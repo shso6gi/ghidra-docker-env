@@ -53,6 +53,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core import json_encoding, live_values
+from scripts.function_tracer_pcode.core.structural import key_is_process_independent
 from scripts.function_tracer_pcode.core.json_encoding import (
     CANONICAL,
     LEGACY,
@@ -279,8 +280,32 @@ def resolve_cause_identity(
 
     Issue #22 PR-22-D: 返す identity は組み込みの値だけ（scope / kind は文字列、key は
     `freeze_identity` の写し。typed key の tuple は写しても同じ値）。
+
+    Issue #215 Gate A: この identity は **別の process が書いた結果どうし**でも比べる
+    （`reporting/root_blocker_summary` が pair・関数・run をまたいで集計する）。構造 key
+    の tail token は発行した process の中でだけ identity になるので、それを含む key
+    （`core.structural.key_is_process_independent` が偽）は解決しない
+    （`process_scoped_cause_identity`）。過分割はしても、別の原因を 1 つにまとめない。
     """
 
+    resolution = _resolve_cause_identity(
+        typed_cause_key=typed_cause_key,
+        object_target_key=object_target_key,
+        left_binary_identity=left_binary_identity,
+        right_binary_identity=right_binary_identity,
+    )
+    if resolution.resolved and not key_is_process_independent(resolution.canonical_cause_key):
+        return CauseIdentityResolution(diagnostic="process_scoped_cause_identity")
+    return resolution
+
+
+def _resolve_cause_identity(
+    *,
+    typed_cause_key: Any,
+    object_target_key: Any,
+    left_binary_identity: Tuple[Any, ...],
+    right_binary_identity: Tuple[Any, ...],
+) -> CauseIdentityResolution:
     # 組み込みの振る舞いの mapping だけ（`typing.Mapping` の `__subclasscheck__` は metaclass・ABC の
     # 登録表を辿る）
     if live_values.builtin_mapping(typed_cause_key) is not None:

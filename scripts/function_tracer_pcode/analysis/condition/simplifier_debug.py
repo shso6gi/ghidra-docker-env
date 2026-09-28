@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.core import (
     condition_key,
     key_contains_placeholder,
 )
+from scripts.function_tracer_pcode.core.structural import unidentified_identity
 from scripts.function_tracer_pcode.analysis.debug import summarize_expression, summarize_condition
 from scripts.function_tracer_pcode.analysis.condition.simplifier_support import (
     _CONDITION_RECOVERABLE_ERRORS,
@@ -58,24 +59,28 @@ class SimplifierDebugMixin:
         return summarize_condition(condition, max_depth=max_depth)
 
     @classmethod
-    def _safe_condition_id(cls, condition: Optional[Condition]) -> int:
+    def _safe_condition_id(cls, condition: Optional[Condition]) -> Tuple[object, ...]:
+        """条件の identity（構造 key そのもの。Issue #215）。
+
+        `hash()` に潰すと衝突した 2 つの条件が同じ identity になる。key は
+        `core/structural` の契約で「等しい ⇒ 構造が等しい」なので、そのまま使う。
+        key を作れないときは識別できない token（何とも等しくならない）にする。
+        """
+
+        if condition is None:
+            return ("none",)
         try:
-            if condition is None:
-                return 0
-            return hash(condition.structural_key(budget=96))
+            return ("key", condition.structural_key(budget=96))
         except _CONDITION_RECOVERABLE_ERRORS:
-            try:
-                expr = getattr(condition, "expression", None)
-                return hash((bool(getattr(condition, "negated", False)), id(expr)))
-            except _CONDITION_RECOVERABLE_ERRORS:
-                return 0
+            return unidentified_identity("condition_key_failed")
 
     @classmethod
-    def _safe_condition_ids(cls, conditions: Iterable[Condition]) -> Tuple[int, ...]:
-        keys: List[int] = []
+    def _safe_condition_ids(cls, conditions: Iterable[Condition]) -> Tuple[Tuple[object, ...], ...]:
+        keys: List[Tuple[object, ...]] = []
         for condition in (conditions or []):
             keys.append(cls._safe_condition_id(condition))
-        return tuple(sorted(keys))
+        # key は型の混ざった tuple なので、決定的な表現（repr）で並べる
+        return tuple(sorted(keys, key=repr))
 
     @classmethod
     def _safe_condition_cache_key(cls, conditions: Iterable[Condition], budget: int = 96) -> Tuple[object, ...]:

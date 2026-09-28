@@ -31,7 +31,10 @@ from scripts.function_tracer_pcode.core.recurrence_contracts import (
     RetainedExactReturnRef,
 )
 from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
-from scripts.function_tracer_pcode.core.structural import key_contains_placeholder
+from scripts.function_tracer_pcode.core.structural import (
+    NON_STRUCTURAL_IDENTITY_TAGS,
+    key_contains_placeholder,
+)
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 import scripts.function_tracer_pcode.analysis.effects.summary as effect_summary
 from scripts.function_tracer_pcode.analysis.effects.summary import canonicalize_location
@@ -2298,18 +2301,23 @@ def _expression_key(expr: Optional[Expression]) -> Tuple[Any, ...]:
         return ("opaque_expression", type(expr).__name__)
 
 
+#: 安定した identity を持たない atom の tag。`NON_STRUCTURAL_IDENTITY_TAGS` は構造 key の
+#: owner が `object_id` の代わりに出す印（Issue #215）
+_FORBIDDEN_IDENTITY_TAGS = frozenset({
+    "opaque",
+    "object_id",
+    "opaque_condition",
+    "opaque_expression",
+    "expression_object",
+    "varnode_id",
+    "block_id",
+    "id",
+}) | NON_STRUCTURAL_IDENTITY_TAGS
+
+
 def _key_contains_forbidden_identity(value: Any) -> bool:
     if isinstance(value, tuple):
-        if value and value[0] in {
-            "opaque",
-            "object_id",
-            "opaque_condition",
-            "opaque_expression",
-            "expression_object",
-            "varnode_id",
-            "block_id",
-            "id",
-        }:
+        if value and value[0] in _FORBIDDEN_IDENTITY_TAGS:
             return True
         return any(_key_contains_forbidden_identity(item) for item in value)
     if isinstance(value, list):

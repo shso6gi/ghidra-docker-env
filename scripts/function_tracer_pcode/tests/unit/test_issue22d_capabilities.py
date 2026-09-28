@@ -1094,6 +1094,9 @@ _PROPORTIONAL_WORK_OWNERS = {
         "_field_values", "make_internal_v2_reason_diagnostic", "make_unknown_reason",
     )},
     ("core.budget_policy", "raise_expression_size_budget_exceeded"): _A_FIXED,
+    # Issue #215: 永続化した cause key の process 独立性の判定（`resolve_cause_identity` が
+    # 数えて写した canonical cause key だけを辿る）
+    ("core.structural", "_key_has_tag"): _B_COUNTED,
     ("core.canonical_digest", "_emit"): _B_BOUND,
     ("core.expression", "Expression._to_dict_active"): _B_SIZED,
     ("core.expression", "_bounded_local_bytes"): _B_BOUND,

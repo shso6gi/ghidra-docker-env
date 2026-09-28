@@ -7,9 +7,14 @@ side instead of round-tripping through rendered strings.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
+import itertools
 import json
+import struct
+import threading
 from typing import Any, Optional, Tuple
+import weakref
 
 from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.condition import Condition
@@ -56,6 +61,568 @@ def _is_all_ones_mask_for_size(expr: Optional[Expression], size: int) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# 予算付きの構造 key と、打ち切った先の厳密な tail token（Issue #215）
+# ---------------------------------------------------------------------------
+#
+# この節が構造 key の **唯一の owner**。consumer（cache / dedup / case merge /
+# 含意 / identity）は key を `==` / `hash` で比べるだけで、Expression へ戻って
+# 確かめ直さない。そのため次の契約をここで無条件に守る（記号は Issue #215）:
+#
+#   C-K1  key が等しい ⇒ 予算に依らない展開 T_o が等しい。暗号の仮定を置かない
+#   C-K2  (a) placeholder の無い key は ⇔。(b) 非巡回で識別済みの tail token は ⇔。
+#         (c) 打ち切り位置が違う key・cycle の距離が違う graph の一致は保証しない
+#   C-K3  placeholder の検出は深さを問わない（`key_contains_placeholder`）
+#   C-K4  memo は tail の入力（`ExactTailOptions`）で分ける。budget は入力ではない
+#   C-K5  識別できないもの（値として固定できない atom・未知の node 種別）は
+#         毎回新しい token になり、何とも等しくならない。`hash()` / `None` に潰さない
+#   C-K6  識別済みの token は PYTHONHASHSEED / `id()` / `repr()` / dict 順に依存しない。
+#         digest が衝突しても intern が別の index を割り当てる（C-K1 は崩れない）
+#   C-K7  canonical encoding はこの module に 1 実装だけ置く
+#   C-K8  token と打ち切りの無い key は共有の有無に依存しない。cycle は現在の path
+#         上の距離（back_ref）で表す
+#
+# **token は process の中でだけ identity になる**（Issue #215 Gate A）。index は
+# 「この process で同じ digest に何番目に来た record か」なので、別の process が
+# 同じ `(digest, index)` を別の record に割り当て得る（A: X→0, Y→1 / B: Y→0, X→1）。
+# 永続化した key を別 process の key と identity として比べる側は、
+# `key_is_process_independent()` が偽の key を比較不能として扱うこと
+# （`checker/cause_aggregate.resolve_cause_identity` がその唯一の入口）。
+
+#: tail token の domain separation（record の digest 専用）
+_EXACT_TAIL_DOMAIN = b"sn3-exact-structural-tail-v1\x00"
+
+#: 識別済みの tail token の tag
+EXACT_TAIL_TAG = "exact_tail"
+#: 識別できない token の tag（C-K5）
+UNIDENTIFIED_TAG = "exact_tail_unidentified"
+#: object identity fallback の token の tag（`expression_key_or_identity`）
+PROCESS_OBJECT_TAG = "process_object"
+
+#: 比較に使ってはいけない（どこまで見えているかを表す）key の tag（C-K3）
+PLACEHOLDER_TAGS = frozenset({"truncated", "cycle", "opaque", UNIDENTIFIED_TAG})
+#: その値が process の中でだけ意味を持つ token の tag（Gate A）
+PROCESS_SCOPED_TAGS = frozenset({EXACT_TAIL_TAG, UNIDENTIFIED_TAG, PROCESS_OBJECT_TAG})
+#: 構造ではなく「新しく発行した印」か「live object の identity」を表す tag。旧実装の
+#: `("object_id", …, id(value))` が担っていた意味の置き換えなので、`object_id` を
+#: 「安定しない identity」として拒んでいた consumer は同じくこれを拒む
+NON_STRUCTURAL_IDENTITY_TAGS = frozenset({UNIDENTIFIED_TAG, PROCESS_OBJECT_TAG})
+
+
+@dataclass(frozen=True)
+class ExactTailOptions:
+    """tail の展開 T_o を決める option（budget は含めない: tail の入力ではない）。
+
+    option を足すときはここと `_key_view` だけを変える。memo の分割（C-K4）は
+    この値そのもので行うので、足し忘れて memo が混線することは無い。
+    """
+
+    normalize_commutative: bool = True
+    strip_width_adapters: bool = False
+    collapse_full_masks: bool = False
+    include_memory_read_order: bool = True
+    include_semantic_runtime_refs: bool = True
+
+
+class _NotCanonical(Exception):
+    """canonical encoding が受け付けない値（C-K5 で識別不能になる）。"""
+
+
+def _encode_canonical(value: Any, out: bytearray) -> None:
+    """長さ前置・型 tag 付きの canonical encoding（C-K7）。
+
+    受け付けるのは exact type の None / bool / int / str / bytes / float / tuple /
+    list だけ。subclass（IntEnum 等）も、`__eq__` が構造と一致する保証が無いので
+    受け付けない。`repr()` / `hash()` / `id()` は使わない。
+    """
+
+    kind = type(value)
+    if value is None:
+        out += b"N"
+    elif kind is bool:
+        out += b"T" if value else b"F"
+    elif kind is int:
+        text = b"%d" % value
+        out += b"I%d:" % len(text)
+        out += text
+    elif kind is str:
+        data = value.encode("utf-8", "surrogatepass")
+        out += b"S%d:" % len(data)
+        out += data
+    elif kind is bytes:
+        out += b"B%d:" % len(value)
+        out += value
+    elif kind is float:
+        # 値の bit 列そのもの（-0.0 と 0.0、NaN の payload も区別する）
+        out += b"D"
+        out += struct.pack(">d", value)
+    elif kind is tuple or kind is list:
+        out += b"(%d:" % len(value) if kind is tuple else b"[%d:" % len(value)
+        for item in value:
+            _encode_canonical(item, out)
+        out += b")"
+    else:
+        raise _NotCanonical(kind.__qualname__)
+
+
+def _canonical_bytes(value: Any) -> bytes:
+    out = bytearray()
+    _encode_canonical(value, out)
+    return bytes(out)
+
+
+class _ExactTailIntern:
+    """record → 識別済み token の intern（C-K6）。
+
+    **表を読む → index を決める → 登録する** は 1 つの lock の中で行う。
+    `dict.setdefault` と `list.append` がそれぞれ atomic でも、その間に別の thread
+    が同じ bucket へ登録すると、異なる record に同じ index を返し得る
+    （Issue #215 Gate B の race test が固定している）。lock の中では Python の
+    callback を呼ばない（bytes の比較だけ）ので、再入も deadlock も無い。
+
+    record は削除しない。したがって index は process の中で安定で、record に対して
+    単射。**別の process の index とは対応しない**（上の Gate A 参照）。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._buckets: dict = {}
+        self._unidentified = itertools.count()
+        self._process_objects = itertools.count()
+        self.collisions = 0
+
+    @staticmethod
+    def digest(record: bytes) -> str:
+        return hashlib.sha256(_EXACT_TAIL_DOMAIN + record).hexdigest()
+
+    def intern(self, record: bytes) -> StructuralKey:
+        digest = self.digest(record)
+        with self._lock:
+            bucket = self._buckets.setdefault(digest, [])
+            index = self._decide_index(bucket, record)
+        return (EXACT_TAIL_TAG, digest, index)
+
+    def _decide_index(self, bucket: list, record: bytes) -> int:
+        """bucket 内の位置を返す（無ければ末尾に登録）。呼ぶのは lock の中だけ。"""
+
+        for index, existing in enumerate(bucket):
+            if existing == record:
+                return index
+        bucket.append(record)
+        if len(bucket) > 1:
+            self.collisions += 1
+        return len(bucket) - 1
+
+    def unidentified(self, reason: str) -> StructuralKey:
+        with self._lock:
+            serial = next(self._unidentified)
+        return (UNIDENTIFIED_TAG, str(reason), serial)
+
+    def process_object_serial(self) -> int:
+        with self._lock:
+            return next(self._process_objects)
+
+    def statistics(self) -> dict:
+        with self._lock:
+            return {
+                "digests": len(self._buckets),
+                "records": sum(len(bucket) for bucket in self._buckets.values()),
+                "record_bytes": sum(len(r) for bucket in self._buckets.values() for r in bucket),
+                "collisions": self.collisions,
+            }
+
+
+_TAIL_INTERN = _ExactTailIntern()
+
+#: validated（凍結済み）node の tail token の process 全体の memo（C-K4）。
+#: 凍結済みの node と closure は immutable かつ非巡回なので、token は node と
+#: option だけで決まる。未凍結の node は入れない（生成後に `size` 等が書き換わる）。
+_VALIDATED_TAIL_MEMO: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_VALIDATED_TAIL_MEMO_LOCK = threading.Lock()
+
+#: `expression_key_or_identity` の object identity（同じ live object → 同じ serial、
+#: serial は再利用しない。`id()` は object の死後に再利用されるので使わない）
+_PROCESS_OBJECT_SERIALS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def unidentified_identity(reason: str) -> StructuralKey:
+    """毎回新しい「識別できない」token（C-K5）。自分自身の再計算とも等しくならない。
+
+    consumer が key を作れなかったときの identity はこれを使う（`hash()` / `id()` /
+    `None` に潰さない）。
+    """
+
+    return _TAIL_INTERN.unidentified(reason)
+
+
+def exact_tail_statistics() -> dict:
+    """intern の統計（診断・性能計測用。判定には使わない）。"""
+
+    return _TAIL_INTERN.statistics()
+
+
+def _identity_atom(value: Any) -> Any:
+    """node の値を key の atom にする。process 依存の atom は識別不能 token にする。
+
+    `canonical_atom` の最後の手段 `("object_id", …, id(value))` は「同じ object か」
+    しか言わず、object の死後に id が再利用されると別物と一致する（C-K5）。float は
+    `canonical_atom` が object として扱うので、ここで bit 列の atom にする。
+    """
+
+    if type(value) is float:
+        return ("float", struct.pack(">d", value).hex())
+    atom = _atom_key(value)
+    return _without_object_ids(atom)
+
+
+def _without_object_ids(atom: Any) -> Any:
+    if type(atom) is not tuple or not atom:
+        return atom
+    if atom[0] == "object_id":
+        return unidentified_identity("object_identity_atom")
+    changed = False
+    items = []
+    for item in atom:
+        replaced = _without_object_ids(item)
+        changed = changed or replaced is not item
+        items.append(replaced)
+    return tuple(items) if changed else atom
+
+
+class _Redirect:
+    """V_o(n) が別の node（全 bit の mask を剥がした operand）であること。"""
+
+    __slots__ = ("target",)
+
+    def __init__(self, target: Optional[Expression]) -> None:
+        self.target = target
+
+
+class _KeyView:
+    """V_o(n) の局所 label L_o と、`ordered_semantic_edges` 順の子（C-K1 の T_o）。
+
+    `kind` は key の組み立て方（`_assemble_key`）を選ぶ。label は子を除いた部分で、
+    key にも tail の record にも同じ値が入る（2 つの表現が別の T_o を見ないように、
+    node の読み方はこの 1 か所にしかない）。
+    """
+
+    __slots__ = ("kind", "label", "children", "commutative")
+
+    def __init__(self, kind: str, label: tuple, children: tuple = (), commutative: bool = False) -> None:
+        self.kind = kind
+        self.label = label
+        self.children = children
+        self.commutative = commutative
+
+
+def _key_view(node: Expression, options: ExactTailOptions):
+    """node を option の下で読む（`_Redirect` か `_KeyView`）。"""
+
+    current = node
+    if options.strip_width_adapters:
+        while (
+            current.expr_type == ExpressionType.UNARY_OP
+            and current.operator in WIDTH_ADAPTER_OPS
+            and current.operands
+        ):
+            current = current.operands[0]
+
+    if (
+        options.collapse_full_masks
+        and current.expr_type == ExpressionType.BINARY_OP
+        and current.operator == "INT_AND"
+        and len(current.operands) == 2
+    ):
+        left, right = current.operands
+        mask_size = current.size or right.size or left.size or 0
+        if _is_all_ones_mask_for_size(left, mask_size):
+            return _Redirect(right)
+        if _is_all_ones_mask_for_size(right, mask_size):
+            return _Redirect(left)
+
+    expr_type = current.expr_type
+    size = int(current.size or 0)
+
+    if expr_type == ExpressionType.CONSTANT:
+        return _KeyView("leaf", ("const", _identity_atom(current.value), size))
+
+    if expr_type == ExpressionType.LITERAL:
+        return _KeyView("leaf", ("literal", _identity_atom(current.value), size))
+
+    if expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
+        return _KeyView(
+            "leaf",
+            (expr_type.name.lower(), current.name or "", _identity_atom(current.value), size),
+        )
+
+    if expr_type == ExpressionType.UNKNOWN:
+        runtime_metadata = (
+            _expression_runtime_metadata(current) if options.include_semantic_runtime_refs else ()
+        )
+        return _KeyView(
+            "leaf",
+            ("unknown", current.name or "", _identity_atom(current.value), size, *runtime_metadata),
+        )
+
+    if expr_type == ExpressionType.UNARY_OP:
+        operand = current.operands[0] if current.operands else None
+        return _KeyView("unary", ("unary", current.operator or "", size), (operand,))
+
+    if expr_type == ExpressionType.BINARY_OP:
+        left = current.operands[0] if current.operands else None
+        right = current.operands[1] if len(current.operands) > 1 else None
+        operator = current.operator or ""
+        return _KeyView(
+            "binary",
+            ("binary", operator, size),
+            (left, right),
+            commutative=bool(options.normalize_commutative and operator in COMMUTATIVE_BINARY_OPS),
+        )
+
+    if expr_type == ExpressionType.MEMORY:
+        address = current.operands[0] if current.operands else None
+        runtime_metadata = (
+            _expression_runtime_metadata(current) if options.include_semantic_runtime_refs else ()
+        )
+        read_order = (
+            ("read_order", int(current.read_order_key))
+            if options.include_memory_read_order and current.read_order_key is not None
+            else ("read_order", None)
+        )
+        return _KeyView("memory", ("memory", size, read_order, runtime_metadata), (address,))
+
+    if expr_type == ExpressionType.CALL:
+        return _KeyView("call", ("call", current.name or "", size), tuple(current.operands))
+
+    if expr_type == ExpressionType.INTRINSIC:
+        opcode = getattr(current, "opcode", None)
+        return _KeyView(
+            "call",
+            ("intrinsic", current.name or "", None if opcode is None else int(opcode), size),
+            tuple(current.operands),
+        )
+
+    if expr_type == ExpressionType.PHI:
+        shape = []
+        children = []
+        for condition, value in current.value or []:
+            if condition is None:
+                shape.append((False, False))
+            else:
+                shape.append((True, bool(condition.negated)))
+                children.append(condition.expression)
+            children.append(value)
+        return _KeyView("phi", ("phi", size, tuple(shape)), tuple(children))
+
+    return _KeyView(
+        "opaque",
+        ("opaque", expr_type.name, current.operator or "", current.name or "", size),
+    )
+
+
+def _assemble_key(view: _KeyView, child_keys: list) -> StructuralKey:
+    """label と子の key から、main 以来の形の key を組む（C-K2(a): 形を変えない）。"""
+
+    kind = view.kind
+    label = view.label
+    if kind == "leaf":
+        return label
+    if kind == "unary":
+        return (*label, child_keys[0])
+    if kind == "binary":
+        left_key, right_key = child_keys
+        if view.commutative and right_key < left_key:
+            left_key, right_key = right_key, left_key
+        return (*label, left_key, right_key)
+    if kind == "memory":
+        tag, size, read_order, runtime_metadata = label
+        return (tag, size, child_keys[0], read_order, *runtime_metadata)
+    if kind == "call":
+        return (*label, tuple(child_keys))
+    if kind == "phi":
+        tag, size, shape = label
+        branches = []
+        position = 0
+        for has_condition, negated in shape:
+            if has_condition:
+                cond_key = ("cond", child_keys[position], negated)
+                position += 1
+            else:
+                cond_key = ("none",)
+            branches.append((cond_key, child_keys[position]))
+            position += 1
+        return (tag, size, tuple(branches))
+    raise AssertionError(kind)
+
+
+def _node_descriptor(node: Expression) -> tuple:
+    return (node.expr_type.name, node.operator or "", node.name or "", int(node.size or 0))
+
+
+class _TailFrame:
+    __slots__ = ("node", "view", "position", "tokens", "min_ref")
+
+    def __init__(self, node, view) -> None:
+        self.node = node
+        self.view = view
+        self.position = 0
+        self.tokens: list = []
+        # この frame の部分木の back_ref が指す最も浅い path 上の深さ
+        self.min_ref = None
+
+
+def _exact_tail_token(
+    root: Expression,
+    options: ExactTailOptions,
+    *,
+    outer_path: Tuple[int, ...] = (),
+    memo: Optional[dict] = None,
+) -> StructuralKey:
+    """root から下を予算無しに展開した T_o(root) の識別済み token（C-K1 / C-K2(b)）。
+
+    明示 stack で辿るので深さに上限は無い。共有部分木は `memo`（1 回の key 計算の
+    間だけ `id()` で引く）で 1 度だけ辿る。`outer_path` は呼び出し側の key が今いる
+    path（root の祖先）で、閉路がそこへ戻るときの back_ref の距離に使う。
+
+    返すのは `("exact_tail", digest, index)`、`("back_ref", k)`（root 自身が path 上に
+    いるとき）、`("exact_tail_unidentified", reason, n)` のどれか。
+    """
+
+    if memo is None:
+        memo = {}
+    path: list = list(outer_path)
+    depth_of: dict = {node_id: depth for depth, node_id in enumerate(path)}
+
+    def _start(node):
+        """node の結果が既に決まっていればそれを、未着手なら frame を返す。"""
+
+        seen_redirects = set()
+        while True:
+            node_id = id(node)
+            depth = depth_of.get(node_id)
+            if depth is not None:
+                return (("ref", depth), None), None
+            cached = memo.get(node_id)
+            if cached is not None:
+                return cached, None
+            if is_validated(node):
+                with _VALIDATED_TAIL_MEMO_LOCK:
+                    known = _VALIDATED_TAIL_MEMO.get(node)
+                    token = known.get(options) if known is not None else None
+                if token is not None:
+                    memo[node_id] = (token, None)
+                    return (token, None), None
+            view = _key_view(node, options)
+            if isinstance(view, _Redirect):
+                if node_id in seen_redirects:
+                    return (unidentified_identity("redirect_cycle"), None), None
+                seen_redirects.add(node_id)
+                if view.target is None:
+                    return (None, None), None
+                node = view.target
+                continue
+            if view.kind == "opaque":
+                return (unidentified_identity("unknown_node_kind"), None), None
+            return None, _TailFrame(node, view)
+
+
+    first, frame = _start(root)
+    if frame is None:
+        token = first[0]
+        if token is not None and token[0] == "ref":
+            return ("back_ref", len(path) - token[1])
+        return token if token is not None else ("none",)
+
+    # path に積むのは V_o を解いた後の node（redirect 先を経由する閉路もここで止まる）
+    stack = [frame]
+    path.append(id(frame.node))
+    depth_of[id(frame.node)] = len(path) - 1
+    final = None
+    while stack:
+        frame = stack[-1]
+        children = frame.view.children
+        if frame.position < len(children):
+            child = children[frame.position]
+            frame.position += 1
+            if child is None:
+                frame.tokens.append(b"0")
+                continue
+            result, child_frame = _start(child)
+            if child_frame is not None:
+                stack.append(child_frame)
+                path.append(id(child_frame.node))
+                depth_of[id(child_frame.node)] = len(path) - 1
+                continue
+            _absorb(frame, result, len(path))
+            if frame.tokens and frame.tokens[-1] is None:
+                final = unidentified_identity("unidentified_child")
+                break
+            continue
+
+        # すべての子が決まった: record を作って intern する
+        stack.pop()
+        node_id = path.pop()
+        depth = len(path)
+        del depth_of[node_id]
+        if any(item is None for item in frame.tokens):
+            final = unidentified_identity("unidentified_child")
+            break
+        if _key_has_tag(frame.view.label, NON_STRUCTURAL_IDENTITY_TAGS):
+            # label に識別不能な atom（旧 `object_id`）がある: tail も識別できない
+            final = unidentified_identity("unidentified_atom")
+            break
+        try:
+            label_bytes = _canonical_bytes(frame.view.label)
+        except _NotCanonical:
+            final = unidentified_identity("non_canonical_atom")
+            break
+        tokens = list(frame.tokens)
+        if frame.view.commutative and len(tokens) == 2:
+            tokens.sort()
+        record = b"L%d:" % len(label_bytes) + label_bytes + b"#%d:" % len(tokens) + b"".join(tokens)
+        token = _TAIL_INTERN.intern(record)
+        path_independent = frame.min_ref is None or frame.min_ref >= depth
+        if path_independent:
+            memo[node_id] = (token, None)
+            if frame.min_ref is None and is_validated(frame.node):
+                with _VALIDATED_TAIL_MEMO_LOCK:
+                    _VALIDATED_TAIL_MEMO.setdefault(frame.node, {})[options] = token
+        result = (token, frame.min_ref if not path_independent else None)
+        if not stack:
+            final = token
+            break
+        _absorb(stack[-1], result, len(path))
+    return final
+
+
+def _absorb(frame: "_TailFrame", result, path_length: int) -> None:
+    """子の結果を親 frame の record 片にする（back_ref は現在の path 上の距離）。"""
+
+    token, child_min_ref = result
+    if token is None:
+        frame.tokens.append(b"0")
+        return
+    if token[0] == "ref":
+        target_depth = token[1]
+        frame.tokens.append(b"R%d;" % (path_length - target_depth))
+        frame.min_ref = target_depth if frame.min_ref is None else min(frame.min_ref, target_depth)
+        return
+    if token[0] != EXACT_TAIL_TAG:
+        frame.tokens.append(None)
+        return
+    frame.tokens.append(b"X" + token[1].encode("ascii") + b".%d;" % token[2])
+    if child_min_ref is not None:
+        frame.min_ref = child_min_ref if frame.min_ref is None else min(frame.min_ref, child_min_ref)
+
+
+def exact_tail_token(expr: Optional[Expression], options: Optional[ExactTailOptions] = None) -> StructuralKey:
+    """式全体の tail token（C-K2(b): 非巡回なら token が等しい ⇔ T_o が等しい）。"""
+
+    if expr is None:
+        return ("none",)
+    return _exact_tail_token(expr, options or ExactTailOptions())
+
+
 def expression_key(
     expr: Optional[Expression],
     *,
@@ -79,10 +646,16 @@ def expression_key(
     produced in -- the remaining budget, or the path that reached the node --
     and reusing it elsewhere would report a node as unresolved when it is not.
 
+    **予算を使い切った先は捨てない**（Issue #215）。打ち切った node は
+    ``("truncated", type, op, name, size, token)`` になり、token は打ち切った先を
+    予算無しに展開した構造の識別済み token（`_exact_tail_token`）。したがって
+    key が等しければ展開も等しい（C-K1）。閉路は ``("cycle", type, name, size,
+    ("back_ref", k))``（k は現在の path 上の距離）、未知の node 種別は識別できない
+    token を持つ ``opaque`` になる。
+
     **これは construction-safe な legacy key であって、validated identity API
     ではない**。lifecycle を進めない（`validated()` を呼ばない）し、未検証の
-    graph でも答えを返す。閉路も予算切れも `("cycle", …)` / `("truncated", …)`
-    の placeholder で表し、consumer は `key_contains_placeholder()` で「どこま
+    graph でも答えを返す。consumer は `key_contains_placeholder()` で「どこま
     で見えているか」を判断する。
 
     意図的にそうしてある理由は 2 つ:
@@ -98,8 +671,17 @@ def expression_key(
     なる（placeholder を作らない）。
     """
 
-    visited: set[int] = set()
+    options = ExactTailOptions(
+        normalize_commutative=bool(normalize_commutative),
+        strip_width_adapters=bool(strip_width_adapters),
+        collapse_full_masks=bool(collapse_full_masks),
+        include_memory_read_order=bool(include_memory_read_order),
+        include_semantic_runtime_refs=bool(include_semantic_runtime_refs),
+    )
+    path: list = []
+    depth_of: dict = {}
     memo: dict[int, StructuralKey] = {}
+    tail_memo: dict = {}
     # 予算と placeholder 件数は再帰の外で数える（key の memo 可否の判定に使う）。
     state = {"remaining": int(budget), "placeholders": 0}
 
@@ -110,162 +692,40 @@ def expression_key(
         cached = memo.get(node_id)
         if cached is not None:
             return cached
+        depth = depth_of.get(node_id)
+        if depth is not None:
+            state["placeholders"] += 1
+            return ("cycle", node.expr_type.name, node.name or "", int(node.size or 0),
+                    ("back_ref", len(path) - depth))
         if state["remaining"] <= 0:
             state["placeholders"] += 1
             return (
                 "truncated",
-                node.expr_type.name,
-                node.operator or "",
-                node.name or "",
-                int(node.size or 0),
+                *_node_descriptor(node),
+                _exact_tail_token(node, options, outer_path=tuple(path), memo=tail_memo),
             )
-        if node_id in visited:
-            state["placeholders"] += 1
-            return ("cycle", node.expr_type.name, node.name or "", int(node.size or 0))
 
-        visited.add(node_id)
+        depth_of[node_id] = len(path)
+        path.append(node_id)
         placeholders_before = state["placeholders"]
         try:
             state["remaining"] -= 1
             key = _build_node(node)
         finally:
-            visited.discard(node_id)
+            path.pop()
+            del depth_of[node_id]
         if state["placeholders"] == placeholders_before:
             memo[node_id] = key
         return key
 
     def _build_node(node: Expression) -> StructuralKey:
-        current = node
-
-        if strip_width_adapters:
-            while (
-                current.expr_type == ExpressionType.UNARY_OP
-                and current.operator in WIDTH_ADAPTER_OPS
-                and current.operands
-            ):
-                current = current.operands[0]
-
-        if (
-            collapse_full_masks
-            and current.expr_type == ExpressionType.BINARY_OP
-            and current.operator == "INT_AND"
-            and len(current.operands) == 2
-        ):
-            left, right = current.operands
-            mask_size = current.size or right.size or left.size or 0
-            if _is_all_ones_mask_for_size(left, mask_size):
-                return _build(right)
-            if _is_all_ones_mask_for_size(right, mask_size):
-                return _build(left)
-
-        expr_type = current.expr_type
-
-        if expr_type == ExpressionType.CONSTANT:
-            return ("const", _atom_key(current.value), int(current.size or 0))
-
-        if expr_type == ExpressionType.LITERAL:
-            return ("literal", _atom_key(current.value), int(current.size or 0))
-
-        if expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
-            return (
-                expr_type.name.lower(),
-                current.name or "",
-                _atom_key(current.value),
-                int(current.size or 0),
-            )
-
-        if expr_type == ExpressionType.UNKNOWN:
-            runtime_metadata = (
-                _expression_runtime_metadata(current) if include_semantic_runtime_refs else ()
-            )
-            return (
-                "unknown",
-                current.name or "",
-                _atom_key(current.value),
-                int(current.size or 0),
-                *runtime_metadata,
-            )
-
-        if expr_type == ExpressionType.UNARY_OP:
-            operand = current.operands[0] if current.operands else None
-            return (
-                "unary",
-                current.operator or "",
-                int(current.size or 0),
-                _build(operand),
-            )
-
-        if expr_type == ExpressionType.BINARY_OP:
-            left = current.operands[0] if current.operands else None
-            right = current.operands[1] if len(current.operands) > 1 else None
-            left_key = _build(left)
-            right_key = _build(right)
-            if normalize_commutative and (current.operator or "") in COMMUTATIVE_BINARY_OPS:
-                if right_key < left_key:
-                    left_key, right_key = right_key, left_key
-            return (
-                "binary",
-                current.operator or "",
-                int(current.size or 0),
-                left_key,
-                right_key,
-            )
-
-        if expr_type == ExpressionType.MEMORY:
-            address = current.operands[0] if current.operands else None
-            address_key = _build(address)
-            runtime_metadata = (
-                _expression_runtime_metadata(current) if include_semantic_runtime_refs else ()
-            )
-            return (
-                "memory",
-                int(current.size or 0),
-                address_key,
-                (
-                    "read_order",
-                    int(current.read_order_key),
-                )
-                if include_memory_read_order and current.read_order_key is not None
-                else ("read_order", None),
-                *runtime_metadata,
-            )
-
-        if expr_type == ExpressionType.CALL:
-            return (
-                "call",
-                current.name or "",
-                int(current.size or 0),
-                tuple(_build(operand) for operand in current.operands),
-            )
-
-        if expr_type == ExpressionType.INTRINSIC:
-            return (
-                "intrinsic",
-                current.name or "",
-                None if getattr(current, "opcode", None) is None else int(current.opcode),
-                int(current.size or 0),
-                tuple(_build(operand) for operand in current.operands),
-            )
-
-        if expr_type == ExpressionType.PHI:
-            branches = []
-            for condition, value in current.value or []:
-                cond_key: StructuralKey
-                if condition is None:
-                    cond_key = ("none",)
-                else:
-                    cond_key = ("cond", _build(condition.expression), bool(condition.negated))
-                branches.append((cond_key, _build(value)))
-            return ("phi", int(current.size or 0), tuple(branches))
-
-        state["placeholders"] += 1
-        return (
-            "opaque",
-            expr_type.name,
-            current.operator or "",
-            current.name or "",
-            int(current.size or 0),
-        )
+        view = _key_view(node, options)
+        if isinstance(view, _Redirect):
+            return _build(view.target)
+        if view.kind == "opaque":
+            state["placeholders"] += 1
+            return (*view.label, unidentified_identity("unknown_node_kind"))
+        return _assemble_key(view, [_build(child) for child in view.children])
 
     return _build(expr)
 
@@ -289,21 +749,52 @@ def condition_key(
     )
 
 
-def key_contains_placeholder(key: StructuralKey) -> bool:
-    tag = key[0] if key else None
-    if tag in {"truncated", "cycle", "opaque"}:
-        return True
-    for item in key[1:]:
-        if isinstance(item, tuple) and item and isinstance(item[0], str):
-            if key_contains_placeholder(item):
-                return True
+def _key_has_tag(key: Any, tags: frozenset) -> bool:
+    """key のどこか（深さを問わない）に、第 1 要素が tags の tuple / list があるか。
+
+    反復で辿り、共有されている部分 key は 1 度だけ見る。永続化で list になった
+    key もそのまま辿れる。
+    """
+
+    stack = [key]
+    seen: set = set()
+    while stack:
+        item = stack.pop()
+        kind = type(item)
+        if kind is not tuple and kind is not list:
+            continue
+        item_id = id(item)
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        if item and type(item[0]) is str and item[0] in tags:
+            return True
+        stack.extend(item)
     return False
+
+
+def key_contains_placeholder(key: StructuralKey) -> bool:
+    """key のどこかに placeholder（truncated / cycle / opaque / 識別不能）があるか（C-K3）。"""
+
+    return _key_has_tag(key, PLACEHOLDER_TAGS)
 
 
 def key_is_comparable(key: StructuralKey) -> bool:
     """Return False if the structural key contains placeholders/truncated markers."""
 
     return not key_contains_placeholder(key)
+
+
+def key_is_process_independent(key: Any) -> bool:
+    """key の等しさが process をまたいで identity の意味を持つか（Issue #215 Gate A）。
+
+    tail token・識別不能 token・object identity token を含む key は、その値が
+    発行した process の中でだけ identity になる。別の process が同じ値を別の構造に
+    割り当て得るので、永続化した key を別 process の key と比べる側は偽のとき
+    比較不能として扱う（fail-closed）。
+    """
+
+    return not _key_has_tag(key, PROCESS_SCOPED_TAGS)
 
 
 def expression_key_safe(
@@ -349,6 +840,10 @@ def expression_key_or_identity(
     """Safe structural key with identity fallback for non-comparable inputs.
 
     This avoids collapsing semantically unknown/truncated keys into equality.
+
+    fallback は **同じ live object だけが等しい** identity（Issue #215）。`id()` は
+    object の死後に再利用されるので使わず、object に弱参照で結び付けた serial を
+    使う（serial は再利用しない）。弱参照できない値は識別不能 token（C-K5）。
     """
 
     safe = expression_key_safe(
@@ -364,7 +859,19 @@ def expression_key_or_identity(
         return safe
     if expr is None:
         return ("uncomparable_expression", "none")
-    return ("uncomparable_expression", type(expr).__name__, id(expr))
+    return ("uncomparable_expression", type(expr).__name__, _process_object_identity(expr))
+
+
+def _process_object_identity(expr: Any) -> StructuralKey:
+    try:
+        with _VALIDATED_TAIL_MEMO_LOCK:
+            serial = _PROCESS_OBJECT_SERIALS.get(expr)
+            if serial is None:
+                serial = _TAIL_INTERN.process_object_serial()
+                _PROCESS_OBJECT_SERIALS[expr] = serial
+    except TypeError:
+        return unidentified_identity("object_not_weakly_referenceable")
+    return (PROCESS_OBJECT_TAG, serial)
 
 
 def expression_provenance_key(

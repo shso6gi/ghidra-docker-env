@@ -922,9 +922,9 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
     def _condition_object_cache_key(
         cls,
         conditions: Iterable[Condition],
-    ) -> Tuple[int, ...]:
+    ) -> Tuple[Tuple[object, ...], ...]:
         keys = [cls._safe_condition_id(cond) for cond in (conditions or []) if cond is not None]
-        keys.sort()
+        keys.sort(key=repr)
         return tuple(keys)
 
     @classmethod

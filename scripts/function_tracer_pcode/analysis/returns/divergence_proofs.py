@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, 
 from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.render_smt import expression_contains_unsupported_smt_ops
-from scripts.function_tracer_pcode.core.structural import expression_key_safe
+from scripts.function_tracer_pcode.core.structural import expression_key
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionNormalizer,
@@ -30,10 +30,15 @@ if TYPE_CHECKING:  # placeholder_algebra は本 module の純関数を import �
 
 
 def condition_identity_key(condition: Condition) -> Tuple[Any, ...]:
-    """条件の identity 鍵。純関数（facade 状態なし）。"""
+    """条件の identity 鍵。純関数（facade 状態なし）。
+
+    構造 key は「等しい ⇒ 構造が等しい」（`core/structural` の C-K1）なので、打ち
+    切りを含む key もそのまま identity にする。比較できない key を `None` に潰すと、
+    比較できない条件どうしがすべて同じ鍵になる（Issue #215）。
+    """
     return (
         "condition",
-        expression_key_safe(getattr(condition, "expression", None)),
+        expression_key(getattr(condition, "expression", None)),
         bool(getattr(condition, "negated", False)),
     )
 
