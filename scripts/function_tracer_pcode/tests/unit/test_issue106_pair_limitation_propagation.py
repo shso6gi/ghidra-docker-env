@@ -265,7 +265,7 @@ def test_e0c_condition_oracle_does_not_swallow_a_limitation_from_the_solver():
     )
 
     limitation = _budget_limitation(site="condition_oracle")
-    fake_z3 = SimpleNamespace(Solver=Mock(side_effect=limitation))
+    fake_z3 = SimpleNamespace(Solver=Mock(side_effect=limitation), Context=Mock())
     with patch.object(ConditionSMTOracle, "_z3", fake_z3):
         with patch.object(
             ConditionSMTOracle, "_build_script",

@@ -7,7 +7,7 @@ import time
 import inspect
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import List, Optional, Dict, Any, Type
+from typing import Any, Dict, List, Optional, Type
 from dataclasses import dataclass, field
 
 from scripts.function_tracer_pcode.core.stage_journal import (
@@ -16,7 +16,16 @@ from scripts.function_tracer_pcode.core.stage_journal import (
     journal_stage_start,
 )
 from scripts.function_tracer_pcode.core.json_encoding import each, materialize
-from scripts.function_tracer_pcode.smt.interface import SMTSolver, SolverResult, SolverStatus
+from scripts.function_tracer_pcode.smt.aggregation import (
+    BackendAggregate,
+    aggregate_backend_results,
+)
+from scripts.function_tracer_pcode.smt.interface import (
+    SMTSolver,
+    SolverResult,
+    SolverStatus,
+    enforce_witness_contract,
+)
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 
 # --------------------------------------------------------------------------
@@ -134,18 +143,53 @@ def _solver_orchestration(mode: str):
 
 @dataclass
 class ParallelResult:
-    """並列実行の結果"""
+    """solver の結果と、その判定。
+
+    作り方は 2 通りあり、どちらで作ったかで `results` の意味が決まる（推測しない）:
+
+    * **1 つの query を backend ごとに解いた行**: `ParallelResult.from_backend_results`
+      だけが作る。判定・代表結果・反例は `smt.aggregation` の規則で決まる（backend の
+      結果の集合だけで決まり、SAT / UNSAT や witness が食い違えば判定しない）。
+      `backend_aggregate` にその集約を持つ。runner と単一 query の実行が使う
+    * **producer が合成した結果**（複数の query / region / case の証拠、判定の無い空の
+      結果、test の fixture）: 直接構築する。判定は producer が `is_equivalent` で明示し、
+      明示しなければ従来どおり先頭の SAT / UNSAT 行から補う。反例は先頭の model 付きの
+      SAT 行。backend の集約規則は適用しない（異なる query の SAT と UNSAT は食い違いでは
+      ない）
+
+    `first_definitive` の名前は結果 JSON の schema のために残している。
+    """
     results: List[SolverResult]
-    first_definitive: Optional[SolverResult] = None  # 最初に確定した結果
+    first_definitive: Optional[SolverResult] = None  # 判定の根拠になった結果
     is_equivalent: Optional[bool] = None
+    #: 1 query の backend 集約（`from_backend_results` だけが設定する。結果 JSON の schema・
+    #: 比較には入れない）。None なら producer が合成した結果
+    backend_aggregate: Optional[BackendAggregate] = field(
+        default=None, compare=False, repr=False
+    )
     #: TIMEOUT の行があるか（作ったときに 1 度だけ数える事実。`EquivalenceResult.is_timeout` が
     #: 行を辿り直さずに読む。結果 JSON の schema・比較には入れない）。作った後に `results` へ行を
     #: 足さない（足すなら新しい `ParallelResult` を作る: この事実が行と食い違う）
     timed_out: bool = field(default=False, init=False, compare=False, repr=False)
 
+    @classmethod
+    def from_backend_results(cls, results: List[SolverResult]) -> "ParallelResult":
+        """同じ 1 つの query を、設定された backend の順に解いた行から作る。"""
+
+        aggregate = aggregate_backend_results(results)
+        return cls(
+            results=list(results),
+            first_definitive=aggregate.representative,
+            is_equivalent=aggregate.is_equivalent,
+            backend_aggregate=aggregate,
+        )
+
     def __post_init__(self) -> None:
-        """手動構築時も SAT/UNSAT から代表結果を補完する。"""
+        """producer が合成した結果では、判定の無い欄を先頭の SAT / UNSAT 行から補う。"""
         self.timed_out = any(result.status == SolverStatus.TIMEOUT for result in self.results)
+        if self.backend_aggregate is not None:
+            # 1 query の backend 集約: 判定しなかった（食い違い）ことも結果なので補わない
+            return
         if self.first_definitive is None:
             for result in self.results:
                 if result.status in (SolverStatus.SAT, SolverStatus.UNSAT):
@@ -154,9 +198,19 @@ class ParallelResult:
 
         if self.is_equivalent is None and self.first_definitive is not None:
             self.is_equivalent = self.first_definitive.status == SolverStatus.UNSAT
+
+    @property
+    def backend_conflict(self) -> Optional[str]:
+        """1 query の backend が食い違ったならその種類（`smt.aggregation`）。診断用。"""
+        if self.backend_aggregate is None:
+            return None
+        return self.backend_aggregate.conflict
     
     def get_counterexample(self) -> Optional[Dict[str, Any]]:
-        """反例を取得（最初のSAT結果から）"""
+        """反例。1 query の backend 集約なら判定の根拠の canonical witness、合成した結果なら
+        先頭の model 付きの SAT 行。"""
+        if self.backend_aggregate is not None:
+            return self.backend_aggregate.counterexample
         for r in self.results:
             if r.status == SolverStatus.SAT and r.model:
                 return r.model
@@ -189,7 +243,7 @@ class CancellationToken:
 
 
 class ParallelSolverRunner:
-    """複数のSMTソルバーを並列実行（早期終了対応）"""
+    """1 つの query を設定された全 backend で解き、結果を `smt.aggregation` でまとめる。"""
     
     # デフォルトで使用するソルバークラス
     DEFAULT_SOLVERS: List[Type[SMTSolver]] = [
@@ -308,7 +362,10 @@ class ParallelSolverRunner:
                 if self.debug:
                     print(f"[ParallelRunner] <<< {solver.name} completed: {result.status.name}", flush=True)
 
-                return result
+                return enforce_witness_contract(
+                    result, smt_script,
+                    canonical=bool(getattr(solver, "PROVIDES_CANONICAL_WITNESS", False)),
+                )
             except Exception as e:
                 if self.debug:
                     import traceback
@@ -333,35 +390,28 @@ class ParallelSolverRunner:
         smt_script: str,
         timeout: Optional[int] = None,
     ) -> ParallelResult:
-        """
-        複数ソルバーを並列実行し、最初に確定した結果で終了
-        
-        Args:
-            smt_script: SMT-LIBスクリプト
-        
-        Returns:
-            ParallelResult: 並列実行の結果
+        """全 backend を並列に実行し、全部の結果を `smt.aggregation` でまとめる。
+
+        最初に終わった backend で打ち切らない: 打ち切ると、どの backend が先に
+        終わったか（と runner がそれを受け取った順）で判定と反例が変わり、SAT / UNSAT
+        の食い違いも見落とす（Issue #161）。全体の待ちは従来どおり
+        `timeout + 10` 秒で、それまでに終わらない backend は TIMEOUT の行になる。
+        行は設定された backend の順に並べる。
         """
         with _solver_orchestration("run_parallel") as query_id:
             if not self._solvers:
-                return ParallelResult(
-                    results=[],
-                    is_equivalent=None
-                )
+                return ParallelResult.from_backend_results([])
         
             runtime_timeout = self._resolve_timeout(timeout)
             if self.debug:
                 print(f"[ParallelRunner] Starting parallel execution with {len(self._solvers)} solvers")
         
-            results: List[SolverResult] = []
-            first_definitive: Optional[SolverResult] = None
             cancellation_token = CancellationToken()
-        
+            results: List[SolverResult] = []
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=len(self._solvers)
             ) as executor:
-                # 全ソルバーを並列起動
-                future_to_solver: Dict[concurrent.futures.Future[SolverResult], SMTSolver] = {
+                futures = [
                     executor.submit(
                         self.run_single,
                         solver,
@@ -370,115 +420,61 @@ class ParallelSolverRunner:
                         runtime_timeout,
                         _orchestrated=True,
                         _journal_query_id=query_id,
-                    ): solver
+                    )
                     for solver in self._solvers
-                }
-            
-                try:
-                    # 結果を収集（完了順）
-                    for future in concurrent.futures.as_completed(
-                        future_to_solver, 
-                        timeout=runtime_timeout + 10
-                    ):
-                        solver = future_to_solver[future]
-                    
-                        try:
-                            result = future.result(timeout=1)
-                            results.append(result)
-                        
-                            if self.debug:
-                                status_msg = result.status.name
-                                if result.error_message:
-                                    status_msg += f" ({result.error_message})"
-                                print(f"[ParallelRunner] {solver.name} completed: {status_msg} ({result.elapsed_time:.3f}s)")
-                        
-                            # 確定的な結果が出たら
-                            if result.status in (SolverStatus.SAT, SolverStatus.UNSAT):
-                                if first_definitive is None:
-                                    first_definitive = result
-                                    # 他のソルバーをキャンセル
-                                    cancellation_token.cancel()
-                                    if self.debug:
-                                        print(f"[ParallelRunner] First definitive result from {solver.name}, cancelling others")
-                                    # 残りのfutureをキャンセル
-                                    for f in future_to_solver:
-                                        if not f.done():
-                                            f.cancel()
-                                    break  # ループを抜ける
-                    
-                        except concurrent.futures.TimeoutError:
-                            if self.debug:
-                                print(f"[ParallelRunner] {solver.name}: future timeout")
-                            results.append(SolverResult(
-                                solver_name=solver.name,
-                                status=SolverStatus.TIMEOUT,
-                                elapsed_time=runtime_timeout
-                            ))
-                        except concurrent.futures.CancelledError:
-                            if self.debug:
-                                print(f"[ParallelRunner] {solver.name}: cancelled")
-                            results.append(SolverResult(
-                                solver_name=solver.name,
-                                status=SolverStatus.UNKNOWN,
-                                error_message="Cancelled"
-                            ))
-                        except Exception as e:
-                            if self.debug:
-                                print(f"[ParallelRunner] {solver.name}: exception - {e}")
-                            results.append(SolverResult(
-                                solver_name=solver.name,
-                                status=SolverStatus.ERROR,
-                                error_message=str(e)
-                            ))
-            
-                except concurrent.futures.TimeoutError:
-                    # 全体タイムアウト
+                ]
+                _done, not_done = concurrent.futures.wait(
+                    futures, timeout=runtime_timeout + 10
+                )
+                if not_done:
                     if self.debug:
                         print("[ParallelRunner] Overall timeout reached")
                     cancellation_token.cancel()
-                    for future, solver in future_to_solver.items():
-                        if not future.done():
-                            results.append(SolverResult(
-                                solver_name=solver.name,
-                                status=SolverStatus.TIMEOUT,
-                                elapsed_time=runtime_timeout
-                            ))
-        
-            # 等価性を判定
-            is_equivalent: Optional[bool] = None
-            if first_definitive:
-                is_equivalent = first_definitive.status == SolverStatus.UNSAT
-        
+                    for future in not_done:
+                        future.cancel()
+                for solver, future in zip(self._solvers, futures):
+                    if future in not_done:
+                        results.append(SolverResult(
+                            solver_name=solver.name,
+                            status=SolverStatus.TIMEOUT,
+                            elapsed_time=runtime_timeout
+                        ))
+                        continue
+                    try:
+                        results.append(future.result())
+                    except Exception as e:
+                        if self.debug:
+                            print(f"[ParallelRunner] {solver.name}: exception - {e}")
+                        results.append(SolverResult(
+                            solver_name=solver.name,
+                            status=SolverStatus.ERROR,
+                            error_message=str(e)
+                        ))
+                    if self.debug:
+                        row = results[-1]
+                        print(f"[ParallelRunner] {solver.name} completed: {row.status.name} ({row.elapsed_time:.3f}s)")
+
+            parallel = ParallelResult.from_backend_results(results)
             if self.debug:
-                print(f"[ParallelRunner] Final result: is_equivalent={is_equivalent}")
-        
-            return ParallelResult(
-                results=results,
-                first_definitive=first_definitive,
-                is_equivalent=is_equivalent
-            )
+                print(f"[ParallelRunner] Final result: is_equivalent={parallel.is_equivalent}")
+            return parallel
     
     def run_sequential(
         self,
         smt_script: str,
         timeout: Optional[int] = None,
     ) -> ParallelResult:
-        """
-        複数ソルバーを順次実行（デバッグ用）
-        最初に確定結果が出たら終了
-        """
+        """全 backend を設定順に 1 つずつ実行し、結果を `smt.aggregation` でまとめる。"""
         with _solver_orchestration("run_sequential") as query_id:
             runtime_timeout = self._resolve_timeout(timeout)
             if self.debug:
                 print(f"[ParallelRunner] Starting sequential execution with {len(self._solvers)} solvers")
         
+            # run_parallel と同じ規則: 全 backend を設定順に実行し、結果を集約する
+            # （最初の確定結果で打ち切ると、SAT / UNSAT の食い違いを見落とす）
             results: List[SolverResult] = []
-            first_definitive: Optional[SolverResult] = None
         
             for solver in self._solvers:
-                if first_definitive is not None:
-                    break
-            
                 if self.debug:
                     print(f"[ParallelRunner] Running {solver.name}...")
             
@@ -492,17 +488,8 @@ class ParallelSolverRunner:
             
                 if self.debug:
                     print(f"[ParallelRunner] {solver.name}: {result.status.name} ({result.elapsed_time:.3f}s)")
-            
-                if result.status in (SolverStatus.SAT, SolverStatus.UNSAT):
-                    first_definitive = result
 
-            return ParallelResult(
-                results=results,
-                first_definitive=first_definitive,
-                is_equivalent=(first_definitive.status == SolverStatus.UNSAT)
-                if first_definitive is not None
-                else None
-            )
+            return ParallelResult.from_backend_results(results)
 
     def _resolve_timeout(self, timeout: Optional[int]) -> int:
         """実行に使うタイムアウトを決定する。"""

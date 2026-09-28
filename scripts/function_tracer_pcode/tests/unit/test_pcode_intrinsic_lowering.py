@@ -1306,5 +1306,7 @@ def test_z3_array_declaration_does_not_turn_sat_into_error():
     result = Z3Solver(timeout=2).check_equivalence_direct(query)
 
     assert result.status == SolverStatus.SAT
-    assert "memory" in result.model
-    assert result.model["index"] == 0
+    # Issue #161: the witness holds the declared scalar inputs only.  An array's
+    # interpretation is an arbitrary solver choice (no least value, never
+    # replayed), so it is not part of the canonical witness.
+    assert result.model == {"index": 0}

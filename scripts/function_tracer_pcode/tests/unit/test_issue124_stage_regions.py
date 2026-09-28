@@ -488,7 +488,8 @@ def test_solver_counters_do_not_double_count():
     assert parallel["wall_seconds"] < 2 * delay
     assert parallel["wall_seconds"] < parallel["backend_seconds"]
 
-    # run_sequential: 最初の確定結果で打ち切るので backend は 1 回だけ。
+    # run_sequential: 全 backend を順に 1 回ずつ実行する（Issue #161: 結果の集約は
+    # 全 backend の結果で行い、最初の確定結果で打ち切らない）。
     sequential_runner = ParallelSolverRunner(
         timeout=5,
         solver_classes=[
@@ -498,11 +499,11 @@ def test_solver_counters_do_not_double_count():
     )
     sequential = _measure(lambda: sequential_runner.run_sequential("(check-sat)"))
     assert sequential["logical_queries"] == 1
-    assert sequential["backend_runs"] == 1
-    assert sequential["wall_seconds"] >= delay
+    assert sequential["backend_runs"] == 2
+    assert sequential["wall_seconds"] >= 2 * delay
     # 順次実行では wall は backend を包む（入れ子で二重加算していない）。
     assert sequential["wall_seconds"] >= sequential["backend_seconds"]
-    assert sequential["wall_seconds"] < 2 * delay
+    assert sequential["wall_seconds"] < 3 * delay
 
     # orchestration の外から直接呼ばれた run_single も論理問い合わせ 1 回。
     direct = _measure(lambda: runner.run_single(runner._solvers[0], "(check-sat)"))

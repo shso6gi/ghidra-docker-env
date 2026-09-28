@@ -2447,13 +2447,20 @@ def _execute_rendered_stage(
         )
         result = getattr(parallel_result, "first_definitive", None)
         if result is None:
+            # 判定の根拠が無い（全 backend が未決着、または SAT / UNSAT の食い違い）。
+            # 行の status は診断として名前だけ借り、確定側（sat / unsat）には読み替えない
+            # （Issue #161: 判定の規則は `smt.aggregation` の 1 箇所）。
             results = tuple(getattr(parallel_result, "results", ()) or ())
             result = results[0] if results else None
-        status_name = (
-            str(getattr(getattr(result, "status", None), "name", "UNKNOWN")).lower()
-            if result is not None
-            else "unknown"
-        )
+            status_name = (
+                str(getattr(getattr(result, "status", None), "name", "UNKNOWN")).lower()
+                if result is not None
+                else "unknown"
+            )
+            if status_name in {"sat", "unsat"}:
+                status_name = "unknown"
+        else:
+            status_name = str(getattr(getattr(result, "status", None), "name", "UNKNOWN")).lower()
         solver_name = str(getattr(result, "solver_name", "unavailable") or "unavailable")
     if status_name == "unsat":
         record_status = "proven"

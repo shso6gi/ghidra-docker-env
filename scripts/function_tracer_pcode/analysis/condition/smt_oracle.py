@@ -25,6 +25,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
     smt_logic_name,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+from scripts.function_tracer_pcode.smt.solvers.z3 import isolated_solver
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 
 
@@ -84,10 +85,8 @@ class ConditionSMTOracle:
         z3 = cls._z3
 
         try:
-            solver = z3.Solver()
-            solver.set("timeout", int(cls.QUERY_TIMEOUT_MS))
-            assertions = z3.parse_smt2_string(script)
-            solver.add(assertions)
+            # Issue #161: query ごとに専用の solver context（他の query の履歴を持ち込まない）
+            solver = isolated_solver(z3, script, int(cls.QUERY_TIMEOUT_MS))
             result = solver.check()
             if result == z3.unsat:
                 if query_key is not None:
