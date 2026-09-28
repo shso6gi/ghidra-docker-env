@@ -65,6 +65,7 @@ from scripts.function_tracer_pcode.semantics.rewrite_contract import (
     ExtensionKind,
     RewriteAssumption,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 #: 最終 relation が ``param_1 == sext64(low32(param_1))`` を含意した、という合成入力。
@@ -1137,7 +1138,7 @@ def _pure_counted_summary_with_guard() -> LoopSummaryRef:
 
 
 def _analysis(function_name: str, returns, *, comparison_bits: int = 32) -> FunctionReturnAnalysis:
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name=function_name,
         entry_point="0x1000",
         parameters=[
@@ -3975,7 +3976,7 @@ def test_counted_loop_summary_vs_shifted_affine_parameter_closed_form_is_dischar
         Expression.binary_op("INT_MULT", shifted_low, Expression.constant(5, size=4)),
     )
     closed.size = 4
-    analysis_left = FunctionReturnAnalysis(
+    analysis_left = raw_function_analysis(
         function_name="left",
         entry_point="0x1000",
         parameters=[
@@ -4115,7 +4116,7 @@ def test_counted_loop_summary_vs_nonzero_start_step3_closed_form_is_discharged()
     ) is not None
 
     result = strategy.check(
-        FunctionReturnAnalysis(
+        raw_function_analysis(
             function_name="nonzero_start_counted",
             entry_point="0x1000",
             parameters=parameters,
@@ -4127,7 +4128,7 @@ def test_counted_loop_summary_vs_nonzero_start_step3_closed_form_is_discharged()
             return_abi_facts=_present_return_abi_facts(),
             comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
         ),
-        FunctionReturnAnalysis(
+        raw_function_analysis(
             function_name="nonzero_start_closed",
             entry_point="0x2000",
             parameters=parameters,
@@ -4288,7 +4289,7 @@ def test_counted_loop_summary_affine_step5_variant_is_discharged_pairwise():
         ),
         opcode=COUNTED_LOOP_SUM_OPCODE,
     )
-    analysis_left = FunctionReturnAnalysis(
+    analysis_left = raw_function_analysis(
         function_name="barthe_step1",
         entry_point="0x1000",
         parameters=[
@@ -4409,7 +4410,7 @@ def test_monkeypatched_method_b_producer_falls_back_to_canonical_solver():
         {"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True},
         {"name": "param_2", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
     ]
-    analysis_left = FunctionReturnAnalysis(
+    analysis_left = raw_function_analysis(
         function_name="barthe_step1",
         entry_point="0x1000",
         parameters=parameters,
@@ -5034,7 +5035,7 @@ def _mips64_counted_loop_vs_low32_closed_form_fixture():
     c_terms.size = 4
     closed = Expression.binary_op("INT_ADD", scaled, c_terms)
     closed.size = 4
-    analysis_left = FunctionReturnAnalysis(
+    analysis_left = raw_function_analysis(
         function_name="mips64_counted",
         entry_point="0x1000",
         parameters=[

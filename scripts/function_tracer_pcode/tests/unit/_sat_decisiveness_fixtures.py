@@ -68,6 +68,7 @@ from scripts.function_tracer_pcode.proof.obligations import SolverQueryExecution
 from scripts.function_tracer_pcode.tests.unit._object_target_key_specificity import (
     _object_target_key_is_specific,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 def _param(name: str, index: int = 0, size: int = 4, data_type: str = "int"):
     return {
@@ -170,7 +171,7 @@ def _build_symbolic_post_state_analysis(name: str) -> FunctionReturnAnalysis:
         params,
         symbolic=True,
     )
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name=name,
         entry_point="0x1000",
         parameters=params,
@@ -251,7 +252,7 @@ def _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2):
 
 def _return_coverage_gap_analyses():
     x = Expression.parameter("x", 0, size=4)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
@@ -259,7 +260,7 @@ def _return_coverage_gap_analyses():
         return_type="int",
         return_abi_facts=_present_return_abi_facts(),
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2",
         parameters=[_param("x")],
@@ -306,7 +307,7 @@ def _analysis_with_unsupported_call_effect() -> FunctionReturnAnalysis:
         reason="target_identity_unavailable",
         order_key=9,
     )
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name="func1",
         entry_point="0x1000",
         parameters=[_param("x")],
@@ -376,7 +377,7 @@ def _analysis_with_unknown_indirect_call_effect(
         reason=reason,
         order_key=9,
     )
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name=function_name,
         entry_point=hex(entry),
         function_ref=CallTargetRef.from_name(function_name, program_id=entry, entry_offset=entry),
@@ -509,7 +510,7 @@ def _analysis_with_deferred_call_argument_blocker(
             deferred.placeholder_name,
             runtime_ref=deferred.unknown_ref,
         ).clone_with(size=unknown_size)
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name=function_name,
         entry_point=hex(entry),
         function_ref=CallTargetRef.from_name(function_name, program_id=entry, entry_offset=entry),
@@ -555,7 +556,7 @@ def _analysis_with_self_recursive_unsupported_call_effect(
         reason=reason,
         order_key=11,
     )
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name="func1",
         entry_point=hex(entry),
         function_ref=CallTargetRef.from_name("func1", program_id=1, entry_offset=entry),
@@ -598,7 +599,7 @@ def _analysis_with_effect_call_argument_evidence() -> FunctionReturnAnalysis:
         path_conditions=((),),
         coverage_complete=True,
     )
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name="func1",
         entry_point="0x1000",
         function_ref=CallTargetRef.from_name("func1", program_id=1, entry_offset=0x1000),
@@ -673,7 +674,7 @@ def _analysis_with_two_effect_call_argument_evidences() -> Tuple[
         coverage_complete=True,
     )
     return (
-        FunctionReturnAnalysis(
+        raw_function_analysis(
             function_name="func1",
             entry_point="0x1000",
             function_ref=CallTargetRef.from_name("func1", program_id=1, entry_offset=0x1000),
@@ -728,7 +729,7 @@ def _analysis_with_effect_call_target_resolution_evidence() -> FunctionReturnAna
         target_condition_keys=(),
         order_key=3,
     )
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name="func1",
         entry_point="0x1000",
         function_ref=CallTargetRef.from_name("func1", program_id=1, entry_offset=0x1000),
@@ -1067,7 +1068,7 @@ def _attach_bounded_call_refinement_expansion_evidence(
     record_function_unary_evidence(analysis, record)
 
 def _completed_proof_ids_for_call_effect_evidence(evidence):
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="func1",
         entry_point="0x1000",
         parameters=[_param("x")],
@@ -1080,7 +1081,7 @@ def _completed_proof_ids_for_call_effect_evidence(evidence):
 
 def _blocking_unsafety_object_target_key(blocking_reason, analysis1):
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -1097,7 +1098,7 @@ def _blocking_unsafety_object_target_key(blocking_reason, analysis1):
     return reason.object_target_key
 
 def _analysis_with_call_effect_summary_proof_evidence(**evidence_overrides) -> FunctionReturnAnalysis:
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name="func1",
         entry_point="0x1000",
         parameters=[_param("x")],
@@ -1320,7 +1321,7 @@ def _sat_unsafety_resolution_evidence(action, counterexample_raw=None, **overrid
 def _sat_unsafety_resolution_action():
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -1425,7 +1426,7 @@ def _analysis_with_phi_circular_guard(
         ),
         guard_negated,
     )
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name=function_name,
         entry_point=hex(entry),
         function_ref=CallTargetRef.from_name(function_name, program_id=entry, entry_offset=entry),
@@ -1583,7 +1584,7 @@ def _method_b_closure_target():
     )
 
 def _analysis_with_completed_evidence(*evidence_items):
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name="func1",
         entry_point="0x1000",
         parameters=[_param("x")],
@@ -1622,7 +1623,7 @@ def _fixture_comparison_binding():
     )
 
     def analysis(count_size, binary_id, entry_point):
-        return FunctionReturnAnalysis(
+        return raw_function_analysis(
             function_name="readonly_fixture",
             entry_point=entry_point,
             parameters=[
@@ -1896,7 +1897,7 @@ def _coverage_identity_analysis(
             ),
         ),
     ]
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name="f",
         entry_point="0x401000",
         function_ref=CallTargetRef.from_name("f", program_id=12345, entry_offset=0x401000),

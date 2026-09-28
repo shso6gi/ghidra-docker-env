@@ -31,6 +31,7 @@ from scripts.function_tracer_pcode.smt import (
     SolverStatus,
 )
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 def _solver_runner():
@@ -107,7 +108,7 @@ def _missing_return_abi_facts():
 
 
 def _analysis(conditions) -> FunctionReturnAnalysis:
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name="ternary_modulo",
         entry_point="0x1000",
         parameters=[],
@@ -215,7 +216,7 @@ def test_pairwise_strategy_marks_contradictory_signed_modulo_pair_unsat_without_
 
 
 def test_pairwise_strategy_marks_unresolved_cases_unknown_without_invoking_solver():
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="f1",
         entry_point="0x1000",
         parameters=[],
@@ -259,7 +260,7 @@ def test_pairwise_strategy_marks_unresolved_cases_unknown_without_invoking_solve
 
 
 def test_pairwise_strategy_treats_unsupported_smt_operator_as_unresolved():
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="f1",
         entry_point="0x1000",
         parameters=[],
@@ -306,7 +307,7 @@ def test_pairwise_strategy_reduces_phi_unknown_under_pair_conditions():
     )
     phi_value.size = 8
 
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="f1",
         entry_point="0x1000",
         parameters=[],
@@ -320,7 +321,7 @@ def test_pairwise_strategy_reduces_phi_unknown_under_pair_conditions():
         return_type="long",
         return_abi_facts=_missing_return_abi_facts(),
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="f2",
         entry_point="0x2000",
         parameters=[],
@@ -373,7 +374,7 @@ def test_pairwise_strategy_reduces_phi_unknown_under_pair_conditions():
 
 
 def test_pairwise_unresolved_check_avoids_condition_simplifier_recursion(monkeypatch):
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="branch_sign_bucket_left",
         entry_point="0x1000",
         parameters=[{"name": "param_1", "size": 4, "data_type": "int", "index": 0}],
@@ -391,7 +392,7 @@ def test_pairwise_unresolved_check_avoids_condition_simplifier_recursion(monkeyp
         return_type="int",
         return_abi_facts=_missing_return_abi_facts(),
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="branch_sign_bucket_right",
         entry_point="0x2000",
         parameters=[{"name": "param_1", "size": 8, "data_type": "long", "index": 0}],
@@ -453,7 +454,7 @@ def test_pairwise_strategy_completes_for_mixed_signed_guard_pair():
     # leaf は 64 bit で読むので、parameter も 64 bit で宣言する。宣言より広い leaf は
     # relation のどの tie にも入らない入力（Issue #167 の hidden input）になり、
     # この test の主題（符号の混ざった guard）と別の理由で判定が止まる。
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="branch_sign_bucket_left",
         entry_point="0x1000",
         parameters=[{"name": "param_1", "size": 8, "data_type": "long", "index": 0}],
@@ -476,7 +477,7 @@ def test_pairwise_strategy_completes_for_mixed_signed_guard_pair():
         return_type="int",
         return_abi_facts=_missing_return_abi_facts(),
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="branch_sign_bucket_right",
         entry_point="0x2000",
         parameters=[{"name": "param_1", "size": 8, "data_type": "long", "index": 0}],

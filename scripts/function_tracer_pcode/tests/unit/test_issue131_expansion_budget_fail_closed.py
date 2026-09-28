@@ -78,6 +78,7 @@ from scripts.function_tracer_pcode.tests.unit.test_issue131_expansion_budget_obs
     _record,
 )
 from scripts.function_tracer_pcode.tests.unit._publication import published
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +171,7 @@ def _total_return_analysis(*, truncations=()) -> FunctionReturnAnalysis:
     """
 
     ret = ReturnInfo(address="0x0", value=_const(0), conditions=[], branch_index=0)
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="f",
         entry_point="0x1000",
         parameters=[
@@ -378,7 +379,7 @@ def _a1_analysis(input_values, *, with_markers=True):
         )
         for index, item in enumerate(expanded)
     ]
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="f",
         entry_point="0x1000",
         parameters=[

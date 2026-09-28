@@ -20,6 +20,7 @@ from scripts.function_tracer_pcode.core import (
     ReadonlyReductionWitness,
     ReturnInfo,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 def _solver_runner():
@@ -90,7 +91,7 @@ def test_pairwise_keeps_mips64_parameter_fragments_uncollapsed():
     あることは信頼済み IEE が無ければ言えないので、式はそのまま残る。
     """
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), _solver_runner(), debug=False)
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="f",
         entry_point="0x1000",
         parameters=[
@@ -132,7 +133,7 @@ def test_pairwise_fragment_backed_pair_is_gated_by_input_correspondence():
     """
     strategy = PairwiseStrategy(FormulaBuilder(debug=False), _solver_runner(), debug=False)
 
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="fc_widen_then_bias_like",
         entry_point="0x1000",
         parameters=[
@@ -150,7 +151,7 @@ def test_pairwise_fragment_backed_pair_is_gated_by_input_correspondence():
         return_type="int",
     )
 
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="fc_widen_then_bias_like",
         entry_point="0x1000",
         parameters=[
@@ -191,28 +192,28 @@ def test_pairwise_fragment_backed_pair_is_gated_by_input_correspondence():
 def test_pairwise_extracts_cases_from_solver_view_consistently():
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), _solver_runner(), debug=False)
 
-    raw_left = FunctionReturnAnalysis(
+    raw_left = raw_function_analysis(
         function_name="left",
         entry_point="0x1000",
         parameters=[{"name": "param_1", "data_type": "int", "size": 8, "index": 0, "is_signed": True}],
         returns=[ReturnInfo(address="0x1001", value=_const(0), conditions=[])],
         return_type="int",
     )
-    raw_right = FunctionReturnAnalysis(
+    raw_right = raw_function_analysis(
         function_name="right",
         entry_point="0x1000",
         parameters=[{"name": "param_1", "data_type": "int", "size": 8, "index": 0, "is_signed": True}],
         returns=[ReturnInfo(address="0x1002", value=_const(1), conditions=[])],
         return_type="int",
     )
-    solver_left = FunctionReturnAnalysis(
+    solver_left = raw_function_analysis(
         function_name="left",
         entry_point="0x1000",
         parameters=[{"name": "param_1", "data_type": "int", "size": 4, "index": 0, "is_signed": True}],
         returns=[ReturnInfo(address="0x1001", value=_const(0), conditions=[])],
         return_type="int",
     )
-    solver_right = FunctionReturnAnalysis(
+    solver_right = raw_function_analysis(
         function_name="right",
         entry_point="0x1000",
         parameters=[{"name": "param_1", "data_type": "int", "size": 4, "index": 0, "is_signed": True}],
@@ -245,7 +246,7 @@ def test_pairwise_extracts_cases_from_solver_view_consistently():
 def test_pairwise_short_circuits_semantically_equal_readonly_reductions():
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), _solver_runner(), debug=False)
 
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="left",
         entry_point="0x1000",
         parameters=[
@@ -255,7 +256,7 @@ def test_pairwise_short_circuits_semantically_equal_readonly_reductions():
         returns=[ReturnInfo(address="0x1001", value=_readonly_sum_value("param_1", stride=4, element_size=4), conditions=[])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="right",
         entry_point="0x1000",
         parameters=[

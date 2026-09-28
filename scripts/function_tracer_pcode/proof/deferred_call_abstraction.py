@@ -737,22 +737,20 @@ def _rewrite_analysis_with_abstract_calls(
     analysis: FunctionReturnAnalysis,
     placeholder_mapping: Dict[Tuple[object, ...], AbstractedCallMatch],
 ) -> FunctionReturnAnalysis:
-    cloned = analysis.semantic_successor(
-        parameters=[dict(param) for param in (analysis.parameters or [])],
-        returns=[],
-    )
-
+    parameters = [dict(param) for param in (analysis.parameters or [])]
     existing_indices = {
         int(param.get("index", -1))
-        for param in cloned.parameters
+        for param in parameters
         if isinstance(param.get("index", -1), int)
     }
 
     for match in placeholder_mapping.values():
         if match.summary_index not in existing_indices:
             # PR-20-B3 以降、この無条件経路が作る要約は自己再帰だけ。
+            # synthetic parameter は入力領域の正本（封印した raw baseline）に登録しない:
+            # 名乗りは出所の記録で、両側の対応の証明ではない（Issue #185）。
             synthetic_key = "synthetic_recursive_summary"
-            cloned.parameters.append(
+            parameters.append(
                 {
                     "name": match.summary_name,
                     "index": match.summary_index,
@@ -765,7 +763,9 @@ def _rewrite_analysis_with_abstract_calls(
             )
             existing_indices.add(match.summary_index)
 
-    cloned.parameters.sort(key=lambda param: int(param.get("index", 1 << 20)))
+    parameters.sort(key=lambda param: int(param.get("index", 1 << 20)))
+    # 表は完成してから代入する（その場で書き換えない: 出力する正本の差分は代入で作り直される）
+    cloned = analysis.semantic_successor(parameters=parameters, returns=[])
     cloned.returns = [
         ReturnInfo(
             address=ret.address,

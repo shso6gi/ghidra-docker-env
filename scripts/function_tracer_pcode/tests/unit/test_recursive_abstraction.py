@@ -3,6 +3,7 @@
 from types import MethodType
 from unittest.mock import Mock
 
+from scripts.function_tracer_pcode.core.parameter_domain import synthetic_parameter_kind
 from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker, StageID
 from scripts.function_tracer_pcode.proof.recursive_abstraction import abstract_recursive_calls
 from scripts.function_tracer_pcode.checker.result import EquivalenceResult
@@ -538,7 +539,7 @@ def test_deferred_call_abstraction_no_longer_folds_matching_sqrt_returns():
     # 返り値は deferred call の UNKNOWN のまま。共有 summary parameter も作らない。
     assert result.analysis1.returns[0].value.expr_type != ExpressionType.PARAMETER
     assert not any(
-        param.get("synthetic_pure_call_summary")
+        synthetic_parameter_kind(param)
         for param in result.analysis1.parameters
     )
     # 名前による pure_return 分類も無い。

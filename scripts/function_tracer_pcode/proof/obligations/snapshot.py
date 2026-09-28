@@ -109,6 +109,10 @@ FUNCTION_ANALYSIS_FIELD_CLASSIFICATION = MappingProxyType({
     # 全記録が snapshot fingerprint に入るので、marker を知らずに作った証明は
     # 別の前提のものとして再利用されない。
     "expansion_budget_truncations": "semantic",
+    # Issue #185: 入力領域の正本と仮説の台帳は解析前提の一部。``to_dict`` は正本が現在の表と
+    # 違うときと台帳があるときだけ出すので、差があれば fingerprint が別の前提になる。
+    "raw_parameter_domains": "semantic",
+    "parameter_domain_hypotheses": "semantic",
 })
 
 

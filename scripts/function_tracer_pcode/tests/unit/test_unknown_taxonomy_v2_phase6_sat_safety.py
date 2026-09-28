@@ -36,6 +36,7 @@ from scripts.function_tracer_pcode.core import Condition
 from scripts.function_tracer_pcode.core import PcodeOpRef
 from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
 from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_of
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 def _param(name: str, index: int = 0, size: int = 4):
@@ -81,7 +82,7 @@ def _case(binary_id: str, entry: int, index: int) -> tuple[FunctionReturnAnalysi
         pcode_time=entry + 0x20,
         pcode_op_ref=_pcode(binary_id, entry + 0x20),
     )
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="fc_is_even",
         entry_point=hex(entry),
         parameters=[_param("x")],
@@ -434,14 +435,14 @@ def test_monolithic_strategy_publishes_safe_counterexample_to_v2():
     )
     with production_signal_scope(session):
         result = checker.check(
-            FunctionReturnAnalysis(
+            raw_function_analysis(
                 function_name="left",
                 entry_point="0x1000",
                 parameters=[],
                 returns=[ReturnInfo("0x1010", Expression.constant(7, size=4), [])],
                 return_type="int",
             ),
-            FunctionReturnAnalysis(
+            raw_function_analysis(
                 function_name="right",
                 entry_point="0x1000",
                 parameters=[],

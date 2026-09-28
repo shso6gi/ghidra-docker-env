@@ -117,6 +117,7 @@ from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, Solv
 import scripts.function_tracer_pcode.checker.preflight_gate as _mx_preflight_gate
 import scripts.function_tracer_pcode.proof.strategies.monolithic_counterexamples as _mx_monolithic_counterexamples
 import scripts.function_tracer_pcode.proof.strategies.monolithic_return_width as _mx_monolithic_return_width
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 def _pcode_ref(
@@ -236,7 +237,7 @@ def _analysis_with_call(
         call_like_pcode_op_keys=(pcode_ref.stable_key(),),
         call_like_identity_complete=True,
     )
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name="caller",
         entry_point=hex(caller_entry),
         function_ref=CallTargetRef.from_name(
@@ -600,7 +601,7 @@ def test_recursive_scc_certificate_requires_a_complete_call_graph_cycle():
 
 
 def test_callother_is_a_typed_userop_fact_not_a_callsite():
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="intrinsic_user",
         entry_point="0x1000",
         function_ref=CallTargetRef.from_name("intrinsic_user", program_id=1, entry_offset=0x1000),
@@ -623,7 +624,7 @@ def test_callother_is_a_typed_userop_fact_not_a_callsite():
             ),
         ),
     )
-    empty = FunctionReturnAnalysis(
+    empty = raw_function_analysis(
         function_name="empty",
         entry_point="0x3000",
         binary_id="right",
@@ -688,7 +689,7 @@ def _analysis_with_inline_region(binary_id: str, entry: int) -> FunctionReturnAn
         region_all_exits_enumerated=True,
         region_cross_edges_enumerated=True,
     )
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name="inlined",
         entry_point=hex(entry),
         function_ref=CallTargetRef.from_name(
@@ -1183,7 +1184,7 @@ def test_unmatched_call_preserves_its_argument_extraction_failure():
     left = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
     evidence = next(iter(left.effect_summary.call_argument_evidence.values()))
     object.__setattr__(evidence, "coverage_complete", False)
-    right = FunctionReturnAnalysis(
+    right = raw_function_analysis(
         function_name="inlined",
         entry_point="0x3000",
         binary_id="right",
@@ -1261,7 +1262,7 @@ def _phase2_caller_analysis(binary_id: str, program_id: int, entry: int) -> Func
         call_like_pcode_op_keys=(pcode_ref.stable_key(),),
         call_like_identity_complete=True,
     )
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name="wrapper",
         entry_point=hex(entry),
         function_ref=CallTargetRef.from_name(
