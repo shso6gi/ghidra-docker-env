@@ -697,6 +697,13 @@ _FORGED_STATES = {
     "lock-of-another-keyset": 'mkdir -p "$1/../other-ks"; validation_lock_authority_keyset "$(dirname -- "$1")" other-ks',
     # lock を保持したまま、keyset の path が別の directory に差し替えられる。
     "keyset-replaced-after-lock": f'{_LOCK}; mv -- "$1" "$1.old"; mkdir -- "$1"',
+    # 別の process が同じ keyset を lock している間に、lock していない自分の fd を handle にする
+    # （判定は inode 単位ではなく、自分の open file description が lock を所有するか）。
+    "another-process-holds-the-inode": (
+        '( exec 9<"$1"; flock 9; : > "$1/../held"; exec sleep 30 ) >/dev/null 2>&1 & holder=$!; '
+        'trap \'kill $holder\' EXIT; until [[ -e "$1/../held" ]]; do sleep 0.05; done; '
+        'exec {fd}<"$1"; VALIDATION_KEYSET_LOCK_FD=$fd'
+    ),
     # 共有 lock（READ）は排他の lock ではない。
     "shared-flock": 'exec {fd}<"$1"; flock -s "$fd"; VALIDATION_KEYSET_LOCK_FD=$fd',
 }
@@ -938,6 +945,7 @@ def test_lock_rejects_a_keyset_replaced_while_waiting(tmp_path):
 
     assert waiter.returncode == 1, err
     assert "was replaced while waiting for its lock" in err
+    assert "is not the lock of" in err
     assert (keyset.stat().st_mode & 0o777) == 0o755
 
 

@@ -412,19 +412,17 @@ validation_authority_keyset_id_is_valid() {
     [[ "${1-}" =~ ^[A-Za-z0-9._-]+$ && "$1" != "." && "$1" != ".." ]]
 }
 
-# 内部: fd が、排他 flock を保持している open file description を指しているか（kernel が
-# fdinfo に出す lock 行で判定する。同じ inode を別に開いた fd には lock 行が出ない）。
+# 内部: fd が、排他 flock を保持している open file description を指しているか。kernel が
+# `/proc/self/fdinfo/<fd>` に出す lock 行で判定する（lock 行はその open file description が
+# 所有する lock だけで、同じ inode を別に開いた fd や、lock を待っているだけの fd には出ない）。
+# どの inode の lock かは呼び出し側が `-ef /dev/fd/<fd>` で確かめる。/proc が読めなければ偽。
 _validation_fd_holds_exclusive_flock() {
-    local fd="$1" line inode="" locked_inode=""
+    local fd="$1" line
     [[ "$fd" =~ ^[0-9]+$ && -r "/proc/self/fdinfo/$fd" ]] || return 1
     while IFS= read -r line; do
-        if [[ "$line" =~ ^ino:[[:space:]]+([0-9]+)$ ]]; then
-            inode="${BASH_REMATCH[1]}"
-        elif [[ "$line" =~ ^lock:[[:space:]]+[0-9]+:[[:space:]]+FLOCK[[:space:]]+ADVISORY[[:space:]]+WRITE[[:space:]]+[0-9-]+[[:space:]]+[0-9a-f]+:[0-9a-f]+:([0-9]+)[[:space:]] ]]; then
-            locked_inode="${BASH_REMATCH[1]}"
-        fi
-    done < "/proc/self/fdinfo/$fd" || return 1
-    [[ -n "$inode" && "$inode" == "$locked_inode" ]]
+        [[ "$line" =~ ^lock:[[:space:]]+[0-9]+:[[:space:]]+FLOCK[[:space:]]+ADVISORY[[:space:]]+WRITE[[:space:]] ]] && return 0
+    done < "/proc/self/fdinfo/$fd"
+    return 1
 }
 
 # 内部: handle 変数が環境から来ていないか（この library が発行した handle は export しない）。
@@ -493,11 +491,6 @@ validation_lock_authority_keyset() {
         echo "Error: VALIDATION_KEYSET_LOCK_WAIT_SECONDS must be a non-negative number of seconds" >&2
         return 1
     fi
-    # 保持の証明に使う kernel の状態が読めなければ、何も作らずに拒否する。
-    if [[ ! -d /proc/self/fdinfo ]]; then
-        echo "Error: authority keyset lock requires /proc/self/fdinfo to prove the lock is held: $dir" >&2
-        return 1
-    fi
     if [[ -L "$dir" ]]; then
         echo "Error: authority keyset must not be a symlink: $dir" >&2
         return 1
@@ -523,11 +516,12 @@ validation_lock_authority_keyset() {
     fi
     export -n VALIDATION_KEYSET_LOCK_FD 2>/dev/null || true
     VALIDATION_KEYSET_LOCK_FD="$lock_fd"
-    # 取得した lock が今の path の keyset の lock であること（待っている間の差し替えを拒否）。
-    if ! validation_assert_authority_keyset_locked "$dir" 2>/dev/null; then
+    # 取得した lock が、今の path の keyset の lock として証明できること（待っている間の
+    # 差し替え、/proc が読めない環境を拒否する。理由は assertion が出す）。
+    if ! validation_assert_authority_keyset_locked "$dir"; then
         exec {lock_fd}<&-
         VALIDATION_KEYSET_LOCK_FD=""
-        echo "Error: authority keyset was replaced while waiting for its lock: $dir" >&2
+        echo "Error: authority keyset was replaced while waiting for its lock, or its lock cannot be proven: $dir" >&2
         return 1
     fi
     if ! chmod 700 -- "$dir"; then
