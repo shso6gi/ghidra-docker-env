@@ -166,6 +166,10 @@ def enforce_witness_contract(
       違うなら契約違反で、SAT を受理せず ERROR にする（反例にも判定にもしない）
     * それ以外の backend の SAT の model は solver の任意の選択なので採らない
       （model 無しの SAT）
+
+    呼ぶのは、backend の結果が model を読む consumer へ渡る境界（runner の `run_single` と
+    monolithic の共有 session の `execute`）。`Z3Solver` を直接呼ぶ解析側の箇所は status
+    だけを読み、model を使わない。
     """
 
     if result.status != SolverStatus.SAT:
