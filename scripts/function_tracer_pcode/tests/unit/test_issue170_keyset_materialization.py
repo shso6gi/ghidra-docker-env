@@ -796,16 +796,19 @@ def _overlaps(a: str, b: str) -> bool:
     return a == b or a.startswith(b + "/") or b.startswith(a + "/")
 
 
+@pytest.mark.parametrize("output_exists", [True, False], ids=["output-exists", "output-absent"])
 @pytest.mark.parametrize("keyset_id", _IDS)
 @pytest.mark.parametrize("spelling", sorted(_ROOT_SPELLINGS))
-def test_canonical_keyset_is_always_separated_from_output(tmp_path, spelling, keyset_id):
+def test_canonical_keyset_is_always_separated_from_output(tmp_path, spelling, keyset_id, output_exists):
     base = Path(_canonical(tmp_path))
     out = base / "a" / "out"
-    out.mkdir(parents=True, mode=0o755)
-    out.chmod(0o755)
+    out.parent.mkdir(parents=True)
     (base / "b").mkdir()
     (base / "link-a").symlink_to(base / "a")
     (base / "link-out").symlink_to(out)
+    if output_exists:
+        out.mkdir(mode=0o755)
+        out.chmod(0o755)
     root = _ROOT_SPELLINGS[spelling](base)
     expected_keyset = os.path.join(os.path.realpath(os.path.join(base, root)), keyset_id)
     keyset_is_symlink = os.path.islink(expected_keyset)
@@ -818,8 +821,9 @@ def test_canonical_keyset_is_always_separated_from_output(tmp_path, spelling, ke
 
     assert result.returncode == 0, result.stderr
     assert "Traceback" not in result.stderr
-    assert (out.stat().st_mode & 0o777) == 0o755
-    assert _key_files_under(out) == []
+    if output_exists:
+        assert (out.stat().st_mode & 0o777) == 0o755
+        assert _key_files_under(out) == []
     if not separated:
         assert result.stdout.split() == ["resolve=1"], (result.stdout, result.stderr)
         assert result.stderr.startswith("Error: "), result.stderr
@@ -827,9 +831,31 @@ def test_canonical_keyset_is_always_separated_from_output(tmp_path, spelling, ke
         return
     assert result.stdout.split() == ["resolve=0", f"keyset={expected_keyset}", "done"], result.stderr
     keyset = Path(expected_keyset)
+    assert _key_files_under(out) == []
     assert sorted(os.listdir(keyset)) == sorted(["supervisor.key", PRIVATE_KEY])
     assert _key_files_under(base) == sorted(str(keyset / name) for name in ("supervisor.key", PRIVATE_KEY))
     assert _validates(keyset / PRIVATE_KEY, out / PUBLIC_KEY)
+
+
+@pytest.mark.parametrize("writer", sorted(_WRITERS_FOR_RECHECK := {
+    "pair": 'validation_materialize_pair_status_keypair "$PY" "$1/pair-status-ed25519.key" "$2"',
+    "hmac": 'validation_materialize_process_key "$1/supervisor.key"',
+}))
+def test_key_writers_recheck_the_separation_at_the_moment_they_write(tmp_path, writer):
+    """lock の後で OUTPUT が keyset の別名に差し替えられたら、書く直前の判定で拒否する。"""
+
+    base = Path(_canonical(tmp_path))
+    keyset = base / "keys" / "ks"
+    out = base / "out"
+    out.mkdir()
+    result = _bash(
+        f'validation_lock_authority_keyset "$1" "$OUT"\nrmdir -- "$OUT"\nln -s -- "$1" "$OUT"\n'
+        + _WRITERS_FOR_RECHECK[writer],
+        str(keyset), str(out / PUBLIC_KEY), env=_env(out),
+    )
+
+    _assert_clean_failure(result, "private authority keyset must be outside OUTPUT_BASE_DIR")
+    assert os.listdir(keyset) == []
 
 
 @pytest.mark.parametrize("relation", ["keyset-aliases-output", "output-aliases-keyset-child"])

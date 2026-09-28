@@ -390,6 +390,9 @@ validation_before_run_half_is_comparable() {
 #   open file description（= lock が作ったもの）である。片方の fd 番号が閉じられて別の file に
 #   再利用されても、dev:ino か lock 行が一致しない。同じ keyset を開き直して lock しようとしても、
 #   残った方が lock を保持しているので取れない。
+#   （証明が区別しないのは、呼び出し側が自分で keyset を開いて排他 flock を取り、その fd の組を
+#    state に書いた場合だけである。その fd の組は実際に keyset の排他を保持しているので、
+#    「keyset の inode ごとに鍵操作は 1 つ」は崩れない。）
 #   - unlock は所有の証明が成り立つときだけ fd を閉じる（自分が取得した lock 以外は閉じない）。
 #   - 鍵を書く helper は、所有の証明、記録した keyset が今もその inode を指すこと、identity の
 #     判定を確かめ、keyset の path ではなく /dev/fd/<primary>/<name>（lock した inode）に書く。
@@ -561,7 +564,11 @@ validation_lock_authority_keyset() {
         fi
         return 1
     fi
-    exec {shadow}<&"$primary"
+    if ! exec {shadow}<&"$primary"; then
+        exec {primary}<&-
+        echo "Error: authority keyset lock descriptor cannot be duplicated: $keyset" >&2
+        return 1
+    fi
     identity="$(_validation_fd_exclusive_flock_identity "$primary")" || identity=""
     if ! _validation_keyset_lock_is_valid_for "$primary" "$shadow" "$identity" "$keyset" "$resolved_output"; then
         exec {primary}<&- {shadow}<&-
