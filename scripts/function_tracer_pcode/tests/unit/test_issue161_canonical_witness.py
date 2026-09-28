@@ -470,3 +470,57 @@ def test_the_runner_drops_a_model_from_a_backend_without_the_witness_contract():
     canonical = ParallelSolverRunner(timeout=1, solver_classes=[_CanonicalBackend])
     assert canonical.run_sequential("(check-sat)").get_counterexample() == {"x": 42}
     assert Z3Solver.PROVIDES_CANONICAL_WITNESS is True
+
+
+@pytest.mark.parametrize("canonical_status", [SolverStatus.SAT, SolverStatus.TIMEOUT])
+def test_a_race_is_not_decided_by_a_sat_without_witness_while_a_canonical_backend_runs(
+    canonical_status,
+):
+    """どの backend が先に終わったかで反例の有無（= 判定）が変わらない。"""
+
+    import threading
+    import time
+
+    from scripts.function_tracer_pcode.smt.interface import SMTSolver, SolverResult
+    from scripts.function_tracer_pcode.smt.parallel import ParallelSolverRunner
+
+    finished_first = threading.Event()
+
+    class _FastArbitrary(SMTSolver):
+        @property
+        def name(self):
+            return "fast-arbitrary"
+
+        def check_availability(self):
+            return True, "test"
+
+        def check_equivalence_direct(self, smt_script, cancellation_token=None):
+            try:
+                return SolverResult(self.name, SolverStatus.SAT, model={"x": 42})
+            finally:
+                finished_first.set()
+
+    class _SlowCanonical(_FastArbitrary):
+        PROVIDES_CANONICAL_WITNESS = True
+
+        @property
+        def name(self):
+            return "slow-canonical"
+
+        def check_equivalence_direct(self, smt_script, cancellation_token=None):
+            assert finished_first.wait(5)
+            time.sleep(0.2)
+            if canonical_status == SolverStatus.SAT:
+                return SolverResult(self.name, SolverStatus.SAT, model={"x": 0})
+            return SolverResult(self.name, SolverStatus.TIMEOUT)
+
+    runner = ParallelSolverRunner(timeout=5, solver_classes=[_FastArbitrary, _SlowCanonical])
+    result = runner.run_parallel("(check-sat)")
+    assert result.is_equivalent is False
+    if canonical_status == SolverStatus.SAT:
+        assert result.first_definitive.solver_name == "slow-canonical"
+        assert result.get_counterexample() == {"x": 0}
+    else:
+        # canonical な backend が決められなかったときだけ witness 無しの SAT が残る
+        assert result.first_definitive.solver_name == "fast-arbitrary"
+        assert result.get_counterexample() is None

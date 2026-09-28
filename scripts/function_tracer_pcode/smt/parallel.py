@@ -7,7 +7,7 @@ import time
 import inspect
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import List, Optional, Dict, Any, Type
+from typing import Any, Dict, Iterable, List, Optional, Type
 from dataclasses import dataclass, field
 
 from scripts.function_tracer_pcode.core.stage_journal import (
@@ -211,6 +211,23 @@ def _with_witness_contract(solver: SMTSolver, result: SolverResult) -> SolverRes
             raw_output=result.raw_output,
         )
     return result
+
+
+def _decides_race(result: SolverResult, pending: Iterable[SMTSolver]) -> bool:
+    """並列実行で `result` が確定結果として他を打ち切ってよいか（Issue #161）。
+
+    UNSAT と witness 付きの SAT は確定。witness の無い SAT は、canonical な witness を
+    作れる backend がまだ走っている間は確定にしない（どの backend が先に終わったかで
+    反例の有無 = 判定が変わらないように）。
+    """
+
+    if result.status == SolverStatus.UNSAT:
+        return True
+    if result.status != SolverStatus.SAT:
+        return False
+    if result.model is not None:
+        return True
+    return not any(getattr(solver, "PROVIDES_CANONICAL_WITNESS", False) for solver in pending)
 
 
 class ParallelSolverRunner:
@@ -418,7 +435,11 @@ class ParallelSolverRunner:
                                 print(f"[ParallelRunner] {solver.name} completed: {status_msg} ({result.elapsed_time:.3f}s)")
                         
                             # 確定的な結果が出たら
-                            if result.status in (SolverStatus.SAT, SolverStatus.UNSAT):
+                            pending = [
+                                other for other_future, other in future_to_solver.items()
+                                if other_future is not future and not other_future.done()
+                            ]
+                            if _decides_race(result, pending):
                                 if first_definitive is None:
                                     first_definitive = result
                                     # 他のソルバーをキャンセル
