@@ -37,10 +37,11 @@ witness を使う側（replay の規則。例: 浮動小数点の引数が NaN �
 witness があるのに満たさない witness を返すことは無い。
 
 **責務の分け方**: 探索の規則（何が canonical か・どう問うか）はここ 1 箇所。backend
-ごとの違い（制約の作り方・一時的な仮定・model の読み方・時間予算の強制）は
-`WitnessSession` の実装が持つ。witness を決められないときは `WitnessUnavailable`
-（`kind` が予算切れ / 判定不能 / 中止のどれか）で、それを solver の結果の status へ
-どう写すかは `smt.interface` が決める（`SolverResult.model` の契約）。
+ごとの違い（制約の作り方・一時的な仮定・model の読み方）は `WitnessSession` の実装が
+持つ。実行の期限と中止は `smt.execution.ExecutionBudget` が持ち、SAT を確定するまでの
+手順（探索の前後の中断確認を含む）は `smt.interface.sat_with_canonical_witness` が持つ。
+witness を決められないときは `WitnessUnavailable`（`kind` が予算切れ / 判定不能 / 中止
+のどれか）で、それを solver の結果の status へどう写すかは `smt.interface` が決める。
 """
 
 from __future__ import annotations
@@ -48,6 +49,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Dict, Mapping, Optional, Protocol, Sequence, Tuple, Union
+
+from scripts.function_tracer_pcode.smt.execution import BUDGET_EXHAUSTED, CANCELLED
 
 
 #: 宣言の sort のうち witness の成分になるもの
@@ -104,19 +107,18 @@ class Constraint:
     preference: str = ""
 
 
-#: `WitnessUnavailable.kind`
-BUDGET_EXHAUSTED = "budget_exhausted"
+#: `WitnessUnavailable.kind`: 中断（`CANCELLED` / `BUDGET_EXHAUSTED`）は実行の状態の owner
+#: （`smt.execution`）が定義し、witness の探索に固有なのは判定不能（`INCONCLUSIVE`）だけ
 INCONCLUSIVE = "inconclusive"
-CANCELLED = "cancelled"
 
 
 class WitnessUnavailable(Exception):
     """canonical な witness を決められなかった。
 
-    `kind` は理由の種類（`BUDGET_EXHAUSTED` = 実行の時間予算を使い切った、
-    `INCONCLUSIVE` = 探索の問いに solver が判定不能を返した、`CANCELLED` = 実行が
-    中止された）。これを受けた backend は SAT を返さず、`smt.interface.witness_failure_result`
-    の結果（TIMEOUT / UNKNOWN）を返す（`SolverResult.model` の契約）。
+    `kind` は理由の種類（`CANCELLED` / `BUDGET_EXHAUSTED` = 実行が中断された、
+    `smt.execution`。`INCONCLUSIVE` = 探索の問いに solver が判定不能を返した）。これを
+    受けた backend は SAT を返さず、`smt.interface.interrupted_result` の結果
+    （TIMEOUT / UNKNOWN）を返す（`SolverResult.model` の契約）。
     """
 
     def __init__(self, kind: str, detail: str) -> None:
@@ -124,6 +126,7 @@ class WitnessUnavailable(Exception):
             raise ValueError(f"unknown witness failure kind: {kind}")
         super().__init__(f"{kind}: {detail}")
         self.kind = kind
+        self.detail = detail
 
 
 class WitnessSession(Protocol):
@@ -137,7 +140,9 @@ class WitnessSession(Protocol):
     * `check_with(constraint)` — これまで `fix` した制約に `constraint` を **一時的に**
       足して解く。SAT ならその model が現在の model になり、その各 target の値を返す。
       UNSAT なら `None`（現在の model は変わらない）。判定不能・予算切れ・中止は
-      `WitnessUnavailable`（時間予算と中止の確認は session の責務）
+      `WitnessUnavailable`（問いごとの中断の確認は session が実行の `ExecutionBudget` で行う。
+      探索の前後の確認は `smt.interface.sat_with_canonical_witness` が行うので、問いが 0 回
+      でも中断をすり抜けない）
     * `fix(constraint)` — 制約を以後ずっと足す
     """
 

@@ -468,10 +468,9 @@ def _capture_witness_deadline(monkeypatch):
     seen = {}
     original = z3_backend.canonical_declared_model
 
-    def _capture(z3_module, solver, prepared, *, deadline, cancellation_token=None):
-        seen["remaining"] = deadline - time.monotonic()
-        return original(z3_module, solver, prepared, deadline=deadline,
-                        cancellation_token=cancellation_token)
+    def _capture(z3_module, solver, prepared, *, budget):
+        seen["remaining"] = budget.deadline - time.monotonic()
+        return original(z3_module, solver, prepared, budget=budget)
 
     monkeypatch.setattr(z3_backend, "canonical_declared_model", _capture)
     return seen
@@ -587,70 +586,7 @@ def test_the_shared_region_session_shares_one_budget_between_check_and_witness(m
     assert result.backend_aggregate is not None  # 1 query の結果として集約されている
 
 
-# ---------------------------------------------------------------------------
-# 中止と期限切れを区別する
-# ---------------------------------------------------------------------------
-
-
-class _Token:
-    def __init__(self, cancelled=False):
-        self.cancelled = cancelled
-
-    def is_cancelled(self):
-        return self.cancelled
-
-
-@pytest.mark.parametrize(
-    "reason, cancelled, deadline_offset, kind",
-    [
-        ("canceled", True, 5.0, CANCELLED),        # 明示の中止
-        ("canceled", False, 5.0, INCONCLUSIVE),    # z3 側の打ち切り（期限内・中止なし）
-        ("timeout", False, 5.0, BUDGET_EXHAUSTED),
-        ("unknown", False, -1.0, BUDGET_EXHAUSTED),  # 期限を過ぎている
-        ("canceled", True, -1.0, CANCELLED),       # 中止が優先（期限切れに数えない）
-        ("incomplete", False, 5.0, INCONCLUSIVE),
-    ],
-)
-def test_an_unknown_witness_answer_separates_cancellation_from_deadline(reason, cancelled, deadline_offset, kind):
-    import time
-
-    failure = z3_backend._unknown_witness_answer(reason, time.monotonic() + deadline_offset, _Token(cancelled))
-    assert failure.kind == kind
-
-
-def test_a_cancelled_witness_search_is_unknown_not_timeout():
-    """探索中の問いが中止で unknown になったら UNKNOWN（TIMEOUT ではない）。"""
-
-    import time
-
-    token = _Token()
-
-    class _CancelledDuringCheck:
-        def __init__(self, inner):
-            self._inner = inner
-
-        def check(self, *args):
-            token.cancelled = True
-            return z3.unknown
-
-        def reason_unknown(self):
-            return "canceled"
-
-        def __getattr__(self, name):
-            return getattr(self._inner, name)
-
-    context = z3.Context()
-    prepared = z3_backend.prepare_witness_query(z3, SCRIPT, context)
-    inner = z3.Solver(ctx=context)
-    inner.add(*prepared.assertions)
-    assert inner.check() == z3.sat
-    solver = _CancelledDuringCheck(inner)
-    result = z3_backend.sat_result_with_witness(
-        z3, solver, prepared, solver_name="Z3", started=time.time(),
-        deadline=time.monotonic() + 30, cancellation_token=token,
-    )
-    assert result.status == SolverStatus.UNKNOWN
-    assert "cancelled" in result.error_message
+# 中止と期限切れの規則・SAT の確定の手順は test_issue161_execution_lifecycle.py
 
 
 # ---------------------------------------------------------------------------

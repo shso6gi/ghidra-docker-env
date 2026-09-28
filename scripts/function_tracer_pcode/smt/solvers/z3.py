@@ -6,16 +6,16 @@ import importlib
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, Tuple, cast
 
+from scripts.function_tracer_pcode.smt.execution import CANCELLED, ExecutionBudget
 from scripts.function_tracer_pcode.smt.interface import (
     SMTSolver,
     SolverResult,
     SolverStatus,
-    witness_failure_result,
+    interrupted_result,
+    sat_with_canonical_witness,
 )
 from scripts.function_tracer_pcode.smt.witness import (
     BOOL,
-    BUDGET_EXHAUSTED,
-    CANCELLED,
     INCONCLUSIVE,
     INT,
     Constraint,
@@ -30,20 +30,19 @@ from scripts.function_tracer_pcode.smt.witness import (
 class _Z3WitnessSession:
     """`smt.witness.WitnessSession` の z3 実装（同じ solver の上で push / pop する）。
 
-    時間予算は呼び出し側（backend の実行入口）が決めた **1 つの** 期限 `deadline`
-    （`time.monotonic()` の値）で、初回の check と共有する。各問いには期限までの残りだけを
-    与え、期限を過ぎたら問わない。`cancellation_token` が中止されたら問わない。
+    実行の期限と中止は、呼び出し側（backend の実行入口）が作った **1 つの**
+    `ExecutionBudget` で、初回の check と共有する。各問いの前に中断を確かめ、問いには
+    期限までの残りだけを与える。問いが unknown を返したら、それが中断かどうかを同じ
+    `ExecutionBudget` に問う（規則は `smt.execution` の 1 箇所）。
     """
 
     def __init__(
-        self, z3: Any, solver: Any, model: Any, targets: tuple, deadline: float,
+        self, z3: Any, solver: Any, model: Any, targets: tuple, budget: ExecutionBudget,
         preference_terms: Optional[Dict[str, Any]] = None,
-        cancellation_token: Optional[Any] = None,
     ) -> None:
         self._z3 = z3
         self._solver = solver
-        self._deadline = deadline
-        self._cancellation_token = cancellation_token
+        self._budget = budget
         self._preference_terms = dict(preference_terms or {})
         ctx = getattr(model, "ctx", None)
         self._terms = {}
@@ -105,16 +104,12 @@ class _Z3WitnessSession:
         return self._z3.is_true(self._model.eval(self._term(constraint), model_completion=True))
 
     def check_with(self, constraint: Constraint) -> Optional[Dict[str, int]]:
-        if self._cancellation_token is not None and self._cancellation_token.is_cancelled():
-            raise WitnessUnavailable(CANCELLED, "the solver execution was cancelled")
-        remaining_ms = int((self._deadline - time.monotonic()) * 1000)
-        if remaining_ms <= 0:
-            raise WitnessUnavailable(
-                BUDGET_EXHAUSTED, "the execution budget ran out during the witness search"
-            )
+        stop = self._budget.interruption()
+        if stop is not None:
+            raise WitnessUnavailable(stop, "the execution stopped during the witness search")
         self._solver.push()
         try:
-            self._solver.set("timeout", remaining_ms)
+            self._solver.set("timeout", max(1, self._budget.remaining_ms()))
             self._solver.add(self._term(constraint))
             verdict = self._solver.check()
             if verdict == self._z3.sat:
@@ -123,32 +118,18 @@ class _Z3WitnessSession:
                 return dict(self._values)
             if verdict == self._z3.unsat:
                 return None
-            raise _unknown_witness_answer(
-                str(self._solver.reason_unknown()), self._deadline, self._cancellation_token
-            )
+            reason = str(self._solver.reason_unknown())
+            stop = self._budget.interruption_after_unknown(reason)
+            if stop is not None:
+                raise WitnessUnavailable(
+                    stop, f"the execution stopped during the witness search ({reason})"
+                )
+            raise WitnessUnavailable(INCONCLUSIVE, f"a witness question was inconclusive: {reason}")
         finally:
             self._solver.pop()
 
     def fix(self, constraint: Constraint) -> None:
         self._solver.add(self._term(constraint))
-
-
-def _unknown_witness_answer(reason: str, deadline: float, cancellation_token: Optional[Any]) -> WitnessUnavailable:
-    """探索の問いに z3 が unknown を返したときの理由の種類。
-
-    明示の中止（`cancellation_token`）は CANCELLED、実行の期限切れ（z3 の "timeout" か、
-    期限を過ぎている）は BUDGET_EXHAUSTED、それ以外（"canceled" を含む z3 側の打ち切りや
-    判定不能）は INCONCLUSIVE。中止を期限切れに数えない（`witness_failure_result` で
-    TIMEOUT と UNKNOWN に分かれる）。
-    """
-
-    if cancellation_token is not None and cancellation_token.is_cancelled():
-        return WitnessUnavailable(CANCELLED, f"the solver execution was cancelled ({reason})")
-    if reason == "timeout" or time.monotonic() >= deadline:
-        return WitnessUnavailable(
-            BUDGET_EXHAUSTED, f"the execution budget ran out during the witness search ({reason})"
-        )
-    return WitnessUnavailable(INCONCLUSIVE, f"a witness question was inconclusive: {reason}")
 
 
 @dataclass(frozen=True)
@@ -185,14 +166,13 @@ def prepare_witness_query(z3: Any, smt_script: str, ctx: Any) -> PreparedWitness
 
 
 def canonical_declared_model(
-    z3: Any, solver: Any, prepared: PreparedWitnessQuery, *, deadline: float,
-    cancellation_token: Optional[Any] = None,
+    z3: Any, solver: Any, prepared: PreparedWitnessQuery, *, budget: ExecutionBudget,
 ) -> Dict[str, Any]:
     """SAT の solver から、query の scalar 入力の canonical な witness を作る。
 
     `solver` は直前の `check()` が SAT だったもの。値は `smt.witness.canonical_witness`
-    の規則で決まり、solver の履歴にも最初の model にも依らない。`deadline` はその
-    check と共有する実行の期限（`time.monotonic()` の値）で、探索は残りの時間だけを使う。
+    の規則で決まり、solver の履歴にも最初の model にも依らない。`budget` はその check と
+    共有する実行の予算で、探索の問いは残りの時間だけを使い、中断されたら問わない。
     script は読み直さない（`prepared` を使う）。探索で足した制約は push で囲むので、
     返ったあとの `solver` は元の assertion のまま。決められなければ `WitnessUnavailable`。
     """
@@ -200,9 +180,8 @@ def canonical_declared_model(
     # model は push より前に読む（push すると直前の check の model は使えなくなる）
     model = solver.model()
     session = _Z3WitnessSession(
-        z3, solver, model, prepared.targets, deadline,
+        z3, solver, model, prepared.targets, budget,
         preference_terms=dict(prepared.preference_terms),
-        cancellation_token=cancellation_token,
     )
     solver.push()
     try:
@@ -215,33 +194,20 @@ def canonical_declared_model(
 
 def sat_result_with_witness(
     z3: Any, solver: Any, prepared: PreparedWitnessQuery, *, solver_name: str, started: float,
-    deadline: float, cancellation_token: Optional[Any] = None,
+    budget: ExecutionBudget,
 ) -> SolverResult:
-    """直前の `check()` が SAT だった solver の結果（`SolverResult.model` の契約どおり）。
+    """直前の `check()` が SAT だった z3 の solver の結果。
 
-    canonical witness を決められたら SAT とその witness、決められなければ
-    `witness_failure_result`（SAT にはしない）。`started` は `time.time()` での実行開始
-    （elapsed の起点）、`deadline` は実行の期限（`time.monotonic()`）。
+    確定の手順（witness の生成の前後の中断確認を含む）は
+    `smt.interface.sat_with_canonical_witness` が持ち、ここは z3 の canonicalize だけを渡す。
     """
 
-    try:
-        model = canonical_declared_model(
-            z3, solver, prepared, deadline=deadline, cancellation_token=cancellation_token,
-        )
-    except WitnessUnavailable as failure:
-        return witness_failure_result(solver_name, failure, time.time() - started)
-    return SolverResult(
-        solver_name=solver_name,
-        status=SolverStatus.SAT,
-        elapsed_time=time.time() - started,
-        model=model,
+    return sat_with_canonical_witness(
+        solver_name,
+        started=started,
+        budget=budget,
+        canonicalize=lambda: canonical_declared_model(z3, solver, prepared, budget=budget),
     )
-
-
-def remaining_timeout_ms(deadline: float) -> int:
-    """実行の期限までの残り（ミリ秒、切り捨て）。0 以下なら期限切れ。"""
-
-    return int((deadline - time.monotonic()) * 1000)
 
 
 def isolated_solver(z3: Any, smt_script: str, timeout_ms: int) -> Any:
@@ -310,10 +276,10 @@ class Z3Solver(SMTSolver):
             return self._create_error_result("Z3 is not available")
         
         start_time = time.time()
-        # Issue #161: 時間予算は 1 回の実行に 1 つ。期限は実行の入口で決め、query の準備
-        # （parse・witness の優先の項）・初回の check・canonical witness の探索がすべて
-        # この期限の中で行う（初回の check には残りだけを与える）。
-        deadline = time.monotonic() + self.timeout
+        # Issue #161: 実行の状態（期限と中止）は 1 回の実行に 1 つの `ExecutionBudget`。
+        # 入口で作り、query の準備・初回の check・canonical witness の生成と SAT の確定の
+        # すべてがこれに問う（初回の check には残りだけを与える）。
+        budget = ExecutionBudget.starting_now(self.timeout, cancellation_token)
         
         try:
             z3 = self._z3
@@ -330,24 +296,15 @@ class Z3Solver(SMTSolver):
             except Exception as e:
                 self._debug_print(f"Parse error: {e}")
                 return self._create_error_result(f"Parse error: {e}")
-            
-            # キャンセルチェック
-            if cancellation_token and cancellation_token.is_cancelled():
-                return SolverResult(
-                    solver_name=self.name,
-                    status=SolverStatus.UNKNOWN,
-                    elapsed_time=time.time() - start_time,
-                    error_message="Cancelled before check"
-                )
 
-            remaining_ms = remaining_timeout_ms(deadline)
-            if remaining_ms <= 0:
-                return SolverResult(
-                    solver_name=self.name,
-                    status=SolverStatus.TIMEOUT,
-                    elapsed_time=time.time() - start_time,
-                    error_message="Timeout: the execution budget ran out before the check",
+            # 準備のあと: 中止・期限切れなら check をしない
+            stop = budget.interruption()
+            if stop is not None:
+                return interrupted_result(
+                    self.name, stop, "the execution stopped before the check",
+                    time.time() - start_time,
                 )
+            remaining_ms = max(1, budget.remaining_ms())
             self._solver.set("timeout", remaining_ms)
             self._debug_print(f"Z3 timeout set to {remaining_ms}ms")
             
@@ -358,24 +315,35 @@ class Z3Solver(SMTSolver):
             
             if result == z3.sat:
                 # 返す model は script の意味だけで決まる canonical witness（solver が
-                # 最初に見つけた model ではない）。決められなければ SAT にしない。
+                # 最初に見つけた model ではない）。確定の手順は interface が持つ。
                 sat_result = sat_result_with_witness(
                     z3, self._solver, prepared, solver_name=self.name,
-                    started=start_time, deadline=deadline,
-                    cancellation_token=cancellation_token,
+                    started=start_time, budget=budget,
                 )
                 self._debug_print(f"Model extracted: {sat_result.model}")
                 return sat_result
             elif result == z3.unsat:
+                # UNSAT は初回の check だけで完結する（後段の仕事が無い）。明示の中止だけは
+                # 全経路で優先する（中止された実行の確定結果を返さない）。期限は従来どおり
+                # z3 の timeout が強制する
+                if budget.interruption() == CANCELLED:
+                    return interrupted_result(
+                        self.name, CANCELLED, "the execution was cancelled during the check",
+                        elapsed,
+                    )
                 return SolverResult(
                     solver_name=self.name,
                     status=SolverStatus.UNSAT,
                     elapsed_time=elapsed
                 )
             else:
-                # unknown の理由を取得してタイムアウトかどうかを判定
+                # unknown: 中断（中止・期限切れ）かどうかは実行の予算に問う（全経路で同じ
+                # 規則）。中断でなければ従来の判定（経過が予算の 90% 以上なら TIMEOUT）
                 reason = str(self._solver.reason_unknown())
                 self._debug_print(f"Reason for unknown: {reason}")
+                stop = budget.interruption_after_unknown(reason)
+                if stop is not None:
+                    return interrupted_result(self.name, stop, reason, elapsed)
                 
                 is_timeout = self._is_timeout_reason(reason, elapsed)
                 

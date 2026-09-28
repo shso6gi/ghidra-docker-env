@@ -3,16 +3,22 @@
 
 from abc import ABC, abstractmethod
 from enum import Enum, auto
-from typing import Optional, Dict, Any, Tuple
+from typing import Callable, Optional, Dict, Any, Tuple
 from dataclasses import dataclass
+import time
 
 
 # Re-exports kept for callers that import these names from this module.
 from typing import List  # noqa: F401
 from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.json_encoding import materialize
-from scripts.function_tracer_pcode.smt.witness import (
+from scripts.function_tracer_pcode.smt.execution import (
     BUDGET_EXHAUSTED,
+    CANCELLED,
+    ExecutionBudget,
+)
+from scripts.function_tracer_pcode.smt.witness import (
+    INCONCLUSIVE,
     WitnessUnavailable,
     witness_contract_violation,
     witness_targets,
@@ -198,25 +204,86 @@ def enforce_witness_contract(
     )
 
 
-def witness_failure_result(
-    solver_name: str, failure: "WitnessUnavailable", elapsed_time: float,
-) -> SolverResult:
-    """canonical witness を決められなかった SAT の結果（SAT にはしない）。
+#: 中断・witness 失敗の種類 → 結果の status（全経路で同じ写し方）
+_INTERRUPTION_STATUS = {
+    CANCELLED: SolverStatus.UNKNOWN,
+    BUDGET_EXHAUSTED: SolverStatus.TIMEOUT,
+    INCONCLUSIVE: SolverStatus.UNKNOWN,
+}
 
-    実行の時間予算を使い切ったなら TIMEOUT（初回の check が予算内に終わらなかった
-    ときと同じ扱い）、探索の問いが判定不能・実行が中止されたなら UNKNOWN。どちらも
-    既存の「判定できなかった」経路（登録済みの理由付きの不明）へ流れ、反例にも
-    証明にもならない。
+
+def interrupted_result(
+    solver_name: str, kind: str, detail: str, elapsed_time: float,
+) -> SolverResult:
+    """実行が中断された（または canonical witness を決められなかった）ときの結果。
+
+    明示の中止は UNKNOWN、実行の期限切れは TIMEOUT（初回の check が予算内に終わらな
+    かったときと同じ扱い）、witness の探索の判定不能は UNKNOWN。どれも既存の「判定
+    できなかった」経路（登録済みの理由付きの不明）へ流れ、反例にも証明にもならない。
     """
 
-    status = (
-        SolverStatus.TIMEOUT if failure.kind == BUDGET_EXHAUSTED else SolverStatus.UNKNOWN
-    )
+    status = _INTERRUPTION_STATUS[kind]
     return SolverResult(
         solver_name=solver_name,
         status=status,
         elapsed_time=elapsed_time,
-        error_message=f"SAT without canonical witness: {failure}",
+        error_message=f"{kind}: {detail}",
+    )
+
+
+def witness_failure_result(
+    solver_name: str, failure: "WitnessUnavailable", elapsed_time: float,
+) -> SolverResult:
+    """canonical witness を決められなかった SAT の結果（SAT にはしない）。"""
+
+    return interrupted_result(
+        solver_name, failure.kind, f"SAT without canonical witness: {failure.detail}", elapsed_time,
+    )
+
+
+def sat_with_canonical_witness(
+    solver_name: str,
+    *,
+    started: float,
+    budget: ExecutionBudget,
+    canonicalize: Callable[[], Dict[str, Any]],
+) -> SolverResult:
+    """初回の check が SAT だった実行を、`SolverResult.model` の契約どおりに確定する。
+
+    canonical witness を作る backend は、SAT をこの手順でだけ返す（backend 固有なのは
+    `canonicalize` の中身だけ）。手順:
+
+    1. witness の生成の前に実行の中断を確かめる（初回の check が期限を越えた・その間に
+       中止された SAT を、witness を作らずに TIMEOUT / UNKNOWN にする）
+    2. `canonicalize()` で canonical witness を作る（探索の問いごとの中断確認は
+       backend の session が同じ `budget` で行う）。決められなければ `witness_failure_result`
+    3. SAT を確定する直前にもう一度中断を確かめる
+
+    1 と 3 は探索の問いの回数に依らない（問いが 0 回の witness・成分が 0 個の witness でも
+    中断をすり抜けない）。`started` は `time.time()` での実行開始（elapsed の起点）。
+    """
+
+    stop = budget.interruption()
+    if stop is not None:
+        return interrupted_result(
+            solver_name, stop, "the execution stopped before the canonical witness",
+            time.time() - started,
+        )
+    try:
+        model = canonicalize()
+    except WitnessUnavailable as failure:
+        return witness_failure_result(solver_name, failure, time.time() - started)
+    stop = budget.interruption()
+    if stop is not None:
+        return interrupted_result(
+            solver_name, stop, "the execution stopped before the SAT was finalized",
+            time.time() - started,
+        )
+    return SolverResult(
+        solver_name=solver_name,
+        status=SolverStatus.SAT,
+        elapsed_time=time.time() - started,
+        model=model,
     )
 
 

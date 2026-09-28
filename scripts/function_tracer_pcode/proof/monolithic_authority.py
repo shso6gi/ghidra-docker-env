@@ -765,44 +765,50 @@ class SharedZ3RegionSession:
         digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
         if digest not in self._specific:
             raise RuntimeError("shared_z3_region_query_outside_canonical_set")
-        from scripts.function_tracer_pcode.smt.interface import enforce_witness_contract
-        from scripts.function_tracer_pcode.smt.solvers.z3 import (
-            remaining_timeout_ms,
-            sat_result_with_witness,
+        from scripts.function_tracer_pcode.smt.execution import ExecutionBudget
+        from scripts.function_tracer_pcode.smt.interface import (
+            enforce_witness_contract,
+            interrupted_result,
         )
+        from scripts.function_tracer_pcode.smt.solvers.z3 import sat_result_with_witness
 
         started = time.time()
-        # Issue #161: 時間予算は 1 回の実行に 1 つ。期限は execute の入口で決め、初回の
-        # check と canonical witness の探索がこの期限の中で行う。
-        deadline = time.monotonic() + max(1, int(timeout))
+        # Issue #161: 実行の状態（期限と中止）は 1 回の実行に 1 つの `ExecutionBudget`。
+        # execute の入口で作り、初回の check と canonical witness の生成・SAT の確定がこれに
+        # 問う（共有 session には中止の入力が無いので期限だけ）。
+        budget = ExecutionBudget.starting_now(max(1, int(timeout)))
         self._solver.push()
         try:
             self._solver.add(*self._specific[digest])
-            remaining_ms = remaining_timeout_ms(deadline)
-            if remaining_ms <= 0:
-                item = SolverResult("Z3(shared-region)", SolverStatus.TIMEOUT,
-                                    elapsed_time=time.time() - started,
-                                    error_message="the execution budget ran out before the check")
+            stop = budget.interruption()
+            if stop is not None:
+                item = interrupted_result(
+                    "Z3(shared-region)", stop, "the execution stopped before the check",
+                    time.time() - started,
+                )
                 return ParallelResult.from_backend_results([item])
-            self._solver.set(timeout=remaining_ms)
+            self._solver.set(timeout=max(1, budget.remaining_ms()))
             verdict = self._solver.check()
             elapsed = time.time() - started
             self.check_count += 1
             if verdict == self._z3.sat:
                 # 共有 session の履歴（先に解いた region）に依らない canonical witness。
-                # 決められなければ SAT にしない（`SolverResult.model` の契約）。
+                # 確定の手順（生成の前後の中断確認）は interface が持つ。
                 item = sat_result_with_witness(
                     self._z3, self._solver, self._prepared[digest],
-                    solver_name="Z3(shared-region)", started=started, deadline=deadline,
+                    solver_name="Z3(shared-region)", started=started, budget=budget,
                 )
             elif verdict == self._z3.unsat:
                 item = SolverResult("Z3(shared-region)", SolverStatus.UNSAT,
                                     elapsed_time=elapsed)
             else:
                 reason = str(self._solver.reason_unknown())
-                status = SolverStatus.TIMEOUT if reason == "timeout" else SolverStatus.UNKNOWN
-                item = SolverResult("Z3(shared-region)", status,
-                                    elapsed_time=elapsed, error_message=reason)
+                stop = budget.interruption_after_unknown(reason)
+                if stop is not None:
+                    item = interrupted_result("Z3(shared-region)", stop, reason, elapsed)
+                else:
+                    item = SolverResult("Z3(shared-region)", SolverStatus.UNKNOWN,
+                                        elapsed_time=elapsed, error_message=reason)
             # 1 query × 1 backend の結果: 契約を境界で検査し、backend 集約の規則で包む
             item = enforce_witness_contract(item, query, canonical=True)
             return ParallelResult.from_backend_results([item])
