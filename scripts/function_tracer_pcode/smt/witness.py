@@ -14,8 +14,14 @@ solver が SAT のときに返す model は、同じ論理式の解のうちど�
 これは script の assertion の集合と宣言順だけで決まる（solver の種類・呼び出しの
 順序・先に解いた query・最初に見つかった model に依らない）。求め方は最上位 bit から
 「この bit を 0 にしても充足可能か」を順に問う greedy で、現在の model の bit が既に
-0 の位置は問わない（model-guided）。入力が 1 つの値に決まっている定数は 1 回の問い
-（「今の値以外にできるか」）で確定させる。
+0 の位置は問わない（model-guided）。1 の bit では先に「この bit から下を全部 0 に
+できるか」を問い、できればその成分はそこで確定する。
+
+問いの立て方は値を変えない（辞書式最小は 1 つしかない）ので、ここは費用だけの選択。
+浮動小数点を含む式では SAT の答えが高く UNSAT の答えが安い（tsafe/normAngle の実測で
+SAT 1 回 0.2〜0.8 秒、UNSAT は 900 回で 0.03 秒）ので、SAT になる問いを減らす順に問う:
+今の model が既に満たしている preference は問わずに確定し、下位を一度に 0 にする問いで
+bit ごとの SAT の列を 1 回にまとめる。
 
 **witness の優先（preference）**: 何を「受け入れられる witness」とみなすかは、
 witness を使う側（replay の規則。例: 浮動小数点の引数が NaN の反例は証拠にしない）が
@@ -64,7 +70,7 @@ class Constraint:
     """探索が solver に足す制約（backend が自分の項へ訳す）。
 
     * `kind="bit"`: `target` の `bit` 番目が `value`（0 / 1）
-    * `kind="eq"` / `"ne"`: `target` が `value` と等しい / 異なる
+    * `kind="low_zero"`: `target` の `bit` 番目から下（`bit`..0）がすべて 0
     * `kind="preference"`: script の preference（`preference` はその名前）が成り立つ
     """
 
@@ -82,14 +88,20 @@ class WitnessUnavailable(Exception):
 class WitnessSession(Protocol):
     """1 つの SAT の論理式の上で witness を探す backend 側の窓口。
 
-    * `values()` — 直近の SAT の model での各 target の値（未割当は model completion）
+    session は「現在の model」を 1 つ持つ（最初は元の論理式の SAT の model、以後は
+    `check_with` が SAT で返した最後の model）。
+
+    * `values()` — 現在の model での各 target の値（未割当は model completion）
+    * `holds(constraint)` — 現在の model で `constraint` が成り立つか（solver に問わない）
     * `check_with(constraint)` — これまで `fix` した制約に `constraint` を **一時的に**
-      足して解く。SAT ならその model での各 target の値、UNSAT なら `None`、判定不能なら
-      `WitnessUnavailable`
+      足して解く。SAT ならその model が現在の model になり、その各 target の値を返す。
+      UNSAT なら `None`（現在の model は変わらない）、判定不能なら `WitnessUnavailable`
     * `fix(constraint)` — 制約を以後ずっと足す
     """
 
     def values(self) -> Mapping[str, int]: ...
+
+    def holds(self, constraint: Constraint) -> bool: ...
 
     def check_with(self, constraint: Constraint) -> Optional[Mapping[str, int]]: ...
 
@@ -105,35 +117,47 @@ def canonical_witness(
 
     まず `preferences` を順に「満たせるなら満たす」と確定し、その中で最上位 bit から
     順に「0 にできるなら 0」を確定する。不変条件: `values` は常に「元の論理式 ∧ これまで
-    fix した制約」の model。終わったときの `values` は、元の論理式の model のうち
-    （満たせる preference をすべて満たし）`targets` の値の列が辞書式最小のもの。
+    fix した制約」の model（= session の現在の model）。終わったときの `values` は、元の
+    論理式の model のうち（満たせる preference をすべて満たし）`targets` の値の列が
+    辞書式最小のもの。
     """
 
     values: Dict[str, int] = {target.name: int(session.values()[target.name]) for target in targets}
+
+    def adopt(model: Mapping[str, int]) -> None:
+        values.update({name: int(model[name]) for name in values})
+
     for name in preferences:
         preference = Constraint("preference", None, preference=name)
-        satisfied = session.check_with(preference)
-        if satisfied is None:
-            continue
-        values = {target: int(satisfied[target]) for target in values}
+        if not session.holds(preference):
+            satisfied = session.check_with(preference)
+            if satisfied is None:
+                continue
+            adopt(satisfied)
         session.fix(preference)
     for target in targets:
-        current = values[target.name]
-        if session.check_with(Constraint("ne", target, current)) is None:
-            # 1 つの値に決まっている（replay の固定値など）: bit ごとに問わない
-            session.fix(Constraint("eq", target, current))
-            continue
         for bit in reversed(range(target.width)):
-            if not (values[target.name] >> bit) & 1:
+            current = values[target.name]
+            if not (current >> bit) & 1:
                 session.fix(Constraint("bit", target, 0, bit))
+                continue
+            # 上位は確定済み。この bit から下を全部 0 にできるなら、それがこの成分の最小
+            cleared = session.check_with(Constraint("low_zero", target, bit=bit))
+            if cleared is not None:
+                adopt(cleared)
+                session.fix(Constraint("low_zero", target, bit=bit))
+                break
+            if bit == 0:
+                # 最下位では「この bit を 0」は今の問いと同じ: 1 に決まる
+                session.fix(Constraint("bit", target, 1, bit))
                 continue
             alternative = session.check_with(Constraint("bit", target, 0, bit))
             if alternative is None:
                 session.fix(Constraint("bit", target, 1, bit))
                 continue
-            values = {name: int(alternative[name]) for name in values}
+            adopt(alternative)
             session.fix(Constraint("bit", target, 0, bit))
-    return values
+    return dict(values)
 
 
 def targets_in_declaration_order(

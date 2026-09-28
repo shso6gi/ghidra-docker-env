@@ -72,70 +72,6 @@ def _top_level_smt_commands(smt_script: str) -> tuple[str, ...]:
     return tuple(commands)
 
 
-def _existing_model_projection(model: Any) -> Dict[str, Any]:
-    result: Dict[str, Any] = {}
-    for declaration in model.decls():
-        value = model[declaration]
-        as_long = getattr(value, "as_long", None)
-        as_signed_long = getattr(value, "as_signed_long", None)
-        try:
-            if callable(as_long):
-                projected = as_long()
-            elif callable(as_signed_long):
-                projected = as_signed_long()
-            else:
-                projected = str(value)
-        except (AttributeError, TypeError, ValueError):
-            projected = str(value)
-        result[str(declaration.name())] = projected
-    return result
-
-
-def extract_total_declared_model(
-    z3: Any, model: Any, smt_script: str,
-) -> Dict[str, Any]:
-    """Materialize every supported declared input using Z3 model completion."""
-
-    result = _existing_model_projection(model)
-    model_context = getattr(model, "ctx", None)
-    declared_names = set()
-    for command in _top_level_smt_commands(smt_script):
-        match = _DECLARATION_RE.fullmatch(command.strip())
-        if match is None:
-            continue
-        name = match.group(1) or match.group(2)
-        sort_text = match.group(3).strip()
-        if name in declared_names:
-            raise ValueError(f"duplicate SMT declaration: {name}")
-        declared_names.add(name)
-        sort_text = sort_text.strip()
-        if sort_text == "Bool":
-            symbol = z3.Bool(name, ctx=model_context)
-        elif sort_text == "Int":
-            symbol = z3.Int(name, ctx=model_context)
-        else:
-            bitvec = re.fullmatch(r"\(_ BitVec ([1-9][0-9]*)\)", sort_text)
-            if bitvec is None:
-                # Arrays, reals, floating-point values and other supported Z3
-                # sorts retain Z3's existing model projection.  They are not
-                # scalar replay inputs and must never turn SAT into ERROR.
-                continue
-            symbol = z3.BitVec(
-                name, int(bitvec.group(1)), ctx=model_context
-            )
-        value = model.eval(symbol, model_completion=True)
-        if sort_text == "Bool":
-            if z3.is_true(value):
-                result[name] = True
-            elif z3.is_false(value):
-                result[name] = False
-            else:
-                raise ValueError(f"completed Bool model value is not concrete: {name}")
-        else:
-            result[name] = value.as_long()
-    return result
-
-
 def _declared_sorts(smt_script: str) -> tuple:
     """script の定数宣言を宣言順に ``(name, sort text)`` で返す（重複は拒否）。"""
 
@@ -189,6 +125,7 @@ class _Z3WitnessSession:
             else:
                 self._terms[target.name] = z3.BitVec(target.name, target.width, ctx=ctx)
         self._targets = targets
+        self._model = model
         self._values = self._read(model)
 
     def _read(self, model: Any) -> Dict[str, int]:
@@ -212,19 +149,22 @@ class _Z3WitnessSession:
             return self._preference_terms[constraint.preference]
         term = self._terms[constraint.target.name]
         if constraint.target.sort == BOOL:
-            if constraint.kind == "ne":
-                return term if constraint.value == 0 else z3.Not(term)
+            if constraint.kind == "low_zero":
+                return z3.Not(term)
             return term if constraint.value == 1 else z3.Not(term)
-        width = constraint.target.width
-        if constraint.kind == "bit":
-            return z3.Extract(constraint.bit, constraint.bit, term) == z3.BitVecVal(
-                constraint.value, 1, ctx=term.ctx
+        if constraint.kind == "low_zero":
+            return z3.Extract(constraint.bit, 0, term) == z3.BitVecVal(
+                0, constraint.bit + 1, ctx=term.ctx
             )
-        value = z3.BitVecVal(constraint.value, width, ctx=term.ctx)
-        return term != value if constraint.kind == "ne" else term == value
+        return z3.Extract(constraint.bit, constraint.bit, term) == z3.BitVecVal(
+            constraint.value, 1, ctx=term.ctx
+        )
 
     def values(self) -> Dict[str, int]:
         return dict(self._values)
+
+    def holds(self, constraint: Constraint) -> bool:
+        return self._z3.is_true(self._model.eval(self._term(constraint), model_completion=True))
 
     def check_with(self, constraint: Constraint) -> Optional[Dict[str, int]]:
         remaining_ms = int((self._deadline - time.monotonic()) * 1000)
@@ -236,7 +176,9 @@ class _Z3WitnessSession:
             self._solver.add(self._term(constraint))
             verdict = self._solver.check()
             if verdict == self._z3.sat:
-                return self._read(self._solver.model())
+                self._model = self._solver.model()
+                self._values = self._read(self._model)
+                return dict(self._values)
             if verdict == self._z3.unsat:
                 return None
             raise WitnessUnavailable(

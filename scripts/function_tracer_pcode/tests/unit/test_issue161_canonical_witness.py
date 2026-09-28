@@ -33,7 +33,6 @@ from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers import z3 as z3_backend
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.smt.witness import (
-    Constraint,
     WitnessTarget,
     WitnessUnavailable,
     canonical_witness,
@@ -57,6 +56,7 @@ class _EnumeratedSession:
         self._preferences = dict(preferences or {})
         self._current = start
         self.checks = 0
+        self.sat_answers = 0
 
     def _holds(self, constraint, model):
         if constraint.kind == "preference":
@@ -64,21 +64,26 @@ class _EnumeratedSession:
         value = model[constraint.target.name]
         if constraint.kind == "bit":
             return ((value >> constraint.bit) & 1) == constraint.value
-        if constraint.kind == "eq":
-            return value == constraint.value
-        return value != constraint.value
+        assert constraint.kind == "low_zero", constraint
+        return value & ((1 << (constraint.bit + 1)) - 1) == 0
 
     def values(self):
         return dict(self._current)
+
+    def holds(self, constraint):
+        return self._holds(constraint, self._current)
 
     def check_with(self, constraint):
         self.checks += 1
         for model in self._models:
             if all(self._holds(c, model) for c in self._fixed) and self._holds(constraint, model):
+                self.sat_answers += 1
+                self._current = dict(model)
                 return dict(model)
         return None
 
     def fix(self, constraint):
+        assert self._holds(constraint, self._current), "fix() must keep the current model valid"
         self._fixed.append(constraint)
 
 
@@ -113,6 +118,18 @@ def test_the_witness_is_the_least_model_whatever_model_the_solver_found_first(pr
         assert canonical_witness(session, TARGETS) == expected
 
 
+def test_the_witness_is_the_least_model_for_random_solution_sets():
+    rng = random.Random(161)
+    universe = [{"a": a, "b": b} for a, b in itertools.product(range(16), repeat=2)]
+    for _ in range(300):
+        models = rng.sample(universe, rng.randint(1, 12))
+        expected = min(models, key=lambda m: (m["a"], m["b"]))
+        start = rng.choice(models)
+        shuffled = list(models)
+        rng.shuffle(shuffled)
+        assert canonical_witness(_EnumeratedSession(shuffled, start), TARGETS) == expected
+
+
 def test_a_satisfiable_preference_is_always_satisfied_by_the_witness():
     models = _models(lambda a, b: a + b == 17)
     preferred = {"|p:0|": lambda m: m["a"] >= 8}
@@ -129,11 +146,33 @@ def test_an_unsatisfiable_preference_is_skipped_not_forced():
     assert canonical_witness(session, TARGETS, ["|p:0|"]) == {"a": 0, "b": 5}
 
 
-def test_a_value_fixed_by_the_formula_costs_one_question():
+# 費用の契約: 浮動小数点の式では SAT の答えが高く UNSAT の答えが安いので、探索は SAT に
+# なる問いを減らす（値は問いの立て方に依らない。上の brute force が固定する）。
+
+
+def test_a_value_fixed_by_the_formula_is_found_without_a_sat_answer():
     models = _models(lambda a, b: a == 15 and b == 15)
     session = _EnumeratedSession(models, models[0])
     assert canonical_witness(session, TARGETS) == {"a": 15, "b": 15}
-    assert session.checks == 2
+    assert session.sat_answers == 0
+
+
+def test_a_component_that_can_be_zero_costs_one_sat_answer():
+    models = _models(lambda a, b: b == 5)
+    session = _EnumeratedSession(models, {"a": 15, "b": 5})
+    assert canonical_witness(session, TARGETS) == {"a": 0, "b": 5}
+    assert session.sat_answers == 1
+
+
+def test_a_preference_the_current_model_satisfies_is_not_asked():
+    models = _models(lambda a, b: a + b == 17)
+    preferred = {"|p:0|": lambda m: m["a"] >= 8}
+    asked = []
+    session = _EnumeratedSession(models, {"a": 9, "b": 8}, preferred)
+    original = session.check_with
+    session.check_with = lambda constraint: (asked.append(constraint.kind), original(constraint))[1]
+    assert canonical_witness(session, TARGETS, ["|p:0|"]) == {"a": 8, "b": 9}
+    assert "preference" not in asked
 
 
 def test_an_inconclusive_question_is_not_turned_into_an_answer():
