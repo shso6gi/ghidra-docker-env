@@ -15,6 +15,7 @@ from scripts.function_tracer_pcode.smt import ParallelSolverRunner
 import scripts.function_tracer_pcode.proof.strategies.monolithic_counterexamples as _mx_monolithic_counterexamples
 import scripts.function_tracer_pcode.proof.strategies.monolithic_regions as _mx_monolithic_regions
 import scripts.function_tracer_pcode.proof.strategies.monolithic_return_width as _mx_monolithic_return_width
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 def _present_return_abi_facts() -> dict:
@@ -42,7 +43,7 @@ def _present_return_abi_facts() -> dict:
 
 
 def _analysis(name: str, value: int) -> FunctionReturnAnalysis:
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name=name,
         entry_point="0x1000",
         parameters=[],
@@ -56,7 +57,7 @@ def _partitioned_analysis(name: str, first_value: int) -> FunctionReturnAnalysis
     zero = Expression.constant(0, size=4)
     is_zero = Condition(Expression.binary_op("INT_EQUAL", parameter, zero))
     is_nonzero = Condition(Expression.binary_op("INT_NOTEQUAL", parameter, zero))
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name=name,
         entry_point="0x1000",
         parameters=[
@@ -166,7 +167,7 @@ def test_rebuilt_unknown_extension_region_queries_are_z3_parseable() -> None:
     unknown.size = 4
     extended = Expression.unary_op("INT_ZEXT", unknown)
     extended.size = 8
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="phi_extension",
         entry_point="0x1000",
         parameters=[],
@@ -196,7 +197,7 @@ def test_monolithic_unknown_extension_width_is_inconclusive_not_error() -> None:
     unknown.size = 4
     extended = Expression.unary_op("INT_ZEXT", unknown)
     extended.size = 0
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="phi_extension_without_output_width",
         entry_point="0x1000",
         parameters=[],
@@ -224,7 +225,7 @@ def test_monolithic_int2float_region_queries_are_z3_parseable() -> None:
     operand = Expression.parameter("n", 0, data_type="int", size=4)
     converted = Expression.unary_op("INT2FLOAT", operand)
     converted.size = 8
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="signed_int_to_double",
         entry_point="0x1000",
         parameters=[
@@ -254,7 +255,7 @@ def test_monolithic_unsupported_unary_is_inconclusive_not_strategy_error() -> No
     operand = Expression.parameter("x", 0, data_type="double", size=8)
     unsupported = Expression.unary_op("FLOAT2INT", operand)
     unsupported.size = 4
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="unsupported_float_to_int",
         entry_point="0x1000",
         parameters=[
@@ -288,7 +289,7 @@ def test_monolithic_mixed_precision_int2float_is_unknown_not_error() -> None:
     denominator.size = 4
     divided = Expression.binary_op("FLOAT_DIV", numerator, denominator)
     divided.size = 8
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="mixed_precision_average",
         entry_point="0x1000",
         parameters=[
@@ -319,7 +320,7 @@ def test_pairwise_checker_unknown_extension_width_is_unknown_not_error() -> None
     unknown.size = 4
     extended = Expression.unary_op("INT_ZEXT", unknown)
     extended.size = 0
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="pairwise_phi_extension_without_output_width",
         entry_point="0x1000",
         parameters=[],
@@ -413,7 +414,7 @@ def test_relation_surface_is_not_split() -> None:
             "INT_SLESS", parameter, Expression.constant(10, size=4)
         )
     )
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="ambiguous",
         entry_point="0x1000",
         parameters=[
@@ -724,7 +725,7 @@ def test_region_query_slices_unrelated_assertions_and_deduplicates_prelude() -> 
 def test_production_region_queries_share_one_incremental_z3_context() -> None:
     parameter = Expression.parameter("x", 0, data_type="int", size=4)
     zero = Expression.constant(0, size=4)
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="identity",
         entry_point="0x1000",
         parameters=[{"name": "x", "index": 0, "size": 4, "data_type": "int"}],

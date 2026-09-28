@@ -4,6 +4,7 @@ import pytest
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
 
 import pytest
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +40,7 @@ def test_function_return_analysis_treats_lowerable_post_state_reads_as_sat_safe(
         offset=0,
         size=4,
     )
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="lowerable",
         entry_point="0x1000",
         parameters=params,
@@ -88,7 +89,7 @@ def test_pairwise_strategy_downgrades_sat_when_analysis_retains_symbolic_post_st
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
 
     analysis1 = _build_symbolic_post_state_analysis("f1")
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="f2",
         entry_point="0x2000",
         parameters=[_param("trace", index=0, size=8, data_type="int *")],
@@ -177,7 +178,7 @@ def test_monolithic_strategy_downgrades_ambiguous_sat_counterexample_to_unknown(
     cond1 = _eq(x1, _const(5))
     cond2 = _eq(x2, _const(5))
 
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
@@ -187,7 +188,7 @@ def test_monolithic_strategy_downgrades_ambiguous_sat_counterexample_to_unknown(
         ],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2",
         parameters=[_param("x")],
@@ -263,14 +264,14 @@ def test_monolithic_sat_requires_counterexample_replay(monkeypatch):
         extra_vars2=[],
         param_fragment_constrained=[],
     )
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="same_func",
         entry_point="0x1000",
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="same_func",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -327,14 +328,14 @@ def test_monolithic_sat_rejects_prior_replay_proof_without_witness_binding(monke
         extra_vars2=[],
         param_fragment_constrained=[],
     )
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="same_func",
         entry_point="0x1000",
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="same_func",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -395,14 +396,14 @@ def test_monolithic_sat_with_unfixed_model_is_unknown():
         param_fragment_constrained=[],
     )
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="same_func",
         entry_point="0x1000",
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="same_func",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -430,14 +431,14 @@ def test_monolithic_sat_with_unfixed_model_is_unknown():
 
 def test_sat_counterexample_ambiguous_reason_has_object_proof_action():
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1000",
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -502,7 +503,7 @@ def test_pairwise_sat_unsafety_emits_object_derived_pending_proof_backlog(monkey
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -558,7 +559,7 @@ def test_pairwise_sat_unsafety_proof_without_attempt_binding_remains_unknown(mon
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -643,14 +644,14 @@ def test_pairwise_sat_promotion_requires_exact_query_execution_receipt(
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="same_func",
         entry_point="0x1000",
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="same_func",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -741,14 +742,14 @@ def test_pairwise_sat_with_fixed_model_records_bound_replay_proof_and_is_decisiv
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="same_func",
         entry_point="0x1000",
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="same_func",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -809,14 +810,14 @@ def test_pairwise_sat_without_model_still_requires_counterexample_replay(monkeyp
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="same_func",
         entry_point="0x1000",
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="same_func",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -872,14 +873,14 @@ def test_pairwise_sat_with_unfixed_model_still_requires_counterexample_replay(mo
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="same_func",
         entry_point="0x1000",
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="same_func",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -1006,14 +1007,14 @@ def test_sat_unsafety_completed_proof_requires_fixed_counterexample_replay_model
 def test_sat_unsafety_completed_proof_requires_current_counterexample_model_match():
     action = _sat_unsafety_resolution_action()
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1000",
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -1087,7 +1088,7 @@ def test_pairwise_sat_unsafety_metadata_only_completed_proof_does_not_recover(mo
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],

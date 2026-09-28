@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional, Tuple
 
+from scripts.function_tracer_pcode.core.parameter_domain import SYNTHETIC_PARAMETER_KINDS
 from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo, ParameterPair
 
 
@@ -151,7 +152,7 @@ def _register_name_looks_mips64_gp(register_name: Optional[str]) -> bool:
 
 
 def _parameter_name_match_is_strong(param: ParameterInfo) -> bool:
-    if param.type_class in {"synthetic_recursive_summary", "synthetic_pure_call_summary"}:
+    if param.type_class in SYNTHETIC_PARAMETER_KINDS:
         return True
     name = param.original_name or ""
     return not re.fullmatch(r"param_\d+", name)

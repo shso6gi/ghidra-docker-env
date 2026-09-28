@@ -9,10 +9,11 @@ from scripts.function_tracer_pcode.core import FunctionReturnAnalysis, ReturnInf
 from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.proof.strategies import pairwise_query_executor as executor
 from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 def _analysis(name):
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name=name, entry_point="0x1000",
         parameters=[{"name": "x", "size": 4, "index": 0, "is_signed": True}],
         returns=[ReturnInfo(address="0x1000", value=Expression.constant(1, size=4), conditions=[])],
@@ -156,13 +157,13 @@ def test_validated_witness_supersedes_rejected_witnesses_of_other_pairs(monkeypa
         return Condition(Expression(ExpressionType.BINARY_OP, operator="INT_EQUAL", operands=[left, right], size=1))
 
     params = [{"name": "x", "size": 4, "index": 0, "is_signed": True}]
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="left", entry_point="0x1", parameters=params,
         returns=[ReturnInfo(address="0x1", value=Expression.constant(1, size=4), conditions=[_eq(x, Expression.constant(0, size=4))]),
                  ReturnInfo(address="0x2", value=Expression.constant(2, size=4), conditions=[_eq(x, Expression.constant(1, size=4))])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="right", entry_point="0x3", parameters=params,
         returns=[ReturnInfo(address="0x3", value=Expression.constant(9, size=4), conditions=[])],
         return_type="int",
@@ -328,7 +329,7 @@ def test_monolithic_reason_with_binding_only_completes_with_matching_bound_proof
 
 def _open_formula_analysis(name, delta):
     x = Expression.parameter("x", 0, data_type="int", size=4)
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name=name, entry_point="0x1000",
         parameters=[{"name": "x", "index": 0, "size": 4, "data_type": "int"}],
         returns=[ReturnInfo("0x1010", Expression.binary_op("INT_ADD", x, Expression.constant(delta, size=4)), [])],

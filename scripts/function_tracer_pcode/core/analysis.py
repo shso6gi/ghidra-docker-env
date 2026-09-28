@@ -36,7 +36,22 @@ from scripts.function_tracer_pcode.core.signature import (
     is_unsigned_data_type,
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
-from scripts.function_tracer_pcode.core.semantic_freeze import freeze_condition, freeze_expression
+from scripts.function_tracer_pcode.core.semantic_freeze import (
+    freeze_condition,
+    freeze_expression,
+    publish_semantic_values,
+)
+from scripts.function_tracer_pcode.core.parameter_domain import (
+    ParameterDomainHypothesis,
+    ParameterDomainSealError,
+    RawParameterDomains,
+    parameter_domain_hypotheses_between,
+    parameter_domain_hypotheses_payload_of,
+    parameter_descriptor_index,
+    raw_parameter_domains_divergence_of,
+    record_parameter_domain_view,
+    seal_parameter_table,
+)
 from scripts.function_tracer_pcode.core.runtime_refs import (
     EFFECT_EXPANSION_CASE_BUDGET_EXCEEDED_REASON,
     EXPANSION_CASE_BUDGET_EXCEEDED_REASON,
@@ -1363,6 +1378,12 @@ class FunctionReturnAnalysis:
     # PR-B から semantic 入力（``to_dict`` / snapshot fingerprint / seed / gate）。
     # 記録がある限り「展開が完全だった」ことは前提にできない。
     expansion_budget_truncations: Tuple[ExpansionBudgetTruncation, ...] = ()
+    # Issue #185: 入力領域の正本。公開境界（``publish_raw_function_analysis``）で parameter 表から
+    # 封印した baseline で、既定値を自動で作らない（None = 正本が無い = どの入力も証明されない）。
+    # 書くのは ``seal_raw_parameter_domains`` だけ（複製・派生は値ごと引き継ぐ）。
+    raw_parameter_domains: Optional[RawParameterDomains] = None
+    # Issue #185: 封印の後に parameter の領域を変えた仮説の台帳（provenance。proof ではない）。
+    parameter_domain_hypotheses: Tuple[ParameterDomainHypothesis, ...] = ()
 
     def __setattr__(self, name: str, value: Any) -> None:
         if name == "expansion_budget_truncations":
@@ -1371,6 +1392,8 @@ class FunctionReturnAnalysis:
             # 出力・fingerprint の walker は正規化済みの記録を数えながら写すだけ
             value = normalize_expansion_budget_truncations(value)
         record_return_type_display(self, name, value)
+        # Issue #185: 出力する入力領域の写しも書いたときに作る（出力は live な値の code を呼ばない）
+        record_parameter_domain_view(self, name)
 
     def __post_init__(self) -> None:
         if self.function_ref is None:
@@ -1388,6 +1411,22 @@ class FunctionReturnAnalysis:
         if not self.return_type_provenance:
             self.return_type_provenance = self._build_return_type_provenance()
         self.normalize_deferred_calls()
+
+    def seal_raw_parameter_domains(self) -> "FunctionReturnAnalysis":
+        """いまの parameter 表を入力領域の正本として封印する（Issue #185）。
+
+        公開境界（``publish_raw_function_analysis``）だけが呼ぶ。仮説の載った解析（overlay）、
+        既に封印した解析は封印できない: 正本は「仮説より前の raw の表」でなければならず、
+        作り直すと仮説で変えた表が正本に化ける。表の形の悪さ（重複・欠落した index）は
+        例外にせず、その index を認証しないと記録する（``seal_parameter_table``）。
+        """
+
+        if self.raw_parameter_domains is not None:
+            raise ParameterDomainSealError("raw_parameter_domains_already_sealed")
+        if self.signature_hypotheses or self.parameter_domain_hypotheses:
+            raise ParameterDomainSealError("hypothesis_view_cannot_be_sealed_as_raw")
+        self.raw_parameter_domains = seal_parameter_table(self.parameters)
+        return self
 
     def semantic_successor(self, **changes: Any) -> "FunctionReturnAnalysis":
         """Build an invalidation-aware successor of this analysis.
@@ -1409,6 +1448,15 @@ class FunctionReturnAnalysis:
         if unknown_changes:
             unknown = ", ".join(sorted(unknown_changes))
             raise TypeError(f"unknown FunctionReturnAnalysis fields: {unknown}")
+
+        # Issue #185: 入力領域の正本と台帳は派生で書き換えない（正本は公開境界の封印だけが作り、
+        # 台帳は仮説の適用だけが追記する）。差し替えると仮説を経た式が raw の式に化ける
+        authority_changes = {"raw_parameter_domains", "parameter_domain_hypotheses"}.intersection(changes)
+        if authority_changes:
+            raise ValueError(
+                "semantic_successor cannot replace the input-domain authority: "
+                + ", ".join(sorted(authority_changes))
+            )
 
         invalidated_fields = semantic_successor_invalidated_fields(*changes)
         conflicting_changes = invalidated_fields.intersection(changes)
@@ -1734,6 +1782,14 @@ class FunctionReturnAnalysis:
             yield "signedness", self.signedness_result
         if live_values.as_bool(self.signature_hypotheses):
             yield "signature_hypotheses", as_list(self.signature_hypotheses)
+        # Issue #185: 正本が現在の表と同じ（production の raw 解析の既定の姿）なら出さない。
+        # 違うとき（仮説・abstraction・作り直し）と台帳があるときだけ、解析前提の同一性に入る。
+        raw_parameter_domains_divergence = raw_parameter_domains_divergence_of(self)
+        if raw_parameter_domains_divergence is not None:
+            yield "raw_parameter_domains", raw_parameter_domains_divergence
+        parameter_domain_hypotheses = parameter_domain_hypotheses_payload_of(self)
+        if parameter_domain_hypotheses is not None:
+            yield "parameter_domain_hypotheses", each(parameter_domain_hypotheses)
         if live_values.as_bool(self.return_type_provenance):
             yield "return_type_provenance", nested(self.return_type_provenance)
         if live_values.as_bool(self.return_abi_facts):
@@ -2004,6 +2060,14 @@ class FunctionReturnAnalysis:
         updated_hypotheses = list(self.signature_hypotheses)
         hypothesis_payload = hypothesis.to_dict()
         updated_hypotheses.append(hypothesis_payload)
+        # Issue #185: 領域の変わった index を台帳へ（override の位置 → index の変換は台帳の
+        # 側で閉じる）。台帳は provenance で、最終 relation はこの記録を十分性にしない。
+        updated_domain_hypotheses = self.parameter_domain_hypotheses + parameter_domain_hypotheses_between(
+            self.parameters,
+            updated_signature.parameters,
+            phase=hypothesis.phase,
+            source_of=_hypothesis_source_by_index(hypothesis, updated_signature.parameters),
+        )
 
         updated_returns = list(self.returns or [])
         updated_return_type_name = str(updated_signature.return_type or "").strip().lower()
@@ -2067,6 +2131,7 @@ class FunctionReturnAnalysis:
             comparison_surface=None if return_changed else self.comparison_surface,
             analysis_notes=updated_notes,
             signature_hypotheses=updated_hypotheses,
+            parameter_domain_hypotheses=updated_domain_hypotheses,
             return_type_provenance=updated_return_type_provenance,
         )
 
@@ -2395,6 +2460,39 @@ class FunctionReturnAnalysis:
     def get_comparison_type_obj(self):
         surface = self.get_comparison_surface()
         return surface.type_obj
+
+
+def _hypothesis_source_by_index(hypothesis: Any, updated_parameters: Any):
+    """台帳の ``source``: 型仮説の override（位置で書かれる）の解決元を、記述子の index で引く。"""
+
+    by_index: Dict[int, str] = {}
+    parameters = list(updated_parameters or [])
+    for position, spec in dict(getattr(hypothesis, "resolved_parameter_overrides", None) or {}).items():
+        try:
+            descriptor = parameters[int(position)]
+            index = int(parameter_descriptor_index(descriptor))
+        except (IndexError, TypeError, ValueError):
+            continue
+        source = getattr(spec, "source", None)
+        if source:
+            by_index[index] = str(source)
+    default = str(getattr(hypothesis, "reason", "") or getattr(hypothesis, "phase", "") or "signature_hypothesis")
+    return lambda index: by_index.get(index, default)
+
+
+def publish_raw_function_analysis(container: Any) -> Any:
+    """解析の公開境界（Issue #185）: 意味値を公開し、raw の parameter 表を入力領域の正本として封印する。
+
+    ``analysis/returns/lifecycle.py`` の公開点と、それを模す test の producer だけが呼ぶ。
+    ``FunctionReturnAnalysis`` でない値（sentinel）は公開だけして素通しにする。既に封印した
+    解析（analyzer の cache が同じ object を返したもの）は最初の封印をそのまま正本にする
+    （封印し直さない。後から表が変わっていれば、それは baseline との差として見える）。
+    """
+
+    published = publish_semantic_values(container)
+    if isinstance(published, FunctionReturnAnalysis) and published.raw_parameter_domains is None:
+        published.seal_raw_parameter_domains()
+    return published
 
 
 def _outcomes_in_order(*groups: Any):

@@ -34,6 +34,7 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     InputCorrespondenceStatus,
     build_input_correspondence_set,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 def _formula_bound_sat_result(model):
@@ -43,7 +44,7 @@ def _formula_bound_sat_result(model):
 
 
 def _analysis(name: str, entry: str, params, value) -> FunctionReturnAnalysis:
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name=name,
         entry_point=entry,
         parameters=list(params),

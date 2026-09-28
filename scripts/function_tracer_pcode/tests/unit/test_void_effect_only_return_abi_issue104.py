@@ -51,6 +51,7 @@ from scripts.function_tracer_pcode.proof.return_width.pipeline import (
     build_pair_return_observation_seed,
     prepare_pair_return_observation,
 )
+from scripts.function_tracer_pcode.tests.unit._production_check_harness import run_production_check
 from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_abi_width_readonly import (
     _width_seed,
 )
@@ -395,66 +396,11 @@ def test_surface_fact_components_keep_their_exact_types():
 # end to end: effect surface -> formula -> solver -> production decision
 # --------------------------------------------------------------------------
 
-def _z3_available():
-    import shutil
-
-    return shutil.which("z3") is not None
-
-
-class _Program:
-    def __init__(self, name):
-        self._name = name
-
-    def getName(self):
-        return self._name
-
-
 def _run_production_check(case_id, left, right):
     """Run the real phase workflow, pairwise strategy, z3 and the production
-    cutover connector; only the Ghidra analysis step is replaced.
-
-    The analyzer goes in through ``EquivalenceChecker(analyzer_factory=...)``
-    (Issue #109), which is the collaborator production itself builds analyzers
-    with -- not a package attribute swapped underneath it."""
-    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
-        build_default_cutover_connector,
-    )
-    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
-        activate_process_worker_execution_authority_deployment,
-    )
-    from scripts.function_tracer_pcode.checker import EquivalenceChecker
-
-    if not _z3_available():
-        pytest.skip("z3 is not available in PATH")
-    activate_process_worker_execution_authority_deployment(
-        key_id="gap6-e2e-" + case_id, key=(case_id.encode() * 32)[:32], key_source_id="/tmp/gap6-" + case_id,
-    )
-    table = {"left": left, "right": right}
-
-    class FakeReturnAnalyzer:
-        def __init__(self, program, **_kwargs):
-            self._program = program
-
-        def analyze_function_by_name(self, _name, _timeout):
-            return table[self._program.getName()]
-
-        def get_last_analysis_failure(self):
-            return None
-
-        def get_last_function_lookup_error(self):
-            return None
-
-        def dispose(self):
-            pass
-
-    checker = EquivalenceChecker(debug=False, analyzer_factory=FakeReturnAnalyzer)
-    checker.v2_dual_write_pilot_connector = build_default_cutover_connector()
-    result = checker.check_from_binaries(
-        _Program("left"), _Program("right"), "f", "f",
-        binary1_id="left-id", binary2_id="right-id",
-        binary1_content_identity=("sha256", "a" * 64), binary2_content_identity=("sha256", "b" * 64),
-    )
-    return result.to_dict()
+    cutover connector; only the Ghidra analysis step is replaced (the shared
+    harness publishes each analysis at the production boundary, Issue #185)."""
+    return run_production_check("gap6-" + case_id, left, right)
 
 
 def _param_x():

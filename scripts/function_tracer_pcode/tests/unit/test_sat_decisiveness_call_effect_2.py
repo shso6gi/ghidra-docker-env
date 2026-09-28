@@ -2,6 +2,7 @@ from scripts.function_tracer_pcode.tests.unit._input_correspondence_support impo
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
 
 import pytest
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 @pytest.fixture(autouse=True)
@@ -142,7 +143,7 @@ def test_pairwise_call_argument_evidence_recovers_with_matching_completed_proof(
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_effect_call_argument_evidence()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -178,7 +179,7 @@ def test_pairwise_preproducer_call_target_resolution_requires_pending_proof(monk
         enable_completed_recovery_proofs=False,
     )
     analysis1 = _analysis_with_effect_call_target_resolution_evidence()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -231,7 +232,7 @@ def test_pairwise_call_target_resolution_requires_matching_completed_proof_by_de
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_effect_call_target_resolution_evidence()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -253,7 +254,7 @@ def test_pairwise_call_target_resolution_rejects_incomplete_completed_proof_cont
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_effect_call_target_resolution_evidence()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -299,7 +300,7 @@ def test_pairwise_call_target_resolution_recovers_with_matching_completed_proof(
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_effect_call_target_resolution_evidence()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         # Issue #167: parameter の対応が完全でないと EQ は確定しない。この test は
@@ -335,7 +336,7 @@ def test_pairwise_self_recursive_call_effect_proof_rejects_non_self_target(monke
         target_entry=0x2000,
         target_name="callee",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x3000",
         parameters=[_param("x")],
@@ -361,7 +362,7 @@ def test_pairwise_unknown_indirect_call_effect_proof_is_not_auto_completed(monke
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -386,7 +387,7 @@ def test_call_effect_summary_producer_emits_only_object_derived_full_ids():
         bare["object_target_key"],
         proof_obligation_id=bare["proof_obligation_id"],
     )
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="func1",
         entry_point="0x1000",
         parameters=[_param("x")],
@@ -431,7 +432,7 @@ def test_call_effect_summary_producer_rejects_missing_unknown_indirect_target_ex
 def test_call_effect_summary_producer_rejects_missing_full_proof_id():
     evidence = _call_effect_summary_proof_evidence()
     evidence.pop("proof_obligation_id", None)
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="func1",
         entry_point="0x1000",
         parameters=[_param("x")],
@@ -506,7 +507,7 @@ def test_monolithic_strategy_does_not_accept_unsat_with_incomplete_effect_summar
         def run_sequential(self, _query: str):
             return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
 
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
@@ -519,7 +520,7 @@ def test_monolithic_strategy_does_not_accept_unsat_with_incomplete_effect_summar
             incomplete_reasons=("effect_summary_path_coverage_incomplete",),
         ),
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2",
         parameters=[_param("x")],
@@ -570,7 +571,7 @@ def test_monolithic_strategy_does_not_accept_unsat_with_unsupported_effect_summa
         def run_sequential(self, _query: str):
             return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
 
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
@@ -583,7 +584,7 @@ def test_monolithic_strategy_does_not_accept_unsat_with_unsupported_effect_summa
             incomplete_reasons=(),
         ),
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2",
         parameters=[_param("x")],
@@ -635,7 +636,7 @@ def test_monolithic_call_effect_summary_proof_complete_allows_recovery():
             return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
 
     analysis1 = _analysis_with_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -686,7 +687,7 @@ def test_monolithic_call_effect_summary_bare_completed_proof_id_does_not_recover
             return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
 
     analysis1 = _analysis_with_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -731,7 +732,7 @@ def test_monolithic_call_effect_summary_missing_completed_proof_id_does_not_reco
             return ParallelResult(results=[SolverResult("fake", SolverStatus.UNSAT)])
 
     analysis1 = _analysis_with_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -803,7 +804,7 @@ def test_pairwise_strategy_downgrades_unsat_when_deferred_call_recovery_is_incon
         call_argument_recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
         call_argument_recovery_reason="argument_recovery_inconclusive",
     )
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
@@ -811,7 +812,7 @@ def test_pairwise_strategy_downgrades_unsat_when_deferred_call_recovery_is_incon
         return_type="int",
     )
     analysis1.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2",
         parameters=[_param("x")],
@@ -893,7 +894,7 @@ def test_pairwise_strategy_records_call_effect_blocker_as_pending_object_proof(m
         call_argument_recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
         call_argument_recovery_reason="argument_recovery_inconclusive",
     )
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
@@ -901,7 +902,7 @@ def test_pairwise_strategy_records_call_effect_blocker_as_pending_object_proof(m
         return_type="int",
     )
     analysis1.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2",
         parameters=[_param("x")],
@@ -956,7 +957,7 @@ def test_pairwise_strategy_records_recoverable_candidate_for_call_effect_blocker
     analysis1, incomplete_pcode_ref, complete_pcode_ref = (
         _analysis_with_two_effect_call_argument_evidences()
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -993,7 +994,7 @@ def test_pairwise_strategy_uses_unsupported_call_site_object_ref_for_blocking_pr
         reason="target_identity_unavailable",
         order_key=9,
     )
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
@@ -1006,7 +1007,7 @@ def test_pairwise_strategy_uses_unsupported_call_site_object_ref_for_blocking_pr
             unsupported_call_sites=(site,),
         ),
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2",
         parameters=[_param("x")],
@@ -1049,7 +1050,7 @@ def test_pairwise_unsupported_call_effect_uses_phase2_specific_object_key():
         reason="target_identity_unavailable",
         order_key=9,
     )
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x401000",
         function_ref=CallTargetRef.from_name("func1", program_id=12345, entry_offset=0x401000),
@@ -1064,7 +1065,7 @@ def test_pairwise_unsupported_call_effect_uses_phase2_specific_object_key():
             unsupported_call_sites=(site,),
         ),
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x402000",
         parameters=[_param("x")],
@@ -1125,7 +1126,7 @@ def test_unsupported_call_site_object_key_keeps_caller_identity_distinct():
         reason="target_identity_unavailable",
         order_key=9,
     )
-    left = FunctionReturnAnalysis(
+    left = raw_function_analysis(
         function_name="func",
         entry_point="0x1000",
         function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
@@ -1139,7 +1140,7 @@ def test_unsupported_call_site_object_key_keeps_caller_identity_distinct():
             unsupported_call_sites=(site,),
         ),
     )
-    right = FunctionReturnAnalysis(
+    right = raw_function_analysis(
         function_name="func",
         entry_point="0x1000",
         function_ref=CallTargetRef.from_name("func", program_id=2, entry_offset=0x1000),
@@ -1195,7 +1196,7 @@ def test_unsupported_call_effect_blocker_prefers_unsupported_site_over_deferred_
         ),
         call_argument_recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
     )
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="func",
         entry_point="0x1000",
         function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
@@ -1210,7 +1211,7 @@ def test_unsupported_call_effect_blocker_prefers_unsupported_site_over_deferred_
         ),
     )
     analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
-    other = FunctionReturnAnalysis(
+    other = raw_function_analysis(
         function_name="other",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -1252,7 +1253,7 @@ def test_bounded_deferred_target_blocker_uses_concrete_callsite_fallback():
         ),
         call_argument_recovery_status=CallArgumentEvidence.RECOVERY_COMPLETE,
     )
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="func",
         entry_point="0x1000",
         function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
@@ -1267,7 +1268,7 @@ def test_bounded_deferred_target_blocker_uses_concrete_callsite_fallback():
         ),
     )
     analysis.deferred_calls = {deferred.deferred_call_ref.stable_key(): deferred}
-    other = FunctionReturnAnalysis(
+    other = raw_function_analysis(
         function_name="other",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -1307,7 +1308,7 @@ def test_deferred_call_object_key_distinguishes_unknown_target_expression_proven
             deferred_call_ref=deferred_ref,
             call_argument_recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
         )
-        analysis = FunctionReturnAnalysis(
+        analysis = raw_function_analysis(
             function_name="func",
             entry_point="0x1000",
             function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
@@ -1320,7 +1321,7 @@ def test_deferred_call_object_key_distinguishes_unknown_target_expression_proven
 
     left = _analysis_with_target_expr(Expression.parameter("fp", 0, size=8))
     right = _analysis_with_target_expr(Expression.parameter("gp", 1, size=8))
-    other = FunctionReturnAnalysis(
+    other = raw_function_analysis(
         function_name="other",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -1372,7 +1373,7 @@ def test_deferred_call_object_key_distinguishes_truncated_target_expression_prov
             deferred_call_ref=deferred_ref,
             call_argument_recovery_status=CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
         )
-        analysis = FunctionReturnAnalysis(
+        analysis = raw_function_analysis(
             function_name="func",
             entry_point="0x1000",
             function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
@@ -1385,7 +1386,7 @@ def test_deferred_call_object_key_distinguishes_truncated_target_expression_prov
 
     left = _analysis_with_target_expr(_deep_zext_target("fp", 0))
     right = _analysis_with_target_expr(_deep_zext_target("gp", 1))
-    other = FunctionReturnAnalysis(
+    other = raw_function_analysis(
         function_name="other",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -1421,7 +1422,7 @@ def test_unsupported_call_effect_object_key_distinguishes_target_expression_prov
             reason="target_identity_unavailable",
             order_key=9,
         )
-        return FunctionReturnAnalysis(
+        return raw_function_analysis(
             function_name="func",
             entry_point="0x1000",
             function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
@@ -1439,7 +1440,7 @@ def test_unsupported_call_effect_object_key_distinguishes_target_expression_prov
 
     left = _analysis_with_site(Expression.parameter("fp", 0, size=8))
     right = _analysis_with_site(Expression.parameter("gp", 1, size=8))
-    other = FunctionReturnAnalysis(
+    other = raw_function_analysis(
         function_name="other",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -1497,7 +1498,7 @@ def test_unsupported_call_effect_object_key_does_not_embed_process_local_target_
         reason="target_identity_unavailable",
         order_key=10,
     )
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="func",
         entry_point="0x1000",
         function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
@@ -1511,7 +1512,7 @@ def test_unsupported_call_effect_object_key_does_not_embed_process_local_target_
             unsupported_call_sites=(site,),
         ),
     )
-    other = FunctionReturnAnalysis(
+    other = raw_function_analysis(
         function_name="other",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -1543,7 +1544,7 @@ def test_unsupported_call_effect_object_key_distinguishes_truncated_target_expre
             reason="target_identity_unavailable",
             order_key=10,
         )
-        analysis = FunctionReturnAnalysis(
+        analysis = raw_function_analysis(
             function_name="func",
             entry_point="0x1000",
             function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
@@ -1557,7 +1558,7 @@ def test_unsupported_call_effect_object_key_distinguishes_truncated_target_expre
                 unsupported_call_sites=(site,),
             ),
         )
-        other = FunctionReturnAnalysis(
+        other = raw_function_analysis(
             function_name="other",
             entry_point="0x2000",
             parameters=[_param("x")],
@@ -1590,7 +1591,7 @@ def test_unsupported_call_effect_object_key_handles_very_deep_target_expression_
             reason="target_identity_unavailable",
             order_key=10,
         )
-        analysis = FunctionReturnAnalysis(
+        analysis = raw_function_analysis(
             function_name="func",
             entry_point="0x1000",
             function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
@@ -1604,7 +1605,7 @@ def test_unsupported_call_effect_object_key_handles_very_deep_target_expression_
                 unsupported_call_sites=(site,),
             ),
         )
-        other = FunctionReturnAnalysis(
+        other = raw_function_analysis(
             function_name="other",
             entry_point="0x2000",
             parameters=[_param("x")],
@@ -1636,7 +1637,7 @@ def test_unsupported_call_effect_object_key_distinguishes_sources_beyond_digest_
             reason="target_identity_unavailable",
             order_key=10,
         )
-        analysis = FunctionReturnAnalysis(
+        analysis = raw_function_analysis(
             function_name="func",
             entry_point="0x1000",
             function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
@@ -1650,7 +1651,7 @@ def test_unsupported_call_effect_object_key_distinguishes_sources_beyond_digest_
                 unsupported_call_sites=(site,),
             ),
         )
-        other = FunctionReturnAnalysis(
+        other = raw_function_analysis(
             function_name="other",
             entry_point="0x2000",
             parameters=[_param("x")],
@@ -1682,7 +1683,7 @@ def test_unsupported_call_effect_object_key_distinguishes_deep_tail_structure_be
             reason="target_identity_unavailable",
             order_key=10,
         )
-        analysis = FunctionReturnAnalysis(
+        analysis = raw_function_analysis(
             function_name="func",
             entry_point="0x1000",
             function_ref=CallTargetRef.from_name("func", program_id=1, entry_offset=0x1000),
@@ -1696,7 +1697,7 @@ def test_unsupported_call_effect_object_key_distinguishes_deep_tail_structure_be
                 unsupported_call_sites=(site,),
             ),
         )
-        other = FunctionReturnAnalysis(
+        other = raw_function_analysis(
             function_name="other",
             entry_point="0x2000",
             parameters=[_param("x")],

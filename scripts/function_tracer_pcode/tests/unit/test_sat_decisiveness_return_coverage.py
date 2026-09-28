@@ -6,6 +6,7 @@ from scripts.function_tracer_pcode.tests.unit._input_correspondence_support impo
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
 
 import pytest
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 @pytest.fixture(autouse=True)
@@ -39,14 +40,14 @@ def test_pairwise_strategy_downgrades_sat_when_return_cases_leave_coverage_gap(m
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
 
     x = Expression.parameter("x", 0, size=4)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1", value=_const(1), conditions=[_eq(x, _const(0))])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2",
         parameters=[_param("x")],
@@ -124,14 +125,14 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_return_coverage_gap(mo
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
 
     x = Expression.parameter("x", 0, size=4)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1", value=_const(1), conditions=[_eq(x, _const(0))])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2",
         parameters=[_param("x")],
@@ -520,14 +521,14 @@ def test_pairwise_return_coverage_inconclusive_unknown_does_not_complete_proof(m
 
 def test_pairwise_return_coverage_inconclusive_query_unknown_records_recovery_proof(monkeypatch):
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1", value=_const(1), conditions=[_eq(Expression.parameter("x", 0, size=4), _const(0))])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2",
         parameters=[_param("x")],
@@ -767,7 +768,7 @@ def test_pairwise_return_coverage_inconclusive_invalid_proof_content_is_not_reco
 
 def test_return_coverage_non_smt_covered_proof_content_does_not_claim_unsat():
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="func",
         entry_point="0x1",
         parameters=[_param("x")],
@@ -845,14 +846,14 @@ def test_monolithic_strategy_downgrades_sat_when_return_cases_leave_coverage_gap
 
     x1 = Expression.parameter("x", 0, size=4)
     x2 = Expression.parameter("x", 0, size=4)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1", value=_const(1), conditions=[_eq(x1, _const(0))])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2",
         parameters=[_param("x")],
@@ -911,14 +912,14 @@ def test_monolithic_strategy_does_not_accept_unsat_with_return_coverage_gap():
 
     x1 = Expression.parameter("x", 0, size=4)
     x2 = Expression.parameter("x", 0, size=4)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1", value=_const(1), conditions=[_eq(x1, _const(0))])],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2",
         parameters=[_param("x")],
@@ -1013,7 +1014,7 @@ def test_monolithic_return_coverage_gap_missing_completed_proof_id_does_not_reco
     assert result.counterexample_raw is None
 
 def test_function_return_analysis_skips_monolithic_fallback_when_coverage_gap_note_is_present():
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
@@ -1080,7 +1081,7 @@ def test_return_coverage_gap_emits_object_derived_pending_proof_backlog():
         mnemonic="RETURN",
         input_sizes=(8, 4),
     )
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="left",
         entry_point="0x401000",
         parameters=[_param("x")],
@@ -1094,7 +1095,7 @@ def test_return_coverage_gap_emits_object_derived_pending_proof_backlog():
         ],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="right",
         entry_point="0x402000",
         parameters=[_param("x")],
@@ -1142,7 +1143,7 @@ def test_return_coverage_inconclusive_emits_smt_disambiguation_pending_proof_bac
         mnemonic="RETURN",
         input_sizes=(8, 4),
     )
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="left",
         entry_point="0x401000",
         parameters=[_param("x")],
@@ -1156,7 +1157,7 @@ def test_return_coverage_inconclusive_emits_smt_disambiguation_pending_proof_bac
         ],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="right",
         entry_point="0x402000",
         parameters=[_param("x")],
@@ -1545,7 +1546,7 @@ def test_return_coverage_target_identity_rejects_opaque_parameter_storage():
 def test_return_coverage_object_target_ignores_diagnostic_suffix():
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     x = Expression.parameter("x", 0, size=4)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="left",
         entry_point="0x401000",
         parameters=[_param("x")],
@@ -1554,7 +1555,7 @@ def test_return_coverage_object_target_ignores_diagnostic_suffix():
         ],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="right",
         entry_point="0x402000",
         parameters=[_param("x")],
@@ -1583,7 +1584,7 @@ def test_return_coverage_object_target_ignores_diagnostic_suffix():
 def test_return_coverage_object_target_distinguishes_guard_partitions():
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     x = Expression.parameter("x", 0, size=4)
-    left_zero = FunctionReturnAnalysis(
+    left_zero = raw_function_analysis(
         function_name="left",
         entry_point="0x401000",
         parameters=[_param("x")],
@@ -1592,7 +1593,7 @@ def test_return_coverage_object_target_distinguishes_guard_partitions():
         ],
         return_type="int",
     )
-    left_one = FunctionReturnAnalysis(
+    left_one = raw_function_analysis(
         function_name="left",
         entry_point="0x401000",
         parameters=[_param("x")],
@@ -1601,7 +1602,7 @@ def test_return_coverage_object_target_distinguishes_guard_partitions():
         ],
         return_type="int",
     )
-    right = FunctionReturnAnalysis(
+    right = raw_function_analysis(
         function_name="right",
         entry_point="0x402000",
         parameters=[_param("x")],
@@ -1705,11 +1706,11 @@ def test_pairwise_relational_partition_mismatch_keeps_sat_decisive(monkeypatch):
         results=[SolverResult("fake", SolverStatus.SAT, model={"x_1": 7, "x_2": 7})]
     )
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1", entry_point="0x1", parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1", value=_const(1), conditions=[])], return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2", entry_point="0x2", parameters=[_param("x")],
         returns=[ReturnInfo(address="0x2", value=_const(2), conditions=[])], return_type="int",
     )

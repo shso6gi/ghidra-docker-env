@@ -6,6 +6,12 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional, Mapping, Tuple
 
+from scripts.function_tracer_pcode.core.parameter_domain import (
+    parameter_descriptor_bits,
+    parameter_descriptor_index,
+    parameter_descriptor_signed,
+    synthetic_parameter_kind,
+)
 from scripts.function_tracer_pcode.core.signature import (
     get_data_type_display_name,
     is_pointer_data_type,
@@ -22,10 +28,11 @@ def collect_param_info(params: List[Dict], suffix: str) -> List[ParameterInfo]:
     """解析結果から ParameterInfo 一覧を構築する。"""
     result: List[ParameterInfo] = []
     for param in params:
-        name = param.get("name", f"param_{param.get('index', 0)}")
-        size = param.get("size", 4) * 8
-        index = param.get("index", 0)
-        is_signed = param.get("is_signed", True)
+        # (index, 幅, 符号) の読み方は入力領域の封印と同じ 1 つの規則（Issue #185）
+        index = parameter_descriptor_index(param)
+        name = param.get("name", f"param_{index}")
+        size = parameter_descriptor_bits(param)
+        is_signed = parameter_descriptor_signed(param)
         abi_register_name = _parameter_register_name(param)
         abi_bank = _parameter_abi_bank(param)
         result.append(
@@ -47,10 +54,10 @@ def collect_param_info(params: List[Dict], suffix: str) -> List[ParameterInfo]:
 
 
 def _parameter_type_class(param: Mapping) -> str:
-    if param.get("synthetic_recursive_summary"):
-        return "synthetic_recursive_summary"
-    if param.get("synthetic_pure_call_summary"):
-        return "synthetic_pure_call_summary"
+    # synthetic の出所の名乗りは core の登録（``SYNTHETIC_PARAMETER_KINDS``）だけで判定する
+    synthetic_kind = synthetic_parameter_kind(param)
+    if synthetic_kind is not None:
+        return synthetic_kind
 
     type_name = normalize_type_name(
         get_data_type_display_name(param.get("data_type_obj"), param.get("data_type"))

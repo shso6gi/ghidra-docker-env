@@ -1,5 +1,6 @@
 from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 def test_function_return_analysis_scans_raw_sibling_after_lowerable_post_state_read():
     params = [
@@ -19,7 +20,7 @@ def test_function_return_analysis_scans_raw_sibling_after_lowerable_post_state_r
         size=4,
     )
     count_addr = Expression.binary_op("INT_ADD", trace, Expression.constant(4, 8))
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="mixed_post_state_and_raw_read",
         entry_point="0x1000",
         parameters=params,
@@ -79,7 +80,7 @@ def test_pairwise_unknown_result_preserves_recovery_action_status(monkeypatch):
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
 
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="f1",
         entry_point="0x1000",
         parameters=[],
@@ -87,7 +88,7 @@ def test_pairwise_unknown_result_preserves_recovery_action_status(monkeypatch):
         return_type="int",
         return_abi_facts=_present_return_abi_facts(),
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="f2",
         entry_point="0x2000",
         parameters=[],
@@ -152,7 +153,7 @@ def test_monolithic_unsupported_intrinsic_is_unresolved_expression_not_strategy_
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = MonolithicStrategy(formula_builder, solver_runner, debug=False)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="left",
         entry_point="0x1000",
         parameters=[_param("x")],
@@ -160,7 +161,7 @@ def test_monolithic_unsupported_intrinsic_is_unresolved_expression_not_strategy_
         return_type="int",
         return_abi_facts=_present_return_abi_facts(),
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="right",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -185,13 +186,13 @@ def test_monolithic_does_not_classify_arbitrary_value_error_from_message_text():
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = MonolithicStrategy(formula_builder, solver_runner, debug=False)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="left", entry_point="0x1000", parameters=[_param("x")],
         returns=[ReturnInfo(address="0x1000", value=_const(1), conditions=[])],
         return_type="int",
         return_abi_facts=_present_return_abi_facts(),
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="right", entry_point="0x2000", parameters=[_param("x")],
         returns=[ReturnInfo(address="0x2000", value=_const(1), conditions=[])],
         return_type="int",
@@ -240,7 +241,7 @@ def test_pairwise_equivalence_blocker_dominates_pair_local_unresolved_expression
     )
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -621,7 +622,7 @@ def test_pairwise_opaque_unresolved_return_stays_unknown(monkeypatch):
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1000",
         parameters=[_param("x")],
@@ -630,7 +631,7 @@ def test_pairwise_opaque_unresolved_return_stays_unknown(monkeypatch):
         return_abi_facts=_present_return_abi_facts(),
         binary_id="B1",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -1040,7 +1041,7 @@ def test_expression_provenance_key_prefers_parameter_runtime_ref_over_storage():
 def test_artifact_stable_key_rewrites_parameter_runtime_ref_program_ids():
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     program_id = 3734980569294953568
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="fc_apply_indirect",
         entry_point="0x101000",
         parameters=[],

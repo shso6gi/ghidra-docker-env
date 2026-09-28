@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
+from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis, publish_raw_function_analysis
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.analysis.returns._shared import (
@@ -17,7 +17,6 @@ from scripts.function_tracer_pcode.analysis.returns._shared import ConditionNorm
 from scripts.function_tracer_pcode.analysis.returns._api import PcodeTracer
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import address_offset_for_block_endpoint
-from scripts.function_tracer_pcode.core.semantic_freeze import publish_semantic_values
 
 
 def decompose_comparison_condition(condition: Condition) -> Optional[Tuple[bool, str, Expression, Expression]]:
@@ -63,7 +62,9 @@ def _impl_analyze_function_by_name(self, function_name: str, timeout: int = 60) 
         # authority）は確定した意味だけを見るので、結果が抱えている式・条件を
         # まとめて凍らせる。個々の consumer に「まだ凍っていないかも」を
         # 気にさせないための 1 箇所。
-        return publish_semantic_values(self.analyze_function(function, timeout))
+        # Issue #185: 同じ境界で raw の parameter 表を入力領域の正本として封印する。
+        # これより後に表を変えたもの（型仮説・abstraction）は正本と比べて見分けられる。
+        return publish_raw_function_analysis(self.analyze_function(function, timeout))
     except Exception as exc:
         self._last_analysis_failure = AnalysisFailure(
             status=ANALYSIS_STATUS_ANALYSIS_EXCEPTION,

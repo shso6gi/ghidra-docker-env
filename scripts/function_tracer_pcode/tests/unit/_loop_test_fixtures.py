@@ -21,6 +21,7 @@ from scripts.function_tracer_pcode.core import (
     ReturnInfo,
 )
 from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 def readonly_loop_summary(*, start: int, seed_terms=(), step: int = 1) -> LoopSummaryRef:
@@ -66,7 +67,7 @@ def readonly_sum_expr(loop_summary: LoopSummaryRef) -> Expression:
 
 
 def loop_function_analysis(name: str = "loop_fn") -> FunctionReturnAnalysis:
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name=name,
         entry_point="0x1000",
         parameters=[],

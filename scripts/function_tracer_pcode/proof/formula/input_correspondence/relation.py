@@ -1,11 +1,21 @@
 # -*- coding: utf-8 -*-
-"""最終 relation の構築（R0〜R5、v5 §4.5）。raw analysis だけを受け付ける。"""
+"""最終 relation の構築（R0〜R5、v5 §4.5）。raw analysis だけを受け付ける。
+
+十分性の判定点はここだけ（``_SideContext.hidden_inputs`` と表全体の欠陥）。入力領域の
+事実（封印した raw baseline・仮説の台帳・synthetic の名乗り）は core の
+``ParameterDomainAudit`` が報告し、ここは「欠陥が 1 つでもあれば、その parameter は
+どの規則でも十分性を持たない」と決めるだけ（Issue #185: provenance ≠ proof）。
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from scripts.function_tracer_pcode.core.parameter_domain import (
+    SYNTHETIC_PARAMETER_KINDS,
+    ParameterDomainAudit,
+)
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.evidence import (
     InputExtensionEvidence,
     analysis_parameter_binding,
@@ -43,6 +53,23 @@ class _SideContext:
     analysis: Any
     evidence_by_index: Dict[int, InputExtensionEvidence]
     demands: Dict[Tuple[int, int], ParameterDemand] = field(default_factory=dict)
+    _domain_audit: Optional[ParameterDomainAudit] = None
+
+    @property
+    def domain_audit(self) -> ParameterDomainAudit:
+        """この側の入力領域の監査（analysis が無い補助 relation は正本が無い）。"""
+
+        if self._domain_audit is None:
+            self._domain_audit = ParameterDomainAudit.of(self.analysis)
+        return self._domain_audit
+
+    def table_defects(self) -> Tuple[str, ...]:
+        """表全体の入力領域の欠陥（正本が無い・台帳が読めない・正本の index が消えた）。"""
+
+        return tuple(
+            f"{defect.kind}:{self.side}" + (f":{defect.detail}" if defect.detail else "")
+            for defect in self.domain_audit.table_defects()
+        )
 
     def demand(self, parameter: SideParameter) -> Optional[ParameterDemand]:
         if self.analysis is None:
@@ -59,11 +86,28 @@ class _SideContext:
         closure = demand.closure(bits)
         return closure.closed, closure.evidence_refs()
 
-    def hidden_inputs(self, parameter: SideParameter) -> Tuple[str, ...]:
+    def hidden_inputs(self, parameter: SideParameter, info: ParameterInfo) -> Tuple[str, ...]:
+        """どの規則の tie にも入らない入力。1 つでもあれば、その pair は十分性を持たない。
+
+        * closure が見つけた別名の読み（register 別名、未解決 leaf、宣言と幅の違う leaf）。
+        * 入力領域を封印した raw baseline で証明できない parameter（Issue #185）: 正本が無い、
+          baseline にちょうど 1 つの index が無い、(幅, 符号) が baseline と違う、仮説の台帳に
+          記録がある、synthetic の出所を名乗る。名乗り・登録・名前の一致は十分性を与えない。
+        """
+
         demand = self.demand(parameter)
-        if demand is None:
-            return ()
-        return tuple(item.as_evidence_ref() for item in demand.hidden_inputs)
+        closure_refs = () if demand is None else tuple(item.as_evidence_ref() for item in demand.hidden_inputs)
+        type_class = getattr(info, "type_class", None)
+        domain_refs = tuple(
+            defect.as_evidence_ref()
+            for defect in self.domain_audit.parameter_defects(
+                index=info.index,
+                bits=info.bit_width,
+                signed=info.is_signed,
+                synthetic_kind=type_class if type_class in SYNTHETIC_PARAMETER_KINDS else None,
+            )
+        )
+        return closure_refs + domain_refs
 
     def evidence(self, parameter: SideParameter) -> Optional[InputExtensionEvidence]:
         evidence = self.evidence_by_index.get(parameter.index)
@@ -148,10 +192,12 @@ def _extension_bound(
 
 
 def _relation_for_pair(
-    left: Optional[SideParameter],
-    right: Optional[SideParameter],
+    left_info: Optional[ParameterInfo],
+    right_info: Optional[ParameterInfo],
     contexts: Mapping[str, _SideContext],
 ) -> InputCorrespondence:
+    left = _side_parameter(left_info)
+    right = _side_parameter(right_info)
     # R0
     if left is None or right is None:
         present = LEFT if left is not None else RIGHT
@@ -164,8 +210,8 @@ def _relation_for_pair(
     # どの規則の tie にも入らない。どの relation になっても十分性を持たない。
     hidden = tuple(
         f"{side}:{ref}"
-        for side, parameter in ((LEFT, left), (RIGHT, right))
-        for ref in contexts[side].hidden_inputs(parameter)
+        for side, parameter, info in ((LEFT, left, left_info), (RIGHT, right, right_info))
+        for ref in contexts[side].hidden_inputs(parameter, info)
     )
 
     # R1 / R2 / R2'
@@ -314,8 +360,9 @@ def build_tie_only_correspondence_set(
 
     同じ pairing と R0〜R5 を使うが、closure も IEE も与えないので R3 / R1 / R2 は
     成立せず、extension 仮定は含意されない（最終 relation の tie だけへの弱め）。
-    premise が入力領域を狭めないので、UNSAT はどの入力についても成り立つ。幅の違う
-    pair は十分性を持たないので、この set で SAT を確定に使ってはいけない。
+    premise が入力領域を狭めないので、UNSAT はどの入力についても成り立つ。analysis が
+    無いので入力領域の正本も無く（Issue #185）、この set は常に不十分: SAT を確定に
+    使ってはいけない（決定の authority は raw pair の最終 relation だけ）。
     """
 
     contexts = {
@@ -332,14 +379,17 @@ def _build_set(
 ) -> InputCorrespondenceSet:
     pairs = build_parameter_pairs(list(params1), list(params2))
     correspondences = tuple(
-        _relation_for_pair(_side_parameter(pair.param1), _side_parameter(pair.param2), contexts)
+        _relation_for_pair(pair.param1, pair.param2, contexts)
         for pair in pairs
     )
+    # 表全体の入力領域の欠陥は pair が 1 つも無い（EMPTY）ときも set を不十分にする:
+    # 「入力が 0 個」も正本で証明される主張（Issue #185）。
+    domain_defects = contexts[LEFT].table_defects() + contexts[RIGHT].table_defects()
     return InputCorrespondenceSet(
         correspondences=correspondences,
         left_parameter_count=len(params1),
         right_parameter_count=len(params2),
-        structural_defects=_structural_defects(params1, params2, pairs),
+        structural_defects=_structural_defects(params1, params2, pairs) + domain_defects,
         left_parameters=tuple(params1),
         right_parameters=tuple(params2),
     )

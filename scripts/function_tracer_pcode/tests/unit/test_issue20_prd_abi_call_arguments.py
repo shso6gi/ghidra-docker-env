@@ -49,6 +49,7 @@ from scripts.function_tracer_pcode.proof.call_effect.obligations import CallSite
 from scripts.function_tracer_pcode.proof.call_effect.obligations import (
     ArtifactObjectIdentity,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 # --------------------------------------------------------------------------
@@ -1027,7 +1028,7 @@ def _fresh_return_analysis(function_name, entry_point, binary_id, constant):
     fresh_expr.size = 4
     value = Expression.binary_op("INT_ADD", fresh_expr, Expression.constant(constant, size=4))
     return (
-        FunctionReturnAnalysis(
+        raw_function_analysis(
             function_name=function_name,
             entry_point=entry_point,
             parameters=[{"name": "x", "index": 0, "size": 4, "data_type": "int", "storage": None}],
@@ -1146,7 +1147,7 @@ def test_positive_control_same_harness_reaches_unconditional_not_eq(monkeypatch)
     )
 
     def _plain(entry_point, constant):
-        return FunctionReturnAnalysis(
+        return raw_function_analysis(
             function_name="same_func",
             entry_point=entry_point,
             parameters=[{"name": "x", "index": 0, "size": 4, "data_type": "int", "storage": None}],
