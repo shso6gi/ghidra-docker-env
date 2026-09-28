@@ -1179,6 +1179,12 @@ def test_simplifier_implication_answers_are_cached_on_the_query_identity(scoped)
     # 正規形の集合を渡した問いは別の key（空の集合で得た答えを流用しない）
     ConditionSimplifier._condition_is_implied(goal, context, {("x", "INT_EQUAL", "y", True)})
     assert scoped.metrics.count("cache.simplifier.implied.hit") == 1
+    # owner の合計は表ごとの数の和（`structural_key_cache_*` の元）
+    for event in ("hit", "miss"):
+        assert scoped.metrics.count(f"cache_family.simplifier.{event}") == sum(
+            scoped.metrics.count(f"cache.{table}.{event}")
+            for table in (ConditionSimplifier.CONJUNCTION_UNSAT_TABLE, ConditionSimplifier.IMPLIED_TABLE)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1208,9 +1214,10 @@ def _note_plan_counters(metrics):
     metrics.note("cache.oracle.verdict.bucket_collision", 1)
     metrics.note("oracle.unknown_hit", 1)
     metrics.note("oracle.timeouts", 1)
+    metrics.note("cache_family.simplifier.hit", 5)
+    metrics.note("cache_family.simplifier.miss", 5)
+    # 表ごとの数は要約に足さない（合計は表が数えた `cache_family.*`）
     metrics.note("cache.simplifier.implied.hit", 3)
-    metrics.note("cache.simplifier.conjunction_unsat.hit", 2)
-    metrics.note("cache.simplifier.implied.miss", 5)
     metrics.note("dpll.satisfiability_calls", 6)
     metrics.note("dpll.decisions", 9)
     metrics.observe("dpll.decisions_per_call", 7)

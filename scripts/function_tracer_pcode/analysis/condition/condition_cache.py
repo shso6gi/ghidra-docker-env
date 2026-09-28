@@ -132,10 +132,12 @@ class IdentityTable:
     `cacheable` が偽の key は受け付けない（lookup は miss、store は何もしない）。
     """
 
-    __slots__ = ("name", "limit", "weight_limit", "_buckets", "_entries", "_weight", "_serial")
+    __slots__ = ("name", "limit", "weight_limit", "_family", "_buckets", "_entries", "_weight", "_serial")
 
     def __init__(self, name: str, limit: int, weight_limit: int) -> None:
         self.name = name
+        #: 表の owner（名前の先頭: `simplifier` / `oracle`）。owner ごとの hit / miss の合計も数える
+        self._family = name.split(".", 1)[0]
         self.limit = int(limit)
         self.weight_limit = int(weight_limit)
         #: hash → その bucket の entry の通し番号
@@ -169,9 +171,11 @@ class IdentityTable:
             serial = self._find(key, key_hash)
             if serial is not None:
                 note(f"cache.{self.name}.hit")
+                note(f"cache_family.{self._family}.hit")
                 return True, self._entries[serial][1]
             note(f"cache.{self.name}.bucket_collision")
         note(f"cache.{self.name}.miss")
+        note(f"cache_family.{self._family}.miss")
         return False, None
 
     def store(self, key: Any, value: Any) -> None:

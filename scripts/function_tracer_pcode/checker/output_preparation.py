@@ -61,7 +61,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.condition_metrics import (
-    PAIRWISE_DEBUG_COUNTER_KEYS,
+    CONDITION_COUNTER_STAT_KEYS,
     condition_metrics_snapshot,
     pairwise_debug_counters,
 )
@@ -1298,7 +1298,7 @@ def _attach_condition_counters(result: Any, condition_simplify: Mapping[str, Any
     merged: Dict[Any, Any] = {}
     if _truthy(current):
         for key, value in read_limits.prefix_items_within_limit(current):
-            if _plain_key(key) not in PAIRWISE_DEBUG_COUNTER_KEYS:
+            if _plain_key(key) not in CONDITION_COUNTER_STAT_KEYS:
                 merged[_plain_key(key)] = value
     merged.update(counters)
     if merged:

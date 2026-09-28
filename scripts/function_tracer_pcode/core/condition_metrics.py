@@ -14,6 +14,7 @@ PR-105-B が DPLL の決定回数予算・oracle の query 数予算を決める
 * `oracle.queries` — solver（z3）を実際に呼んだ回数。1 回の時間は `oracle.check_ms`
 * `oracle.timeouts` — solver が `unknown`（timeout / canceled）を返した回数
 * `oracle.unknowns` — solver が `unknown` を返した回数（timeout 以外も含む）
+* `cache_family.<owner>.hit` / `.miss` — owner（`simplifier` / `oracle`）の表の合計
 * `cache.<表>.hit` / `.miss` / `.bucket_collision` / `.evicted` / `.too_large` /
   `.uncacheable` — cache 表ごと（`memo.<種別>.*` は root 単位の memo）
 * `oracle.unknown_hit` — cache hit のうち記憶していた値が `None`（未判定）だったもの
@@ -182,7 +183,9 @@ def condition_metrics_snapshot() -> Dict[str, Any]:
 
 
 #: `pairwise_debug_stats` へ載せる要約の名前（計画 §6.B-1 / D3）→ 数え方
-_SIMPLIFIER_CACHE_PREFIX = "cache.simplifier."
+#: 条件簡約の表（`simplifier.*`）の hit / miss の合計（`condition_cache` が表ごとの数と一緒に数える）
+_SIMPLIFIER_FAMILY_HIT = "cache_family.simplifier.hit"
+_SIMPLIFIER_FAMILY_MISS = "cache_family.simplifier.miss"
 _PAIRWISE_DEBUG_COUNTERS = (
     ("condition_oracle_query", "oracle.queries"),
     ("condition_oracle_cache_hit", "cache.oracle.verdict.hit"),
@@ -195,7 +198,7 @@ _PAIRWISE_DEBUG_COUNTERS = (
 
 
 #: `pairwise_debug_counters()` が書く key の全部（出力の準備が上書きの対象を知るため）
-PAIRWISE_DEBUG_COUNTER_KEYS = frozenset(
+CONDITION_COUNTER_STAT_KEYS = frozenset(
     {"structural_key_cache_hit", "structural_key_cache_miss", "condition_dpll_decisions_per_call_max"}
     | {key for key, _name in _PAIRWISE_DEBUG_COUNTERS}
 )
@@ -206,8 +209,8 @@ def pairwise_debug_counters(snapshot: Optional[Dict[str, Any]] = None) -> Dict[s
 
     `snapshot` を渡さなければ今の scope の snapshot（scope の外では空）。分布（log2 の
     度数など）は `diagnostics.condition_simplify` にだけ出し、ここは件数と 1 回あたりの
-    DPLL 決定数の最大だけ。`structural_key_cache_*` は条件簡約の表（`cache.simplifier.*`:
-    conjunction の充足不能性・含意）の合計。
+    DPLL 決定数の最大だけ。`structural_key_cache_*` は条件簡約の表（`simplifier.*`: conjunction の
+    充足不能性・含意）の合計（`cache_family.simplifier.*`、表が数える）。
     """
 
     if snapshot is None:
@@ -219,14 +222,8 @@ def pairwise_debug_counters(snapshot: Optional[Dict[str, Any]] = None) -> Dict[s
         return {}
     counters = snapshot.get("counters") or {}
     summary = {
-        "structural_key_cache_hit": sum(
-            value for name, value in counters.items()
-            if name.startswith(_SIMPLIFIER_CACHE_PREFIX) and name.endswith(".hit")
-        ),
-        "structural_key_cache_miss": sum(
-            value for name, value in counters.items()
-            if name.startswith(_SIMPLIFIER_CACHE_PREFIX) and name.endswith(".miss")
-        ),
+        "structural_key_cache_hit": counters.get(_SIMPLIFIER_FAMILY_HIT, 0),
+        "structural_key_cache_miss": counters.get(_SIMPLIFIER_FAMILY_MISS, 0),
     }
     for key, name in _PAIRWISE_DEBUG_COUNTERS:
         summary[key] = counters.get(name, 0)
@@ -274,7 +271,7 @@ def note_dpll_decision() -> None:
 
 __all__ = [
     "METRICS_SCHEMA",
-    "PAIRWISE_DEBUG_COUNTER_KEYS",
+    "CONDITION_COUNTER_STAT_KEYS",
     "ConditionSimplifyMetrics",
     "active_condition_metrics",
     "condition_metrics_scope",
