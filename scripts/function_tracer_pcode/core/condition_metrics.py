@@ -178,6 +178,49 @@ def condition_metrics_snapshot() -> Dict[str, Any]:
     return {} if metrics is None else metrics.snapshot()
 
 
+#: `pairwise_debug_stats` へ載せる要約の名前（計画 §6.B-1 / D3）→ 数え方
+_SIMPLIFIER_CACHE_PREFIX = "cache.simplifier."
+_PAIRWISE_DEBUG_COUNTERS = (
+    ("condition_oracle_query", "oracle.queries"),
+    ("condition_oracle_cache_hit", "cache.oracle.verdict.hit"),
+    ("condition_oracle_unknown_hit", "oracle.unknown_hit"),
+    ("condition_oracle_identity_miss_after_hash_hit", "cache.oracle.verdict.bucket_collision"),
+    ("condition_oracle_timeout", "oracle.timeouts"),
+    ("condition_satisfiability_calls", "dpll.satisfiability_calls"),
+    ("condition_dpll_decisions", "dpll.decisions"),
+)
+
+
+def pairwise_debug_counters() -> Dict[str, int]:
+    """今の scope の計測を、`pairwise_debug_stats` 用の平たい整数の要約にする（0 は載せない）。
+
+    分布（log2 の度数など）は `diagnostics.condition_simplify` にだけ出し、ここは件数と
+    1 回あたりの DPLL 決定数の最大だけ。`structural_key_cache_*` は条件簡約の表
+    （`cache.simplifier.*`: 含意・矛盾・formula の含意）の合計。scope の外では空。
+    """
+
+    metrics = active_condition_metrics()
+    if metrics is None:
+        return {}
+    snapshot = metrics.snapshot()
+    counters = snapshot["counters"]
+    summary = {
+        "structural_key_cache_hit": sum(
+            value for name, value in counters.items()
+            if name.startswith(_SIMPLIFIER_CACHE_PREFIX) and name.endswith(".hit")
+        ),
+        "structural_key_cache_miss": sum(
+            value for name, value in counters.items()
+            if name.startswith(_SIMPLIFIER_CACHE_PREFIX) and name.endswith(".miss")
+        ),
+    }
+    for key, name in _PAIRWISE_DEBUG_COUNTERS:
+        summary[key] = counters.get(name, 0)
+    decisions = snapshot["distributions"].get("dpll.decisions_per_call")
+    summary["condition_dpll_decisions_per_call_max"] = int(decisions["max"]) if decisions else 0
+    return {key: value for key, value in summary.items() if value}
+
+
 class _SatisfiabilityFrame:
     __slots__ = ("decisions",)
 
@@ -224,5 +267,6 @@ __all__ = [
     "note",
     "note_dpll_decision",
     "observe",
+    "pairwise_debug_counters",
     "satisfiability_call",
 ]

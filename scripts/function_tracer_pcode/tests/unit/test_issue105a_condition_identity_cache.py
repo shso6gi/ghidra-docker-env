@@ -1036,6 +1036,52 @@ def test_d13_dpll_decisions_and_satisfiability_calls_are_counted(monkeypatch, sc
     assert per_call["count"] == 1 and per_call["max"] == snapshot["counters"]["dpll.decisions"]
 
 
+def test_d3_counters_reach_pairwise_debug_stats_under_the_plan_names(scoped):
+    """D3: pair の要約が `pairwise_debug_stats` に計画 §6.B-1 の名前で載る（0 は載せない）。"""
+
+    from scripts.function_tracer_pcode.checker.result_assembly import _with_condition_counters
+
+    scoped.metrics.note("oracle.queries", 4)
+    scoped.metrics.note("cache.oracle.verdict.hit", 2)
+    scoped.metrics.note("cache.oracle.verdict.bucket_collision", 1)
+    scoped.metrics.note("oracle.unknown_hit", 1)
+    scoped.metrics.note("oracle.timeouts", 1)
+    scoped.metrics.note("cache.simplifier.implied.hit", 3)
+    scoped.metrics.note("cache.simplifier.formula_implies.hit", 2)
+    scoped.metrics.note("cache.simplifier.implied.miss", 5)
+    scoped.metrics.note("dpll.satisfiability_calls", 6)
+    scoped.metrics.note("dpll.decisions", 9)
+    scoped.metrics.observe("dpll.decisions_per_call", 7)
+    stats = _with_condition_counters({"existing_counter": 1})
+    assert stats == {
+        "existing_counter": 1,
+        "structural_key_cache_hit": 5,
+        "structural_key_cache_miss": 5,
+        "condition_oracle_query": 4,
+        "condition_oracle_cache_hit": 2,
+        "condition_oracle_unknown_hit": 1,
+        "condition_oracle_identity_miss_after_hash_hit": 1,
+        "condition_oracle_timeout": 1,
+        "condition_satisfiability_calls": 6,
+        "condition_dpll_decisions": 9,
+        "condition_dpll_decisions_per_call_max": 7,
+    }
+
+
+def test_d3_nothing_is_added_outside_a_pair_scope():
+    from scripts.function_tracer_pcode.checker.result_assembly import _with_condition_counters
+
+    assert active_condition_metrics() is None
+    original = {"existing_counter": 1}
+    assert _with_condition_counters(original) is original
+    assert _with_condition_counters(None) is None
+
+
+def test_d3_the_result_assembly_uses_the_pair_summary():
+    source = (PACKAGE_ROOT / "checker" / "result_assembly.py").read_text(encoding="utf-8")
+    assert "pairwise_debug_stats=_with_condition_counters(strategy_result.pairwise_debug_stats)" in source
+
+
 def test_d13_counters_reach_the_result_json(scoped):
     """D13: 計測は出力の準備が診断へ写し、結果 JSON の `diagnostics.condition_simplify` に出る。"""
 
