@@ -10,6 +10,7 @@ from scripts.function_tracer_pcode.core import (
     ReturnInfo,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+from scripts.function_tracer_pcode.core.structural import unidentified_identity
 from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
@@ -341,7 +342,8 @@ def _impl__summary_return_conditions_key(self, conditions: Sequence[Condition]) 
         try:
             keys.append(condition.structural_key(budget=256))
         except Exception:
-            keys.append(("opaque_condition", type(condition).__name__))
+            # 型名に潰さない（失敗した条件どうしが同じ鍵になる。Issue #215）
+            keys.append(unidentified_identity("condition_key_failed"))
     keys.sort(key=repr)
     return ("conditions", tuple(keys))
 

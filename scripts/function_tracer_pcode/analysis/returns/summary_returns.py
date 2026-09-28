@@ -34,6 +34,7 @@ from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_wid
 from scripts.function_tracer_pcode.core.structural import (
     NON_STRUCTURAL_IDENTITY_TAGS,
     key_contains_placeholder,
+    unidentified_identity,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 import scripts.function_tracer_pcode.analysis.effects.summary as effect_summary
@@ -2282,7 +2283,9 @@ def _conditions_key(conditions: Sequence[Condition]) -> Tuple[Any, ...]:
         try:
             keys.append(condition.structural_key(budget=256))
         except Exception:
-            keys.append(("opaque_condition", type(condition).__name__))
+            # 型名に潰すと失敗した条件どうしが同じ鍵になる（Issue #215）。何とも等しく
+            # ならない印にする（`_FORBIDDEN_IDENTITY_TAGS` が拒む）
+            keys.append(unidentified_identity("condition_key_failed"))
     keys.sort(key=repr)
     return ("conditions", tuple(keys))
 
@@ -2298,7 +2301,7 @@ def _expression_key(expr: Optional[Expression]) -> Tuple[Any, ...]:
             include_semantic_runtime_refs=True,
         )
     except Exception:
-        return ("opaque_expression", type(expr).__name__)
+        return unidentified_identity("expression_key_failed")
 
 
 #: 安定した identity を持たない atom の tag。`NON_STRUCTURAL_IDENTITY_TAGS` は構造 key の

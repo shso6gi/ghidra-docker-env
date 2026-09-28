@@ -177,3 +177,37 @@ def test_181_ac2_ordinary_case_sets_still_reuse_the_same_identity(identity):
     assert fn(_case([_param_less(1), _param_less(2)])) == fn(_case([_param_less(1), _param_less(2)]))
     # 深い条件でも同じ構造なら同じ identity（「常に再利用しない」へ退化していない）
     assert fn(_case([_deep_less(10)])) == fn(_case([_deep_less(10)]))
+
+
+# --------------------------------------------------------------------------
+# 構造 key を作れなかったときの identity（型名に潰さない）
+# --------------------------------------------------------------------------
+
+class _Unkeyable:
+    """`structural_key` が失敗する条件 / 値（consumer の例外 fallback を通す）。"""
+
+    negated = False
+    expression = None
+
+    def structural_key(self, **_kwargs):
+        raise RuntimeError("no key")
+
+
+def test_summary_keys_do_not_collapse_conditions_whose_key_cannot_be_built():
+    from scripts.function_tracer_pcode.analysis.returns import summary_returns
+
+    left = summary_returns._conditions_key([_Unkeyable()])
+    right = summary_returns._conditions_key([_Unkeyable()])
+    assert left != right
+    # 「安定しない identity」として拒まれる（`object_id` と同じ扱い）
+    assert summary_returns._key_contains_forbidden_identity(left)
+    assert summary_returns._expression_key(_Unkeyable()) != summary_returns._expression_key(_Unkeyable())
+
+
+def test_recurrence_summary_keys_do_not_collapse_on_failure():
+    from scripts.function_tracer_pcode.analysis.recurrence import guard_proof, object_identity
+
+    assert guard_proof._impl__summary_return_conditions_key(None, [_Unkeyable()]) != \
+        guard_proof._impl__summary_return_conditions_key(None, [_Unkeyable()])
+    assert object_identity._impl__summary_return_expression_key(None, _Unkeyable()) != \
+        object_identity._impl__summary_return_expression_key(None, _Unkeyable())
