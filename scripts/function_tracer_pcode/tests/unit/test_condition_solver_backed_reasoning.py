@@ -185,7 +185,7 @@ def test_solver_backed_reasoning_activates_for_boolean_connective_structure(monk
 
     invoked = {"count": 0}
 
-    def _fake_conjunction_is_unsat(conditions, cache_key=None):
+    def _fake_conjunction_is_unsat(conditions, use_cache=True):
         invoked["count"] += 1
         return None
 
@@ -207,7 +207,7 @@ def test_solver_backed_reasoning_activates_for_non_connective_comparison(monkeyp
 
     invoked = {"count": 0}
 
-    def _fake_conjunction_is_unsat(conditions, cache_key=None):
+    def _fake_conjunction_is_unsat(conditions, use_cache=True):
         invoked["count"] += 1
         return None
 
@@ -236,7 +236,7 @@ def test_solver_backed_reasoning_activates_for_call_comparison(monkeypatch):
 
     invoked = {"count": 0}
 
-    def _fake_conjunction_is_unsat(conditions, cache_key=None):
+    def _fake_conjunction_is_unsat(conditions, use_cache=True):
         invoked["count"] += 1
         return None
 

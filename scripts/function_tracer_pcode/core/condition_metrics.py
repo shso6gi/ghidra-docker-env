@@ -14,9 +14,12 @@ PR-105-B が DPLL の決定回数予算・oracle の query 数予算を決める
 * `oracle.queries` — solver（z3）を実際に呼んだ回数。1 回の時間は `oracle.check_ms`
 * `oracle.timeouts` — solver が `unknown`（timeout / canceled）を返した回数
 * `oracle.unknowns` — solver が `unknown` を返した回数（timeout 以外も含む）
-* `cache.<表>.hit` / `.miss` / `.bucket_collision` / `.cleared` — cache 表ごと
+* `cache.<表>.hit` / `.miss` / `.bucket_collision` / `.evicted` / `.too_large` /
+  `.uncacheable` — cache 表ごと（`memo.<種別>.*` は root 単位の memo）
 * `oracle.unknown_hit` — cache hit のうち記憶していた値が `None`（未判定）だったもの
 * `identity.*` / `memo.*` — identity の構築と root 単位 memo の hit
+* `simplifier.reentry_guard_hit` / `simplifier.guard_tainted_not_stored` — 再入 guard の
+  打ち切りと、それを材料にしたので覚えなかった答え
 
 置き場所が `core` なのは、値を書く側（`analysis/condition`）と読む側（出力の準備
 `checker/output_preparation`。出力層は analysis に依存しない）の両方から下向きに参照
@@ -191,19 +194,30 @@ _PAIRWISE_DEBUG_COUNTERS = (
 )
 
 
-def pairwise_debug_counters() -> Dict[str, int]:
-    """今の scope の計測を、`pairwise_debug_stats` 用の平たい整数の要約にする（0 は載せない）。
+#: `pairwise_debug_counters()` が書く key の全部（出力の準備が上書きの対象を知るため）
+PAIRWISE_DEBUG_COUNTER_KEYS = frozenset(
+    {"structural_key_cache_hit", "structural_key_cache_miss", "condition_dpll_decisions_per_call_max"}
+    | {key for key, _name in _PAIRWISE_DEBUG_COUNTERS}
+)
 
-    分布（log2 の度数など）は `diagnostics.condition_simplify` にだけ出し、ここは件数と
-    1 回あたりの DPLL 決定数の最大だけ。`structural_key_cache_*` は条件簡約の表
-    （`cache.simplifier.*`: 含意・矛盾・formula の含意）の合計。scope の外では空。
+
+def pairwise_debug_counters(snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+    """計測の snapshot を、`pairwise_debug_stats` 用の平たい整数の要約にする（0 は載せない）。
+
+    `snapshot` を渡さなければ今の scope の snapshot（scope の外では空）。分布（log2 の
+    度数など）は `diagnostics.condition_simplify` にだけ出し、ここは件数と 1 回あたりの
+    DPLL 決定数の最大だけ。`structural_key_cache_*` は条件簡約の表（`cache.simplifier.*`:
+    conjunction の充足不能性・含意）の合計。
     """
 
-    metrics = active_condition_metrics()
-    if metrics is None:
+    if snapshot is None:
+        metrics = active_condition_metrics()
+        if metrics is None:
+            return {}
+        snapshot = metrics.snapshot()
+    if not snapshot:
         return {}
-    snapshot = metrics.snapshot()
-    counters = snapshot["counters"]
+    counters = snapshot.get("counters") or {}
     summary = {
         "structural_key_cache_hit": sum(
             value for name, value in counters.items()
@@ -216,7 +230,7 @@ def pairwise_debug_counters() -> Dict[str, int]:
     }
     for key, name in _PAIRWISE_DEBUG_COUNTERS:
         summary[key] = counters.get(name, 0)
-    decisions = snapshot["distributions"].get("dpll.decisions_per_call")
+    decisions = (snapshot.get("distributions") or {}).get("dpll.decisions_per_call")
     summary["condition_dpll_decisions_per_call_max"] = int(decisions["max"]) if decisions else 0
     return {key: value for key, value in summary.items() if value}
 
@@ -260,6 +274,7 @@ def note_dpll_decision() -> None:
 
 __all__ = [
     "METRICS_SCHEMA",
+    "PAIRWISE_DEBUG_COUNTER_KEYS",
     "ConditionSimplifyMetrics",
     "active_condition_metrics",
     "condition_metrics_scope",

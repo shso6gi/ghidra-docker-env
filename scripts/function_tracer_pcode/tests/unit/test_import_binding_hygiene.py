@@ -125,6 +125,82 @@ def test_no_module_level_definition_shadows_another():
     )
 
 
+def _shadowed_class_members(path):
+    """class 本体の直下で同じ名前を 2 回以上束ねる `def` / `class` / 代入を返す。
+
+    `Module.body` 直下の検査（`_shadowed_definitions`）と同じ理由の defect が class の中にも
+    起きる: 後の定義が前の本体を **呼ばれない死んだ code** にする（Issue #105 PR-105-A で
+    `CnfReasoningMixin._clause_set_is_unsat` が 2 回定義され、前の本体を直しても何も
+    変わらない状態になっていた）。service-function の束縛（`name = _svc._impl_name`）も
+    代入なので同じ規則に入る。property の `setter` / `deleter` / `getter` と `@overload` は
+    同じ名前を重ねるのが仕様なので除く。
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    found = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        seen = defaultdict(list)
+        for stmt in node.body:
+            names = []
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if _is_overload(stmt) or _is_property_accessor(stmt):
+                    continue
+                names = [stmt.name]
+            elif isinstance(stmt, ast.Assign):
+                names = [target.id for target in stmt.targets if isinstance(target, ast.Name)]
+            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+                if isinstance(stmt.target, ast.Name):
+                    names = [stmt.target.id]
+            for name in names:
+                seen[name].append(stmt.lineno)
+        for name, lines in seen.items():
+            if len(lines) > 1:
+                found[f"{node.name}.{name}"] = lines
+    return found
+
+
+def _is_property_accessor(stmt):
+    for decorator in getattr(stmt, "decorator_list", ()):
+        if isinstance(decorator, ast.Attribute) and decorator.attr in {"setter", "deleter", "getter"}:
+            return True
+    return False
+
+
+def test_no_class_body_member_shadows_another():
+    """class 本体で後から来た定義・代入が前の定義を殺していないこと（tests も対象）。"""
+    offenders = []
+    for path in sorted(PACKAGE_ROOT.rglob("*.py")):
+        for name, lines in sorted(_shadowed_class_members(path).items()):
+            trail = " -> ".join(f"L{lineno}" for lineno in lines)
+            offenders.append(f"{path.relative_to(PACKAGE_ROOT)}: {name}: {trail}")
+    assert offenders == [], (
+        "class-body members shadow each other; keep the one that is in effect after "
+        "the class body finishes executing and delete the dead one:\n" + "\n".join(offenders)
+    )
+
+
+def test_the_class_member_detector_sees_redefinitions_and_rebindings(tmp_path):
+    sample = tmp_path / "sample.py"
+    sample.write_text(
+        "class C:\n"
+        "    def m(self):\n"
+        "        return 1\n"
+        "    x = 1\n"
+        "    def m(self):\n"
+        "        return 2\n"
+        "    x = 2\n"
+        "    @property\n"
+        "    def p(self):\n"
+        "        return 1\n"
+        "    @p.setter\n"
+        "    def p(self, value):\n"
+        "        pass\n",
+        encoding="utf-8",
+    )
+    assert _shadowed_class_members(sample) == {"C.m": [2, 5], "C.x": [4, 7]}
+
+
 def test_the_definition_detector_sees_a_redefined_function(tmp_path):
     sample = tmp_path / "sample.py"
     sample.write_text("def f():\n    return 1\n\n\ndef f():\n    return 2\n", encoding="utf-8")
@@ -132,7 +208,7 @@ def test_the_definition_detector_sees_a_redefined_function(tmp_path):
 
 
 def test_the_definition_detector_ignores_nested_definitions(tmp_path):
-    """関数内 / class 本体の再定義は対象外（import 側と同じ `Module.body` 直下だけ）。"""
+    """関数内 / class 本体の再定義はこの detector の対象外（class 本体は `_shadowed_class_members`）。"""
     sample = tmp_path / "sample.py"
     sample.write_text(
         "def outer():\n"

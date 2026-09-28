@@ -23,6 +23,8 @@ from scripts.function_tracer_pcode.analysis.condition.simplifier_support import 
     BooleanAtom,
     BooleanLiteral,
     BooleanClause,
+    note_reentry_guard_hit,
+    reentry_guard_scope,
 )
 
 
@@ -441,7 +443,11 @@ class CnfReasoningMixin:
 
     @classmethod
     def _clause_set_is_unsat(cls, condition_list: List[Condition]) -> Optional[bool]:
-        """CNF + DPLL による判定（最上位の充足可能性判定 1 回 = 計測枠 1 つ）。"""
+        """CNF + DPLL による判定（最上位の充足可能性判定 1 回 = 計測枠 1 つ）。
+
+        二値（`_clauses_are_satisfiable` の否定）: 予算の無い今の DPLL は完全なので
+        `not` は正確。三値の `SatVerdict` へ移して `not` を消すのは PR-105-B（D1-B）。
+        """
 
         clauses = cls._conditions_to_cnf_clauses(condition_list)
         if clauses is None:
@@ -451,74 +457,71 @@ class CnfReasoningMixin:
             return not cls._clauses_are_satisfiable(clause_literals)
 
     @classmethod
-    def _cached_formula_result(cls, table: str, key: SolverQueryIdentity, compute) -> Optional[bool]:
-        """`compute()` の結果（`True` / `False` / `None`）を conjunction の identity で覚える。
+    def _conjunction_is_unsat(cls, condition_list: List[Condition]) -> Optional[bool]:
+        """条件の conjunction が充足不能か（`True` / `False` / 判定できない `None`）。
 
-        `None`（判定できなかった）も覚えた値で、hit しても `True` / `False` には化けない。
-        例外は覚えない（そのまま上へ）。再入（同じ conjunction の判定の途中）は `None`。
+        `_formula_is_unsat` と `_formula_implies`（文脈 ∧ ¬条件）の **唯一の実装**。どちらも
+        同じ問い（conjunction の充足不能性）なので、表も 1 つ（`CONJUNCTION_UNSAT_TABLE`）で
+        key は conjunction の `SolverQueryIdentity`（bucket → 完全比較）。
+
+        * solver を使ってよい conjunction なら条件 oracle、答えが無ければ CNF + DPLL
+        * `None`（判定できなかった）も覚えた値で、hit しても `True` / `False` には化けない
+        * 例外は覚えない。再入（同じ conjunction の判定の途中）は `None` で、**その途中で
+          作った答えは覚えない**（`reentry_guard_scope`: 再入で打ち切った答えは呼ばれ方に
+          依存するので、覚えると「いつ・どこから最初に聞かれたか」で答えが変わる）
         """
 
-        if key.cacheable:
-            found, cached = cache_lookup(table, key, limit=cls._FORMULA_IMPLIES_CACHE_LIMIT)
-            if found:
-                return cached
+        try:
+            key = SolverQueryIdentity.from_conditions(condition_list)
+        except _CONDITION_RECOVERABLE_ERRORS:
+            return None
+        found, cached = cache_lookup(
+            cls.CONJUNCTION_UNSAT_TABLE, key, limit=cls._FORMULA_IMPLIES_CACHE_LIMIT
+        )
+        if found:
+            return cached
         if key in cls._active_formula_implies_keys:
-            cls._debug_print(
-                "Skipping recursive formula guard hit",
-                0,
-            )
+            cls._debug_print("Skipping recursive formula guard hit", 0)
+            note_reentry_guard_hit()
             return None
         cls._active_formula_implies_keys.add(key)
         try:
-            result = compute()
+            with reentry_guard_scope() as guard:
+                result = cls._compute_conjunction_is_unsat(condition_list)
         finally:
             cls._active_formula_implies_keys.discard(key)
-        if key.cacheable:
-            cache_store(table, key, result, limit=cls._FORMULA_IMPLIES_CACHE_LIMIT)
+        if guard.clean:
+            cache_store(
+                cls.CONJUNCTION_UNSAT_TABLE, key, result, limit=cls._FORMULA_IMPLIES_CACHE_LIMIT
+            )
         return result
+
+    @classmethod
+    def _compute_conjunction_is_unsat(cls, condition_list: List[Condition]) -> Optional[bool]:
+        try:
+            use_solver = cls._should_use_solver_reasoning(condition_list)
+        except _CONDITION_RECOVERABLE_ERRORS:
+            use_solver = False
+        if use_solver:
+            try:
+                solver_result = ConditionSMTOracle.conjunction_is_unsat(condition_list)
+            except _CONDITION_RECOVERABLE_ERRORS:
+                solver_result = None
+            if solver_result is not None:
+                return solver_result
+        try:
+            return cls._clause_set_is_unsat(condition_list)
+        except _CONDITION_RECOVERABLE_ERRORS:
+            return None
 
     @classmethod
     def _formula_is_unsat(
         cls,
         conditions: Iterable[Condition],
     ) -> Optional[bool]:
-        """条件の conjunction が充足不能か（`True` / `False` / 判定できない `None`）。
+        """条件の conjunction が充足不能か（`_conjunction_is_unsat`）。"""
 
-        Issue #105 PR-105-A: 結果は conjunction の `SolverQueryIdentity`（条件の意味の
-        完全な identity、bucket → 完全比較）を key に pair の中で覚える。
-        """
-
-        condition_list = list(conditions or [])
-
-        def compute() -> Optional[bool]:
-            if cls._should_use_solver_reasoning(condition_list):
-                try:
-                    solver_result = ConditionSMTOracle.conjunction_is_unsat(condition_list)
-                except _CONDITION_RECOVERABLE_ERRORS:
-                    solver_result = None
-                if solver_result is not None:
-                    return solver_result
-            try:
-                return cls._clause_set_is_unsat(condition_list)
-            except _CONDITION_RECOVERABLE_ERRORS:
-                return None
-
-        return cls._cached_formula_result(
-            cls.FORMULA_UNSAT_TABLE,
-            SolverQueryIdentity.from_conditions(condition_list),
-            compute,
-        )
-
-    @classmethod
-    def _clause_set_is_unsat(cls, condition_list: List[Condition]) -> Optional[bool]:
-        """CNF + DPLL による判定（最上位の充足可能性判定 1 回 = 計測枠 1 つ）。"""
-
-        clauses = cls._conditions_to_cnf_clauses(condition_list)
-        if clauses is None:
-            return None
-        clause_literals = [clause.literals for clause in clauses]
-        with satisfiability_call():
-            return not cls._clauses_are_satisfiable(clause_literals)
+        return cls._conjunction_is_unsat(list(conditions or []))
 
     @classmethod
     def _formula_implies(
@@ -526,37 +529,11 @@ class CnfReasoningMixin:
         context_conditions: Iterable[Condition],
         condition: Condition,
     ) -> Optional[bool]:
-        """文脈が条件を含意するか = 文脈 ∧ ¬条件 が充足不能か。
-
-        key は含意の conjunction（文脈 + ¬条件）の `SolverQueryIdentity`。
-        """
+        """文脈が条件を含意するか = 文脈 ∧ ¬条件 が充足不能か（`_conjunction_is_unsat`）。"""
 
         try:
             context_list = list(context_conditions or [])
             negated_condition = condition.negate()
-            implication_conditions = context_list + [negated_condition]
-            key = SolverQueryIdentity.from_conditions(implication_conditions)
         except _CONDITION_RECOVERABLE_ERRORS:
             return None
-
-        def compute() -> Optional[bool]:
-            try:
-                use_solver = cls._should_use_solver_reasoning(implication_conditions)
-            except _CONDITION_RECOVERABLE_ERRORS:
-                use_solver = False
-
-            if use_solver:
-                try:
-                    solver_result = ConditionSMTOracle.conjunction_is_unsat(
-                        implication_conditions
-                    )
-                except _CONDITION_RECOVERABLE_ERRORS:
-                    solver_result = None
-                if solver_result is not None:
-                    return solver_result
-            try:
-                return cls._clause_set_is_unsat(implication_conditions)
-            except _CONDITION_RECOVERABLE_ERRORS:
-                return None
-
-        return cls._cached_formula_result(cls.FORMULA_IMPLIES_TABLE, key, compute)
+        return cls._conjunction_is_unsat(context_list + [negated_condition])

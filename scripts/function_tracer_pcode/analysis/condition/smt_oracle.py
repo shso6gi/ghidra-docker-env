@@ -39,7 +39,8 @@ from scripts.function_tracer_pcode.core.render_smt import (
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.smt.solvers.z3 import isolated_solver
-from scripts.function_tracer_pcode.core.semantic_freeze import publish
+from scripts.function_tracer_pcode.core.semantic_freeze import publish, validated
+from scripts.function_tracer_pcode.core.semantic_snapshot import walk_dag_nodes
 
 
 class _RootSolverFacts(NamedTuple):
@@ -71,7 +72,12 @@ _UNUSABLE_QUERY = _QueryFacts(False, {}, frozenset(), {}, frozenset(), frozenset
 
 
 def _root_solver_facts(expr: Any) -> _RootSolverFacts:
-    """旧 `_build_script` の条件ごとの検査と宣言の収集（同じ規則、root 1 つ分）。"""
+    """旧 `_build_script` の条件ごとの検査と宣言の収集（同じ規則、root 1 つ分）。
+
+    node は `walk_dag_nodes`（`SolverQueryIdentity` の root graph と **同じ走査**）から
+    読む。symbol の割当（`objvar_<n>`）は graph の symbol から決まるので、幅を集める
+    node の集合が別の走査だと、割当があって幅が無い（または逆の）symbol ができる。
+    """
 
     note("oracle.root_facts_built")
     if expr is None:
@@ -81,7 +87,8 @@ def _root_solver_facts(expr: Any) -> _RootSolverFacts:
     symbol_widths: Dict[Any, int] = {}
     memory_widths = set()
     call_declarations: Dict[str, Tuple[Tuple[int, ...], int]] = {}
-    for node in ConditionSMTOracle._iter_expression_nodes(expr):
+    _graph, nodes = walk_dag_nodes(validated(expr))
+    for node in nodes:
         expr_type = getattr(node, "expr_type", None)
         expr_kind = getattr(expr_type, "__class__", None)
         if expr_type is None or expr_kind is None:
@@ -159,10 +166,6 @@ def _merge_root_facts(facts: Iterable[_RootSolverFacts]) -> _QueryFacts:
     )
 
 
-def _objvar_number(name: str) -> int:
-    return int(name.rsplit("_", 1)[1])
-
-
 def _reason_is_timeout(solver: Any) -> bool:
     """solver の `unknown` が時間切れによるものか（計測用。判定には使わない）。"""
 
@@ -191,7 +194,7 @@ class ConditionSMTOracle:
     """
 
     QUERY_TIMEOUT_MS = 250
-    #: 判定の表の上限（件数、超えたら全消去。旧 `_unsat_cache` と同じ）
+    #: 判定の表の上限（件数。重みの上限と合わせて古い順に捨てる: `condition_cache`）
     _CACHE_LIMIT = 4096
     #: 書き換えの表の上限（件数）
     _REWRITE_CACHE_LIMIT = 8192
@@ -230,23 +233,20 @@ class ConditionSMTOracle:
         use_cache: bool = True,
     ) -> Optional[bool]:
         conditions = tuple(conditions or ())
+        if conditions and not cls.is_available():
+            return None
         query = SolverQueryIdentity.from_conditions(conditions)
-        if conditions:
-            if not cls.is_available():
-                return None
-            if not cls._query_facts(query, conditions).usable:
-                note("oracle.unusable")
-                return None
+        if conditions and not cls._query_facts(query, conditions).usable:
+            note("oracle.unusable")
+            return None
 
-        cacheable = use_cache and query.cacheable
-        if cacheable:
+        # 覚えてよい query か（比較できない graph を含まないか）は表が key の型で判定する
+        if use_cache:
             found, cached = cache_lookup(cls.VERDICT_TABLE, query, limit=cls._CACHE_LIMIT)
             if found:
                 if cached is None:
                     note("oracle.unknown_hit")
                 return cached
-        elif use_cache:
-            note("oracle.uncacheable_query")
 
         usable, script = cls._build_script(conditions, query=query, use_cache=use_cache)
         if not usable or script is None:
@@ -273,7 +273,7 @@ class ConditionSMTOracle:
                 note("oracle.unknowns")
                 if _reason_is_timeout(solver):
                     note("oracle.timeouts")
-            if cacheable:
+            if use_cache:
                 cache_store(cls.VERDICT_TABLE, query, verdict, limit=cls._CACHE_LIMIT)
             return verdict
         except AnalysisLimitation:
@@ -322,15 +322,19 @@ class ConditionSMTOracle:
         facts = cls._query_facts(query, conditions)
         if not facts.usable:
             return False, None
+        symbol_names = query.symbol_names
+        if set(symbol_names) != set(facts.symbol_widths):
+            # 割当のある symbol と幅を集めた symbol は同じ走査から来るので一致するはず。
+            # 食い違うなら宣言の無い（または使われない）symbol を含む script になるので組まない
+            note("oracle.symbol_set_mismatch")
+            return False, None
         note("oracle.scripts_built")
 
-        symbol_names = query.symbol_names
+        mapping = query.mapping_items()
         lines: List[str] = [
             f"(set-logic {smt_logic_name(uses_float_theory=facts.uses_float_theory, uses_arrays=True, uses_uf=bool(facts.float_predicate_decls))})"
         ]
-        for identity, symbol in sorted(
-            symbol_names.items(), key=lambda item: _objvar_number(item[1])
-        ):
+        for identity, symbol in mapping:
             lines.append(f"(declare-const {symbol} (_ BitVec {facts.symbol_widths[identity]}))")
         for mem_bits in sorted(facts.memory_widths):
             lines.append(
@@ -340,7 +344,6 @@ class ConditionSMTOracle:
             lines.append(f"(declare-const {symbol_name} (_ BitVec {bit_width}))")
         lines.extend(sorted(facts.float_predicate_decls))
         lines.extend(call_smt_declaration_lines(facts.call_declarations))
-        mapping = query.mapping_items()
         for entry, index in zip(query.entries, query.order):
             condition = conditions[index]
             assertion = cls._condition_assertion(
@@ -362,9 +365,8 @@ class ConditionSMTOracle:
 
         expr = condition.expression
         key = RewriteIdentity.for_root(root_graph, mapping)
-        cacheable = use_cache and key.cacheable
         found, rendered = (False, None)
-        if cacheable:
+        if use_cache:
             found, rendered = cache_lookup(
                 cls.REWRITE_TABLE, key, limit=cls._REWRITE_CACHE_LIMIT
             )
@@ -372,7 +374,7 @@ class ConditionSMTOracle:
             rendered = cls._rewrite_expr_with_symbol_names(expr, symbol_names).to_smt(
                 float_mode="fp"
             )
-            if cacheable:
+            if use_cache:
                 cache_store(cls.REWRITE_TABLE, key, rendered, limit=cls._REWRITE_CACHE_LIMIT)
         if getattr(condition, "negated", False):
             rendered = f"(not {rendered})"

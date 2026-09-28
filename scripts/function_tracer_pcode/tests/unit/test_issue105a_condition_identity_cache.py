@@ -223,7 +223,11 @@ def _repr_sort_sites(tree):
 
 
 def test_d1_condition_simplification_has_no_repr_ordered_keys():
-    """D1: `analysis/condition/` の key・並べ替えに `repr` を使わない。
+    """D1-A（本 PR）: `analysis/condition/` の key・並べ替えに `repr` を使わない。
+
+    計画 D1 は 2 つの責務に分かれる。D1-A（`repr` 依存の条件 / query identity・並べ替えの
+    撤去）は本 PR、D1-B（`not cls._clauses_satisfiability(...)` の禁止）は `SatVerdict`
+    を入れる PR-105-B（`test_d1b_the_boolean_negation_of_dpll_has_one_owner_for_pr_105b`）。
 
     `analysis/returns/lifecycle.py` の scope key（storage の束縛の並べ替え）は対象外:
     その key は `AnalysisSnapshot` の意味 fingerprint（`analysis_scope_key`）に入るので、
@@ -237,6 +241,32 @@ def test_d1_condition_simplification_has_no_repr_ordered_keys():
         if sites:
             offenders[path.name] = sites
     assert offenders == {}
+
+
+def test_d1b_the_boolean_negation_of_dpll_has_one_owner_for_pr_105b():
+    """D1-B の引継ぎ: DPLL の二値の否定（`not cls._clauses_are_satisfiable(...)`）は 1 箇所だけ。
+
+    予算の無い今の DPLL は完全なので `not` は正確で、本 PR では消さない（三値の
+    `SatVerdict` と一体で PR-105-B が消す）。main には 3 箇所あったものを
+    `_clause_set_is_unsat` 1 つにまとめたので、PR-105-B が変える場所はそこだけになる。
+    増えたらこの test が落ちる。
+    """
+
+    tree = ast.parse((PACKAGE_ROOT / "analysis" / "condition" / "simplifier_cnf.py").read_text(encoding="utf-8"))
+    owners = []
+    for function in ast.walk(tree):
+        if not isinstance(function, ast.FunctionDef):
+            continue
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.UnaryOp)
+                and isinstance(node.op, ast.Not)
+                and isinstance(node.operand, ast.Call)
+                and isinstance(node.operand.func, ast.Attribute)
+                and node.operand.func.attr in {"_clauses_are_satisfiable", "_clauses_satisfiability"}
+            ):
+                owners.append(function.name)
+    assert owners == ["_clause_set_is_unsat"]
 
 
 def test_d1_the_ast_rule_detects_both_repr_forms():
@@ -905,6 +935,8 @@ def test_the_root_memo_does_not_keep_a_root_alive(scoped):
     gc.collect()
     assert alive() is None
     memo = scoped.store._roots.get("query_identity.root_graph")
+    # 回収の callback は消す予定を積むだけで、次の読み書き（ここでは `len`）で片付く
+    assert memo is None or len(memo) == 0
     entries = memo._entries.values() if memo is not None else ()
     assert all(entry[0]() is not None for entry in entries)
 
@@ -974,14 +1006,27 @@ def test_the_count_limit_still_evicts_the_oldest_first(scoped):
     assert [table.lookup(("key", index))[0] for index in range(4)] == [False, False, True, True]
 
 
-def test_the_weight_of_a_container_looks_only_one_level_deep():
+def test_the_weight_of_a_container_counts_distinct_objects_in_linear_time():
+    """入れ物の重みは distinct な入れ物の数（共有は 1 回）。木として展開しない。"""
+
     shared = ("leaf",)
     for _ in range(40):
         shared = (shared, shared)
-    # 共有された入れ子 tuple を木としてたどらない（たどると 2**40）
-    assert condition_cache.cache_weight(shared) == 3
-    assert condition_cache.cache_weight((_Weighted("a", 5), 1)) == 1 + 5 + 1
+    # 共有された入れ子 tuple（木なら 2**40 個）は distinct な 41 個
+    assert condition_cache.cache_weight(shared) == 41
+    assert condition_cache.cache_weight((_Weighted("a", 5), 1)) == 1 + 5
     assert condition_cache.cache_weight(None) == 1
+    # 深い入れ子も数える（1 段だけ見て 1 にしない）
+    nested = ()
+    for index in range(100):
+        nested = (nested, index)
+    assert condition_cache.cache_weight(nested) == 101
+
+
+def test_the_weight_of_a_string_grows_with_its_length():
+    assert condition_cache.cache_weight("x") == 1
+    assert condition_cache.cache_weight("x" * (10 * 1024)) == 11
+    assert condition_cache.cache_weight(("x" * (4 * 1024), "y")) == 1 + 4
 
 
 def test_identity_weights_count_the_graph_nodes_they_keep_alive():
@@ -1157,50 +1202,103 @@ def test_d13_dpll_decisions_and_satisfiability_calls_are_counted(monkeypatch, sc
     assert per_call["count"] == 1 and per_call["max"] == snapshot["counters"]["dpll.decisions"]
 
 
+def _note_plan_counters(metrics):
+    metrics.note("oracle.queries", 4)
+    metrics.note("cache.oracle.verdict.hit", 2)
+    metrics.note("cache.oracle.verdict.bucket_collision", 1)
+    metrics.note("oracle.unknown_hit", 1)
+    metrics.note("oracle.timeouts", 1)
+    metrics.note("cache.simplifier.implied.hit", 3)
+    metrics.note("cache.simplifier.conjunction_unsat.hit", 2)
+    metrics.note("cache.simplifier.implied.miss", 5)
+    metrics.note("dpll.satisfiability_calls", 6)
+    metrics.note("dpll.decisions", 9)
+    metrics.observe("dpll.decisions_per_call", 7)
+
+
+_PLAN_COUNTERS = {
+    "structural_key_cache_hit": 5,
+    "structural_key_cache_miss": 5,
+    "condition_oracle_query": 4,
+    "condition_oracle_cache_hit": 2,
+    "condition_oracle_unknown_hit": 1,
+    "condition_oracle_identity_miss_after_hash_hit": 1,
+    "condition_oracle_timeout": 1,
+    "condition_satisfiability_calls": 6,
+    "condition_dpll_decisions": 9,
+    "condition_dpll_decisions_per_call_max": 7,
+}
+
+
+def _bare_result(**changes):
+    from scripts.function_tracer_pcode.checker.result import EquivalenceResult
+
+    result = EquivalenceResult(
+        is_equivalent=None, function1_name="l", function2_name="r",
+        binary1_name="L", binary2_name="R", solver_results=None,
+    )
+    for name, value in changes.items():
+        setattr(result, name, value)
+    return result
+
+
+def _attach_output_diagnostics(result):
+    from scripts.function_tracer_pcode.checker import output_preparation
+
+    prepared = SimpleNamespace(plan=SimpleNamespace(to_diagnostic=lambda: {}))
+    policy = SimpleNamespace(to_diagnostic=lambda: {})
+    output_preparation._attach_budget_diagnostics(result, prepared, policy)
+
+
 def test_d3_counters_reach_pairwise_debug_stats_under_the_plan_names(scoped):
     """D3: pair の要約が `pairwise_debug_stats` に計画 §6.B-1 の名前で載る（0 は載せない）。"""
 
-    from scripts.function_tracer_pcode.checker.result_assembly import _with_condition_counters
-
-    scoped.metrics.note("oracle.queries", 4)
-    scoped.metrics.note("cache.oracle.verdict.hit", 2)
-    scoped.metrics.note("cache.oracle.verdict.bucket_collision", 1)
-    scoped.metrics.note("oracle.unknown_hit", 1)
-    scoped.metrics.note("oracle.timeouts", 1)
-    scoped.metrics.note("cache.simplifier.implied.hit", 3)
-    scoped.metrics.note("cache.simplifier.formula_implies.hit", 2)
-    scoped.metrics.note("cache.simplifier.implied.miss", 5)
-    scoped.metrics.note("dpll.satisfiability_calls", 6)
-    scoped.metrics.note("dpll.decisions", 9)
-    scoped.metrics.observe("dpll.decisions_per_call", 7)
-    stats = _with_condition_counters({"existing_counter": 1})
-    assert stats == {
-        "existing_counter": 1,
-        "structural_key_cache_hit": 5,
-        "structural_key_cache_miss": 5,
-        "condition_oracle_query": 4,
-        "condition_oracle_cache_hit": 2,
-        "condition_oracle_unknown_hit": 1,
-        "condition_oracle_identity_miss_after_hash_hit": 1,
-        "condition_oracle_timeout": 1,
-        "condition_satisfiability_calls": 6,
-        "condition_dpll_decisions": 9,
-        "condition_dpll_decisions_per_call_max": 7,
-    }
+    _note_plan_counters(scoped.metrics)
+    result = _bare_result(pairwise_debug_stats={"existing_counter": 1})
+    _attach_output_diagnostics(result)
+    assert result.to_dict()["pairwise_debug_stats"] == {"existing_counter": 1, **_PLAN_COUNTERS}
+    # 同じ snapshot から写すので、診断の counter と食い違わない
+    counters = result.to_dict()["diagnostics"]["condition_simplify"]["counters"]
+    assert counters["oracle.queries"] == _PLAN_COUNTERS["condition_oracle_query"]
 
 
 def test_d3_nothing_is_added_outside_a_pair_scope():
-    from scripts.function_tracer_pcode.checker.result_assembly import _with_condition_counters
-
     assert active_condition_metrics() is None
-    original = {"existing_counter": 1}
-    assert _with_condition_counters(original) is original
-    assert _with_condition_counters(None) is None
+    result = _bare_result(pairwise_debug_stats={"existing_counter": 1})
+    _attach_output_diagnostics(result)
+    assert result.to_dict()["pairwise_debug_stats"] == {"existing_counter": 1}
 
 
-def test_d3_the_result_assembly_uses_the_pair_summary():
+def test_d3_stage_merges_do_not_count_the_pair_totals_twice(scoped):
+    """counter は pair の累計なので、出力で 1 回だけ写す（stage の合算に乗せない）。
+
+    旧 head は結果の組み立て（stage / 再試行ごと）で累計を足し、stage の counter を
+    合算する `merge_stage_debug_statistics` がそれをさらに足して数え過ぎた。
+    """
+
+    from scripts.function_tracer_pcode.checker.result_assembly import assemble_equivalence_result
+    from scripts.function_tracer_pcode.proof.obligations.stage_runner import (
+        merge_stage_debug_statistics,
+    )
+
+    _note_plan_counters(scoped.metrics)
     source = (PACKAGE_ROOT / "checker" / "result_assembly.py").read_text(encoding="utf-8")
-    assert "pairwise_debug_stats=_with_condition_counters(strategy_result.pairwise_debug_stats)" in source
+    assert "condition_metrics" not in source and "pairwise_debug_counters" not in source
+    assert assemble_equivalence_result  # 組み立ては counter を知らない
+
+    accumulated = {}
+    stages = [
+        _bare_result(pairwise_debug_stats={"timeout_fallback_attempts": 1}),
+        # 旧 head が書いていた stale な要約（stage ごとの累計）が残っていても上書きされる
+        _bare_result(pairwise_debug_stats={"timeout_fallback_attempts": 2, "condition_oracle_query": 99}),
+    ]
+    for stage in stages:
+        merge_stage_debug_statistics(accumulated, stage)
+    final = stages[-1]
+    _attach_output_diagnostics(final)
+    stats = final.to_dict()["pairwise_debug_stats"]
+    assert stats["timeout_fallback_attempts"] == 3
+    assert {key: stats[key] for key in _PLAN_COUNTERS} == _PLAN_COUNTERS
 
 
 def test_d13_counters_reach_the_result_json(scoped):
@@ -1270,3 +1368,258 @@ def test_d9_attempt_records_do_not_call_the_type_name_again():
         assert signature.to_dict()["return_type"] == "int"
         assert signature.format_return_type() == "int"
     assert _DataType.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# 再発防止の契約（修正ラリーで後から見つかった種類の欠陥を、種類ごとに固定する）
+# ---------------------------------------------------------------------------
+
+
+class _Opaque:
+    """式の値に入ると graph が比較できなくなる Python object。"""
+
+
+def _uncacheable_condition():
+    odd = Expression(ExpressionType.CONSTANT, value=_Opaque(), size=4)
+    return Condition(Expression.binary_op("INT_EQUAL", _param("param_1", 0), odd))
+
+
+def test_uncacheable_identities_are_equal_only_over_the_same_root_objects(scoped):
+    """比較できない identity は同じ root object の上でだけ一致する（再入 guard 用）。
+
+    旧 head は `self is other` のときしか一致せず、別々に作った同じ問いの identity が
+    再入 guard の集合で見つからなかった（guard が効かない）。
+    """
+
+    condition = _uncacheable_condition()
+    first = _query(condition)
+    again = _query(condition)
+    assert not first.cacheable
+    assert first == again and hash(first) == hash(again)
+    assert again in {first}
+    # 構造が同じでも別の object は別（意味の一致とは言わない）
+    assert _query(_uncacheable_condition()) != first
+    # 向きが違えば別
+    assert _query(condition.negate()) != first
+    # 同じ object の多重集合なら入力順に依らない
+    other = _uncacheable_condition()
+    assert _query(condition, other) == _query(other, condition)
+
+
+def test_tables_refuse_uncacheable_keys_in_one_place(scoped):
+    condition = _uncacheable_condition()
+    key = _query(condition)
+    cache_store("t", key, True)
+    assert cache_lookup("t", key) == (False, None)
+    assert len(scoped.store.table("t")) == 0
+    assert scoped.metrics.count("cache.t.uncacheable") == 1
+    # consumer は判定を持たない（oracle も simplifier も表に任せる）
+    for relative in ("analysis/condition/smt_oracle.py", "analysis/condition/simplifier.py",
+                     "analysis/condition/simplifier_cnf.py"):
+        text = (PACKAGE_ROOT / relative).read_text(encoding="utf-8")
+        assert ".cacheable" not in text, relative
+
+
+def test_the_reentry_guard_stops_an_uncacheable_conjunction(monkeypatch, scoped):
+    """比較できない条件でも、同じ conjunction の判定の途中の再入は打ち切られる。"""
+
+    calls = []
+    condition = _uncacheable_condition()
+
+    def _recursive(cls, condition_list):
+        calls.append(len(condition_list))
+        if len(calls) > 5:
+            raise AssertionError("re-entry guard did not stop the recursion")
+        return cls._conjunction_is_unsat([condition])
+
+    monkeypatch.setattr(
+        ConditionSimplifier, "_compute_conjunction_is_unsat", classmethod(_recursive)
+    )
+    assert ConditionSimplifier._formula_is_unsat([condition]) is None
+    assert calls == [1]
+    assert scoped.metrics.count("simplifier.reentry_guard_hit") == 1
+
+
+def test_an_answer_built_on_a_reentry_guard_hit_is_not_remembered(monkeypatch, scoped):
+    """再入 guard で打ち切った問いを材料にした答えは覚えない（evict / 呼ばれ方で答えが変わる）。"""
+
+    outer = [_slt(_param("param_1", 0), _const(0))]
+    inner = [_slt(_param("param_1", 0), _const(1))]
+    original = ConditionSimplifier._compute_conjunction_is_unsat.__func__
+
+    def _compute(cls, condition_list):
+        if condition_list[0].equals(outer[0]):
+            # outer の判定の途中で inner を聞き、inner の判定の途中で outer を聞く（再入）
+            cls._conjunction_is_unsat(inner)
+            return original(cls, condition_list)
+        cls._conjunction_is_unsat(outer)
+        return original(cls, condition_list)
+
+    monkeypatch.setattr(
+        ConditionSimplifier, "_compute_conjunction_is_unsat", classmethod(_compute)
+    )
+    assert ConditionSimplifier._formula_is_unsat(outer) is False
+    table = ConditionSimplifier.CONJUNCTION_UNSAT_TABLE
+    # inner は outer の再入の打ち切りを材料にしたので覚えない、outer もその inner を材料にしたので覚えない
+    assert cache_lookup(table, _query(*inner)) == (False, None)
+    assert cache_lookup(table, _query(*outer)) == (False, None)
+    assert scoped.metrics.count("simplifier.guard_tainted_not_stored") == 2
+    # 打ち切りの無い判定は覚える
+    monkeypatch.setattr(
+        ConditionSimplifier, "_compute_conjunction_is_unsat", classmethod(original)
+    )
+    assert ConditionSimplifier._formula_is_unsat(inner) is False
+    assert cache_lookup(table, _query(*inner)) == (True, False)
+
+
+def test_the_implication_cache_does_not_remember_a_guard_tainted_answer(monkeypatch, scoped):
+    goal = _slt(_param("param_1", 0), _const(5))
+    context = [_slt(_param("param_1", 0), _const(0))]
+
+    def _reenter(cls, context_conditions, condition):
+        # 含意の判定の途中で同じ含意を聞く（打ち切られて False）
+        assert cls._condition_is_implied(goal, list(context)) is False
+        return None
+
+    monkeypatch.setattr(ConditionSimplifier, "_formula_implies", classmethod(_reenter))
+    # 答え自体は scalar の含意で出る（p1 < 0 ⟹ p1 < 5）が、途中で再入を打ち切ったので覚えない
+    assert ConditionSimplifier._condition_is_implied(goal, list(context)) is True
+    key = query_identity.ImplicationIdentity.of(goal, context, None)
+    assert cache_lookup(ConditionSimplifier.IMPLIED_TABLE, key) == (False, None)
+    assert scoped.metrics.count("simplifier.guard_tainted_not_stored") == 1
+
+
+def test_formula_is_unsat_and_formula_implies_share_one_owner_and_table(scoped):
+    """文脈 ∧ ¬条件 の充足不能性は `_formula_is_unsat` と `_formula_implies` で同じ問い。"""
+
+    context = [_slt(_param("param_1", 0), _const(0))]
+    goal = _slt(_param("param_1", 0), _const(5))
+    assert ConditionSimplifier._formula_implies(context, goal) is True
+    assert ConditionSimplifier._formula_is_unsat(context + [goal.negate()]) is True
+    assert scoped.metrics.count("cache.simplifier.conjunction_unsat.hit") == 1
+    assert not hasattr(ConditionSimplifier, "FORMULA_UNSAT_TABLE")
+    assert not hasattr(ConditionSimplifier, "FORMULA_IMPLIES_TABLE")
+
+
+@pytest.mark.parametrize("site", ["oracle", "simplifier"])
+def test_an_analysis_limitation_is_never_remembered(monkeypatch, scoped, site):
+    from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+
+    conditions = [_slt(_param("param_1", 0), _const(0))]
+    limitation = AnalysisLimitation("analysis_budget_exceeded", "probe", site="test")
+    fake = _FakeZ3(raises=limitation)
+    monkeypatch.setattr(ConditionSMTOracle, "_z3", fake)
+    monkeypatch.setattr(ConditionSMTOracle, "_available", True)
+    monkeypatch.setattr(ConditionSMTOracle, "_availability_checked", True)
+    call = (
+        (lambda: ConditionSMTOracle.conjunction_is_unsat(conditions))
+        if site == "oracle"
+        else (lambda: ConditionSimplifier._formula_is_unsat(conditions))
+    )
+    with pytest.raises(AnalysisLimitation):
+        call()
+    # 判定の表（oracle の verdict・条件簡約の答え）には何も残らない。書き換えの表は
+    # solver を呼ぶ前に作った描画（root と mapping だけで決まる値）なので対象外
+    for name in (ConditionSMTOracle.VERDICT_TABLE, ConditionSimplifier.CONJUNCTION_UNSAT_TABLE,
+                 ConditionSimplifier.IMPLIED_TABLE):
+        assert len(scoped.store.table(name)) == 0, name
+
+
+def test_answers_do_not_depend_on_eviction(monkeypatch):
+    """同じ問いの列は、表が 1 件しか持てなくても・十分持てても同じ答えになる。"""
+
+    def _questions():
+        p1, p2 = _param("param_1", 0), _param("param_2", 1)
+        atoms = [_slt(p1, _const(value)) for value in (0, 1, 5)] + [
+            _eq(p2, _const(3)), _slt(_const(2), p1),
+        ]
+        answers = []
+        for round_ in range(3):
+            for left in atoms:
+                for right in atoms:
+                    answers.append(ConditionSimplifier._formula_is_unsat([left, right]))
+                    answers.append(ConditionSimplifier._condition_is_implied(right, [left]))
+                    answers.append(ConditionSMTOracle.conjunction_is_unsat([left, right.negate()]))
+            atoms = [Condition(atom.expression, atom.negated) for atom in atoms]  # 別 object
+        return answers
+
+    with condition_cache_scope(), condition_metrics_scope():
+        roomy = _questions()
+    monkeypatch.setattr(condition_cache, "DEFAULT_TABLE_WEIGHT_LIMIT", 1)
+    monkeypatch.setattr(condition_cache, "DEFAULT_ROOT_MEMO_WEIGHT_LIMIT", 1)
+    with condition_cache_scope(), condition_metrics_scope() as metrics:
+        cramped = _questions()
+        assert metrics.count("cache.oracle.verdict.hit") == 0
+    unscoped = _questions()
+    assert roomy == cramped == unscoped
+
+
+def test_oracle_symbols_and_declarations_come_from_one_traversal(monkeypatch, scoped):
+    """`objvar` の割当（graph の symbol）と幅の宣言は同じ node の集合から来る。
+
+    食い違ったら script を組まない（宣言の無い symbol を solver へ渡さない）。
+    """
+
+    from scripts.function_tracer_pcode.analysis.condition import smt_oracle
+
+    conditions = [_slt(_param("param_1", 0), _param("param_2", 1))]
+    usable, script = ConditionSMTOracle._build_script(conditions)
+    assert usable and script.count("declare-const objvar_") == 2
+    source = (PACKAGE_ROOT / "analysis" / "condition" / "smt_oracle.py").read_text(encoding="utf-8")
+    facts_source = source[source.index("def _root_solver_facts"):source.index("def _merge_root_facts")]
+    assert "walk_dag_nodes" in facts_source and "_iter_expression_nodes" not in facts_source
+
+    original = smt_oracle._root_solver_facts
+
+    def _drop_a_width(expr):
+        facts = original(expr)
+        return facts._replace(symbol_widths=facts.symbol_widths[:1])
+
+    with condition_cache_scope():
+        monkeypatch.setattr(smt_oracle, "_root_solver_facts", _drop_a_width)
+        assert ConditionSMTOracle._build_script(conditions) == (False, None)
+        assert ConditionSMTOracle.conjunction_is_unsat(conditions) is None
+
+
+def test_the_weakref_callback_only_queues_the_entry_for_removal(scoped):
+    """回収の callback は表を触らない（GC はどの bytecode の間でも走る）。次の読み書きで片付く。"""
+
+    import gc
+
+    root = _slt(_param("param_1", 0), _const(0)).expression
+    root_memo("kind", root, lambda _root: "value")
+    memo = scoped.store._roots["kind"]
+    del root
+    gc.collect()
+    assert len(memo._entries) == 1 and len(memo._dead) == 1
+    other = _slt(_param("param_1", 0), _const(9)).expression
+    root_memo("kind", other, lambda _root: "other")
+    assert len(memo._dead) == 0 and len(memo._entries) == 1
+
+
+def test_a_strongly_held_root_counts_toward_the_memo_weight(monkeypatch, scoped):
+    """弱参照を持てない root（tuple の構造 key）は memo が生かすので、その大きさも重みに入る。"""
+
+    monkeypatch.setattr(condition_cache, "DEFAULT_ROOT_MEMO_WEIGHT_LIMIT", 50)
+    big_term = ()
+    for index in range(100):
+        big_term = (big_term, index)
+    root_memo("kind", big_term, lambda _root: 1)
+    assert scoped.metrics.count("memo.kind.too_large") == 1
+    assert len(scoped.store._roots["kind"]) == 0
+
+
+def test_implication_identities_never_merge_under_forced_collisions(forced_collisions, scoped):
+    goal = _slt(_param("param_1", 0), _const(5))
+    context_a = [_slt(_param("param_1", 0), _const(0))]
+    context_b = [_slt(_param("param_1", 0), _const(9))]
+    key = query_identity.ImplicationIdentity.of(goal, context_a, None)
+    cache_store("t", key, True)
+    assert cache_lookup("t", query_identity.ImplicationIdentity.of(goal, context_a, None)) == (True, True)
+    assert cache_lookup("t", query_identity.ImplicationIdentity.of(goal, context_b, None)) == (False, None)
+    assert cache_lookup(
+        "t", query_identity.ImplicationIdentity.of(goal, context_a, {("a", "INT_EQUAL", "b", True)})
+    ) == (False, None)
+    assert cache_lookup(
+        "t", query_identity.ImplicationIdentity.of(goal.negate(), context_a, None)
+    ) == (False, None)

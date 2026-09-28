@@ -35,8 +35,9 @@ structural identity（`core/structural.py`、可換の正規化あり・runtime 
 from __future__ import annotations
 
 import hashlib
+import weakref
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.analysis.condition.condition_cache import root_memo
 from scripts.function_tracer_pcode.core.condition_metrics import note
@@ -394,6 +395,12 @@ class SolverQueryIdentity:
       graph を完全比較すれば宣言も比べたことになる（別の field として持たない）。
 
     `__hash__` は `fast`（bucket 専用）、`__eq__` は `matches`（完全比較）。
+
+    **比較できない identity**（`cacheable` が偽: graph のどれかが比較できない）は、同じ
+    root object の上に作った identity とだけ一致する（`instances`、root への弱参照）。
+    意味の一致ではなく「同じ入力の問いの途中か」だけを表すので、表には覚えない
+    （`condition_cache` が `cacheable` で拒む）。これが無いと、再入の guard（同じ問いの
+    途中で同じ問いが来たら打ち切る）が比較できない条件で効かなくなる。
     """
 
     fast: bytes
@@ -403,6 +410,8 @@ class SolverQueryIdentity:
     order: Tuple[int, ...]
     symbol_names: Mapping[Any, str]
     cacheable: bool
+    #: 比較できない identity だけが持つ、(向き, root を指す参照) の並び（`entries` と同じ順）
+    instances: Tuple[Tuple[bool, Any], ...] = ()
 
     @classmethod
     def from_conditions(
@@ -420,6 +429,13 @@ class SolverQueryIdentity:
         raw.sort(key=lambda item: (item[0], item[1], item[2]))
         entries = tuple(QueryEntry(negated, graph) for _digest, negated, _index, graph in raw)
         order = tuple(index for _digest, _negated, index, _graph in raw)
+        cacheable = all(entry.graph.cacheable for entry in entries)
+        instances: Tuple[Tuple[bool, Any], ...] = ()
+        if not cacheable:
+            instances = tuple(
+                (negated, _instance_reference(getattr(conditions[index], "expression", None)))
+                for _digest, negated, index, _graph in raw
+            )
         symbol_names = _canonical_symbol_names(entries)
         digest = hashlib.blake2b(digest_size=16, person=_QUERY_PERSON)
         digest.update(encode_stable_atoms((QUERY_IDENTITY_SCHEMA, _context_atoms(render_context))))
@@ -434,7 +450,8 @@ class SolverQueryIdentity:
             entries=entries,
             order=order,
             symbol_names=symbol_names,
-            cacheable=all(entry.graph.cacheable for entry in entries),
+            cacheable=cacheable,
+            instances=instances,
         )
 
     def cache_weight(self) -> int:
@@ -449,14 +466,18 @@ class SolverQueryIdentity:
             return True
         if not isinstance(other, SolverQueryIdentity):
             return False
-        if not (self.cacheable and other.cacheable):
-            return False
         if self.fast != other.fast:
             return False
         if self.schema != other.schema or self.render_context != other.render_context:
             return False
         if len(self.entries) != len(other.entries):
             return False
+        if not (self.cacheable and other.cacheable):
+            return (
+                not self.cacheable
+                and not other.cacheable
+                and _same_instances(self.instances, other.instances)
+            )
         for left, right in zip(self.entries, other.entries):
             if left.negated != right.negated:
                 return False
@@ -494,11 +515,48 @@ class SolverQueryIdentity:
         )
 
 
+#: 条件に式が無いときの root の代わり（`None` は「回収済み」と区別できないので使わない）
+_NO_EXPRESSION = object()
+
+
+def _instance_reference(expression: Any) -> Callable[[], Any]:
+    """root object を指す参照（弱参照。持てない値は強参照、式が無ければ `_NO_EXPRESSION`）。"""
+
+    if expression is None:
+        return lambda: _NO_EXPRESSION
+    try:
+        return weakref.ref(expression)
+    except TypeError:
+        return lambda: expression
+
+
+def _same_instances(left: Tuple[Tuple[bool, Any], ...], right: Tuple[Tuple[bool, Any], ...]) -> bool:
+    """同じ root object の多重集合か（どちらかが回収済みなら一致しない）。
+
+    `id()` は両方の object が生きている今この瞬間の比較にだけ使い、保存しない。
+    """
+
+    def _live(instances):
+        rows = []
+        for negated, reference in instances:
+            target = reference()
+            rows.append((negated, id(target), target is None))
+        return sorted(rows)
+
+    left_rows = _live(left)
+    right_rows = _live(right)
+    if any(dead for _negated, _id, dead in left_rows + right_rows):
+        return False
+    return left_rows == right_rows
+
+
 def _context_atoms(context: RenderContext) -> Tuple[Any, ...]:
     return (context.float_mode, context.render_schema)
 
 
 def _objvar_index(name: str) -> int:
+    """`objvar_<n>` の n（symbol 名の形はこの module の `_canonical_symbol_names` が決める）。"""
+
     return int(name.rsplit("_", 1)[1])
 
 
@@ -616,7 +674,65 @@ class RewriteIdentity:
         )
 
 
+# ---------------------------------------------------------------------------
+# ImplicationIdentity（条件簡約の「文脈が条件を含意するか」の問い）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, eq=False)
+class ImplicationIdentity:
+    """含意の問い（文脈・条件・呼び出し側が渡した正規形の集合）の identity。
+
+    答えは 3 つすべてに依存する（正規形の集合が空か文脈から作ったものかで答えが
+    変わり得る）ので、どれも落とさない。文脈と条件は `SolverQueryIdentity`
+    （bucket → 完全比較）、正規形の集合は primitive の tuple の集合の完全比較。
+    """
+
+    context: SolverQueryIdentity
+    condition: SolverQueryIdentity
+    implied_norms: FrozenSet[Any]
+
+    @classmethod
+    def of(cls, condition: Any, context: Sequence[Any], implied_norms: Any) -> "ImplicationIdentity":
+        return cls(
+            context=SolverQueryIdentity.from_conditions(context),
+            condition=SolverQueryIdentity.from_conditions((condition,)),
+            implied_norms=frozenset(implied_norms or ()),
+        )
+
+    @property
+    def cacheable(self) -> bool:
+        return self.context.cacheable and self.condition.cacheable
+
+    def cache_weight(self) -> int:
+        return 1 + self.context.cache_weight() + self.condition.cache_weight() + len(self.implied_norms)
+
+    def __eq__(self, other: Any) -> bool:
+        if self is other:
+            return True
+        if not isinstance(other, ImplicationIdentity):
+            return False
+        return (
+            self.condition == other.condition
+            and self.context == other.context
+            and self.implied_norms == other.implied_norms
+        )
+
+    def __ne__(self, other: Any) -> bool:
+        return not self.__eq__(other)
+
+    def __hash__(self) -> int:
+        return hash((self.context.fast, self.condition.fast, len(self.implied_norms)))
+
+    def __repr__(self) -> str:
+        return (
+            f"ImplicationIdentity(context={len(self.context)}, "
+            f"implied_norms={len(self.implied_norms)}, fast={self.condition.fast.hex()[:12]})"
+        )
+
+
 __all__ = [
+    "ImplicationIdentity",
     "ORACLE_RENDER_CONTEXT",
     "QUERY_IDENTITY_SCHEMA",
     "REWRITE_IDENTITY_SCHEMA",

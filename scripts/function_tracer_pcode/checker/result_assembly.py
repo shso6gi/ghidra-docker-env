@@ -29,8 +29,6 @@ from __future__ import annotations
 import time
 from typing import Any, Callable, Dict, Optional
 
-from scripts.function_tracer_pcode.core.condition_metrics import pairwise_debug_counters
-
 from scripts.function_tracer_pcode.core.errors import (
     AnalysisLimitation,
     InternalError,
@@ -44,21 +42,6 @@ from scripts.function_tracer_pcode.core import FunctionSignature, live_values
 from scripts.function_tracer_pcode.core import read_limits
 from scripts.function_tracer_pcode.core.render_smt import UnknownSmtExtensionWidthError
 from scripts.function_tracer_pcode.smt import ParallelResult
-
-
-def _with_condition_counters(stats: Optional[Dict[str, int]]) -> Optional[Dict[str, int]]:
-    """strategy の counter に、pair の条件簡約・条件 oracle の要約を足す（Issue #105 PR-105-A）。
-
-    要約は pair の scope の今までの累計（再試行の phase を含む）。判定には使わない。
-    scope の外（pair 境界を通らない呼び出し）では何も足さない。
-    """
-
-    counters = pairwise_debug_counters()
-    if not counters:
-        return stats
-    merged = dict(stats or {})
-    merged.update(counters)
-    return merged
 
 
 def assemble_equivalence_result(
@@ -152,7 +135,7 @@ def assemble_equivalence_result(
             'unknown_pairs': strategy_result.unknown_pairs,
             'error_pairs': strategy_result.error_pairs,
         } if strategy_result.total_pairs > 0 else None,
-        pairwise_debug_stats=_with_condition_counters(strategy_result.pairwise_debug_stats),
+        pairwise_debug_stats=strategy_result.pairwise_debug_stats,
         unknown_reasons=strategy_result.unknown_reasons,
         error_message=strategy_result.error_message,
         failure_status=strategy_result.error_kind,

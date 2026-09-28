@@ -30,7 +30,11 @@ consumer（何を覚えるか）          smt_oracle（verdict・書き換え）
   超えたら **古い entry から** 捨てる（FIFO、決定的）。件数だけでは 1 件の大きさが
   抑えられず、root の式が回収された後も key の中の graph が上限の件数まで残る
   （長く走る pair で RSS が数 GB 増えた実測がある）。重みの定義は identity の型が持ち
-  （`cache_weight()`）、表は中身を知らない。捨てても答えは変わらない（miss になるだけ）。
+  （`cache_weight()`）、それを持たない値は distinct な入れ物の数で量る（共有を 1 回だけ
+  数えるので線形時間）。捨てても答えは変わらない（miss になるだけ）。
+* **覚えてよい key かは key の型が決める**（`cacheable`）。`cacheable` が偽の key
+  （比較できない graph を含む identity）は表が受け付けない（lookup は miss、store は
+  捨てる）。consumer ごとに同じ判定を書かない。
 
 保持の仕方は `core/budget_policy` の scope と同じ module 単位の stack（contextvar に
 すると solver worker thread から見えなくなる）。
@@ -58,30 +62,75 @@ DEFAULT_ROOT_MEMO_LIMIT = 16384
 DEFAULT_ROOT_MEMO_WEIGHT_LIMIT = 100_000
 
 
-def cache_weight(value: Any) -> int:
-    """値が cache の中で生かす量の目安（1 以上）。
+#: 文字列・byte 列はこの byte 数ごとに重み 1（graph の node 1 つが値の複製で 1〜2 KB
+#: を占めるのと釣り合わせる）。短いものは入れ物の要素として重み 0
+_BYTES_PER_WEIGHT = 1024
+_CONTAINERS = (tuple, list, set, frozenset, dict)
 
-    `cache_weight()` を持つ値（identity の型）はそれに従う。tuple / list / set /
-    frozenset は **1 段だけ** 見て、要素ごとに `cache_weight()` があればその値、無ければ 1 を
-    足す（+1）。入れ子の container は再帰しない: 共有された tuple の DAG を木として
-    たどると指数時間になるので、量を数えたい値は自分で `cache_weight()` を持つ。
-    それ以外は 1。
-    """
 
+def _own_weight(value: Any) -> Optional[int]:
     weigh = getattr(value, "cache_weight", None)
     if callable(weigh):
         return max(1, int(weigh()))
-    if isinstance(value, (tuple, list, set, frozenset)):
-        total = 1
-        for item in value:
-            item_weigh = getattr(item, "cache_weight", None)
-            total += max(1, int(item_weigh())) if callable(item_weigh) else 1
-        return total
-    return 1
+    return None
+
+
+def cache_weight(value: Any) -> int:
+    """値が cache の中で生かす量の目安（1 以上）。
+
+    * `cache_weight()` を持つ値（identity の型）はそれに従う（中は辿らない）。
+    * tuple / list / set / frozenset / dict は、辿れる **distinct な** 入れ物 1 つにつき 1、
+      中の `cache_weight()` を持つ値はその重み（distinct なものを 1 回）、文字列・byte 列は
+      `_BYTES_PER_WEIGHT` ごとに 1 を足す。共有された部分は 1 回だけ数える（`id()` で
+      訪問済みを覚える）ので、入れ子の tuple の DAG でも distinct な object の数に比例する
+      時間で終わる（木として展開しない）。
+    * 文字列・byte 列そのものは `1 + len // _BYTES_PER_WEIGHT`、それ以外は 1。
+    """
+
+    own = _own_weight(value)
+    if own is not None:
+        return own
+    if isinstance(value, (str, bytes)):
+        return 1 + len(value) // _BYTES_PER_WEIGHT
+    if not isinstance(value, _CONTAINERS):
+        return 1
+    total = 0
+    visited = set()
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        own = _own_weight(current)
+        if own is not None:
+            total += own
+            continue
+        if isinstance(current, (str, bytes)):
+            total += len(current) // _BYTES_PER_WEIGHT
+            continue
+        if not isinstance(current, _CONTAINERS):
+            continue
+        total += 1
+        if isinstance(current, dict):
+            pending.extend(current.keys())
+            pending.extend(current.values())
+        else:
+            pending.extend(current)
+    return max(1, total)
+
+
+def key_is_cacheable(key: Any) -> bool:
+    """表に覚えてよい key か（key の型の `cacheable`。持たない値は覚えてよい）。"""
+
+    return bool(getattr(key, "cacheable", True))
 
 
 class IdentityTable:
-    """identity を key にした bounded な表（bucket → 完全比較、件数と重みで FIFO）。"""
+    """identity を key にした bounded な表（bucket → 完全比較、件数と重みで FIFO）。
+
+    `cacheable` が偽の key は受け付けない（lookup は miss、store は何もしない）。
+    """
 
     __slots__ = ("name", "limit", "weight_limit", "_buckets", "_entries", "_weight", "_serial")
 
@@ -111,6 +160,9 @@ class IdentityTable:
         return None
 
     def lookup(self, key: Any) -> Tuple[bool, Any]:
+        if not key_is_cacheable(key):
+            note(f"cache.{self.name}.uncacheable")
+            return False, None
         key_hash = hash(key)
         bucket = self._buckets.get(key_hash)
         if bucket:
@@ -123,6 +175,8 @@ class IdentityTable:
         return False, None
 
     def store(self, key: Any, value: Any) -> None:
+        if not key_is_cacheable(key):
+            return
         key_hash = hash(key)
         weight = cache_weight(key) + cache_weight(value)
         serial = self._find(key, key_hash)
@@ -156,43 +210,64 @@ class IdentityTable:
 
 
 class _RootMemo:
-    """root object ごとの memo 1 種（弱参照、件数と重みで FIFO）。"""
+    """root object ごとの memo 1 種（弱参照、件数と重みで FIFO）。
 
-    __slots__ = ("kind", "_entries", "_weight")
+    root が回収されたときの弱参照の callback は **消す予定を積むだけ** で、表そのものは
+    触らない（callback は GC の途中、どの thread のどの bytecode の間でも走り得る。
+    `put` が古い順に捨てている最中に表の大きさが変わると壊れる）。積んだ予定は次の
+    `get` / `put`（store の lock の中）で片付ける。
+    """
+
+    __slots__ = ("kind", "_entries", "_weight", "_dead")
 
     def __init__(self, kind: str) -> None:
         self.kind = kind
         #: id(root) → (root を指す参照, 値, 重み)。挿入順（古い順）
         self._entries: Dict[int, Tuple[Callable[[], Any], Any, int]] = {}
         self._weight = 0
+        #: 回収された root の (id, 参照)。callback が積み、`_reap` が片付ける
+        self._dead: List[Tuple[int, Any]] = []
 
     def __len__(self) -> int:
+        self._reap()
         return len(self._entries)
 
     @property
     def weight(self) -> int:
+        self._reap()
         return self._weight
 
+    def _reap(self) -> None:
+        while self._dead:
+            key, reference = self._dead.pop()
+            self._discard(key, reference)
+
     def get(self, root: Any) -> Tuple[bool, Any]:
+        self._reap()
         entry = self._entries.get(id(root))
         if entry is not None and entry[0]() is root:
             return True, entry[1]
         return False, None
 
     def put(self, root: Any, value: Any) -> None:
+        self._reap()
         key = id(root)
-        self.discard(key, None)
+        self._discard(key, None)
+        reference, strong = _root_reference(root, self._dead, key)
         weight = cache_weight(value)
+        if strong:
+            # 弱参照を持てない root（tuple の構造 key など）は memo が生かすので重みに入れる
+            weight += cache_weight(root)
         if weight > DEFAULT_ROOT_MEMO_WEIGHT_LIMIT:
             note(f"memo.{self.kind}.too_large")
             return
-        self._entries[key] = (_root_reference(root, self, key), value, weight)
+        self._entries[key] = (reference, value, weight)
         self._weight += weight
         while len(self._entries) > DEFAULT_ROOT_MEMO_LIMIT or self._weight > DEFAULT_ROOT_MEMO_WEIGHT_LIMIT:
-            self.discard(next(iter(self._entries)), None)
+            self._discard(next(iter(self._entries)), None)
             note(f"memo.{self.kind}.evicted")
 
-    def discard(self, key: int, reference: Any) -> None:
+    def _discard(self, key: int, reference: Any) -> None:
         """entry を消す（`reference` を渡したら、その参照の entry のときだけ）。"""
 
         entry = self._entries.get(key)
@@ -256,24 +331,24 @@ class ConditionCacheStore:
                     table.clear()
 
 
-def _root_reference(root: Any, memo: "_RootMemo", key: int) -> Callable[[], Any]:
-    """root を指す参照（取り出すと root か `None`）。
+def _root_reference(root: Any, dead: List[Tuple[int, Any]], key: int) -> Tuple[Callable[[], Any], bool]:
+    """root を指す参照（取り出すと root か `None`）と、それが強参照か。
 
     式 object は弱参照で持つ: memo が root を生かし続けると、pair の間ずっと本来は
-    捨てられる DAG が残る。root が回収されたら entry も消す（callback は回収の途中、
-    memory が再利用される前に走るので、同じ `id()` の別の object と取り違えない）。
-    値は root だけで決まるので、root が消えた entry は誰にも引かれず、捨てても答えは
-    変わらない。弱参照を持てない値（tuple の構造 key など）は強参照で持つ（件数と重みの
-    上限で有界）。
+    捨てられる DAG が残る。root が回収されたら entry を消す予定を積む（callback は
+    回収の途中、memory が再利用される前に走るので、同じ `id()` の別の object の entry と
+    取り違えない: 消すのは積んだ参照の entry だけ）。値は root だけで決まるので、root が
+    消えた entry は誰にも引かれず、捨てても答えは変わらない。弱参照を持てない値
+    （tuple の構造 key など）は強参照で持つ（件数と重みの上限で有界）。
     """
 
-    def _evict(reference: Any) -> None:
-        memo.discard(key, reference)
+    def _collected(reference: Any) -> None:
+        dead.append((key, reference))
 
     try:
-        return weakref.ref(root, _evict)
+        return weakref.ref(root, _collected), False
     except TypeError:
-        return lambda: root
+        return (lambda: root), True
 
 
 _SCOPE_LOCK = threading.Lock()
@@ -348,6 +423,7 @@ __all__ = [
     "cache_lookup",
     "cache_weight",
     "cache_store",
+    "key_is_cacheable",
     "clear_condition_caches",
     "condition_cache_scope",
     "root_memo",

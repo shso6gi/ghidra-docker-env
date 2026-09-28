@@ -61,7 +61,9 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.condition_metrics import (
+    PAIRWISE_DEBUG_COUNTER_KEYS,
     condition_metrics_snapshot,
+    pairwise_debug_counters,
 )
 from scripts.function_tracer_pcode.core.budget_policy import (
     BudgetKind,
@@ -1272,12 +1274,35 @@ def _attach_budget_diagnostics(result: Any, prepared: PreparedSemanticPayload, p
         "observed": budget_observations(),
         "serialization": prepared.plan.to_diagnostic(),
     }
-    # Issue #105 PR-105-A: 条件簡約・条件 oracle の計測（PR-105-B の予算を決める分布）。
-    # 数だけで判定に使わない。scope の外（pair 境界を通らない呼び出し）では空なので書かない。
     condition_simplify = condition_metrics_snapshot()
     if condition_simplify:
         diagnostics["condition_simplify"] = condition_simplify
     live_values.set_state(result, "diagnostics", diagnostics)
+    _attach_condition_counters(result, condition_simplify)
+
+
+def _attach_condition_counters(result: Any, condition_simplify: Mapping[str, Any]) -> None:
+    """条件簡約・条件 oracle の計測の要約を `pairwise_debug_stats` へ写す（C、判定に使わない）。
+
+    Issue #105 PR-105-A: 計測は pair の scope の **累計** なので、pair の出力を作るここで
+    1 回だけ、`diagnostics.condition_simplify` と同じ snapshot から写す（上書き）。結果の
+    組み立て（stage / 再試行ごと）で足すと、stage の counter を合算する
+    `merge_stage_debug_statistics` が累計をさらに足して数え過ぎる。scope の外
+    （pair 境界を通らない呼び出し）では何も足さない。
+    """
+
+    if not condition_simplify:
+        return
+    counters = pairwise_debug_counters(condition_simplify)
+    current = live_values.attribute(result, "pairwise_debug_stats")
+    merged: Dict[Any, Any] = {}
+    if _truthy(current):
+        for key, value in read_limits.prefix_items_within_limit(current):
+            if _plain_key(key) not in PAIRWISE_DEBUG_COUNTER_KEYS:
+                merged[_plain_key(key)] = value
+    merged.update(counters)
+    if merged:
+        live_values.set_state(result, "pairwise_debug_stats", merged)
 
 
 def _charged(budget: JsonBudget, prepared: PreparedJson) -> PreparedJson:
