@@ -2,6 +2,7 @@ from scripts.function_tracer_pcode.tests.unit._input_correspondence_support impo
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *
 
 import pytest
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 @pytest.fixture(autouse=True)
@@ -20,7 +21,7 @@ def test_function_return_analysis_marks_effect_sensitive_raw_memory_reads_as_sat
         offset=4,
         size=4,
     )
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="raw_read_after_effect",
         entry_point="0x1000",
         parameters=params,
@@ -61,7 +62,7 @@ def test_function_return_analysis_ignores_effect_sensitive_raw_reads_under_incom
         offset=4,
         size=4,
     )
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="guarded_raw_read_after_effect",
         entry_point="0x1000",
         parameters=params,
@@ -96,7 +97,7 @@ def test_function_return_analysis_checks_raw_read_alias_under_effect_guard():
     ]
     p = Expression.parameter("p", 0, size=8)
     q = Expression.parameter("q", 1, size=8)
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="guarded_alias_raw_read_after_effect",
         entry_point="0x1000",
         parameters=params,
@@ -129,7 +130,7 @@ def test_function_return_analysis_checks_raw_read_alias_under_effect_guard():
     assert "effect_sensitive_raw_memory_reads" in analysis.get_decisive_sat_unsafety_reasons()
 
 def test_function_return_analysis_blocks_equivalence_when_effect_summary_is_unsupported():
-    analysis = FunctionReturnAnalysis(
+    analysis = raw_function_analysis(
         function_name="unsupported_effect_summary",
         entry_point="0x1000",
         parameters=[],
@@ -364,7 +365,7 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_incomplete_effect_summ
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
 
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
@@ -377,7 +378,7 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_incomplete_effect_summ
             incomplete_reasons=("effect_summary_path_coverage_incomplete",),
         ),
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2",
         parameters=[_param("x")],
@@ -439,7 +440,7 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_unsupported_effect_sum
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
 
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="func1",
         entry_point="0x1",
         parameters=[_param("x")],
@@ -452,7 +453,7 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_unsupported_effect_sum
             incomplete_reasons=(),
         ),
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2",
         parameters=[_param("x")],
@@ -501,7 +502,7 @@ def test_pairwise_call_effect_summary_proof_pending_blocks_equivalent(monkeypatc
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -524,7 +525,7 @@ def test_pairwise_call_effect_summary_proof_wrong_id_does_not_recover(monkeypatc
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -561,7 +562,7 @@ def test_pairwise_call_effect_summary_bare_completed_proof_id_does_not_recover(m
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -590,7 +591,7 @@ def test_pairwise_call_effect_summary_missing_completed_proof_id_does_not_recove
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -624,7 +625,7 @@ def test_pairwise_call_effect_summary_producer_connects_completed_target_proof(m
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -660,7 +661,7 @@ def test_pairwise_self_recursive_no_store_requires_validated_recurrence_artifact
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_self_recursive_unsupported_call_effect()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -694,7 +695,7 @@ def test_pairwise_preproducer_complete_call_argument_evidence_requires_pending_p
         enable_completed_recovery_proofs=False,
     )
     analysis1 = _analysis_with_effect_call_argument_evidence()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -734,7 +735,7 @@ def test_pairwise_complete_call_argument_evidence_requires_explicit_phase15_proo
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_effect_call_argument_evidence()
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -1667,7 +1668,7 @@ def test_pairwise_incomplete_call_argument_evidence_does_not_auto_proof(monkeypa
     analysis1.effect_summary.call_argument_evidence = {
         complete_evidence.pcode_op_ref.stable_key(): incomplete_evidence,
     }
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -1695,7 +1696,7 @@ def test_pairwise_bounded_call_argument_evidence_auto_records_phase15_proof(monk
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_effect_call_argument_evidence()
     analysis1.analysis_notes.append("bounded_call_refinement_deferred_expanded")
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],
@@ -1734,7 +1735,7 @@ def test_pairwise_bounded_call_argument_note_without_evidence_does_not_auto_proo
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
     analysis1 = _analysis_with_effect_call_argument_evidence()
     analysis1.analysis_notes.append("bounded_call_refinement_deferred_expanded")
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="func2",
         entry_point="0x2000",
         parameters=[_param("x")],

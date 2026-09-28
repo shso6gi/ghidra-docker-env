@@ -14,6 +14,7 @@ from scripts.function_tracer_pcode.core import (
     FunctionReturnAnalysis,
     ReturnInfo,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 _CROSS_SIDE_EXTENSION_SURFACE_EVIDENCE = {
@@ -63,7 +64,7 @@ def _analysis(
     surface_evidence=None,
     surface_bits: int = 64,
 ) -> FunctionReturnAnalysis:
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name=name,
         entry_point="0x1000",
         parameters=[],

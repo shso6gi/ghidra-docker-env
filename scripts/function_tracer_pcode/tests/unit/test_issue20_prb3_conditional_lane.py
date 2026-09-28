@@ -76,6 +76,7 @@ from scripts.function_tracer_pcode.proof.conditional_lane import (
     conditional_counterexample_safety_reasons,
     run_conditional_proof as _run_conditional_proof_with_relation,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 # Issue #167: lane の formula の parameter premise は base（raw）pair の最終
@@ -164,7 +165,7 @@ def _analysis(
         call_model_candidate=candidate,
     )
     value = Expression.unknown(info.placeholder_name, runtime_ref=info.unknown_ref).clone_with(size=8)
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name="snippet",
         entry_point=hex(entry),
         function_ref=CallTargetRef.from_name("snippet", program_id=entry, entry_offset=entry),

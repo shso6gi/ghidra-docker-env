@@ -92,6 +92,7 @@ from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_ca
 from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_return_outcome import (
     _execution_receipt as _outcome_execution_receipt,
 )
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 def _json_authority_value(value):
@@ -521,7 +522,7 @@ def test_real_solver_checker_unknown_uses_all_site_activation_census(tmp_path):
     })
 
     def analysis(name, value, notes=()):
-        result = FunctionReturnAnalysis(
+        result = raw_function_analysis(
             function_name=name,
             entry_point="0x1000",
             parameters=[],

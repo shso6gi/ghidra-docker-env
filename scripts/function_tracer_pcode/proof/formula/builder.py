@@ -5,6 +5,7 @@ import hashlib
 import re
 from typing import List, Dict, Optional, Tuple, Any
 
+from scripts.function_tracer_pcode.core.parameter_domain import parameter_descriptor_bits, parameter_descriptor_index
 from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
@@ -337,9 +338,9 @@ def _require_same_parameter_shape(
 
     shape = sorted(
         (
-            int(descriptor.get("index", 0)),
-            int(descriptor.get("size", 4)) * 8,
-            descriptor.get("name", f"param_{descriptor.get('index', 0)}"),
+            int(parameter_descriptor_index(descriptor)),
+            int(parameter_descriptor_bits(descriptor)),
+            descriptor.get("name", f"param_{parameter_descriptor_index(descriptor)}"),
         )
         for descriptor in analysis.parameters or ()
     )

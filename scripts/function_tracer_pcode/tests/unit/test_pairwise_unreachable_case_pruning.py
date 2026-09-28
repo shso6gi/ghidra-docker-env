@@ -21,6 +21,7 @@ from scripts.function_tracer_pcode.core import (
     ReturnInfo,
 )
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 def _param(name: str) -> Expression:
@@ -45,7 +46,7 @@ def _binary(op: str, left: Expression, right: Expression) -> Expression:
 
 
 def _analysis(name: str, returns) -> FunctionReturnAnalysis:
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name=name,
         entry_point="0x1000",
         parameters=[],

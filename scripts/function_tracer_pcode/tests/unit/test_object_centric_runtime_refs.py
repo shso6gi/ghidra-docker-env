@@ -82,6 +82,7 @@ def _lowering_identity(expr):
     return semantic_projection(expr).loop_lowering.identity
 
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
+from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 
 
 class _FakeAddressSpace:
@@ -1379,14 +1380,14 @@ def test_method_b_covering_case_producer_records_only_covering_evidence():
     summary_return = ReturnInfo(address="0x1004", value=summary_expr, conditions=[])
     exact_case = ReturnCase(0, [], exact_expr, exact_return, parameters=parameters)
     summary_case = ReturnCase(1, [], summary_expr, summary_return, parameters=parameters)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="left",
         entry_point="0x1000",
         parameters=parameters,
         returns=[exact_return],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="right",
         entry_point="0x2000",
         parameters=parameters,
@@ -1445,14 +1446,14 @@ def test_method_b_guard_partition_producer_records_when_count_guard_is_proven():
     summary_return = ReturnInfo(address="0x1004", value=summary_expr, conditions=[count_is_two])
     exact_case = ReturnCase(0, [count_is_two], exact_expr, exact_return, parameters=parameters)
     summary_case = ReturnCase(1, [count_is_two], summary_expr, summary_return, parameters=parameters)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="left",
         entry_point="0x1000",
         parameters=parameters,
         returns=[exact_return],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="right",
         entry_point="0x2000",
         parameters=parameters,
@@ -1487,7 +1488,7 @@ def test_method_b_guard_partition_producer_records_when_count_guard_is_proven():
 
     # Issue #167: Method B の proof は比較の solver surface（relation が許可した書き換え）
     # から作るので、同じ analysis を別の relation で比べ直した比較では採用しない。
-    widened = FunctionReturnAnalysis(
+    widened = raw_function_analysis(
         function_name="left",
         entry_point="0x1000",
         parameters=[*parameters, {"name": "extra", "index": 2, "data_type": "int", "size": 4}],
@@ -1529,14 +1530,14 @@ def test_method_b_guard_partition_producer_records_count_membership_when_range_i
     summary_return = ReturnInfo(address="0x1004", value=summary_expr, conditions=conditions)
     exact_case = ReturnCase(0, conditions, exact_expr, exact_return, parameters=parameters)
     summary_case = ReturnCase(1, conditions, summary_expr, summary_return, parameters=parameters)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="left",
         entry_point="0x1000",
         parameters=parameters,
         returns=[exact_return],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="right",
         entry_point="0x2000",
         parameters=parameters,
@@ -1595,14 +1596,14 @@ def test_method_b_guard_partition_producer_rejects_open_count_range():
     summary_return = ReturnInfo(address="0x1004", value=summary_expr, conditions=[count_gt_two])
     exact_case = ReturnCase(0, [count_gt_two], exact_expr, exact_return, parameters=parameters)
     summary_case = ReturnCase(1, [count_gt_two], summary_expr, summary_return, parameters=parameters)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="left",
         entry_point="0x1000",
         parameters=parameters,
         returns=[exact_return],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="right",
         entry_point="0x2000",
         parameters=parameters,
@@ -1650,14 +1651,14 @@ def test_method_b_covering_case_producer_rejects_term_sequence_mismatch():
     summary_return = ReturnInfo(address="0x1004", value=summary_expr, conditions=[])
     exact_case = ReturnCase(0, [], exact_expr, exact_return, parameters=parameters)
     summary_case = ReturnCase(1, [], summary_expr, summary_return, parameters=parameters)
-    analysis1 = FunctionReturnAnalysis(
+    analysis1 = raw_function_analysis(
         function_name="left",
         entry_point="0x1000",
         parameters=parameters,
         returns=[exact_return],
         return_type="int",
     )
-    analysis2 = FunctionReturnAnalysis(
+    analysis2 = raw_function_analysis(
         function_name="right",
         entry_point="0x2000",
         parameters=parameters,
@@ -2569,7 +2570,7 @@ def _return_case_for_expr(expr: Expression) -> ReturnCase:
 
 
 def _analysis_with_return(function_name: str, value: Expression, conditions=()) -> FunctionReturnAnalysis:
-    return FunctionReturnAnalysis(
+    return raw_function_analysis(
         function_name=function_name,
         entry_point="0x1000",
         parameters=[
