@@ -277,12 +277,24 @@ private root that resolves inside `OUTPUT_BASE_DIR`, whatever its spelling
   private key only (e.g. the run tree was deleted and is being re-run) → rewrite
   the public key from it; always → validate the pair. An existing private key is
   never rewritten, and a failure exits 1 with the reason instead of a traceback.
+- The supervisor / worker HMAC keys are written only by
+  `validation_materialize_process_key` (a missing or empty key is written
+  atomically with `umask 077`; an existing key is never rewritten).
 - Several runs can point at the same keyset (a shared override, a renamed output,
   another container). The keyset directory is therefore locked (`flock` on its
   inode) while its keys are read, written and validated, and only then. A run
   that finds the keyset held waits up to `VALIDATION_KEYSET_LOCK_WAIT_SECONDS`
   (default 120) and then exits 1 with "held by another run for too long" without
   touching the keyset.
+- The key writers check the lock they rely on against the kernel, not against a
+  shell variable: the handle returned by `validation_lock_authority_keyset` must
+  be an open descriptor that holds an exclusive `flock` on the same inode as the
+  key's parent directory. Otherwise they write nothing and return 2. A caller
+  only has to follow `lock → materialize → unlock` (see the comment block in
+  `scripts/validation_matrix_common.sh`) and must not start background jobs
+  inside it.
+- `EQBENCH_AUTHORITY_KEYSET_ID` must be a single path component of
+  `[A-Za-z0-9._-]` other than `.` and `..`.
 - Known limitation: a corrupted private key that is still 32 bytes long cannot be
   detected while the public key is missing, because any 32 bytes are a valid
   Ed25519 seed; the public key is then re-exported from it. To start over, remove

@@ -1387,7 +1387,7 @@ def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
     assert "EQBENCH_PRIVATE_AUTHORITY_ROOT" in script
     # Issue #170: 鍵の具体化は共通 helper が唯一の owner で、keyset の lock の中で呼ぶ。
     assert "--validate-private-key" not in script
-    assert 'validation_lock_authority_keyset "$PROCESS_AUTHORITY_ROOT" || exit 1' in script
+    assert 'validation_lock_authority_keyset "$EQBENCH_PRIVATE_AUTHORITY_ROOT" "$AUTHORITY_KEYSET_ID" || exit 1' in script
     assert "validation_materialize_pair_status_keypair" in script
     assert "validation_unlock_authority_keyset" in script
     assert "expected_pair_status_paths.txt" in script

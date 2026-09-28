@@ -364,27 +364,138 @@ validation_before_run_half_is_comparable() {
         --validate-comparison-tree "$half_dir")
 }
 
-# Issue #170: 秘密鍵の keyset（`<realpath(private root)>/<KEYSET_ID>`）は出力 dir とは
-# 別の共有資源で、別の出力・別 container・rename した出力から同じ keyset を指せる。
-# そのため keyset directory の inode を flock で排他し、鍵を読む・書く・検証する区間
-# （evidence guard、HMAC 鍵、pair-status 鍵の具体化）だけを保持する。
+# ---------------------------------------------------------------------------
+# Issue #170: 秘密鍵の keyset と、その中の鍵の具体化（Eq / Neq 共通の唯一の owner）
 #
-# - keyset の component が symlink なら拒否する。存在しなければ `mkdir -p -m 700` で作る。
-# - lock は上限付きで待つ（`VALIDATION_KEYSET_LOCK_WAIT_SECONDS`、既定 120 秒）。
-#   超えたら「held by another run for too long」で 1 を返し、keyset には何も書かない。
+# keyset は `<canonical private root>/<keyset id>` の directory で、出力 dir とは別の共有
+# 資源（別の出力・別 container・rename した出力から同じ keyset を指せる）。鍵を読む・書く・
+# 検証する区間だけ、その directory の inode を flock で排他する。
+#
+# 呼び出し側の契約はこれだけ:
+#   root="$(validation_resolve_private_authority_root "$root" "$OUTPUT_BASE_DIR")" || exit 1
+#   validation_lock_authority_keyset "$root" "$keyset_id" || exit 1
+#   validation_materialize_process_key "$root/$keyset_id/<name>.key" || exit 1   # HMAC 鍵
+#   validation_materialize_pair_status_keypair "$python" "$root/$keyset_id/pair-status-ed25519.key" "$public" || exit 1
+#   validation_unlock_authority_keyset || exit 1
+# lock と unlock の間で `&` を使わない（fd を受け継ぐのは同期的な子だけにする）。
+#
+# lock を保持していることの証明は shell 変数ではなく kernel の状態で行う:
+# `VALIDATION_KEYSET_LOCK_FD` は fd 番号（handle）にすぎず、鍵を書く helper は毎回
+# validation_assert_authority_keyset_locked で「その fd が開いていて、排他 flock を保持
+# する open file description で、keyset directory と同じ inode を指す」ことを確かめる。
+# 変数だけの偽装、fd を閉じた後に残った handle、別の file に再利用された fd 番号、
+# lock していない fd、環境変数から来た handle、lock 後に差し替えた keyset はどれも拒否する。
+# ---------------------------------------------------------------------------
+
+_VALIDATION_KEY_AUTHORITY_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+_VALIDATION_PAIR_STATUS_KEY_MODULE=scripts.function_tracer_pcode.authority.decision.pair_status_authority
+
+# 秘密鍵の root を正規化し（`realpath -m`）、OUTPUT の外にあることを確かめて stdout に出す。
+# `//`、`..`、相対 path、symlink のどの綴りでも、OUTPUT の中を指していれば拒否する。
+validation_resolve_private_authority_root() {
+    local root="$1" output="$2" resolved_root resolved_output
+    if [[ -z "$root" ]] \
+        || ! resolved_root="$(realpath -m -- "$root")" \
+        || ! resolved_output="$(realpath -m -- "$output")"; then
+        echo "Error: private authority root cannot be resolved: $root" >&2
+        return 1
+    fi
+    if [[ "$resolved_root" == "$resolved_output" || "$resolved_root" == "$resolved_output/"* ]]; then
+        echo "Error: private authority root must be outside OUTPUT_BASE_DIR" >&2
+        return 1
+    fi
+    printf '%s\n' "$resolved_root"
+}
+
+# keyset id は root の直下の 1 つの path component（`.` と `..` は root 自身と親を指すので不可）。
+validation_authority_keyset_id_is_valid() {
+    [[ "${1-}" =~ ^[A-Za-z0-9._-]+$ && "$1" != "." && "$1" != ".." ]]
+}
+
+# 内部: fd が、排他 flock を保持している open file description を指しているか（kernel が
+# fdinfo に出す lock 行で判定する。同じ inode を別に開いた fd には lock 行が出ない）。
+_validation_fd_holds_exclusive_flock() {
+    local fd="$1" line inode="" locked_inode=""
+    [[ "$fd" =~ ^[0-9]+$ && -r "/proc/self/fdinfo/$fd" ]] || return 1
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^ino:[[:space:]]+([0-9]+)$ ]]; then
+            inode="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^lock:[[:space:]]+[0-9]+:[[:space:]]+FLOCK[[:space:]]+ADVISORY[[:space:]]+WRITE[[:space:]]+[0-9-]+[[:space:]]+[0-9a-f]+:[0-9a-f]+:([0-9]+)[[:space:]] ]]; then
+            locked_inode="${BASH_REMATCH[1]}"
+        fi
+    done < "/proc/self/fdinfo/$fd" || return 1
+    [[ -n "$inode" && "$inode" == "$locked_inode" ]]
+}
+
+# 内部: handle 変数が環境から来ていないか（この library が発行した handle は export しない）。
+_validation_keyset_lock_handle_is_exported() {
+    local declaration attributes
+    declaration="$(declare -p VALIDATION_KEYSET_LOCK_FD 2>/dev/null)" || return 1
+    attributes="${declaration#declare -}"
+    attributes="${attributes%% *}"
+    [[ "$attributes" == *x* ]]
+}
+
+# 鍵を書く helper の共通の前提: いま保持している keyset lock が、この keyset の lock である。
+# 満たさなければ理由を出して 2 を返す（呼び出し側の誤り。何も書かない）。
+validation_assert_authority_keyset_locked() {
+    local keyset="$1" fd="${VALIDATION_KEYSET_LOCK_FD:-}"
+    if [[ -z "$fd" ]]; then
+        echo "Error: no authority keyset lock is held for $keyset" >&2
+        return 2
+    fi
+    if _validation_keyset_lock_handle_is_exported; then
+        echo "Error: the authority keyset lock handle came from the environment, not from validation_lock_authority_keyset" >&2
+        return 2
+    fi
+    if ! _validation_fd_holds_exclusive_flock "$fd"; then
+        echo "Error: the authority keyset lock handle (fd $fd) no longer holds a keyset lock" >&2
+        return 2
+    fi
+    if [[ -L "$keyset" || ! -d "$keyset" || ! "$keyset" -ef "/dev/fd/$fd" ]]; then
+        echo "Error: the held authority keyset lock is not the lock of $keyset" >&2
+        return 2
+    fi
+}
+
+# keyset `<root>/<keyset id>` の inode を lock する。root は正規化済み
+# （validation_resolve_private_authority_root の出力）でなければならない。
+# - keyset が symlink なら拒否する。存在しなければ `mkdir -p -m 700` で作る。
+# - 上限付きで待つ（`VALIDATION_KEYSET_LOCK_WAIT_SECONDS`、既定 120 秒）。超えたら
+#   「held by another run for too long」で 1 を返し、keyset には何も書かない。
+# - 待っている間に keyset が差し替えられていたら拒否する。
 # - `chmod 700` は lock を取った後に行う（拒否された run が keyset の ctime を変えない）。
-# - lock の保持中に別の keyset lock は取らない（2 を返す）。保持中は `&` で子を起動
-#   しない: fd を受け継ぐのは同期的な helper だけで、unlock より前に終了する。
+# - 既に handle を持っていれば（保持中でも stale でも）2 を返す。
 validation_lock_authority_keyset() {
-    local dir="$1"
+    local root="$1" keyset_id="$2"
+    local dir="$root/$keyset_id"
     local wait_seconds="${VALIDATION_KEYSET_LOCK_WAIT_SECONDS:-120}"
     local lock_fd flock_status
     if [[ -n "${VALIDATION_KEYSET_LOCK_FD:-}" ]]; then
-        echo "Error: an authority keyset lock is already held; refusing a second keyset lock: $dir" >&2
+        if _validation_keyset_lock_handle_is_exported; then
+            echo "Error: the authority keyset lock handle came from the environment; refusing to lock $dir" >&2
+        elif _validation_fd_holds_exclusive_flock "$VALIDATION_KEYSET_LOCK_FD"; then
+            echo "Error: an authority keyset lock is already held; refusing a second keyset lock: $dir" >&2
+        else
+            echo "Error: a stale authority keyset lock handle (fd $VALIDATION_KEYSET_LOCK_FD) is still set; refusing to lock $dir" >&2
+        fi
         return 2
+    fi
+    if [[ "$root" != /* || "$(realpath -m -- "$root" 2>/dev/null)" != "$root" ]]; then
+        echo "Error: private authority root must be a canonical absolute path: $root" >&2
+        return 2
+    fi
+    if ! validation_authority_keyset_id_is_valid "$keyset_id"; then
+        echo "Error: authority keyset id must be one path component of [A-Za-z0-9._-] other than . and ..: $keyset_id" >&2
+        return 1
     fi
     if [[ ! "$wait_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
         echo "Error: VALIDATION_KEYSET_LOCK_WAIT_SECONDS must be a non-negative number of seconds" >&2
+        return 1
+    fi
+    # 保持の証明に使う kernel の状態が読めなければ、何も作らずに拒否する。
+    if [[ ! -d /proc/self/fdinfo ]]; then
+        echo "Error: authority keyset lock requires /proc/self/fdinfo to prove the lock is held: $dir" >&2
         return 1
     fi
     if [[ -L "$dir" ]]; then
@@ -410,67 +521,106 @@ validation_lock_authority_keyset() {
         fi
         return 1
     fi
-    # lock を取った inode が今の path の inode であること（待っている間の差し替えを拒否）。
-    if [[ -L "$dir" || ! "$dir" -ef "/dev/fd/$lock_fd" ]]; then
+    export -n VALIDATION_KEYSET_LOCK_FD 2>/dev/null || true
+    VALIDATION_KEYSET_LOCK_FD="$lock_fd"
+    # 取得した lock が今の path の keyset の lock であること（待っている間の差し替えを拒否）。
+    if ! validation_assert_authority_keyset_locked "$dir" 2>/dev/null; then
         exec {lock_fd}<&-
+        VALIDATION_KEYSET_LOCK_FD=""
         echo "Error: authority keyset was replaced while waiting for its lock: $dir" >&2
         return 1
     fi
     if ! chmod 700 -- "$dir"; then
         exec {lock_fd}<&-
+        VALIDATION_KEYSET_LOCK_FD=""
         echo "Error: authority keyset permissions cannot be restricted: $dir" >&2
         return 1
     fi
-    VALIDATION_KEYSET_LOCK_FD="$lock_fd"
-    VALIDATION_KEYSET_LOCK_DIR="$dir"
 }
 
-# keyset lock の fd を閉じる（= lock を解放する）。保持していなければ何もしない。
+# keyset lock を解放する（fd を閉じる）。保持していなければ何もしない。
+# handle が lock を保持していない（閉じられた・別の file に再利用された）なら、その fd
+# 番号は閉じずに 2 を返す（この library が lock していない fd を閉じない）。
 validation_unlock_authority_keyset() {
-    if [[ -n "${VALIDATION_KEYSET_LOCK_FD:-}" ]]; then
-        exec {VALIDATION_KEYSET_LOCK_FD}<&-
+    local fd="${VALIDATION_KEYSET_LOCK_FD:-}"
+    [[ -n "$fd" ]] || return 0
+    if _validation_keyset_lock_handle_is_exported || ! _validation_fd_holds_exclusive_flock "$fd"; then
+        echo "Error: the authority keyset lock handle (fd $fd) does not hold a keyset lock; not closing it" >&2
+        return 2
     fi
+    exec {fd}<&-
     VALIDATION_KEYSET_LOCK_FD=""
-    VALIDATION_KEYSET_LOCK_DIR=""
 }
 
-# Issue #170: pair-status 署名鍵の具体化規則の唯一の owner（Eq / Neq 共通）。
-#
+# 内部: keyset の中の鍵 file の path を検査し、絶対 path にして stdout に出す。
+_validation_keyset_member_path() {
+    local key_file="$1"
+    validation_assert_authority_keyset_locked "$(dirname -- "$key_file")" || return 2
+    if [[ -L "$key_file" ]]; then
+        echo "Error: authority key must not be a symlink: $key_file" >&2
+        return 1
+    fi
+    if [[ "$key_file" == /* ]]; then printf '%s\n' "$key_file"; else printf '%s\n' "$PWD/$key_file"; fi
+}
+
+# supervisor / worker の HMAC 鍵（32 byte）を具体化する。空または無ければ subshell の
+# `umask 077` の中で書いて atomic に置く（途中で止まっても短い鍵を残さない）。既にあれば
+# regular file であることだけ確かめて書き換えない（鍵の長さの妥当性は読む側の
+# supervisor_command が所有する）。
+validation_materialize_process_key() {
+    local key_file temporary
+    key_file="$(_validation_keyset_member_path "$1")" || return
+    if [[ -e "$key_file" && ! -f "$key_file" ]]; then
+        echo "Error: process authority key is not a regular file: $key_file" >&2
+        return 1
+    fi
+    [[ -s "$key_file" ]] && return 0
+    if ! temporary="$(umask 077; mktemp -- "$key_file.tmp.XXXXXX")"; then
+        echo "Error: process authority key cannot be written: $key_file" >&2
+        return 1
+    fi
+    if ! (umask 077; head -c 32 /dev/urandom > "$temporary") \
+        || [[ "$(stat -c %s -- "$temporary" 2>/dev/null)" != 32 ]] \
+        || ! mv -f -T -- "$temporary" "$key_file"; then
+        rm -f -- "$temporary"
+        echo "Error: process authority key cannot be written: $key_file" >&2
+        return 1
+    fi
+}
+
+# 内部: pair-status 鍵 CLI を 1 回呼ぶ。repo root で実行する（呼び出し側の cwd に依存しない）。
+# 失敗したら traceback を出さず、その stderr の最後の行（無ければ exit status）を理由にする。
+_validation_pair_status_key_cli() {
+    local python_bin="$1" failure="$2" error_output status=0 reason
+    shift 2
+    error_output="$(cd "$_VALIDATION_KEY_AUTHORITY_REPO_ROOT" \
+        && "$python_bin" -m "$_VALIDATION_PAIR_STATUS_KEY_MODULE" "$@" 2>&1 >/dev/null)" || status=$?
+    (( status == 0 )) && return 0
+    reason="$(printf '%s\n' "$error_output" | tail -n 1)"
+    echo "Error: $failure: ${reason:-exit $status}" >&2
+    return 1
+}
+
+# pair-status 署名鍵の具体化規則（唯一の owner）。
 # - 秘密鍵が空（無い）: 生成し、公開鍵も書く。
 # - 秘密鍵だけある（出力 dir を消して取り直した等）: 秘密鍵から公開鍵を書き直す。
 # - どの場合も最後に対を validate する。秘密鍵を書くのは空と判定したときだけで、
 #   validate の後は書き換えない。
-# 秘密鍵を置く keyset の lock（validation_lock_authority_keyset）を保持したまま呼ぶ。
-# CLI が失敗したら traceback は出さず、その stderr の最後の行を理由として 1 行で出し、
-# 1 を返す。
 validation_materialize_pair_status_keypair() {
-    local python_bin="$1" private_key="$2" public_key="$3"
-    local module=scripts.function_tracer_pcode.authority.decision.pair_status_authority
-    local error_output
-    if [[ -z "${VALIDATION_KEYSET_LOCK_DIR:-}" \
-        || ! "$(dirname -- "$private_key")" -ef "$VALIDATION_KEYSET_LOCK_DIR" ]]; then
-        echo "Error: pair-status keypair must be materialized while holding its keyset lock: $private_key" >&2
-        return 2
-    fi
+    local python_bin="$1" private_key public_key="$3"
+    private_key="$(_validation_keyset_member_path "$2")" || return
+    [[ "$public_key" == /* ]] || public_key="$PWD/$public_key"
     if [[ ! -s "$private_key" ]]; then
-        if ! error_output="$("$python_bin" -m "$module" \
-            --generate-private-key "$private_key" \
-            --write-public-key "$public_key" 2>&1 >/dev/null)"; then
-            echo "Error: pair-status keypair cannot be generated: $(printf '%s\n' "$error_output" | tail -n 1)" >&2
-            return 1
-        fi
+        _validation_pair_status_key_cli "$python_bin" "pair-status keypair cannot be generated" \
+            --generate-private-key "$private_key" --write-public-key "$public_key" || return 1
     elif [[ ! -s "$public_key" ]]; then
-        if ! error_output="$("$python_bin" -m "$module" \
-            --export-public-from-private "$private_key" \
-            --write-public-key "$public_key" 2>&1 >/dev/null)"; then
-            echo "Error: pair-status public key cannot be exported from the retained private key: $(printf '%s\n' "$error_output" | tail -n 1)" >&2
-            return 1
-        fi
+        _validation_pair_status_key_cli "$python_bin" \
+            "pair-status public key cannot be exported from the retained private key" \
+            --export-public-from-private "$private_key" --write-public-key "$public_key" || return 1
     fi
-    if ! error_output="$("$python_bin" -m "$module" \
-        --validate-private-key "$private_key" \
-        --public-key "$public_key" 2>&1 >/dev/null)"; then
-        echo "Error: pair-status private key and public key are not a valid pair: $(printf '%s\n' "$error_output" | tail -n 1)" >&2
+    if ! _validation_pair_status_key_cli "$python_bin" \
+        "pair-status private key and public key are not a valid pair" \
+        --validate-private-key "$private_key" --public-key "$public_key"; then
         echo "Private key: $private_key" >&2
         echo "Public key: $public_key" >&2
         return 1
