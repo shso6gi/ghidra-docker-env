@@ -364,6 +364,350 @@ validation_before_run_half_is_comparable() {
         --validate-comparison-tree "$half_dir")
 }
 
+# ---------------------------------------------------------------------------
+# Issue #170: 秘密鍵の keyset と鍵の具体化（Eq / Neq 共通の唯一の owner）
+#
+# 配置の契約:
+#   keyset        = <realpath -m(private root)>/<keyset id>。keyset id は 1 つの path component
+#                   （[A-Za-z0-9._-]、`.` と `..` は不可）。keyset は symlink でない。
+#                   keyset と OUTPUT は分離している: 同一でも、keyset が OUTPUT の中でも、
+#                   OUTPUT が keyset の中でもない（canonical な綴りと、存在する祖先の inode の両方で判定）。
+#   秘密鍵・HMAC 鍵 = keyset の直下の file（したがって OUTPUT の外）。
+#   公開鍵        = OUTPUT の中の file（したがって keyset の外）。
+#
+# keyset identity の判定は _validation_check_authority_keyset だけが持つ。
+#   validation_resolve_authority_keyset が root と id から keyset を組み立てて判定し、
+#   validation_lock_authority_keyset は渡された keyset を同じ判定にかけ直す（手で組み立てた
+#   path も同じ規則で判定されるので、別の意味を持てない）。鍵を書く直前にも同じ判定をする。
+#
+# lock capability:
+#   lock は keyset を開いた fd（primary）とその dup（shadow）で排他 flock を保持し、非 export の
+#   配列 _VALIDATION_KEYSET_LOCK に (primary, shadow, lock の dev:ino, keyset, OUTPUT) を記録する。
+#   記録は kernel と照合する材料で、それ自体は証明ではない。所有の証明は
+#   「primary と shadow の両方の open file description が、記録した dev:ino の排他 flock を所有
+#    している」こと（/proc/self/fdinfo の lock 行は、その open file description が所有する lock
+#    だけを出す）。排他 flock を所有できる open file description は 1 つだけなので、両者は同じ
+#   open file description（= lock が作ったもの）である。片方の fd 番号が閉じられて別の file に
+#   再利用されても、dev:ino か lock 行が一致しない。同じ keyset を開き直して lock しようとしても、
+#   残った方が lock を保持しているので取れない。
+#   （証明が区別しないのは、呼び出し側が自分で keyset を開いて排他 flock を取り、その fd の組を
+#    state に書いた場合だけである。その fd の組は実際に keyset の排他を保持しているので、
+#    「keyset の inode ごとに鍵操作は 1 つ」は崩れない。）
+#   - unlock は所有の証明が成り立つときだけ fd を閉じる（自分が取得した lock 以外は閉じない）。
+#   - 鍵を書く helper は、所有の証明、記録した keyset が今もその inode を指すこと、identity の
+#     判定を確かめ、keyset の path ではなく /dev/fd/<primary>/<name>（lock した inode）に書く。
+#
+# 呼び出し側の契約（新しい runner もこれだけ守ればよい）:
+#   keyset="$(validation_resolve_authority_keyset "$root" "$keyset_id" "$OUTPUT_BASE_DIR")" || exit 1
+#   validation_lock_authority_keyset "$keyset" "$OUTPUT_BASE_DIR" || exit 1
+#   ...（"$keyset/<name>" を読む evidence guard）
+#   validation_materialize_process_key "$keyset/<name>.key" || exit 1
+#   validation_materialize_pair_status_keypair "$python" "$keyset/<name>.key" "$OUTPUT_BASE_DIR/<public>.json" || exit 1
+#   validation_unlock_authority_keyset || exit 1
+# - lock と unlock の間で `&` を使わない（fd を受け継ぐのは同期的な子だけにする）。
+# - helper が失敗したら exit する（process の終了で lock は解放される）。
+# - 誤用（lock 無し、別の keyset の鍵、stale / 偽造 / 環境由来の state、2 つ目の lock）は 2、
+#   設定・環境の問題（identity の違反、timeout、書けない、鍵が壊れている）は 1 を返す。
+# - 相対 path は呼び出し側の cwd で解決する（runner は SCRIPT_DIR に cd してから呼ぶ）。
+# ---------------------------------------------------------------------------
+
+_VALIDATION_KEY_AUTHORITY_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+_VALIDATION_PAIR_STATUS_KEY_MODULE=scripts.function_tracer_pcode.authority.decision.pair_status_authority
+
+# 内部: keyset id と鍵の名前に使える 1 つの path component か。
+_validation_path_component_is_valid() {
+    [[ "${1-}" =~ ^[A-Za-z0-9._-]+$ && "$1" != "." && "$1" != ".." ]]
+}
+
+# 内部: 絶対 path a と b が重なる（同一、または一方が他方の祖先）か。canonical な綴りの前方一致と、
+# 存在する祖先（自身を含む）の inode（bind mount などの別名）の両方で判定する。
+_validation_paths_overlap() {
+    local a="$1" b="$2" near far p
+    [[ "$a" == "$b" || "$a" == "$b/"* || "$b" == "$a/"* ]] && return 0
+    for near in "$a" "$b"; do
+        if [[ "$near" == "$a" ]]; then far="$b"; else far="$a"; fi
+        p="$near"
+        while :; do
+            [[ -e "$p" && "$p" -ef "$far" ]] && return 0
+            [[ "$p" == / ]] && break
+            p="${p%/*}"
+            [[ -n "$p" ]] || p=/
+        done
+    done
+    return 1
+}
+
+# keyset identity の判定（唯一の owner）。満たさなければ理由を出して 1 を返す。書き込みはしない。
+_validation_check_authority_keyset() {
+    local keyset="$1" output="$2" resolved_output
+    if [[ "$keyset" != /* ]] || ! _validation_path_component_is_valid "${keyset##*/}"; then
+        echo "Error: authority keyset must be <canonical private root>/<one path component>: $keyset" >&2
+        return 1
+    fi
+    if [[ -L "$keyset" ]]; then
+        echo "Error: authority keyset must not be a symlink: $keyset" >&2
+        return 1
+    fi
+    if [[ "$(realpath -m -- "$keyset" 2>/dev/null)" != "$keyset" ]]; then
+        echo "Error: authority keyset must be a canonical path: $keyset" >&2
+        return 1
+    fi
+    if [[ -z "$output" ]] || ! resolved_output="$(realpath -m -- "$output")"; then
+        echo "Error: OUTPUT_BASE_DIR cannot be resolved: $output" >&2
+        return 1
+    fi
+    if _validation_paths_overlap "$keyset" "$resolved_output"; then
+        echo "Error: private authority keyset must be outside OUTPUT_BASE_DIR and must not contain it: keyset=$keyset OUTPUT_BASE_DIR=$resolved_output" >&2
+        return 1
+    fi
+}
+
+# private root と keyset id から keyset を組み立て（唯一の組み立て箇所）、identity を判定して
+# stdout に出す。書き込みはしない。
+validation_resolve_authority_keyset() {
+    local root="$1" keyset_id="$2" output="$3" resolved_root keyset
+    if ! _validation_path_component_is_valid "$keyset_id"; then
+        echo "Error: authority keyset id must be one path component of [A-Za-z0-9._-] other than . and ..: $keyset_id" >&2
+        return 1
+    fi
+    if [[ -z "$root" ]] || ! resolved_root="$(realpath -m -- "$root")"; then
+        echo "Error: private authority root cannot be resolved: $root" >&2
+        return 1
+    fi
+    keyset="${resolved_root%/}/$keyset_id"
+    _validation_check_authority_keyset "$keyset" "$output" || return 1
+    printf '%s\n' "$keyset"
+}
+
+# 内部: lock の state が存在するか（形は問わない）。
+_validation_keyset_lock_state_exists() {
+    declare -p _VALIDATION_KEYSET_LOCK >/dev/null 2>&1
+}
+
+# 内部: state が lock の作った形か（非 export の配列、5 要素、fd は数字）。環境から来た変数は
+# 配列にならず export 属性を持つので、ここで拒否される。
+_validation_keyset_lock_state_is_well_formed() {
+    local declaration
+    declaration="$(declare -p _VALIDATION_KEYSET_LOCK 2>/dev/null)" || return 1
+    [[ "$declaration" == "declare -a _VALIDATION_KEYSET_LOCK="* ]] || return 1
+    (( ${#_VALIDATION_KEYSET_LOCK[@]} == 5 )) \
+        && [[ "${_VALIDATION_KEYSET_LOCK[0]}" =~ ^[0-9]+$ && "${_VALIDATION_KEYSET_LOCK[1]}" =~ ^[0-9]+$ ]]
+}
+
+# 内部: fd の open file description が所有する排他 flock の dev:ino を stdout に出す（無ければ偽）。
+_validation_fd_exclusive_flock_identity() {
+    local fd="$1" line
+    [[ "$fd" =~ ^[0-9]+$ && -r "/proc/self/fdinfo/$fd" ]] || return 1
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^lock:[[:space:]]+[0-9]+:[[:space:]]+FLOCK[[:space:]]+ADVISORY[[:space:]]+WRITE[[:space:]]+[0-9-]+[[:space:]]+([0-9a-f]+:[0-9a-f]+:[0-9]+)[[:space:]] ]]; then
+            printf '%s\n' "${BASH_REMATCH[1]}"
+            return 0
+        fi
+    done < "/proc/self/fdinfo/$fd"
+    return 1
+}
+
+# 内部: 所有の証明（冒頭の comment）。
+_validation_keyset_lock_is_owned() {
+    local primary="$1" shadow="$2" identity="$3" held
+    [[ -n "$identity" && "$primary" != "$shadow" ]] || return 1
+    held="$(_validation_fd_exclusive_flock_identity "$primary")" && [[ "$held" == "$identity" ]] || return 1
+    held="$(_validation_fd_exclusive_flock_identity "$shadow")" && [[ "$held" == "$identity" ]]
+}
+
+# 内部: 所有の証明に加えて、keyset が今も lock した inode を指し、identity の判定を満たすか。
+_validation_keyset_lock_is_valid_for() {
+    local primary="$1" shadow="$2" identity="$3" keyset="$4" output="$5"
+    _validation_keyset_lock_is_owned "$primary" "$shadow" "$identity" || return 1
+    [[ ! -L "$keyset" && -d "$keyset" && "$keyset" -ef "/dev/fd/$primary" ]] || return 1
+    _validation_check_authority_keyset "$keyset" "$output" 2>/dev/null
+}
+
+# keyset の inode を lock する。keyset は validation_resolve_authority_keyset の出力（同じ判定に
+# かけ直す）。
+# - 存在しなければ `mkdir -p -m 700` で作る。
+# - 上限付きで待つ（`VALIDATION_KEYSET_LOCK_WAIT_SECONDS`、既定 120 秒）。超えたら
+#   「held by another run for too long」で 1 を返し、keyset には何も書かない。
+# - 取得後に所有・inode・identity を確かめる（待っている間の差し替えを拒否する）。
+# - `chmod 700` は lock を取った後に、lock した inode に対して行う。
+# - state が既にあれば（保持中・stale・偽造・環境由来のどれでも）2 を返す。
+validation_lock_authority_keyset() {
+    local keyset="$1" output="$2"
+    local wait_seconds="${VALIDATION_KEYSET_LOCK_WAIT_SECONDS:-120}"
+    local primary shadow identity resolved_output flock_status
+    if _validation_keyset_lock_state_exists; then
+        echo "Error: an authority keyset lock state already exists (held, stale, forged or from the environment); refusing to lock $keyset" >&2
+        return 2
+    fi
+    if [[ ! "$wait_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "Error: VALIDATION_KEYSET_LOCK_WAIT_SECONDS must be a non-negative number of seconds" >&2
+        return 1
+    fi
+    _validation_check_authority_keyset "$keyset" "$output" || return 1
+    resolved_output="$(realpath -m -- "$output")" || return 1
+    if ! mkdir -p -m 700 -- "$keyset" 2>/dev/null || [[ -L "$keyset" || ! -d "$keyset" ]]; then
+        echo "Error: authority keyset is not a directory and cannot be created as one: $keyset" >&2
+        return 1
+    fi
+    if ! exec {primary}<"$keyset"; then
+        echo "Error: authority keyset cannot be opened for locking: $keyset" >&2
+        return 1
+    fi
+    flock_status=0
+    flock -E 75 -w "$wait_seconds" "$primary" || flock_status=$?
+    if (( flock_status != 0 )); then
+        exec {primary}<&-
+        if (( flock_status == 75 )); then
+            echo "Error: authority keyset is held by another run for too long (${wait_seconds}s): $keyset" >&2
+        else
+            echo "Error: authority keyset cannot be locked (flock exit $flock_status): $keyset" >&2
+        fi
+        return 1
+    fi
+    if ! exec {shadow}<&"$primary"; then
+        exec {primary}<&-
+        echo "Error: authority keyset lock descriptor cannot be duplicated: $keyset" >&2
+        return 1
+    fi
+    identity="$(_validation_fd_exclusive_flock_identity "$primary")" || identity=""
+    if ! _validation_keyset_lock_is_valid_for "$primary" "$shadow" "$identity" "$keyset" "$resolved_output"; then
+        exec {primary}<&- {shadow}<&-
+        echo "Error: authority keyset was replaced while waiting for its lock, or its lock cannot be proven: $keyset" >&2
+        return 1
+    fi
+    if ! chmod 700 -- "/dev/fd/$primary"; then
+        exec {primary}<&- {shadow}<&-
+        echo "Error: authority keyset permissions cannot be restricted: $keyset" >&2
+        return 1
+    fi
+    _VALIDATION_KEYSET_LOCK=("$primary" "$shadow" "$identity" "$keyset" "$resolved_output")
+}
+
+# keyset lock を解放する（primary と shadow を閉じる）。state が無ければ何もしない。
+# 所有の証明が成り立たなければ、どの fd も閉じずに 2 を返す（自分が取得した lock 以外を閉じない）。
+# keyset の path が差し替えられていても、所有していれば閉じる（自分の lock の解放なので）。
+validation_unlock_authority_keyset() {
+    local primary shadow
+    _validation_keyset_lock_state_exists || return 0
+    if ! _validation_keyset_lock_state_is_well_formed \
+        || ! _validation_keyset_lock_is_owned \
+            "${_VALIDATION_KEYSET_LOCK[0]}" "${_VALIDATION_KEYSET_LOCK[1]}" "${_VALIDATION_KEYSET_LOCK[2]}"; then
+        echo "Error: the authority keyset lock state does not match a lock this process holds; not closing any descriptor" >&2
+        return 2
+    fi
+    primary="${_VALIDATION_KEYSET_LOCK[0]}"
+    shadow="${_VALIDATION_KEYSET_LOCK[1]}"
+    exec {primary}<&- {shadow}<&-
+    unset _VALIDATION_KEYSET_LOCK
+}
+
+# 内部: 鍵を書く helper の共通の前提。key_file が「いま保持している keyset lock の keyset の直下の
+# file」であることを確かめ、書き込み先（lock した inode の中の path）を stdout に出す。
+_validation_keyset_member_target() {
+    local key_file="$1" name
+    if ! _validation_keyset_lock_state_exists; then
+        echo "Error: no authority keyset lock is held for $key_file" >&2
+        return 2
+    fi
+    if ! _validation_keyset_lock_state_is_well_formed; then
+        echo "Error: the authority keyset lock state was not created by validation_lock_authority_keyset: $key_file" >&2
+        return 2
+    fi
+    local primary="${_VALIDATION_KEYSET_LOCK[0]}" shadow="${_VALIDATION_KEYSET_LOCK[1]}"
+    local identity="${_VALIDATION_KEYSET_LOCK[2]}" keyset="${_VALIDATION_KEYSET_LOCK[3]}"
+    local output="${_VALIDATION_KEYSET_LOCK[4]}"
+    if ! _validation_keyset_lock_is_owned "$primary" "$shadow" "$identity"; then
+        echo "Error: the recorded authority keyset lock (fd $primary) is not held by this process: $key_file" >&2
+        return 2
+    fi
+    name="${key_file##*/}"
+    if [[ "${key_file%/*}" != "$keyset" ]] || ! _validation_path_component_is_valid "$name"; then
+        echo "Error: authority key must be a file directly under the locked keyset $keyset: $key_file" >&2
+        return 2
+    fi
+    if [[ -L "$keyset" || ! -d "$keyset" || ! "$keyset" -ef "/dev/fd/$primary" ]]; then
+        echo "Error: authority keyset no longer names the locked directory: $keyset" >&2
+        return 2
+    fi
+    _validation_check_authority_keyset "$keyset" "$output" || return 1
+    if [[ -L "/dev/fd/$primary/$name" ]]; then
+        echo "Error: authority key must not be a symlink: $key_file" >&2
+        return 1
+    fi
+    printf '%s\n' "/dev/fd/$primary/$name"
+}
+
+# supervisor / worker の HMAC 鍵（32 byte）を具体化する。空または無ければ subshell の
+# `umask 077` の中で一時 file に書き、32 byte を確かめてから atomic に置く（途中で止まっても
+# 短い鍵を残さない）。既にあれば regular file であることだけ確かめて書き換えない（鍵の長さの
+# 妥当性は読む側の supervisor_command が所有する）。
+validation_materialize_process_key() {
+    local key_file="$1" target temporary
+    target="$(_validation_keyset_member_target "$key_file")" || return
+    if [[ -e "$target" && ! -f "$target" ]]; then
+        echo "Error: process authority key is not a regular file: $key_file" >&2
+        return 1
+    fi
+    [[ -s "$target" ]] && return 0
+    if ! temporary="$(umask 077; mktemp -- "$target.tmp.XXXXXX")"; then
+        echo "Error: process authority key cannot be written: $key_file" >&2
+        return 1
+    fi
+    if ! (umask 077; head -c 32 /dev/urandom > "$temporary") \
+        || [[ "$(stat -c %s -- "$temporary" 2>/dev/null)" != 32 ]] \
+        || ! mv -f -T -- "$temporary" "$target"; then
+        rm -f -- "$temporary"
+        echo "Error: process authority key cannot be written: $key_file" >&2
+        return 1
+    fi
+}
+
+# 内部: pair-status 鍵 CLI を 1 回呼ぶ。repo root で実行する（呼び出し側の cwd に依存しない。
+# 相対の python_bin は呼び出し側の cwd で先に解決する）。失敗したら traceback を出さず、その
+# stderr の最後の行（無ければ exit status）を理由にする。
+_validation_pair_status_key_cli() {
+    local python_bin="$1" failure="$2" error_output status=0 reason
+    shift 2
+    [[ "$python_bin" != */* || "$python_bin" == /* ]] || python_bin="$PWD/$python_bin"
+    error_output="$(cd "$_VALIDATION_KEY_AUTHORITY_REPO_ROOT" \
+        && "$python_bin" -m "$_VALIDATION_PAIR_STATUS_KEY_MODULE" "$@" 2>&1 >/dev/null)" || status=$?
+    (( status == 0 )) && return 0
+    reason="$(printf '%s\n' "$error_output" | tail -n 1)"
+    echo "Error: $failure: ${reason:-exit $status}" >&2
+    return 1
+}
+
+# pair-status 署名鍵の具体化規則（唯一の owner）。
+# - 秘密鍵が空（無い）: 生成し、公開鍵も書く。
+# - 秘密鍵だけある（出力 dir を消して取り直した等）: 秘密鍵から公開鍵を書き直す。
+# - どの場合も最後に対を validate する。秘密鍵を書くのは空と判定したときだけで、
+#   validate の後は書き換えない。
+# 秘密鍵は保持している keyset の直下、公開鍵は lock で記録した OUTPUT の中でなければならない。
+validation_materialize_pair_status_keypair() {
+    local python_bin="$1" private_key="$2" public_key="$3" target public_target
+    target="$(_validation_keyset_member_target "$private_key")" || return
+    if ! public_target="$(realpath -m -- "$public_key" 2>/dev/null)" \
+        || [[ "$public_target" != "${_VALIDATION_KEYSET_LOCK[4]}/"* ]]; then
+        echo "Error: pair-status public key must be inside OUTPUT_BASE_DIR (${_VALIDATION_KEYSET_LOCK[4]}): $public_key" >&2
+        return 1
+    fi
+    if [[ ! -s "$target" ]]; then
+        _validation_pair_status_key_cli "$python_bin" "pair-status keypair cannot be generated" \
+            --generate-private-key "$target" --write-public-key "$public_target" || return 1
+    elif [[ ! -s "$public_target" ]]; then
+        _validation_pair_status_key_cli "$python_bin" \
+            "pair-status public key cannot be exported from the retained private key" \
+            --export-public-from-private "$target" --write-public-key "$public_target" || return 1
+    fi
+    if ! _validation_pair_status_key_cli "$python_bin" \
+        "pair-status private key and public key are not a valid pair" \
+        --validate-private-key "$target" --public-key "$public_target"; then
+        echo "Private key: $private_key" >&2
+        echo "Public key: $public_target" >&2
+        return 1
+    fi
+}
+
 export -f validation_positive_int_setting
 export -f validation_manifest_value
 export -f validation_run_benchmark_gate
