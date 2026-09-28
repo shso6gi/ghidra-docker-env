@@ -761,7 +761,7 @@ def test_t13_a_tie_only_relation_is_never_decisive_and_cannot_stand_in_for_the_f
         (lambda a: replace(a, raw_parameter_domains=None), ("parameter_domain_origin_unavailable",)),
         (
             lambda a: a.with_signature_hypothesis(_hypothesis(0, "uint", 4, False, phase="P1_SIGNEDNESS")),
-            ("parameter_domain_changed:s32->u32", "parameter_domain_hypothesis:P1_SIGNEDNESS:s32->u32"),
+            ("parameter_domain_hypothesis:P1_SIGNEDNESS:s32->u32", "parameter_domain_changed:s32->u32"),
         ),
     ],
     ids=["raw", "sign", "width", "unsealed", "hypothesis"],
@@ -871,3 +871,18 @@ def test_a_table_that_gained_a_duplicate_index_after_the_seal_is_unmatched_per_p
     duplicated = right.semantic_successor(parameters=[dict(right.parameters[0]), dict(right.parameters[0], name="b")])
     defects = ParameterDomainAudit.of(duplicated).parameter_defects(index=0, bits=32, signed=True, synthetic_kind=None)
     assert [defect.as_evidence_ref() for defect in defects] == ["parameter_domain_origin_unmatched:0"]
+
+
+def test_the_hypothesis_survives_the_evidence_truncation_ahead_of_closure_refs():
+    """relation の evidence は consumer で先頭から切り詰められる。仮説（根の理由）を先頭に置く。"""
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.model import _EVIDENCE_REF_ITEMS
+
+    left = _raw("left", [_descriptor("a", 4, "int", True)], [ReturnInfo("0x10", _param("a", 4, "int"), [])])
+    wide = _param("a", 8, "long")
+    reads = [Condition(_cmp("INT_SLESS", wide, _const(value, 8))) for value in range(_EVIDENCE_REF_ITEMS + 2)]
+    right = _raw("right", [_descriptor("a", 8, "long", True)], [ReturnInfo("0x10", _const(0, 4), reads)])
+    narrowed = right.with_signature_hypothesis(_hypothesis(0, "int", 4, True, phase="P4A_MIPS64_ABI"))
+    (item,) = _relation(left, narrowed).correspondences
+    assert item.evidence[1] == "right:parameter_domain_hypothesis:P4A_MIPS64_ABI:s64->s32"
+    assert "right:parameter_domain_hypothesis:P4A_MIPS64_ABI:s64->s32" in _evidence(_relation(left, narrowed))

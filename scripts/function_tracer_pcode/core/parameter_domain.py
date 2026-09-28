@@ -483,15 +483,16 @@ class ParameterDomainAudit:
             if synthetic_kind is None:
                 defects.append(ParameterDomainDefect(DEFECT_ORIGIN_UNMATCHED, label_index))
             return tuple(defects)
+        # 台帳の記録（原因）を差（結果）より先に並べる: evidence は consumer で先頭から切り詰められる
+        for entry in self.hypotheses:
+            if entry.index == normalized:
+                defects.append(ParameterDomainDefect(DEFECT_HYPOTHESIS, entry.label))
         live = self.current.get(normalized, (None,))[0]
         if claimed != raw:
             defects.append(ParameterDomainDefect(DEFECT_CHANGED, f"{raw.label}->{_domain_label(claimed)}"))
         elif live != raw:
             # 式が使う値は正本と同じでも、いまの表は違う（作り直した relation が古い表を使った）
             defects.append(ParameterDomainDefect(DEFECT_CHANGED, f"{raw.label}->{_domain_label(live)}"))
-        for entry in self.hypotheses:
-            if entry.index == normalized:
-                defects.append(ParameterDomainDefect(DEFECT_HYPOTHESIS, entry.label))
         return tuple(defects)
 
 

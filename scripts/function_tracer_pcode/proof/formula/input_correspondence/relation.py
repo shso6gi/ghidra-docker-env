@@ -107,7 +107,8 @@ class _SideContext:
                 synthetic_kind=type_class if type_class in SYNTHETIC_PARAMETER_KINDS else None,
             )
         )
-        return closure_refs + domain_refs
+        # 入力領域の欠陥を先に: 入力そのものが証明されていないことが、別名の読みより根の理由
+        return domain_refs + closure_refs
 
     def evidence(self, parameter: SideParameter) -> Optional[InputExtensionEvidence]:
         evidence = self.evidence_by_index.get(parameter.index)
