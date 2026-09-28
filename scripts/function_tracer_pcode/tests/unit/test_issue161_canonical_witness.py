@@ -397,3 +397,37 @@ def test_production_z3_solvers_and_parses_name_their_context():
 def test_the_static_rule_detects_a_context_free_solver():
     tree = ast.parse("import z3\ns = z3.Solver()\nz3.parse_smt2_string('x', ctx=c)\n")
     assert _z3_calls_without_context(tree) == [2]
+
+
+# ---------------------------------------------------------------------------
+# runner: canonical な witness を作れない backend の model は採らない
+# ---------------------------------------------------------------------------
+
+
+def test_the_runner_drops_a_model_from_a_backend_without_the_witness_contract():
+    from scripts.function_tracer_pcode.smt.interface import SMTSolver, SolverResult
+    from scripts.function_tracer_pcode.smt.parallel import ParallelSolverRunner
+
+    class _ArbitraryModelBackend(SMTSolver):
+        @property
+        def name(self):
+            return "arbitrary"
+
+        def check_availability(self):
+            return True, "test"
+
+        def check_equivalence_direct(self, smt_script, cancellation_token=None):
+            return SolverResult(self.name, SolverStatus.SAT, model={"x": 42})
+
+    class _CanonicalBackend(_ArbitraryModelBackend):
+        PROVIDES_CANONICAL_WITNESS = True
+
+    arbitrary = ParallelSolverRunner(timeout=1, solver_classes=[_ArbitraryModelBackend])
+    result = arbitrary.run_sequential("(check-sat)")
+    assert result.is_equivalent is False
+    assert result.get_counterexample() is None
+    assert "canonical witness unavailable" in result.results[0].error_message
+
+    canonical = ParallelSolverRunner(timeout=1, solver_classes=[_CanonicalBackend])
+    assert canonical.run_sequential("(check-sat)").get_counterexample() == {"x": 42}
+    assert Z3Solver.PROVIDES_CANONICAL_WITNESS is True

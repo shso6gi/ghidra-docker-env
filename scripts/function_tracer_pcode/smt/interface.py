@@ -53,7 +53,11 @@ class SolverResult:
 
 class SMTSolver(ABC):
     """SMTソルバーの抽象基底クラス"""
-    
+
+    #: SAT の model が `SolverResult.model` の契約（canonical な witness、`smt.witness`）を
+    #: 満たすか。満たさない backend の SAT の model は runner が採らない（model 無しの SAT）。
+    PROVIDES_CANONICAL_WITNESS = False
+
     def __init__(self, timeout: int = 10):
         """
         Args:

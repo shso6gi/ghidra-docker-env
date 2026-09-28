@@ -299,6 +299,8 @@ def isolated_solver(z3: Any, smt_script: str, timeout_ms: int) -> Any:
 
 class Z3Solver(SMTSolver):
     """Z3 SMTソルバー"""
+
+    PROVIDES_CANONICAL_WITNESS = True
     
     def __init__(self, timeout: int = 10, debug: bool = False):
         super().__init__(timeout)

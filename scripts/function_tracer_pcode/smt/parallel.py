@@ -188,6 +188,31 @@ class CancellationToken:
         return self._cancelled.is_set()
 
 
+def _with_witness_contract(solver: SMTSolver, result: SolverResult) -> SolverResult:
+    """SAT の model を `SolverResult.model` の契約に合わせる（Issue #161）。
+
+    canonical な witness を作れない backend の model は solver の任意の選択なので採らない
+    （model 無しの SAT。replay はそれを反例として受け入れない）。
+    """
+
+    if (
+        result.status == SolverStatus.SAT
+        and result.model is not None
+        and not getattr(solver, "PROVIDES_CANONICAL_WITNESS", False)
+    ):
+        return SolverResult(
+            solver_name=result.solver_name,
+            status=result.status,
+            elapsed_time=result.elapsed_time,
+            model=None,
+            error_message=(
+                "canonical witness unavailable: backend does not provide one"
+            ),
+            raw_output=result.raw_output,
+        )
+    return result
+
+
 class ParallelSolverRunner:
     """複数のSMTソルバーを並列実行（早期終了対応）"""
     
@@ -308,7 +333,7 @@ class ParallelSolverRunner:
                 if self.debug:
                     print(f"[ParallelRunner] <<< {solver.name} completed: {result.status.name}", flush=True)
 
-                return result
+                return _with_witness_contract(solver, result)
             except Exception as e:
                 if self.debug:
                     import traceback
