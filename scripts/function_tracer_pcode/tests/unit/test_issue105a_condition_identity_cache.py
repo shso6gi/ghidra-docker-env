@@ -1615,11 +1615,17 @@ def test_implication_identities_never_merge_under_forced_collisions(forced_colli
     context_b = [_slt(_param("param_1", 0), _const(9))]
     key = query_identity.ImplicationIdentity.of(goal, context_a, None)
     cache_store("t", key, True)
-    assert cache_lookup("t", query_identity.ImplicationIdentity.of(goal, context_a, None)) == (True, True)
-    assert cache_lookup("t", query_identity.ImplicationIdentity.of(goal, context_b, None)) == (False, None)
+    normed = query_identity.ImplicationIdentity.of(goal, context_a, {("a", "INT_EQUAL", "b", True)})
+    cache_store("t", normed, False)
+    # 正規形の集合が同じ大きさでも中身が違えば別の問い
+    assert cache_lookup(
+        "t", query_identity.ImplicationIdentity.of(goal, context_a, {("c", "INT_EQUAL", "d", True)})
+    ) == (False, None)
     assert cache_lookup(
         "t", query_identity.ImplicationIdentity.of(goal, context_a, {("a", "INT_EQUAL", "b", True)})
-    ) == (False, None)
+    ) == (True, False)
+    assert cache_lookup("t", query_identity.ImplicationIdentity.of(goal, context_a, None)) == (True, True)
+    assert cache_lookup("t", query_identity.ImplicationIdentity.of(goal, context_b, None)) == (False, None)
     assert cache_lookup(
         "t", query_identity.ImplicationIdentity.of(goal.negate(), context_a, None)
     ) == (False, None)
