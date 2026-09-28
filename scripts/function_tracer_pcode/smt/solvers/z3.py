@@ -366,8 +366,11 @@ class Z3Solver(SMTSolver):
         except Exception as e:
             elapsed = time.time() - start_time
             self._debug_print(f"Exception: {e}")
-            if elapsed >= self.timeout:
-                return self._create_timeout_result(elapsed)
+            # 例外で止まった実行も、中断（中止・期限切れ）なら中断の規則で分類する
+            # （中止を優先。期限切れは従来どおり TIMEOUT）。それ以外は ERROR
+            stop = budget.interruption()
+            if stop is not None:
+                return interrupted_result(self.name, stop, f"the execution raised: {e}", elapsed)
             return self._create_error_result(str(e))
     
     def _is_timeout_reason(self, reason: str, elapsed: float) -> bool:

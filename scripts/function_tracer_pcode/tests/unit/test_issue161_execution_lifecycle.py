@@ -317,6 +317,21 @@ def test_an_unknown_first_check_follows_the_interruption_rule(monkeypatch, reaso
     assert _standalone(ALREADY_CANONICAL, timeout=1, token=token).status == expected
 
 
+@pytest.mark.parametrize("stop, expected", [("cancel", UNKNOWN), ("deadline", TIMEOUT), (None, SolverStatus.ERROR)])
+def test_an_execution_that_raises_is_classified_by_the_same_rule(monkeypatch, stop, expected):
+    token = _Token()
+
+    def _raise():
+        if stop == "cancel":
+            token.cancel()
+        elif stop == "deadline":
+            time.sleep(1.1)
+        raise RuntimeError("backend failure")
+
+    _script_solvers(monkeypatch, during_first_check=_raise)
+    assert _standalone(ALREADY_CANONICAL, timeout=1, token=token).status == expected
+
+
 # ---------------------------------------------------------------------------
 # monolithic の共有 session も同じ規則（中止の入力は無いので期限だけ）
 # ---------------------------------------------------------------------------

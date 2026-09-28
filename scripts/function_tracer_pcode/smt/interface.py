@@ -46,7 +46,9 @@ class SolverResult:
     #:   SAT は、**必ず** script が宣言する scalar 入力の canonical witness を持つ
     #:   （`smt.witness`: 宣言順・辞書式最小、値は sort の Python 型）。solver の履歴や
     #:   最初に見つけた model に依らない。決められなかったときは SAT を返さない
-    #:   （`witness_failure_result`: 予算切れは TIMEOUT、判定不能・中止は UNKNOWN）
+    #:   （`interrupted_result`: 予算切れは TIMEOUT、判定不能・中止は UNKNOWN）。SAT は
+    #:   `sat_with_canonical_witness` の手順でだけ確定する（witness の生成の前後で実行の
+    #:   中断を確かめる。実行の状態の owner は `smt.execution.ExecutionBudget`）
     #: * 作れない backend の SAT は `None`
     #: * どちらも backend の境界（`enforce_witness_contract`）で強制する。canonical
     #:   provider の witness が無い・形が違う SAT は契約違反として ERROR にし
@@ -82,7 +84,7 @@ class SMTSolver(ABC):
     #: SAT の model が `SolverResult.model` の契約（canonical witness、`smt.witness`）を
     #: 満たすと宣言するか。宣言は `enforce_witness_contract` が結果ごとに検査する（宣言した
     #: backend の witness の無い・形の違う SAT は ERROR、宣言しない backend の model は落とす）。
-    #: 宣言する backend は、witness を決められない SAT を `witness_failure_result` で返す。
+    #: 宣言する backend は、SAT を `sat_with_canonical_witness` でだけ返す。
     PROVIDES_CANONICAL_WITNESS = False
 
     def __init__(self, timeout: int = 10):
