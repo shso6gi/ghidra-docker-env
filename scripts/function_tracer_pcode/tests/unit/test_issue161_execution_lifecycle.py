@@ -245,17 +245,44 @@ def test_the_sat_is_not_finalized_after_the_witness_if_the_execution_stopped(mon
     assert result.status == (UNKNOWN if stop == "cancel" else TIMEOUT)
 
 
-def test_a_cancellation_during_the_witness_search_is_unknown(monkeypatch):
+def _solver_checks_after(monkeypatch, moment):
+    """`moment()` が真になった後に z3 の `check()` が呼ばれた回数を数える。"""
+
+    made = _script_solvers(monkeypatch)
+    late = []
+    original = _ScriptedSolver.check
+
+    def _check(self, *args):
+        if moment():
+            late.append(1)
+        return original(self, *args)
+
+    monkeypatch.setattr(_ScriptedSolver, "check", _check)
+    return made, late
+
+
+def test_a_cancellation_during_the_witness_search_is_unknown_and_asks_no_more(monkeypatch):
     token = _Token()
+    _made, late = _solver_checks_after(monkeypatch, token.is_cancelled)
     _count_questions(monkeypatch, on_question=lambda n: token.cancel() if n == 1 else None)
     result = _standalone(MANY_QUESTIONS, timeout=10, token=token)
     assert result.status == UNKNOWN and CANCELLED in result.error_message
+    assert late == []  # 中止の後に solver へ問いを投げない
 
 
-def test_a_deadline_during_the_witness_search_is_a_timeout(monkeypatch):
-    _count_questions(monkeypatch, on_question=lambda n: time.sleep(1.1) if n == 1 else None)
+def test_a_deadline_during_the_witness_search_is_a_timeout_and_asks_no_more(monkeypatch):
+    passed = []
+    _made, late = _solver_checks_after(monkeypatch, lambda: bool(passed))
+
+    def _pass_the_deadline(n):
+        if n == 1:
+            time.sleep(1.1)
+            passed.append(1)
+
+    _count_questions(monkeypatch, on_question=_pass_the_deadline)
     result = _standalone(MANY_QUESTIONS, timeout=1)
     assert result.status == TIMEOUT and BUDGET_EXHAUSTED in result.error_message
+    assert late == []  # 期限の後に solver へ問いを投げない
 
 
 def test_an_unsat_is_not_returned_from_a_cancelled_execution(monkeypatch):
