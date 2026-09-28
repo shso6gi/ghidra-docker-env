@@ -154,7 +154,11 @@ class _FakeZ3:
         self.solvers = 0
         self.checks = 0
 
-    def Solver(self):
+    def Context(self):
+        # Issue #161: oracle は query ごとに専用の context（`isolated_solver`）を作る
+        return object()
+
+    def Solver(self, ctx=None):
         fake = self
         self.solvers += 1
 
@@ -176,7 +180,7 @@ class _FakeZ3:
 
         return _Solver()
 
-    def parse_smt2_string(self, _script):
+    def parse_smt2_string(self, _script, ctx=None):
         return []
 
 
