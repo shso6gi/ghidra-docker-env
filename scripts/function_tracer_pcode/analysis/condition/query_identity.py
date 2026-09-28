@@ -293,6 +293,11 @@ class RootQueryGraph:
     def distinct_node_count(self) -> int:
         return self.graph.distinct_node_count
 
+    def cache_weight(self) -> int:
+        """cache の中で生かす量（node の値の複製の数。`condition_cache` が上限に使う）。"""
+
+        return max(1, len(self.node_payloads))
+
     def same_as(self, other: "RootQueryGraph") -> bool:
         """完全比較（番号順に node ごと。巨大な入れ子 tuple は作らない）。"""
 
@@ -432,6 +437,11 @@ class SolverQueryIdentity:
             cacheable=all(entry.graph.cacheable for entry in entries),
         )
 
+    def cache_weight(self) -> int:
+        """cache の key として生かす量（条件ごとの graph の node 数の和）。"""
+
+        return 1 + sum(entry.graph.cache_weight() for entry in self.entries)
+
     def matches(self, other: Any) -> bool:
         """完全比較。`fast` は早期棄却にだけ使う。"""
 
@@ -569,6 +579,11 @@ class RewriteIdentity:
     @property
     def cacheable(self) -> bool:
         return self.root.cacheable
+
+    def cache_weight(self) -> int:
+        """cache の key として生かす量（root の graph の node 数 + mapping の件数）。"""
+
+        return 1 + self.root.cache_weight() + len(self.mapping)
 
     def matches(self, other: Any) -> bool:
         if self is other:

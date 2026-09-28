@@ -904,8 +904,9 @@ def test_the_root_memo_does_not_keep_a_root_alive(scoped):
     del root
     gc.collect()
     assert alive() is None
-    memo = scoped.store._roots.get("query_identity.root_graph", {})
-    assert all(entry[0]() is not None for entry in memo.values())
+    memo = scoped.store._roots.get("query_identity.root_graph")
+    entries = memo._entries.values() if memo is not None else ()
+    assert all(entry[0]() is not None for entry in entries)
 
 
 def test_the_root_memo_keeps_values_that_cannot_be_weakly_referenced(scoped):
@@ -914,6 +915,126 @@ def test_the_root_memo_keeps_values_that_cannot_be_weakly_referenced(scoped):
     assert root_memo("kind", term, lambda root: built.append(root) or "v") == "v"
     assert root_memo("kind", term, lambda root: built.append(root) or "other") == "v"
     assert built == [term]
+
+
+class _Weighted:
+    """`cache_weight()` を持つ値（重みの上限の test 用）。"""
+
+    def __init__(self, name, weight):
+        self.name = name
+        self.weight = weight
+
+    def cache_weight(self):
+        return self.weight
+
+    def __hash__(self):
+        return hash(self.name)
+
+    def __eq__(self, other):
+        return isinstance(other, _Weighted) and other.name == self.name
+
+
+def test_a_table_keeps_the_newest_entries_within_its_weight_limit(scoped):
+    table = condition_cache.IdentityTable("t", limit=100, weight_limit=30)
+    for index in range(5):
+        table.store(_Weighted(f"k{index}", 9), index)
+    # 1 件 = key 9 + value 1 = 10。上限 30 なので新しい 3 件だけ残る（古い順に捨てる）
+    assert len(table) == 3
+    assert table.weight == 30
+    assert [table.lookup(_Weighted(f"k{index}", 9))[0] for index in range(5)] == [
+        False, False, True, True, True,
+    ]
+    assert scoped.metrics.count("cache.t.evicted") == 2
+
+
+def test_a_table_does_not_keep_an_entry_heavier_than_its_limit(scoped):
+    table = condition_cache.IdentityTable("t", limit=100, weight_limit=30)
+    table.store(_Weighted("small", 4), "s")
+    table.store(_Weighted("huge", 100), "h")
+    assert table.lookup(_Weighted("huge", 100)) == (False, None)
+    # 重すぎる 1 件が他を追い出さない
+    assert table.lookup(_Weighted("small", 4)) == (True, "s")
+    assert scoped.metrics.count("cache.t.too_large") == 1
+
+
+def test_replacing_an_entry_keeps_the_weight_consistent(scoped):
+    table = condition_cache.IdentityTable("t", limit=100, weight_limit=1000)
+    for _ in range(10):
+        table.store(_Weighted("same", 7), "v")
+    assert len(table) == 1
+    assert table.weight == 8
+    table.clear()
+    assert len(table) == 0 and table.weight == 0
+
+
+def test_the_count_limit_still_evicts_the_oldest_first(scoped):
+    table = condition_cache.IdentityTable("t", limit=2, weight_limit=10_000)
+    for index in range(4):
+        table.store(("key", index), index)
+    assert [table.lookup(("key", index))[0] for index in range(4)] == [False, False, True, True]
+
+
+def test_the_weight_of_a_container_looks_only_one_level_deep():
+    shared = ("leaf",)
+    for _ in range(40):
+        shared = (shared, shared)
+    # 共有された入れ子 tuple を木としてたどらない（たどると 2**40）
+    assert condition_cache.cache_weight(shared) == 3
+    assert condition_cache.cache_weight((_Weighted("a", 5), 1)) == 1 + 5 + 1
+    assert condition_cache.cache_weight(None) == 1
+
+
+def test_identity_weights_count_the_graph_nodes_they_keep_alive():
+    small = _slt(_param("param_1", 0), _const(0))
+    large = _slt(_deep_chain(_param("param_1", 0), 30), _const(0))
+    small_graph = root_query_graph(small.expression)
+    large_graph = root_query_graph(large.expression)
+    assert small_graph.cache_weight() == len(small_graph.node_payloads)
+    assert large_graph.cache_weight() > small_graph.cache_weight()
+    query = _query(small, large)
+    assert query.cache_weight() == 1 + sum(entry.graph.cache_weight() for entry in query.entries)
+    assert query.cache_weight() >= 1 + small_graph.cache_weight() + large_graph.cache_weight() - 1
+
+
+def test_stored_query_identities_keep_a_bounded_number_of_graph_nodes_alive(monkeypatch, scoped):
+    """root の式が捨てられても、key の中の graph が上限を越えて残らない（RSS 増の原因）。"""
+
+    import gc
+
+    monkeypatch.setattr(condition_cache, "DEFAULT_TABLE_WEIGHT_LIMIT", 500)
+    for index in range(200):
+        condition = _slt(_deep_chain(_param("param_1", 0), 20), _const(index))
+        cache_store(ConditionSMTOracle.VERDICT_TABLE, _query(condition), True)
+        del condition
+    gc.collect()
+    table = scoped.store.table(ConditionSMTOracle.VERDICT_TABLE)
+    assert 0 < table.weight <= 500
+    kept_nodes = sum(
+        len(entry.graph.node_payloads) for key, _v, _w, _h in table._entries.values() for entry in key.entries
+    )
+    assert kept_nodes <= 500
+    # 新しいものは引ける
+    newest = _slt(_deep_chain(_param("param_1", 0), 20), _const(199))
+    assert cache_lookup(ConditionSMTOracle.VERDICT_TABLE, _query(newest)) == (True, True)
+
+
+def test_the_root_memo_is_bounded_by_weight_and_forgets_collected_roots(monkeypatch, scoped):
+    import gc
+
+    monkeypatch.setattr(condition_cache, "DEFAULT_ROOT_MEMO_WEIGHT_LIMIT", 20)
+    roots = [_Weighted(f"r{index}", 1) for index in range(10)]
+    for root in roots:
+        root_memo("kind", root, lambda _root: _Weighted("value", 5))
+    memo = scoped.store._roots["kind"]
+    assert memo.weight <= 20
+    assert len(memo) == 4
+    assert scoped.metrics.count("memo.kind.evicted") == 6
+    del roots[-1], root
+    gc.collect()
+    assert len(memo) == 3
+    assert memo.weight == 15
+    root_memo("kind", _Weighted("big", 1), lambda _root: _Weighted("value", 50))
+    assert scoped.metrics.count("memo.kind.too_large") == 1
 
 
 def test_reset_caches_clears_only_the_owners_tables(scoped):

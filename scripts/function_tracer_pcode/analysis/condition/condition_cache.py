@@ -25,6 +25,13 @@ consumer（何を覚えるか）          smt_oracle（verdict・書き換え）
   ので、memo が DAG を生かし続けない）。root だけに依存する値にしか使わない
   （mapping や描画文脈に依存する値は identity を key にした表へ）。
 
+* **量は重みで抑える**。表と root memo は、件数に加えて **重み**（`cache_weight()` の
+  合計。条件の identity では key が生かす graph の node 数）に上限を持ち、どちらかを
+  超えたら **古い entry から** 捨てる（FIFO、決定的）。件数だけでは 1 件の大きさが
+  抑えられず、root の式が回収された後も key の中の graph が上限の件数まで残る
+  （長く走る pair で RSS が数 GB 増えた実測がある）。重みの定義は identity の型が持ち
+  （`cache_weight()`）、表は中身を知らない。捨てても答えは変わらない（miss になるだけ）。
+
 保持の仕方は `core/budget_policy` の scope と同じ module 単位の stack（contextvar に
 すると solver worker thread から見えなくなる）。
 """
@@ -39,53 +46,160 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from scripts.function_tracer_pcode.core.condition_metrics import note
 
 
-#: 表 1 つの既定の上限（件数）。旧 class 属性 cache と同じく、超えたら全消去する。
+#: 表 1 つの既定の上限（件数）
 DEFAULT_TABLE_LIMIT = 8192
+#: 表 1 つが保持してよい重みの合計（条件の identity では graph の node 数）。1 node は
+#: 値の複製（NodeRecord と凍結時の意味値）で 1〜2 KB を占めるので、表 1 つで高々
+#: 数百 MB に収まる値にする。hit 率との釣り合いは ell / 固定 subset で測った（PR 本文）
+DEFAULT_TABLE_WEIGHT_LIMIT = 50_000
 #: root 単位の memo 1 種の上限（件数）
 DEFAULT_ROOT_MEMO_LIMIT = 16384
+#: root 単位の memo 1 種が保持してよい重みの合計
+DEFAULT_ROOT_MEMO_WEIGHT_LIMIT = 100_000
+
+
+def cache_weight(value: Any) -> int:
+    """値が cache の中で生かす量の目安（1 以上）。
+
+    `cache_weight()` を持つ値（identity の型）はそれに従う。tuple / list / set /
+    frozenset は **1 段だけ** 見て、要素ごとに `cache_weight()` があればその値、無ければ 1 を
+    足す（+1）。入れ子の container は再帰しない: 共有された tuple の DAG を木として
+    たどると指数時間になるので、量を数えたい値は自分で `cache_weight()` を持つ。
+    それ以外は 1。
+    """
+
+    weigh = getattr(value, "cache_weight", None)
+    if callable(weigh):
+        return max(1, int(weigh()))
+    if isinstance(value, (tuple, list, set, frozenset)):
+        total = 1
+        for item in value:
+            item_weigh = getattr(item, "cache_weight", None)
+            total += max(1, int(item_weigh())) if callable(item_weigh) else 1
+        return total
+    return 1
 
 
 class IdentityTable:
-    """identity を key にした bounded な表（bucket → 完全比較）。"""
+    """identity を key にした bounded な表（bucket → 完全比較、件数と重みで FIFO）。"""
 
-    __slots__ = ("name", "limit", "_buckets", "_size")
+    __slots__ = ("name", "limit", "weight_limit", "_buckets", "_entries", "_weight", "_serial")
 
-    def __init__(self, name: str, limit: int) -> None:
+    def __init__(self, name: str, limit: int, weight_limit: int) -> None:
         self.name = name
         self.limit = int(limit)
-        self._buckets: Dict[int, List[Tuple[Any, Any]]] = {}
-        self._size = 0
+        self.weight_limit = int(weight_limit)
+        #: hash → その bucket の entry の通し番号
+        self._buckets: Dict[int, List[int]] = {}
+        #: 通し番号 → (key, value, weight, hash)。挿入順（古い順）に並ぶ
+        self._entries: Dict[int, Tuple[Any, Any, int, int]] = {}
+        self._weight = 0
+        self._serial = 0
 
     def __len__(self) -> int:
-        return self._size
+        return len(self._entries)
+
+    @property
+    def weight(self) -> int:
+        return self._weight
+
+    def _find(self, key: Any, key_hash: int) -> Optional[int]:
+        for serial in self._buckets.get(key_hash, ()):
+            stored_key = self._entries[serial][0]
+            if stored_key is key or stored_key == key:
+                return serial
+        return None
 
     def lookup(self, key: Any) -> Tuple[bool, Any]:
-        bucket = self._buckets.get(hash(key))
+        key_hash = hash(key)
+        bucket = self._buckets.get(key_hash)
         if bucket:
-            for stored_key, value in bucket:
-                if stored_key is key or stored_key == key:
-                    note(f"cache.{self.name}.hit")
-                    return True, value
+            serial = self._find(key, key_hash)
+            if serial is not None:
+                note(f"cache.{self.name}.hit")
+                return True, self._entries[serial][1]
             note(f"cache.{self.name}.bucket_collision")
         note(f"cache.{self.name}.miss")
         return False, None
 
     def store(self, key: Any, value: Any) -> None:
-        if self._size >= self.limit:
-            self._buckets.clear()
-            self._size = 0
-            note(f"cache.{self.name}.cleared")
-        bucket = self._buckets.setdefault(hash(key), [])
-        for index, (stored_key, _value) in enumerate(bucket):
-            if stored_key is key or stored_key == key:
-                bucket[index] = (key, value)
-                return
-        bucket.append((key, value))
-        self._size += 1
+        key_hash = hash(key)
+        weight = cache_weight(key) + cache_weight(value)
+        serial = self._find(key, key_hash)
+        if serial is not None:
+            self._drop(serial)
+        if weight > self.weight_limit:
+            # 1 件で上限を越える値は覚えない（覚えると他の全部を追い出す）
+            note(f"cache.{self.name}.too_large")
+            return
+        self._serial += 1
+        self._entries[self._serial] = (key, value, weight, key_hash)
+        self._buckets.setdefault(key_hash, []).append(self._serial)
+        self._weight += weight
+        while len(self._entries) > self.limit or self._weight > self.weight_limit:
+            self._drop(next(iter(self._entries)))
+            note(f"cache.{self.name}.evicted")
+
+    def _drop(self, serial: int) -> None:
+        _key, _value, weight, key_hash = self._entries.pop(serial)
+        self._weight -= weight
+        bucket = self._buckets.get(key_hash)
+        if bucket is not None:
+            bucket.remove(serial)
+            if not bucket:
+                del self._buckets[key_hash]
 
     def clear(self) -> None:
         self._buckets.clear()
-        self._size = 0
+        self._entries.clear()
+        self._weight = 0
+
+
+class _RootMemo:
+    """root object ごとの memo 1 種（弱参照、件数と重みで FIFO）。"""
+
+    __slots__ = ("kind", "_entries", "_weight")
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+        #: id(root) → (root を指す参照, 値, 重み)。挿入順（古い順）
+        self._entries: Dict[int, Tuple[Callable[[], Any], Any, int]] = {}
+        self._weight = 0
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    @property
+    def weight(self) -> int:
+        return self._weight
+
+    def get(self, root: Any) -> Tuple[bool, Any]:
+        entry = self._entries.get(id(root))
+        if entry is not None and entry[0]() is root:
+            return True, entry[1]
+        return False, None
+
+    def put(self, root: Any, value: Any) -> None:
+        key = id(root)
+        self.discard(key, None)
+        weight = cache_weight(value)
+        if weight > DEFAULT_ROOT_MEMO_WEIGHT_LIMIT:
+            note(f"memo.{self.kind}.too_large")
+            return
+        self._entries[key] = (_root_reference(root, self, key), value, weight)
+        self._weight += weight
+        while len(self._entries) > DEFAULT_ROOT_MEMO_LIMIT or self._weight > DEFAULT_ROOT_MEMO_WEIGHT_LIMIT:
+            self.discard(next(iter(self._entries)), None)
+            note(f"memo.{self.kind}.evicted")
+
+    def discard(self, key: int, reference: Any) -> None:
+        """entry を消す（`reference` を渡したら、その参照の entry のときだけ）。"""
+
+        entry = self._entries.get(key)
+        if entry is None or (reference is not None and entry[0] is not reference):
+            return
+        del self._entries[key]
+        self._weight -= entry[2]
 
 
 class ConditionCacheStore:
@@ -94,13 +208,13 @@ class ConditionCacheStore:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._tables: Dict[str, IdentityTable] = {}
-        self._roots: Dict[str, Dict[int, Tuple[Any, Any]]] = {}
+        self._roots: Dict[str, _RootMemo] = {}
 
     def table(self, name: str, limit: int = DEFAULT_TABLE_LIMIT) -> IdentityTable:
         with self._lock:
             table = self._tables.get(name)
             if table is None:
-                table = IdentityTable(name, limit)
+                table = IdentityTable(name, limit, DEFAULT_TABLE_WEIGHT_LIMIT)
                 self._tables[name] = table
             return table
 
@@ -114,18 +228,18 @@ class ConditionCacheStore:
 
     def root_memo(self, kind: str, root: Any, build: Callable[[Any], Any]) -> Any:
         with self._lock:
-            memo = self._roots.setdefault(kind, {})
-            entry = memo.get(id(root))
-            if entry is not None and entry[0]() is root:
-                note(f"memo.{kind}.hit")
-                return entry[1]
+            memo = self._roots.get(kind)
+            if memo is not None:
+                found, value = memo.get(root)
+                if found:
+                    note(f"memo.{kind}.hit")
+                    return value
         value = build(root)
         with self._lock:
-            memo = self._roots.setdefault(kind, {})
-            if len(memo) >= DEFAULT_ROOT_MEMO_LIMIT:
-                memo.clear()
-                note(f"memo.{kind}.cleared")
-            memo[id(root)] = (_root_reference(root, memo), value)
+            memo = self._roots.get(kind)
+            if memo is None:
+                memo = self._roots[kind] = _RootMemo(kind)
+            memo.put(root, value)
         return value
 
     def clear(self, names: Optional[Tuple[str, ...]] = None) -> None:
@@ -142,23 +256,19 @@ class ConditionCacheStore:
                     table.clear()
 
 
-def _root_reference(root: Any, memo: Dict[int, Tuple[Any, Any]]) -> Callable[[], Any]:
+def _root_reference(root: Any, memo: "_RootMemo", key: int) -> Callable[[], Any]:
     """root を指す参照（取り出すと root か `None`）。
 
     式 object は弱参照で持つ: memo が root を生かし続けると、pair の間ずっと本来は
     捨てられる DAG が残る。root が回収されたら entry も消す（callback は回収の途中、
     memory が再利用される前に走るので、同じ `id()` の別の object と取り違えない）。
     値は root だけで決まるので、root が消えた entry は誰にも引かれず、捨てても答えは
-    変わらない。弱参照を持てない値（tuple の構造 key など）は強参照で持つ（表の件数の
+    変わらない。弱参照を持てない値（tuple の構造 key など）は強参照で持つ（件数と重みの
     上限で有界）。
     """
 
-    key = id(root)
-
-    def _evict(_reference: Any) -> None:
-        entry = memo.get(key)
-        if entry is not None and entry[0] is _reference:
-            memo.pop(key, None)
+    def _evict(reference: Any) -> None:
+        memo.discard(key, reference)
 
     try:
         return weakref.ref(root, _evict)
@@ -228,10 +338,15 @@ def clear_condition_caches(names: Tuple[str, ...]) -> None:
 
 
 __all__ = [
+    "DEFAULT_ROOT_MEMO_LIMIT",
+    "DEFAULT_ROOT_MEMO_WEIGHT_LIMIT",
+    "DEFAULT_TABLE_LIMIT",
+    "DEFAULT_TABLE_WEIGHT_LIMIT",
     "ConditionCacheStore",
     "IdentityTable",
     "active_condition_cache",
     "cache_lookup",
+    "cache_weight",
     "cache_store",
     "clear_condition_caches",
     "condition_cache_scope",
