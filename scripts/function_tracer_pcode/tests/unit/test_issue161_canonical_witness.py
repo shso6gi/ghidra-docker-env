@@ -422,13 +422,14 @@ def test_the_authority_witness_replay_accepts_the_backend_witness():
 # ---------------------------------------------------------------------------
 
 
-class _SlowFirstCheck:
-    """最初の `check()` だけ `delay` 秒かかる z3 solver（それ以外は委譲）。"""
+class _RecordingSolver:
+    """z3 の solver を包み、最初の `check()` を `delay` 秒遅らせ、timeout の設定を記録する。"""
 
-    def __init__(self, inner, delay):
+    def __init__(self, inner, delay=0.0):
         self._inner = inner
         self._delay = delay
         self._first = True
+        self.timeouts_ms = []
 
     def check(self, *args):
         if self._first:
@@ -438,8 +439,27 @@ class _SlowFirstCheck:
             time.sleep(self._delay)
         return self._inner.check(*args)
 
+    def set(self, *args, **kwargs):
+        if args and args[0] == "timeout":
+            self.timeouts_ms.append(args[1])
+        if "timeout" in kwargs:
+            self.timeouts_ms.append(kwargs["timeout"])
+        return self._inner.set(*args, **kwargs)
+
     def __getattr__(self, name):
         return getattr(self._inner, name)
+
+
+def _wrap_z3_solvers(monkeypatch, delay):
+    made = []
+    real_solver = z3.Solver
+
+    def _factory(*args, **kwargs):
+        made.append(_RecordingSolver(real_solver(*args, **kwargs), delay))
+        return made[-1]
+
+    monkeypatch.setattr(z3, "Solver", _factory)
+    return made
 
 
 def _capture_witness_deadline(monkeypatch):
@@ -448,36 +468,79 @@ def _capture_witness_deadline(monkeypatch):
     seen = {}
     original = z3_backend.canonical_declared_model
 
-    def _capture(z3_module, solver, script, *, deadline, cancellation_token=None):
+    def _capture(z3_module, solver, prepared, *, deadline, cancellation_token=None):
         seen["remaining"] = deadline - time.monotonic()
-        return original(z3_module, solver, script, deadline=deadline,
+        return original(z3_module, solver, prepared, deadline=deadline,
                         cancellation_token=cancellation_token)
 
     monkeypatch.setattr(z3_backend, "canonical_declared_model", _capture)
     return seen
 
 
+def _count_parses(monkeypatch):
+    calls = []
+    real_parse = z3.parse_smt2_string
+
+    def _parse(*args, **kwargs):
+        calls.append(args[0])
+        return real_parse(*args, **kwargs)
+
+    monkeypatch.setattr(z3, "parse_smt2_string", _parse)
+    return calls
+
+
 def test_the_witness_search_gets_only_what_the_first_check_left(monkeypatch):
     seen = _capture_witness_deadline(monkeypatch)
-    original_isolated = z3_backend.isolated_solver
-    monkeypatch.setattr(
-        z3_backend, "isolated_solver",
-        lambda *args: _SlowFirstCheck(original_isolated(*args), 1.5),
-    )
+    _wrap_z3_solvers(monkeypatch, 1.5)
     solver = Z3Solver(timeout=3)
     solver.check_availability()
     assert solver.check_equivalence_direct(SCRIPT).status == SolverStatus.SAT
     assert seen["remaining"] <= 3 - 1.5 + 0.05
 
 
+def test_query_preparation_is_part_of_the_execution_budget(monkeypatch):
+    """parse と witness の優先の項の用意も期限に数える（初回の check には残りだけ）。"""
+
+    import time
+
+    seen = _capture_witness_deadline(monkeypatch)
+    made = _wrap_z3_solvers(monkeypatch, 0.0)
+    original_prepare = z3_backend.prepare_witness_query
+
+    def _slow_prepare(*args, **kwargs):
+        time.sleep(1.5)
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(z3_backend, "prepare_witness_query", _slow_prepare)
+    solver = Z3Solver(timeout=3)
+    solver.check_availability()
+    assert solver.check_equivalence_direct(SCRIPT).status == SolverStatus.SAT
+    assert made and made[0].timeouts_ms[0] <= 1500 + 50
+    assert seen["remaining"] <= 3 - 1.5 + 0.05
+
+
+def test_a_preparation_that_uses_the_whole_budget_never_checks(monkeypatch):
+    import time
+
+    made = _wrap_z3_solvers(monkeypatch, 0.0)
+    original_prepare = z3_backend.prepare_witness_query
+
+    def _slow_prepare(*args, **kwargs):
+        time.sleep(1.1)
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(z3_backend, "prepare_witness_query", _slow_prepare)
+    solver = Z3Solver(timeout=1)
+    solver.check_availability()
+    result = solver.check_equivalence_direct(SCRIPT)
+    assert result.status == SolverStatus.TIMEOUT
+    assert made[0]._first is True  # check は呼ばれていない
+
+
 def test_one_execution_never_uses_more_than_its_budget(monkeypatch):
     import time
 
-    original_isolated = z3_backend.isolated_solver
-    monkeypatch.setattr(
-        z3_backend, "isolated_solver",
-        lambda *args: _SlowFirstCheck(original_isolated(*args), 1.2),
-    )
+    _wrap_z3_solvers(monkeypatch, 1.2)
     original_check_with = z3_backend._Z3WitnessSession.check_with
 
     def _slow_check_with(self, constraint):
@@ -496,17 +559,98 @@ def test_one_execution_never_uses_more_than_its_budget(monkeypatch):
     assert elapsed <= 2 + 0.4
 
 
+def test_the_witness_search_does_not_parse_the_script_again(monkeypatch):
+    """preference の項は実行の最初の 1 回の parse で用意する（witness 段で読み直さない）。"""
+
+    preference = "\n".join(witness_preference_lines([_fp_param("p")], [_fp_param("q")]))
+    script = NAN_FIRST.format(preference=preference)
+    calls = _count_parses(monkeypatch)
+    model = _solve(script)
+    assert model == {"p": 0x8000000000000000, "q": 0}
+    assert len(calls) == 1
+
+
 def test_the_shared_region_session_shares_one_budget_between_check_and_witness(monkeypatch):
     from scripts.function_tracer_pcode.proof import monolithic_authority
 
     seen = _capture_witness_deadline(monkeypatch)
     formula = "(declare-const x (_ BitVec 16))\n(assert (bvugt x #x0010))\n(check-sat)"
     session = _shared_session([formula])
-    session._solver = _SlowFirstCheck(session._solver, 1.5)
+    session._solver = _RecordingSolver(session._solver, 1.5)
     assert isinstance(session, monolithic_authority.SharedZ3RegionSession)
-    item = session.execute(formula, 3).results[0]
+    calls = _count_parses(monkeypatch)
+    result = session.execute(formula, 3)
+    item = result.results[0]
     assert item.status == SolverStatus.SAT and item.model == {"x": 0x11}
     assert seen["remaining"] <= 3 - 1.5 + 0.05
+    assert calls == []  # execute の中で script を parse しない
+    assert result.backend_aggregate is not None  # 1 query の結果として集約されている
+
+
+# ---------------------------------------------------------------------------
+# 中止と期限切れを区別する
+# ---------------------------------------------------------------------------
+
+
+class _Token:
+    def __init__(self, cancelled=False):
+        self.cancelled = cancelled
+
+    def is_cancelled(self):
+        return self.cancelled
+
+
+@pytest.mark.parametrize(
+    "reason, cancelled, deadline_offset, kind",
+    [
+        ("canceled", True, 5.0, CANCELLED),        # 明示の中止
+        ("canceled", False, 5.0, INCONCLUSIVE),    # z3 側の打ち切り（期限内・中止なし）
+        ("timeout", False, 5.0, BUDGET_EXHAUSTED),
+        ("unknown", False, -1.0, BUDGET_EXHAUSTED),  # 期限を過ぎている
+        ("canceled", True, -1.0, CANCELLED),       # 中止が優先（期限切れに数えない）
+        ("incomplete", False, 5.0, INCONCLUSIVE),
+    ],
+)
+def test_an_unknown_witness_answer_separates_cancellation_from_deadline(reason, cancelled, deadline_offset, kind):
+    import time
+
+    failure = z3_backend._unknown_witness_answer(reason, time.monotonic() + deadline_offset, _Token(cancelled))
+    assert failure.kind == kind
+
+
+def test_a_cancelled_witness_search_is_unknown_not_timeout():
+    """探索中の問いが中止で unknown になったら UNKNOWN（TIMEOUT ではない）。"""
+
+    import time
+
+    token = _Token()
+
+    class _CancelledDuringCheck:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def check(self, *args):
+            token.cancelled = True
+            return z3.unknown
+
+        def reason_unknown(self):
+            return "canceled"
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    context = z3.Context()
+    prepared = z3_backend.prepare_witness_query(z3, SCRIPT, context)
+    inner = z3.Solver(ctx=context)
+    inner.add(*prepared.assertions)
+    assert inner.check() == z3.sat
+    solver = _CancelledDuringCheck(inner)
+    result = z3_backend.sat_result_with_witness(
+        z3, solver, prepared, solver_name="Z3", started=time.time(),
+        deadline=time.monotonic() + 30, cancellation_token=token,
+    )
+    assert result.status == SolverStatus.UNKNOWN
+    assert "cancelled" in result.error_message
 
 
 # ---------------------------------------------------------------------------
@@ -607,6 +751,8 @@ class _Query:
 
 
 def _shared_session(formulas):
+    """`SharedZ3RegionSession` を region query の集合だけから組む（本番と同じ準備を使う）。"""
+
     from scripts.function_tracer_pcode.proof import monolithic_authority
 
     session = monolithic_authority.SharedZ3RegionSession.__new__(
@@ -615,10 +761,11 @@ def _shared_session(formulas):
     session._z3 = z3
     session._ctx = z3.Context()
     session._solver = z3.Solver(ctx=session._ctx)
-    session._specific = {
-        query.contract.formula_digest: tuple(z3.parse_smt2_string(query.formula, ctx=session._ctx))
+    session._prepared = {
+        query.contract.formula_digest: z3_backend.prepare_witness_query(z3, query.formula, session._ctx)
         for query in map(_Query, formulas)
     }
+    session._specific = {digest: prepared.assertions for digest, prepared in session._prepared.items()}
     session.check_count = 0
     return session
 

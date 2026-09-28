@@ -279,6 +279,140 @@ def targets_in_declaration_order(
     return tuple(targets)
 
 
+def witness_targets(smt_script: str) -> Tuple[WitnessTarget, ...]:
+    """script が宣言する witness の成分（宣言順）。SMT-LIB の字面だけを読む（backend 非依存）。"""
+
+    return targets_in_declaration_order(_declared_sorts(smt_script))
+
+
+def witness_preferences(smt_script: str) -> Tuple[str, ...]:
+    """script が宣言する witness の preference の名前（優先順）。"""
+
+    return _declared_preferences(smt_script)
+
+
+def witness_contract_violation(
+    targets: Sequence[WitnessTarget], model: Optional[Mapping[str, object]],
+) -> Optional[str]:
+    """`model` が canonical witness の **形** を満たさなければ理由を返す（満たせば None）。
+
+    形: `targets` のすべてを、ちょうどそれだけ束縛し、値が sort の Python 型と範囲に
+    収まる（Bool は bool、Int は int、bit-vector は 0 以上 2**幅 未満の int）。最小性は
+    ここでは検査しない（同じ query を解いた canonical backend どうしの一致は
+    `smt.aggregation` が検査する）。
+    """
+
+    if model is None:
+        return "a SAT from a canonical witness provider carries no witness"
+    names = [target.name for target in targets]
+    if set(model) != set(names):
+        missing = sorted(set(names) - set(model))
+        extra = sorted(set(model) - set(names))
+        return f"the witness does not bind exactly the declared inputs (missing={missing}, extra={extra})"
+    for target in targets:
+        value = model[target.name]
+        if target.sort == BOOL:
+            if type(value) is not bool:
+                return f"{target.name} is Bool but the witness value is {type(value).__name__}"
+            continue
+        if type(value) is not int:
+            return f"{target.name} needs an int but the witness value is {type(value).__name__}"
+        if target.sort == BITVEC and not 0 <= value < (1 << target.width):
+            return f"{target.name} is out of range for (_ BitVec {target.width})"
+    return None
+
+
+#: SMT-LIB の symbol（quoted symbol `|...|` は空白を含み得るので 1 つの名前として読む）
+_SYMBOL = r"(?:\|[^|]*\||[^\s()|]+)"
+_DECLARATION_RE = re.compile(
+    r"^\(declare-(?:const\s+(" + _SYMBOL + r")|fun\s+(" + _SYMBOL + r")\s+\(\))\s+(.+)\)$",
+    re.DOTALL,
+)
+
+
+def _top_level_smt_commands(smt_script: str) -> tuple[str, ...]:
+    """Split SMT-LIB into top-level commands without parsing rendered terms."""
+
+    commands = []
+    start = None
+    depth = 0
+    in_string = False
+    in_quoted_symbol = False
+    in_comment = False
+    escaped = False
+    for index, char in enumerate(smt_script):
+        if in_comment:
+            if char == "\n":
+                in_comment = False
+            continue
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if in_quoted_symbol:
+            if char == "|":
+                in_quoted_symbol = False
+            continue
+        if char == ";":
+            in_comment = True
+        elif char == '"':
+            in_string = True
+        elif char == "|":
+            in_quoted_symbol = True
+        elif char == "(":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                raise ValueError("SMT-LIB command parentheses are unbalanced")
+            if depth == 0 and start is not None:
+                commands.append(smt_script[start:index + 1])
+                start = None
+    if depth or in_string or in_quoted_symbol:
+        raise ValueError("SMT-LIB command surface is incomplete")
+    return tuple(commands)
+
+
+def _declared_sorts(smt_script: str) -> tuple:
+    """script の定数宣言を宣言順に ``(name, sort text)`` で返す（重複は拒否）。"""
+
+    declarations = []
+    declared_names = set()
+    for command in _top_level_smt_commands(smt_script):
+        match = _DECLARATION_RE.fullmatch(command.strip())
+        if match is None:
+            continue
+        name = match.group(1) or match.group(2)
+        if name in declared_names:
+            raise ValueError(f"duplicate SMT declaration: {name}")
+        declared_names.add(name)
+        declarations.append((name, match.group(3).strip()))
+    return tuple(declarations)
+
+
+_PREFERENCE_RE = re.compile(
+    r"^\(define-fun\s+(\|" + re.escape(WITNESS_PREFERENCE_PREFIX) + r"([0-9]+)\|)\s+\(\)\s+Bool\s",
+    re.DOTALL,
+)
+
+
+def _declared_preferences(smt_script: str) -> tuple:
+    """script が宣言する witness の preference の名前（優先順）。"""
+
+    found = []
+    for command in _top_level_smt_commands(smt_script):
+        match = _PREFERENCE_RE.match(command.strip())
+        if match is not None:
+            found.append((int(match.group(2)), match.group(1)))
+    return tuple(name for _order, name in sorted(found))
+
+
 __all__ = [
     "BITVEC",
     "BOOL",
@@ -296,5 +430,8 @@ __all__ = [
     "canonical_witness",
     "targets_in_declaration_order",
     "unquoted_symbol",
+    "witness_contract_violation",
+    "witness_preferences",
+    "witness_targets",
     "witness_value",
 ]

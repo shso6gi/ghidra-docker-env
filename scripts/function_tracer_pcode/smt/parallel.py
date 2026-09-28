@@ -16,7 +16,10 @@ from scripts.function_tracer_pcode.core.stage_journal import (
     journal_stage_start,
 )
 from scripts.function_tracer_pcode.core.json_encoding import each, materialize
-from scripts.function_tracer_pcode.smt.aggregation import aggregate_backend_results
+from scripts.function_tracer_pcode.smt.aggregation import (
+    BackendAggregate,
+    aggregate_backend_results,
+)
 from scripts.function_tracer_pcode.smt.interface import (
     SMTSolver,
     SolverResult,
@@ -140,43 +143,77 @@ def _solver_orchestration(mode: str):
 
 @dataclass
 class ParallelResult:
-    """1 つの query に対する backend の結果。
+    """solver の結果と、その判定。
 
-    `results` は設定された backend の順に 1 行ずつ（完了順ではない）。`first_definitive`
-    は判定の根拠になった 1 行で、`smt.aggregation` の規則（backend の結果の集合だけで
-    決まり、SAT と UNSAT が食い違えば判定しない）で決まる。名前は結果 JSON の schema
-    のために残している（「最初に終わった結果」ではない）。
+    作り方は 2 通りあり、どちらで作ったかで `results` の意味が決まる（推測しない）:
+
+    * **1 つの query を backend ごとに解いた行**: `ParallelResult.from_backend_results`
+      だけが作る。判定・代表結果・反例は `smt.aggregation` の規則で決まる（backend の
+      結果の集合だけで決まり、SAT / UNSAT や witness が食い違えば判定しない）。
+      `backend_aggregate` にその集約を持つ。runner と単一 query の実行が使う
+    * **producer が合成した結果**（複数の query / region / case の証拠、判定の無い空の
+      結果、test の fixture）: 直接構築する。判定は producer が `is_equivalent` で明示し、
+      明示しなければ従来どおり先頭の SAT / UNSAT 行から補う。反例は先頭の model 付きの
+      SAT 行。backend の集約規則は適用しない（異なる query の SAT と UNSAT は食い違いでは
+      ない）
+
+    `first_definitive` の名前は結果 JSON の schema のために残している。
     """
     results: List[SolverResult]
     first_definitive: Optional[SolverResult] = None  # 判定の根拠になった結果
     is_equivalent: Optional[bool] = None
+    #: 1 query の backend 集約（`from_backend_results` だけが設定する。結果 JSON の schema・
+    #: 比較には入れない）。None なら producer が合成した結果
+    backend_aggregate: Optional[BackendAggregate] = field(
+        default=None, compare=False, repr=False
+    )
     #: TIMEOUT の行があるか（作ったときに 1 度だけ数える事実。`EquivalenceResult.is_timeout` が
     #: 行を辿り直さずに読む。結果 JSON の schema・比較には入れない）。作った後に `results` へ行を
     #: 足さない（足すなら新しい `ParallelResult` を作る: この事実が行と食い違う）
     timed_out: bool = field(default=False, init=False, compare=False, repr=False)
-    #: backend の結果が SAT と UNSAT で食い違ったか（そのとき判定しない。診断用、schema 外）
-    backend_conflict: bool = field(default=False, init=False, compare=False, repr=False)
+
+    @classmethod
+    def from_backend_results(cls, results: List[SolverResult]) -> "ParallelResult":
+        """同じ 1 つの query を、設定された backend の順に解いた行から作る。"""
+
+        aggregate = aggregate_backend_results(results)
+        return cls(
+            results=list(results),
+            first_definitive=aggregate.representative,
+            is_equivalent=aggregate.is_equivalent,
+            backend_aggregate=aggregate,
+        )
 
     def __post_init__(self) -> None:
-        """代表結果を `smt.aggregation` の規則で補完する（手動構築でも同じ規則）。"""
+        """producer が合成した結果では、判定の無い欄を先頭の SAT / UNSAT 行から補う。"""
         self.timed_out = any(result.status == SolverStatus.TIMEOUT for result in self.results)
-        aggregate = aggregate_backend_results(self.results)
-        self.backend_conflict = aggregate.conflict
+        if self.backend_aggregate is not None:
+            # 1 query の backend 集約: 判定しなかった（食い違い）ことも結果なので補わない
+            return
         if self.first_definitive is None:
-            self.first_definitive = aggregate.representative
+            for result in self.results:
+                if result.status in (SolverStatus.SAT, SolverStatus.UNSAT):
+                    self.first_definitive = result
+                    break
 
         if self.is_equivalent is None and self.first_definitive is not None:
             self.is_equivalent = self.first_definitive.status == SolverStatus.UNSAT
+
+    @property
+    def backend_conflict(self) -> Optional[str]:
+        """1 query の backend が食い違ったならその種類（`smt.aggregation`）。診断用。"""
+        if self.backend_aggregate is None:
+            return None
+        return self.backend_aggregate.conflict
     
     def get_counterexample(self) -> Optional[Dict[str, Any]]:
-        """反例（判定の根拠が SAT のときの canonical witness）。無ければ None。"""
-        representative = self.first_definitive
-        if (
-            representative is not None
-            and representative.status == SolverStatus.SAT
-            and representative.model
-        ):
-            return representative.model
+        """反例。1 query の backend 集約なら判定の根拠の canonical witness、合成した結果なら
+        先頭の model 付きの SAT 行。"""
+        if self.backend_aggregate is not None:
+            return self.backend_aggregate.counterexample
+        for r in self.results:
+            if r.status == SolverStatus.SAT and r.model:
+                return r.model
         return None
     
     def json_items(self):
@@ -325,7 +362,10 @@ class ParallelSolverRunner:
                 if self.debug:
                     print(f"[ParallelRunner] <<< {solver.name} completed: {result.status.name}", flush=True)
 
-                return enforce_witness_contract(solver, result)
+                return enforce_witness_contract(
+                    result, smt_script,
+                    canonical=bool(getattr(solver, "PROVIDES_CANONICAL_WITNESS", False)),
+                )
             except Exception as e:
                 if self.debug:
                     import traceback
@@ -360,10 +400,7 @@ class ParallelSolverRunner:
         """
         with _solver_orchestration("run_parallel") as query_id:
             if not self._solvers:
-                return ParallelResult(
-                    results=[],
-                    is_equivalent=None
-                )
+                return ParallelResult.from_backend_results([])
         
             runtime_timeout = self._resolve_timeout(timeout)
             if self.debug:
@@ -417,7 +454,7 @@ class ParallelSolverRunner:
                         row = results[-1]
                         print(f"[ParallelRunner] {solver.name} completed: {row.status.name} ({row.elapsed_time:.3f}s)")
 
-            parallel = ParallelResult(results=results)
+            parallel = ParallelResult.from_backend_results(results)
             if self.debug:
                 print(f"[ParallelRunner] Final result: is_equivalent={parallel.is_equivalent}")
             return parallel
@@ -452,7 +489,7 @@ class ParallelSolverRunner:
                 if self.debug:
                     print(f"[ParallelRunner] {solver.name}: {result.status.name} ({result.elapsed_time:.3f}s)")
 
-            return ParallelResult(results=results)
+            return ParallelResult.from_backend_results(results)
 
     def _resolve_timeout(self, timeout: Optional[int]) -> int:
         """実行に使うタイムアウトを決定する。"""

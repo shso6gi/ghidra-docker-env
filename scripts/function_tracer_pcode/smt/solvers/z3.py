@@ -3,7 +3,7 @@
 
 import time
 import importlib
-import re
+from dataclasses import dataclass
 from typing import Optional, Dict, Any, Tuple, cast
 
 from scripts.function_tracer_pcode.smt.interface import (
@@ -18,103 +18,13 @@ from scripts.function_tracer_pcode.smt.witness import (
     CANCELLED,
     INCONCLUSIVE,
     INT,
-    WITNESS_PREFERENCE_PREFIX,
     Constraint,
+    WitnessTarget,
     WitnessUnavailable,
     canonical_witness,
-    targets_in_declaration_order,
+    witness_preferences,
+    witness_targets,
 )
-
-
-#: SMT-LIB の symbol（quoted symbol `|...|` は空白を含み得るので 1 つの名前として読む）
-_SYMBOL = r"(?:\|[^|]*\||[^\s()|]+)"
-_DECLARATION_RE = re.compile(
-    r"^\(declare-(?:const\s+(" + _SYMBOL + r")|fun\s+(" + _SYMBOL + r")\s+\(\))\s+(.+)\)$",
-    re.DOTALL,
-)
-
-
-def _top_level_smt_commands(smt_script: str) -> tuple[str, ...]:
-    """Split SMT-LIB into top-level commands without parsing rendered terms."""
-
-    commands = []
-    start = None
-    depth = 0
-    in_string = False
-    in_quoted_symbol = False
-    in_comment = False
-    escaped = False
-    for index, char in enumerate(smt_script):
-        if in_comment:
-            if char == "\n":
-                in_comment = False
-            continue
-        if in_string:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            continue
-        if in_quoted_symbol:
-            if char == "|":
-                in_quoted_symbol = False
-            continue
-        if char == ";":
-            in_comment = True
-        elif char == '"':
-            in_string = True
-        elif char == "|":
-            in_quoted_symbol = True
-        elif char == "(":
-            if depth == 0:
-                start = index
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth < 0:
-                raise ValueError("SMT-LIB command parentheses are unbalanced")
-            if depth == 0 and start is not None:
-                commands.append(smt_script[start:index + 1])
-                start = None
-    if depth or in_string or in_quoted_symbol:
-        raise ValueError("SMT-LIB command surface is incomplete")
-    return tuple(commands)
-
-
-def _declared_sorts(smt_script: str) -> tuple:
-    """script の定数宣言を宣言順に ``(name, sort text)`` で返す（重複は拒否）。"""
-
-    declarations = []
-    declared_names = set()
-    for command in _top_level_smt_commands(smt_script):
-        match = _DECLARATION_RE.fullmatch(command.strip())
-        if match is None:
-            continue
-        name = match.group(1) or match.group(2)
-        if name in declared_names:
-            raise ValueError(f"duplicate SMT declaration: {name}")
-        declared_names.add(name)
-        declarations.append((name, match.group(3).strip()))
-    return tuple(declarations)
-
-
-_PREFERENCE_RE = re.compile(
-    r"^\(define-fun\s+(\|" + re.escape(WITNESS_PREFERENCE_PREFIX) + r"([0-9]+)\|)\s+\(\)\s+Bool\s",
-    re.DOTALL,
-)
-
-
-def _declared_preferences(smt_script: str) -> tuple:
-    """script が宣言する witness の preference の名前（優先順）。"""
-
-    found = []
-    for command in _top_level_smt_commands(smt_script):
-        match = _PREFERENCE_RE.match(command.strip())
-        if match is not None:
-            found.append((int(match.group(2)), match.group(1)))
-    return tuple(name for _order, name in sorted(found))
 
 
 class _Z3WitnessSession:
@@ -213,13 +123,9 @@ class _Z3WitnessSession:
                 return dict(self._values)
             if verdict == self._z3.unsat:
                 return None
-            reason = str(self._solver.reason_unknown())
-            if reason in ("timeout", "canceled") or time.monotonic() >= self._deadline:
-                raise WitnessUnavailable(
-                    BUDGET_EXHAUSTED,
-                    f"the execution budget ran out during the witness search ({reason})",
-                )
-            raise WitnessUnavailable(INCONCLUSIVE, f"a witness question was inconclusive: {reason}")
+            raise _unknown_witness_answer(
+                str(self._solver.reason_unknown()), self._deadline, self._cancellation_token
+            )
         finally:
             self._solver.pop()
 
@@ -227,43 +133,88 @@ class _Z3WitnessSession:
         self._solver.add(self._term(constraint))
 
 
+def _unknown_witness_answer(reason: str, deadline: float, cancellation_token: Optional[Any]) -> WitnessUnavailable:
+    """探索の問いに z3 が unknown を返したときの理由の種類。
+
+    明示の中止（`cancellation_token`）は CANCELLED、実行の期限切れ（z3 の "timeout" か、
+    期限を過ぎている）は BUDGET_EXHAUSTED、それ以外（"canceled" を含む z3 側の打ち切りや
+    判定不能）は INCONCLUSIVE。中止を期限切れに数えない（`witness_failure_result` で
+    TIMEOUT と UNKNOWN に分かれる）。
+    """
+
+    if cancellation_token is not None and cancellation_token.is_cancelled():
+        return WitnessUnavailable(CANCELLED, f"the solver execution was cancelled ({reason})")
+    if reason == "timeout" or time.monotonic() >= deadline:
+        return WitnessUnavailable(
+            BUDGET_EXHAUSTED, f"the execution budget ran out during the witness search ({reason})"
+        )
+    return WitnessUnavailable(INCONCLUSIVE, f"a witness question was inconclusive: {reason}")
+
+
+@dataclass(frozen=True)
+class PreparedWitnessQuery:
+    """1 つの query を z3 で解くために、実行の最初に 1 回だけ用意するもの。
+
+    `assertions` は query の本体、`preference_terms` は witness の優先の項（script の
+    `define-fun |witness-preference:<k>|` を同じ parse で取り出したもの）、`targets` は
+    witness の成分。witness の探索はここにあるものだけを使い、script を読み直さない
+    （実行の期限の外で parse しない）。
+    """
+
+    assertions: Tuple[Any, ...]
+    preference_terms: Tuple[Tuple[str, Any], ...]
+    targets: Tuple[WitnessTarget, ...]
+
+
+def prepare_witness_query(z3: Any, smt_script: str, ctx: Any) -> PreparedWitnessQuery:
+    """`smt_script` を `ctx` に 1 回だけ parse して、本体と witness の優先の項を分ける。
+
+    preference は assert しないので、本体の後ろに `(assert <name>)` を足して 1 回で parse
+    し、末尾の k 個を preference の項として切り出す（本体には入れない）。
+    """
+
+    preferences = witness_preferences(smt_script)
+    appended = "".join(f"\n(assert {name})" for name in preferences)
+    parsed = tuple(z3.parse_smt2_string(smt_script + appended, ctx=ctx))
+    split = len(parsed) - len(preferences)
+    return PreparedWitnessQuery(
+        assertions=parsed[:split],
+        preference_terms=tuple(zip(preferences, parsed[split:])),
+        targets=witness_targets(smt_script),
+    )
+
+
 def canonical_declared_model(
-    z3: Any, solver: Any, smt_script: str, *, deadline: float,
+    z3: Any, solver: Any, prepared: PreparedWitnessQuery, *, deadline: float,
     cancellation_token: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """SAT の solver から、script が宣言する scalar 入力の canonical な witness を作る。
+    """SAT の solver から、query の scalar 入力の canonical な witness を作る。
 
     `solver` は直前の `check()` が SAT だったもの。値は `smt.witness.canonical_witness`
     の規則で決まり、solver の履歴にも最初の model にも依らない。`deadline` はその
     check と共有する実行の期限（`time.monotonic()` の値）で、探索は残りの時間だけを使う。
-    探索で足した制約は push で囲むので、返ったあとの `solver` は元の assertion のまま。
-    決められなければ `WitnessUnavailable`。
+    script は読み直さない（`prepared` を使う）。探索で足した制約は push で囲むので、
+    返ったあとの `solver` は元の assertion のまま。決められなければ `WitnessUnavailable`。
     """
 
-    targets = targets_in_declaration_order(_declared_sorts(smt_script))
-    preferences = _declared_preferences(smt_script)
     # model は push より前に読む（push すると直前の check の model は使えなくなる）
     model = solver.model()
-    preference_terms = {}
-    for name in preferences:
-        # preference の本体は script の define-fun。同じ context に script ごと parse し
-        # 直して、末尾に足した `(assert name)` の項を取り出す（宣言は同じ項になる）。
-        preference_terms[name] = z3.parse_smt2_string(
-            smt_script + f"\n(assert {name})", ctx=model.ctx
-        )[-1]
     session = _Z3WitnessSession(
-        z3, solver, model, targets, deadline,
-        preference_terms=preference_terms, cancellation_token=cancellation_token,
+        z3, solver, model, prepared.targets, deadline,
+        preference_terms=dict(prepared.preference_terms),
+        cancellation_token=cancellation_token,
     )
     solver.push()
     try:
-        return canonical_witness(session, targets, preferences)
+        return canonical_witness(
+            session, prepared.targets, [name for name, _term in prepared.preference_terms]
+        )
     finally:
         solver.pop()
 
 
 def sat_result_with_witness(
-    z3: Any, solver: Any, smt_script: str, *, solver_name: str, started: float,
+    z3: Any, solver: Any, prepared: PreparedWitnessQuery, *, solver_name: str, started: float,
     deadline: float, cancellation_token: Optional[Any] = None,
 ) -> SolverResult:
     """直前の `check()` が SAT だった solver の結果（`SolverResult.model` の契約どおり）。
@@ -275,7 +226,7 @@ def sat_result_with_witness(
 
     try:
         model = canonical_declared_model(
-            z3, solver, smt_script, deadline=deadline, cancellation_token=cancellation_token,
+            z3, solver, prepared, deadline=deadline, cancellation_token=cancellation_token,
         )
     except WitnessUnavailable as failure:
         return witness_failure_result(solver_name, failure, time.time() - started)
@@ -287,11 +238,18 @@ def sat_result_with_witness(
     )
 
 
+def remaining_timeout_ms(deadline: float) -> int:
+    """実行の期限までの残り（ミリ秒、切り捨て）。0 以下なら期限切れ。"""
+
+    return int((deadline - time.monotonic()) * 1000)
+
+
 def isolated_solver(z3: Any, smt_script: str, timeout_ms: int) -> Any:
-    """script を専用の z3 context に parse した solver を作る。
+    """script を専用の z3 context に parse した solver を作る（status だけを使う問い合わせ用）。
 
     同じ context を共有すると、先に parse した式（別の query）が後の solver の探索に
     影響し得る（Issue #161）。query ごとに context を分けて、解く対象を script だけにする。
+    SAT の witness を返す実行（`Z3Solver`）は `prepare_witness_query` を使う。
     """
 
     context = z3.Context()
@@ -352,16 +310,23 @@ class Z3Solver(SMTSolver):
             return self._create_error_result("Z3 is not available")
         
         start_time = time.time()
+        # Issue #161: 時間予算は 1 回の実行に 1 つ。期限は実行の入口で決め、query の準備
+        # （parse・witness の優先の項）・初回の check・canonical witness の探索がすべて
+        # この期限の中で行う（初回の check には残りだけを与える）。
+        deadline = time.monotonic() + self.timeout
         
         try:
             z3 = self._z3
             if z3 is None:
                 raise RuntimeError("Z3 module not loaded")
 
-            # Issue #161: query ごとに専用の context（先に解いた query の影響を受けない）
+            # query ごとに専用の context（先に解いた query の影響を受けない）。parse は
+            # この 1 回だけで、witness の探索は script を読み直さない。
             try:
-                self._solver = isolated_solver(z3, smt_script, self.timeout * 1000)
-                self._debug_print(f"Z3 timeout set to {self.timeout * 1000}ms")
+                context = z3.Context()
+                prepared = prepare_witness_query(z3, smt_script, context)
+                self._solver = z3.Solver(ctx=context)
+                self._solver.add(*prepared.assertions)
             except Exception as e:
                 self._debug_print(f"Parse error: {e}")
                 return self._create_error_result(f"Parse error: {e}")
@@ -374,11 +339,19 @@ class Z3Solver(SMTSolver):
                     elapsed_time=time.time() - start_time,
                     error_message="Cancelled before check"
                 )
+
+            remaining_ms = remaining_timeout_ms(deadline)
+            if remaining_ms <= 0:
+                return SolverResult(
+                    solver_name=self.name,
+                    status=SolverStatus.TIMEOUT,
+                    elapsed_time=time.time() - start_time,
+                    error_message="Timeout: the execution budget ran out before the check",
+                )
+            self._solver.set("timeout", remaining_ms)
+            self._debug_print(f"Z3 timeout set to {remaining_ms}ms")
             
-            # 検証実行。時間予算は 1 回の実行に 1 つ（Issue #161）: 初回の check と
-            # canonical witness の探索が同じ期限を共有し、探索は残りの時間だけを使う。
             self._debug_print("Starting check...")
-            deadline = time.monotonic() + self.timeout
             result = self._solver.check()
             elapsed = time.time() - start_time
             self._debug_print(f"Check completed: {result} ({elapsed:.3f}s)")
@@ -387,7 +360,7 @@ class Z3Solver(SMTSolver):
                 # 返す model は script の意味だけで決まる canonical witness（solver が
                 # 最初に見つけた model ではない）。決められなければ SAT にしない。
                 sat_result = sat_result_with_witness(
-                    z3, self._solver, smt_script, solver_name=self.name,
+                    z3, self._solver, prepared, solver_name=self.name,
                     started=start_time, deadline=deadline,
                     cancellation_token=cancellation_token,
                 )
