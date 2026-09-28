@@ -769,16 +769,24 @@ class SharedZ3RegionSession:
             elapsed = time.time() - started
             self.check_count += 1
             if verdict == self._z3.sat:
-                model = self._solver.model()
                 from scripts.function_tracer_pcode.smt.solvers.z3 import (
-                    extract_total_declared_model,
+                    canonical_declared_model,
                 )
+                from scripts.function_tracer_pcode.smt.witness import WitnessUnavailable
 
-                values = extract_total_declared_model(
-                    self._z3, model, query
-                )
+                # Issue #161: 共有 session の履歴（先に解いた region）に依らない
+                # canonical な witness。決められなければ model 無しの SAT。
+                try:
+                    values = canonical_declared_model(
+                        self._z3, self._solver, query, budget_seconds=max(1, int(timeout))
+                    )
+                    note = None
+                except WitnessUnavailable as exc:
+                    values = None
+                    note = f"canonical witness unavailable: {exc}"
                 item = SolverResult("Z3(shared-region)", SolverStatus.SAT,
-                                    elapsed_time=elapsed, model=values)
+                                    elapsed_time=time.time() - started, model=values,
+                                    error_message=note)
             elif verdict == self._z3.unsat:
                 item = SolverResult("Z3(shared-region)", SolverStatus.UNSAT,
                                     elapsed_time=elapsed)

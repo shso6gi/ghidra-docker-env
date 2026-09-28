@@ -32,6 +32,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
     expression_smt_bit_width,
     smt_logic_name,
 )
+from scripts.function_tracer_pcode.proof.formula.witness_domain import witness_preference_lines
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     LEFT as INPUT_LEFT,
     RIGHT as INPUT_RIGHT,
@@ -772,6 +773,9 @@ class FormulaBuilder:
         )
         if fp_non_nan_lines:
             lines.extend(fp_non_nan_lines)
+
+        # Issue #161: 反例として受け入れる witness の優先（assert しない）
+        lines.extend(witness_preference_lines(params1, params2))
 
         return lines, runtime_unknown_decls, constrained_fragments, param_fragment_constrained
 

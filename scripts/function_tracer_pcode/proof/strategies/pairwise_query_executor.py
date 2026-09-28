@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from scripts.function_tracer_pcode.proof.formula.witness_domain import fp_parameters, is_nan_bit_pattern
 from scripts.function_tracer_pcode.smt import SolverStatus
 from scripts.function_tracer_pcode.proof.unknown_reason import (
     UnknownRecoveryActionStatus,
@@ -1714,35 +1715,30 @@ def _build_value_equality_assertions(
 
 
 def _bit_pattern_is_nan(value: int, bit_width: int) -> bool:
-    if bit_width == 64:
-        exponent_bits, mantissa_bits = 11, 52
-    elif bit_width == 32:
-        exponent_bits, mantissa_bits = 8, 23
-    else:
-        return False
-    value %= 1 << bit_width
-    exponent = (value >> mantissa_bits) & ((1 << exponent_bits) - 1)
-    mantissa = value & ((1 << mantissa_bits) - 1)
-    return exponent == (1 << exponent_bits) - 1 and mantissa != 0
+    return is_nan_bit_pattern(value, bit_width)
 
 
 def counterexample_fp_nan_parameters(
     base_ctx: Dict[str, Any],
     counterexample_raw: Optional[Dict[str, Any]],
 ) -> Tuple[str, ...]:
-    """Names of floating-point parameters the model assigns a NaN bit pattern."""
+    """Names of floating-point parameters the model assigns a NaN bit pattern.
+
+    The rule (which parameters and which bit patterns) is owned by
+    `proof.formula.witness_domain`; the formula header declares the same rule as a
+    witness preference, so a NaN witness only reaches here when no non-NaN witness
+    of the query exists (Issue #161).
+    """
 
     if not counterexample_raw:
         return ()
     names: List[str] = []
     for side in ("params1", "params2"):
-        for param in base_ctx.get(side, []) or []:
-            if getattr(param, "type_class", None) != "fp":
-                continue
+        for param in fp_parameters(base_ctx.get(side, []) or []):
             raw_value = counterexample_raw.get(param.smt_name)
             if isinstance(raw_value, bool) or not isinstance(raw_value, int):
                 continue
-            if _bit_pattern_is_nan(raw_value, int(param.bit_width)):
+            if is_nan_bit_pattern(raw_value, int(param.bit_width)):
                 names.append(param.smt_name)
     return tuple(names)
 

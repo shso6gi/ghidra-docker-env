@@ -28,7 +28,10 @@ class SolverResult:
     solver_name: str
     status: SolverStatus
     elapsed_time: float = 0.0
-    model: Optional[Dict[str, Any]] = None  # 反例（SATの場合）
+    #: SAT の witness。script が宣言する scalar 入力の canonical な値（宣言順・unsigned の
+    #: 辞書式最小、`smt.witness`）で、solver の履歴や最初に見つけた model に依らない。
+    #: 決められなかった SAT は `None`（replay は反例として受け入れない）。
+    model: Optional[Dict[str, Any]] = None
     error_message: Optional[str] = None
     raw_output: Optional[str] = None
     

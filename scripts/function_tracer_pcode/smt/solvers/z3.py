@@ -7,6 +7,14 @@ import re
 from typing import Optional, Dict, Any, Tuple, Callable, cast
 
 from scripts.function_tracer_pcode.smt.interface import SMTSolver, SolverResult, SolverStatus
+from scripts.function_tracer_pcode.smt.witness import (
+    BOOL,
+    WITNESS_PREFERENCE_PREFIX,
+    Constraint,
+    WitnessUnavailable,
+    canonical_witness,
+    targets_in_declaration_order,
+)
 
 
 _DECLARATION_RE = re.compile(
@@ -128,6 +136,167 @@ def extract_total_declared_model(
     return result
 
 
+def _declared_sorts(smt_script: str) -> tuple:
+    """script の定数宣言を宣言順に ``(name, sort text)`` で返す（重複は拒否）。"""
+
+    declarations = []
+    declared_names = set()
+    for command in _top_level_smt_commands(smt_script):
+        match = _DECLARATION_RE.fullmatch(command.strip())
+        if match is None:
+            continue
+        name = match.group(1) or match.group(2)
+        if name in declared_names:
+            raise ValueError(f"duplicate SMT declaration: {name}")
+        declared_names.add(name)
+        declarations.append((name, match.group(3).strip()))
+    return tuple(declarations)
+
+
+_PREFERENCE_RE = re.compile(
+    r"^\(define-fun\s+(\|" + re.escape(WITNESS_PREFERENCE_PREFIX) + r"([0-9]+)\|)\s+\(\)\s+Bool\s",
+    re.DOTALL,
+)
+
+
+def _declared_preferences(smt_script: str) -> tuple:
+    """script が宣言する witness の preference の名前（優先順）。"""
+
+    found = []
+    for command in _top_level_smt_commands(smt_script):
+        match = _PREFERENCE_RE.match(command.strip())
+        if match is not None:
+            found.append((int(match.group(2)), match.group(1)))
+    return tuple(name for _order, name in sorted(found))
+
+
+class _Z3WitnessSession:
+    """`smt.witness.WitnessSession` の z3 実装（同じ solver の上で push / pop する）。"""
+
+    def __init__(
+        self, z3: Any, solver: Any, model: Any, targets: tuple, deadline: float,
+        preference_terms: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self._z3 = z3
+        self._solver = solver
+        self._deadline = deadline
+        self._preference_terms = dict(preference_terms or {})
+        ctx = getattr(model, "ctx", None)
+        self._terms = {}
+        for target in targets:
+            if target.sort == BOOL:
+                self._terms[target.name] = z3.Bool(target.name, ctx=ctx)
+            else:
+                self._terms[target.name] = z3.BitVec(target.name, target.width, ctx=ctx)
+        self._targets = targets
+        self._values = self._read(model)
+
+    def _read(self, model: Any) -> Dict[str, int]:
+        values: Dict[str, int] = {}
+        for target in self._targets:
+            value = model.eval(self._terms[target.name], model_completion=True)
+            if target.sort == BOOL:
+                if self._z3.is_true(value):
+                    values[target.name] = 1
+                elif self._z3.is_false(value):
+                    values[target.name] = 0
+                else:
+                    raise WitnessUnavailable(f"Bool value is not concrete: {target.name}")
+            else:
+                values[target.name] = value.as_long()
+        return values
+
+    def _term(self, constraint: Constraint) -> Any:
+        z3 = self._z3
+        if constraint.kind == "preference":
+            return self._preference_terms[constraint.preference]
+        term = self._terms[constraint.target.name]
+        if constraint.target.sort == BOOL:
+            if constraint.kind == "ne":
+                return term if constraint.value == 0 else z3.Not(term)
+            return term if constraint.value == 1 else z3.Not(term)
+        width = constraint.target.width
+        if constraint.kind == "bit":
+            return z3.Extract(constraint.bit, constraint.bit, term) == z3.BitVecVal(
+                constraint.value, 1, ctx=term.ctx
+            )
+        value = z3.BitVecVal(constraint.value, width, ctx=term.ctx)
+        return term != value if constraint.kind == "ne" else term == value
+
+    def values(self) -> Dict[str, int]:
+        return dict(self._values)
+
+    def check_with(self, constraint: Constraint) -> Optional[Dict[str, int]]:
+        remaining_ms = int((self._deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            raise WitnessUnavailable("canonical witness search exceeded its time budget")
+        self._solver.push()
+        try:
+            self._solver.set("timeout", remaining_ms)
+            self._solver.add(self._term(constraint))
+            verdict = self._solver.check()
+            if verdict == self._z3.sat:
+                return self._read(self._solver.model())
+            if verdict == self._z3.unsat:
+                return None
+            raise WitnessUnavailable(
+                f"canonical witness search was inconclusive: {self._solver.reason_unknown()}"
+            )
+        finally:
+            self._solver.pop()
+
+    def fix(self, constraint: Constraint) -> None:
+        self._solver.add(self._term(constraint))
+
+
+def canonical_declared_model(
+    z3: Any, solver: Any, smt_script: str, *, budget_seconds: float,
+) -> Dict[str, int]:
+    """SAT の solver から、script が宣言する scalar 入力の canonical な witness を作る。
+
+    `solver` は直前の `check()` が SAT だったもの。値は `smt.witness.canonical_witness`
+    の規則（宣言順・unsigned の辞書式最小）で決まり、solver の履歴にも最初の model にも
+    依らない。配列・関数などの解釈は含めない（最小が定まらず、replay も使わない）。
+    探索で足した制約は push で囲むので、返ったあとの `solver` は元の assertion のまま。
+    決められなければ `WitnessUnavailable`。
+    """
+
+    targets = targets_in_declaration_order(_declared_sorts(smt_script))
+    preferences = _declared_preferences(smt_script)
+    # model は push より前に読む（push すると直前の check の model は使えなくなる）
+    model = solver.model()
+    preference_terms = {}
+    for name in preferences:
+        # preference の本体は script の define-fun。同じ context に script ごと parse し
+        # 直して、末尾に足した `(assert name)` の項を取り出す（宣言は同じ項になる）。
+        preference_terms[name] = z3.parse_smt2_string(
+            smt_script + f"\n(assert {name})", ctx=model.ctx
+        )[-1]
+    session = _Z3WitnessSession(
+        z3, solver, model, targets, time.monotonic() + max(0.001, budget_seconds),
+        preference_terms=preference_terms,
+    )
+    solver.push()
+    try:
+        return canonical_witness(session, targets, preferences)
+    finally:
+        solver.pop()
+
+
+def isolated_solver(z3: Any, smt_script: str, timeout_ms: int) -> Any:
+    """script を専用の z3 context に parse した solver を作る。
+
+    同じ context を共有すると、先に parse した式（別の query）が後の solver の探索に
+    影響し得る（Issue #161）。query ごとに context を分けて、解く対象を script だけにする。
+    """
+
+    context = z3.Context()
+    solver = z3.Solver(ctx=context)
+    solver.set("timeout", int(timeout_ms))
+    solver.add(z3.parse_smt2_string(smt_script, ctx=context))
+    return solver
+
+
 class Z3Solver(SMTSolver):
     """Z3 SMTソルバー"""
     
@@ -184,16 +353,10 @@ class Z3Solver(SMTSolver):
             if z3 is None:
                 raise RuntimeError("Z3 module not loaded")
 
-            solver = z3.Solver()
-            self._solver = solver
-            self._solver.set("timeout", self.timeout * 1000)  # ミリ秒
-            self._debug_print(f"Z3 timeout set to {self.timeout * 1000}ms")
-            
-            # SMT-LIBスクリプトをパース
+            # Issue #161: query ごとに専用の context（先に解いた query の影響を受けない）
             try:
-                assertions = z3.parse_smt2_string(smt_script)
-                self._solver.add(assertions)
-                self._debug_print(f"Parsed {len(assertions)} assertions")
+                self._solver = isolated_solver(z3, smt_script, self.timeout * 1000)
+                self._debug_print(f"Z3 timeout set to {self.timeout * 1000}ms")
             except Exception as e:
                 self._debug_print(f"Parse error: {e}")
                 return self._create_error_result(f"Parse error: {e}")
@@ -215,15 +378,24 @@ class Z3Solver(SMTSolver):
             
             if result == z3.sat:
                 self._model = self._solver.model()
-                model_dict = extract_total_declared_model(
-                    z3, self._model, smt_script
-                )
+                # Issue #161: 返す model は script の意味だけで決まる canonical な
+                # witness（solver が最初に見つけた model ではない）。決められなければ
+                # model 無しの SAT（replay はそれを反例として受け入れない）。
+                try:
+                    model_dict = canonical_declared_model(
+                        z3, self._solver, smt_script, budget_seconds=self.timeout
+                    )
+                    witness_note = None
+                except WitnessUnavailable as exc:
+                    model_dict = None
+                    witness_note = f"canonical witness unavailable: {exc}"
                 self._debug_print(f"Model extracted: {model_dict}")
                 return SolverResult(
                     solver_name=self.name,
                     status=SolverStatus.SAT,
-                    elapsed_time=elapsed,
-                    model=model_dict
+                    elapsed_time=time.time() - start_time,
+                    model=model_dict,
+                    error_message=witness_note,
                 )
             elif result == z3.unsat:
                 return SolverResult(
