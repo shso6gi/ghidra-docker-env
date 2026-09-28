@@ -894,24 +894,19 @@ fi
 
 mkdir -p "$OUTPUT_BASE_DIR"
 OUTPUT_BASE_DIR="$(realpath -m "$OUTPUT_BASE_DIR")"
-EQBENCH_PRIVATE_AUTHORITY_ROOT="$(realpath -m "$EQBENCH_PRIVATE_AUTHORITY_ROOT")"
-if [[ "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR" \
-    || "$EQBENCH_PRIVATE_AUTHORITY_ROOT" == "$OUTPUT_BASE_DIR/"* ]]; then
-    echo "Error: private authority root must be outside OUTPUT_BASE_DIR" >&2
-    exit 1
-fi
 AUTHORITY_KEYSET_ID="${EQBENCH_AUTHORITY_KEYSET_ID:-$(printf '%s' "$OUTPUT_BASE_DIR" | sha256sum | awk '{print $1}')}"
-if [[ ! "$AUTHORITY_KEYSET_ID" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    echo "Error: EQBENCH_AUTHORITY_KEYSET_ID contains unsafe characters" >&2
-    exit 1
-fi
-PROCESS_AUTHORITY_ROOT="$EQBENCH_PRIVATE_AUTHORITY_ROOT/$AUTHORITY_KEYSET_ID"
+# Issue #170: keyset（秘密鍵の置き場所）は共通の owner が組み立てて判定する（正規化した private
+# root の直下の 1 component で、OUTPUT と分離している）。runner は root/id を自分で組み立てない。
+PROCESS_AUTHORITY_ROOT="$(validation_resolve_authority_keyset \
+    "$EQBENCH_PRIVATE_AUTHORITY_ROOT" "$AUTHORITY_KEYSET_ID" "$OUTPUT_BASE_DIR")" || exit 1
 PROCESS_SUPERVISOR_KEY_ID="eqbench-phase8-supervisor-v1"
 PROCESS_WORKER_KEY_ID="eqbench-phase8-worker-v1"
 PROCESS_SUPERVISOR_KEY_FILE="$PROCESS_AUTHORITY_ROOT/supervisor.key"
 PROCESS_WORKER_KEY_FILE="$PROCESS_AUTHORITY_ROOT/worker.key"
 PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE="$PROCESS_AUTHORITY_ROOT/pair-status-ed25519.key"
 PAIR_STATUS_VERIFICATION_KEY_FILE="$OUTPUT_BASE_DIR/pair-status-verification-key.json"
+# Issue #170: 鍵を読む・書く・検証する区間だけ keyset の lock を保持する（窓の中で `&` を使わない）。
+validation_lock_authority_keyset "$PROCESS_AUTHORITY_ROOT" "$OUTPUT_BASE_DIR" || exit 1
 existing_authority_evidence="$(find "$OUTPUT_BASE_DIR" \
     \( -name '*.pair-status.json' -o -name 'pair-status-verification-key.json' \
        -o -path '*/.process-authority/*' \) -print -quit)"
@@ -925,28 +920,15 @@ if [[ -n "$existing_authority_evidence" ]]; then
         exit 1
     fi
 fi
-mkdir -p "$PROCESS_AUTHORITY_ROOT"
-chmod 700 "$PROCESS_AUTHORITY_ROOT"
+validation_materialize_process_key "$PROCESS_SUPERVISOR_KEY_FILE" || exit 1
+validation_materialize_process_key "$PROCESS_WORKER_KEY_FILE" || exit 1
+validation_materialize_pair_status_keypair "$PYTHON_BIN" \
+    "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" "$PAIR_STATUS_VERIFICATION_KEY_FILE" || exit 1
+validation_unlock_authority_keyset || exit 1
+# 新しい keyset で始める run は、以降の書き込みも umask 077 で行う（main と同じ）。
 if [[ -z "$existing_authority_evidence" ]]; then
     umask 077
-    [[ -s "$PROCESS_SUPERVISOR_KEY_FILE" ]] || head -c 32 /dev/urandom > "$PROCESS_SUPERVISOR_KEY_FILE"
-    [[ -s "$PROCESS_WORKER_KEY_FILE" ]] || head -c 32 /dev/urandom > "$PROCESS_WORKER_KEY_FILE"
-    if [[ ! -s "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" ]]; then
-        "$PYTHON_BIN" -m \
-            scripts.function_tracer_pcode.authority.decision.pair_status_authority \
-            --generate-private-key "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
-            --write-public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
-    elif [[ ! -s "$PAIR_STATUS_VERIFICATION_KEY_FILE" ]]; then
-        "$PYTHON_BIN" -m \
-            scripts.function_tracer_pcode.authority.decision.pair_status_authority \
-            --export-public-from-private "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
-            --write-public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
-    fi
 fi
-"$PYTHON_BIN" -m \
-    scripts.function_tracer_pcode.authority.decision.pair_status_authority \
-    --validate-private-key "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
-    --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" >/dev/null
 EXPECTED_PAIR_STATUS_PATHS_FILE="$OUTPUT_BASE_DIR/expected_pair_status_paths.txt"
 : > "$EXPECTED_PAIR_STATUS_PATHS_FILE"
 VERIFIED_SKIPPED_PAIR_STATUS_PATHS_FILE="$OUTPUT_BASE_DIR/verified_skipped_pair_status_paths.txt"
