@@ -267,17 +267,23 @@ Each run signs its pair statuses with a private key kept outside the run tree, i
 the keyset `<realpath(EQBENCH_PRIVATE_AUTHORITY_ROOT)>/<keyset id>` (the keyset id
 is `sha256` of the canonical `OUTPUT_BASE_DIR`, or `EQBENCH_AUTHORITY_KEYSET_ID`
 for the Eq runner); the public key is written to
-`OUTPUT_BASE_DIR/pair-status-verification-key.json`. Both runners reject a
-private root that resolves inside `OUTPUT_BASE_DIR`, whatever its spelling
-(`//`, `..`, a relative path, a symlink).
+`OUTPUT_BASE_DIR/pair-status-verification-key.json`.
 
+- The keyset id must be a single path component of `[A-Za-z0-9._-]` other than
+  `.` and `..`, and the keyset itself must not be a symlink.
+- The keyset and `OUTPUT_BASE_DIR` must be disjoint: the keyset may be neither
+  `OUTPUT_BASE_DIR`, nor inside it, nor contain it. This is judged on the
+  composed keyset (not on the root and the id separately), both on canonical
+  paths (`//`, `..`, relative paths and symlinks are resolved first) and on the
+  inodes of existing ancestors (so an alias such as a bind mount is caught too).
+  A run that violates it exits 1 before writing anything.
 - The keys are created, re-exported and validated only by
   `validation_materialize_pair_status_keypair` in
   `scripts/validation_matrix_common.sh`: no private key → generate the pair;
   private key only (e.g. the run tree was deleted and is being re-run) → rewrite
   the public key from it; always → validate the pair. An existing private key is
   never rewritten, and a failure exits 1 with the reason instead of a traceback.
-- The supervisor / worker HMAC keys are written only by
+  The supervisor / worker HMAC keys are written only by
   `validation_materialize_process_key` (a missing or empty key is written
   atomically with `umask 077`; an existing key is never rewritten).
 - Several runs can point at the same keyset (a shared override, a renamed output,
@@ -286,19 +292,20 @@ private root that resolves inside `OUTPUT_BASE_DIR`, whatever its spelling
   that finds the keyset held waits up to `VALIDATION_KEYSET_LOCK_WAIT_SECONDS`
   (default 120) and then exits 1 with "held by another run for too long" without
   touching the keyset.
-- The key writers check the lock they rely on against the kernel, not against a
-  shell variable: the handle returned by `validation_lock_authority_keyset` must
-  be an open descriptor that holds an exclusive `flock` on the same inode as the
-  key's parent directory. Otherwise they write nothing and return 2. A caller
-  only has to follow `lock → materialize → unlock` (see the comment block in
+- The key writers only write under the keyset whose lock this process acquired
+  and still owns. Ownership is proven against the kernel (`/proc/self/fdinfo`),
+  not against a shell variable, and the keys are written through the locked
+  descriptor (`/dev/fd/<fd>/<name>`), not through the keyset path. Unlock closes
+  only the descriptors of the lock it acquired. Misuse returns 2 and writes or
+  closes nothing. A new runner only has to follow
+  `resolve → lock → materialize → unlock` (see the comment block in
   `scripts/validation_matrix_common.sh`) and must not start background jobs
   inside it.
-- `EQBENCH_AUTHORITY_KEYSET_ID` must be a single path component of
-  `[A-Za-z0-9._-]` other than `.` and `..`.
-- Known limitation: a corrupted private key that is still 32 bytes long cannot be
-  detected while the public key is missing, because any 32 bytes are a valid
+- Known limitations: a corrupted private key that is still 32 bytes long cannot
+  be detected while the public key is missing, because any 32 bytes are a valid
   Ed25519 seed; the public key is then re-exported from it. To start over, remove
-  both the run tree and its keyset directory.
+  both the run tree and its keyset directory. The lock is advisory: a process that
+  writes the keys without these helpers (e.g. an old checkout) is not excluded.
 
 ### Identical binary / identical function fast path
 

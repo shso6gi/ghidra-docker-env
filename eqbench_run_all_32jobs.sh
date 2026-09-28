@@ -894,14 +894,11 @@ fi
 
 mkdir -p "$OUTPUT_BASE_DIR"
 OUTPUT_BASE_DIR="$(realpath -m "$OUTPUT_BASE_DIR")"
-EQBENCH_PRIVATE_AUTHORITY_ROOT="$(validation_resolve_private_authority_root \
-    "$EQBENCH_PRIVATE_AUTHORITY_ROOT" "$OUTPUT_BASE_DIR")" || exit 1
 AUTHORITY_KEYSET_ID="${EQBENCH_AUTHORITY_KEYSET_ID:-$(printf '%s' "$OUTPUT_BASE_DIR" | sha256sum | awk '{print $1}')}"
-if ! validation_authority_keyset_id_is_valid "$AUTHORITY_KEYSET_ID"; then
-    echo "Error: EQBENCH_AUTHORITY_KEYSET_ID must be one path component of [A-Za-z0-9._-] other than . and .." >&2
-    exit 1
-fi
-PROCESS_AUTHORITY_ROOT="$EQBENCH_PRIVATE_AUTHORITY_ROOT/$AUTHORITY_KEYSET_ID"
+# Issue #170: keyset（秘密鍵の置き場所）は共通の owner が組み立てて判定する（正規化した private
+# root の直下の 1 component で、OUTPUT と分離している）。runner は root/id を自分で組み立てない。
+PROCESS_AUTHORITY_ROOT="$(validation_resolve_authority_keyset \
+    "$EQBENCH_PRIVATE_AUTHORITY_ROOT" "$AUTHORITY_KEYSET_ID" "$OUTPUT_BASE_DIR")" || exit 1
 PROCESS_SUPERVISOR_KEY_ID="eqbench-phase8-supervisor-v1"
 PROCESS_WORKER_KEY_ID="eqbench-phase8-worker-v1"
 PROCESS_SUPERVISOR_KEY_FILE="$PROCESS_AUTHORITY_ROOT/supervisor.key"
@@ -909,7 +906,7 @@ PROCESS_WORKER_KEY_FILE="$PROCESS_AUTHORITY_ROOT/worker.key"
 PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE="$PROCESS_AUTHORITY_ROOT/pair-status-ed25519.key"
 PAIR_STATUS_VERIFICATION_KEY_FILE="$OUTPUT_BASE_DIR/pair-status-verification-key.json"
 # Issue #170: 鍵を読む・書く・検証する区間だけ keyset の lock を保持する（窓の中で `&` を使わない）。
-validation_lock_authority_keyset "$EQBENCH_PRIVATE_AUTHORITY_ROOT" "$AUTHORITY_KEYSET_ID" || exit 1
+validation_lock_authority_keyset "$PROCESS_AUTHORITY_ROOT" "$OUTPUT_BASE_DIR" || exit 1
 existing_authority_evidence="$(find "$OUTPUT_BASE_DIR" \
     \( -name '*.pair-status.json' -o -name 'pair-status-verification-key.json' \
        -o -path '*/.process-authority/*' \) -print -quit)"

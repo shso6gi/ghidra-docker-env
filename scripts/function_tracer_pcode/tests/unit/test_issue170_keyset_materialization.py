@@ -1,24 +1,24 @@
 # -*- coding: utf-8 -*-
-"""Issue #170 (PR-R1): pair-status 鍵の具体化と keyset の inode lock。
+"""Issue #170 (PR-R1): 秘密鍵の keyset identity、keyset lock の capability、鍵の具体化。
 
-固定している契約（計画 v5 の §0 C-L key 行 / §6 / PR-R1）:
+固定している不変条件（計画 v5 の §0 C-L key 行 / §6 / PR-R1）:
 
-* 鍵を具体化する規則の owner は ``validation_matrix_common.sh`` の
-  ``validation_materialize_pair_status_keypair``（pair-status 鍵）と
-  ``validation_materialize_process_key``（HMAC 鍵）だけ。runner は鍵 CLI も
-  ``/dev/urandom`` も直接使わない。
-* 鍵を書く helper の前提「keyset lock を保持している」は shell 変数の文字列ではなく
-  kernel の状態で確かめる（handle の fd が開いていて、排他 flock を保持する open file
-  description で、鍵の親 directory と同じ inode）。変数だけの偽装・閉じた fd の stale
-  handle・再利用された fd 番号・別の keyset の lock・環境から来た handle は exit 2。
-* keyset id は private root の直下の 1 component（``.`` と ``..`` は不可）。
-* 秘密鍵の keyset（``<realpath(private root)>/<KEYSET_ID>``）は出力とは別の共有資源で、
-  その directory の inode を lock する。lock は evidence guard・HMAC 鍵・具体化の区間
-  （S8〜S13）だけ保持し、上限付きで待つ。
-* 待ちの上限を超えた run は「held by another run for too long」で exit 1 になり、
-  keyset にも key root にも（ctime を含めて）触れない。
-* Neq の private root も realpath してから OUTPUT の外であることを確かめる。
+* **keyset identity**: keyset は ``<realpath(private root)>/<1 つの path component>`` で、
+  symlink でなく、OUTPUT と分離している（同一でも、包含でも、被包含でもない）。組み立てと判定の
+  owner は ``validation_resolve_authority_keyset`` / ``_validation_check_authority_keyset`` だけで、
+  lock と writer も同じ判定にかけ直す。したがって秘密鍵・HMAC 鍵は OUTPUT の外にある。
+* **lock capability**: 鍵を書けるのは、この process が ``validation_lock_authority_keyset`` で取得し、
+  いまも所有している排他 flock（kernel の fdinfo で証明）の keyset の直下だけ。shell 変数の偽装・
+  stale な state・再利用された fd 番号・別の keyset の lock・環境由来の state では書けない（exit 2）。
+* **unlock**: 自分が取得した lock（所有の証明が成り立つ fd）以外は閉じない。
+* keyset の inode ごとに、鍵の guard・具体化を実行するのは同時に 1 つだけ。待ちは上限付きで、
+  超えた run は「held by another run for too long」で exit 1、keyset にも key root にも触れない。
+* 鍵を具体化する規則の owner は ``validation_materialize_pair_status_keypair`` と
+  ``validation_materialize_process_key`` だけ。runner は鍵 CLI も ``/dev/urandom`` も直接使わない。
 * 失敗はメッセージ付きの非 0 で、Python の traceback を出さない。
+
+oracle は実装と独立に置く（keyset と OUTPUT の重なりは Python の realpath で求め、capability は
+「lock が作った state 以外の全ての遷移」で書けないこと・fd を閉じないことを確かめる）。
 
 runner は実物を使う。tmp に repo の形（runner と ``scripts`` への symlink、Neq の
 sample 1 つ）を作り、``PYTHON_BIN`` の stub が鍵 CLI（gen / exp / val）を実物の
@@ -440,11 +440,12 @@ def test_rerun_into_a_cleared_output_reuses_the_retained_private_key(harness, ki
 
 
 # ---------------------------------------------------------------------------
-# T-C: private root の包含判定は正規化した path で行う（6 つの綴り）
+# T-C: keyset と OUTPUT の分離（runner 経由。private root の 6 つの綴り × 2 runner）
 # ---------------------------------------------------------------------------
 
 
 _CONTAINMENT_SPELLINGS = ["plain", "double-slash", "leading-double-slash", "dotdot", "symlink", "relative"]
+_KEY_NAMES = {PRIVATE_KEY, "supervisor.key", "worker.key"}
 
 
 def _containment_root(harness: Harness, output: Path, spelling: str) -> str:
@@ -465,23 +466,49 @@ def _containment_root(harness: Harness, output: Path, spelling: str) -> str:
     return os.path.relpath(inside, harness.repo)
 
 
+def _key_files_under(directory: Path) -> list[str]:
+    return sorted(str(path) for path in directory.rglob("*") if path.name in _KEY_NAMES)
+
+
+def _assert_rejected_without_touching_output(harness, label, rc, err, output, mode_before):
+    assert rc == 1, (rc, err)
+    assert "private authority keyset must be outside OUTPUT_BASE_DIR and must not contain it" in err, err
+    assert "Traceback" not in err
+    assert _key_files_under(output) == []
+    assert (output.stat().st_mode & 0o777) == mode_before
+    assert harness.key_ops(label) == []
+
+
 @pytest.mark.parametrize("spelling", _CONTAINMENT_SPELLINGS)
 @pytest.mark.parametrize("kind", ["eq", "neq"])
 def test_private_root_inside_output_is_rejected_for_every_spelling(harness, kind, spelling):
     output = harness.root / "real" / "out"
-    output.mkdir(parents=True)
+    output.mkdir(parents=True, mode=0o755)
+    output.chmod(0o755)
     root = _containment_root(harness, output, spelling)
     rc, err = harness.run(kind, "C", output, EQBENCH_PRIVATE_AUTHORITY_ROOT=root)
 
-    assert rc == 1, (rc, err)
-    assert "private authority root must be outside OUTPUT_BASE_DIR" in err, err
-    assert "Traceback" not in err
-    leaked = [
-        str(path) for path in output.rglob("*")
-        if path.name in {PRIVATE_KEY, "supervisor.key", "worker.key"}
-    ]
-    assert leaked == []
-    assert harness.key_ops("C") == []
+    _assert_rejected_without_touching_output(harness, "C", rc, err, output, 0o755)
+
+
+@pytest.mark.parametrize("relation", ["keyset-is-output", "keyset-contains-output"])
+def test_eq_rejects_a_keyset_composed_onto_or_around_output(harness, relation):
+    """root も id も単独では正しいが、組み立てた keyset が OUTPUT と重なる。"""
+
+    output = harness.root / "x" / "out"
+    output.mkdir(parents=True, mode=0o755)
+    output.chmod(0o755)
+    if relation == "keyset-is-output":
+        root, keyset_id = output.parent, output.name
+    else:
+        root, keyset_id = output.parent.parent, output.parent.name
+    rc, err = harness.run(
+        "eq", "C", output,
+        EQBENCH_PRIVATE_AUTHORITY_ROOT=str(root), EQBENCH_AUTHORITY_KEYSET_ID=keyset_id,
+    )
+
+    _assert_rejected_without_touching_output(harness, "C", rc, err, output, 0o755)
+    assert _key_files_under(harness.root) == []
 
 
 @pytest.mark.parametrize("keyset_id", [".", ".."])
@@ -494,30 +521,36 @@ def test_eq_rejects_a_keyset_id_that_escapes_the_private_root(harness, keyset_id
     rc, err = harness.run("eq", "C", output, EQBENCH_AUTHORITY_KEYSET_ID=keyset_id)
 
     assert rc == 1, (rc, err)
-    assert "EQBENCH_AUTHORITY_KEYSET_ID must be one path component" in err, err
+    assert "authority keyset id must be one path component" in err, err
     assert _snapshot(harness.key_root) == before_root
     assert harness.root.stat().st_mode == before_parent
-    assert not (harness.root / "supervisor.key").exists()
+    assert _key_files_under(harness.root) == []
     assert harness.key_ops("C") == []
 
 
 # ---------------------------------------------------------------------------
-# helper の状態 test（validation_matrix_common.sh を直接呼ぶ）
+# helper を直接呼ぶ test の道具。script の $1 = keyset、$2 = 公開鍵、$OUT = OUTPUT
 # ---------------------------------------------------------------------------
 
 
-def _bash(script: str, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+def _bash(script: str, *args: str, env: dict[str, str] | None = None,
+          cwd: Path = REPO_ROOT) -> subprocess.CompletedProcess:
     full_env = dict(os.environ)
-    full_env.pop("VALIDATION_KEYSET_LOCK_WAIT_SECONDS", None)
+    for name in list(full_env):
+        if name.startswith("VALIDATION_") or name == "_VALIDATION_KEYSET_LOCK":
+            full_env.pop(name)
     full_env.update(env or {})
     return subprocess.run(
         ["bash", "-c", f'set -euo pipefail\nsource "{COMMON}"\n{script}', "bash", *args],
-        cwd=REPO_ROOT, capture_output=True, text=True, timeout=120, env=full_env,
+        cwd=cwd, capture_output=True, text=True, timeout=120, env=full_env,
     )
 
 
-# keyset `<root>/<id>` を lock する（root は正規化済み、id は 1 component）。
-_LOCK = 'validation_lock_authority_keyset "$(dirname -- "$1")" "$(basename -- "$1")"'
+def _canonical(path: Path) -> str:
+    return os.path.realpath(path)
+
+
+_LOCK = 'validation_lock_authority_keyset "$1" "$OUT"'
 
 _MATERIALIZE = f"""
 {_LOCK} || exit $?
@@ -528,33 +561,46 @@ exit "$rc"
 """
 
 
+def _env(out: Path, **extra: str) -> dict[str, str]:
+    return {"PY": sys.executable, "OUT": str(out), **extra}
+
+
 def _materialize(keyset: Path, public_key: Path) -> subprocess.CompletedProcess:
-    return _bash(_MATERIALIZE, _canonical(keyset), str(public_key), env={"PY": sys.executable})
-
-
-def _canonical(path: Path) -> str:
-    return os.path.realpath(path)
+    return _bash(_MATERIALIZE, _canonical(keyset), str(public_key), env=_env(public_key.parent))
 
 
 def _generate(tmp_path: Path, name: str) -> tuple[Path, Path]:
-    keyset = tmp_path / name
-    public = tmp_path / f"{name}.json"
+    keyset = tmp_path / "keys" / name
+    public = tmp_path / f"out-{name}" / PUBLIC_KEY
+    public.parent.mkdir(parents=True)
     result = _materialize(keyset, public)
     assert result.returncode == 0, result.stderr
     return keyset / PRIVATE_KEY, public
 
 
-def _assert_clean_failure(result: subprocess.CompletedProcess, reason: str) -> None:
-    assert result.returncode == 1, (result.returncode, result.stderr)
+def _assert_clean_failure(result: subprocess.CompletedProcess, reason: str, rc: int = 1) -> None:
+    assert result.returncode == rc, (result.returncode, result.stderr)
     assert reason in result.stderr, result.stderr
     assert "Traceback" not in result.stderr
     assert result.stderr.startswith("Error: "), result.stderr
 
 
+def _fresh_layout(tmp_path: Path) -> tuple[Path, Path]:
+    """OUTPUT の外の keyset（まだ無い）と、存在する OUTPUT。"""
+
+    out = tmp_path / "out"
+    out.mkdir()
+    return tmp_path / "keys" / "ks", out
+
+
+# ---------------------------------------------------------------------------
+# 鍵の状態（無し / 秘密鍵だけ / 両方 / 壊れている）
+# ---------------------------------------------------------------------------
+
+
 def test_helper_generates_a_keypair_when_the_keyset_is_empty(tmp_path):
-    keyset = tmp_path / "keys" / "ks"
-    public = tmp_path / "out" / PUBLIC_KEY
-    public.parent.mkdir()
+    keyset, out = _fresh_layout(tmp_path)
+    public = out / PUBLIC_KEY
     result = _materialize(keyset, public)
 
     assert result.returncode == 0, result.stderr
@@ -632,9 +678,7 @@ def test_helper_rejects_an_unreadable_private_key(tmp_path):
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root writes files regardless of mode")
 def test_helper_rejects_an_unwritable_public_key_directory(tmp_path):
-    keyset = tmp_path / "keys" / "ks"
-    out = tmp_path / "out"
-    out.mkdir()
+    keyset, out = _fresh_layout(tmp_path)
     out.chmod(0o500)
     try:
         result = _materialize(keyset, out / PUBLIC_KEY)
@@ -653,151 +697,53 @@ def test_helper_rejects_a_public_key_path_that_is_a_directory(tmp_path):
     _assert_clean_failure(result, "are not a valid pair")
 
 
-def test_helper_refuses_to_run_without_the_keyset_lock(tmp_path):
-    keyset = tmp_path / "ks"
-    keyset.mkdir()
+def test_process_key_is_kept_when_present_and_written_when_empty(tmp_path):
+    keyset, out = _fresh_layout(tmp_path)
+    keyset.mkdir(parents=True)
+    (keyset / "supervisor.key").write_bytes(b"k" * 64)
+    (keyset / "worker.key").write_bytes(b"")
     result = _bash(
-        'validation_materialize_pair_status_keypair "$PY" "$1/pair-status-ed25519.key" "$2"',
-        str(keyset), str(tmp_path / PUBLIC_KEY), env={"PY": sys.executable},
+        f'{_LOCK}\nvalidation_materialize_process_key "$1/supervisor.key"\n'
+        'validation_materialize_process_key "$1/worker.key"',
+        _canonical(keyset), env=_env(out),
     )
 
-    assert result.returncode == 2, result.stderr
-    assert "no authority keyset lock is held" in result.stderr
-    assert os.listdir(keyset) == []
+    assert result.returncode == 0, result.stderr
+    assert (keyset / "supervisor.key").read_bytes() == b"k" * 64
+    assert (keyset / "worker.key").stat().st_size == 32
+    assert sorted(os.listdir(keyset)) == ["supervisor.key", "worker.key"]
 
 
-# ---------------------------------------------------------------------------
-# lock の capability: 鍵を書く helper は「いま保持している keyset lock」を kernel の状態で
-# 確かめる（shell 変数の文字列を lock と取り違えない）
-# ---------------------------------------------------------------------------
+def test_process_key_rejects_a_non_regular_file(tmp_path):
+    keyset, out = _fresh_layout(tmp_path)
+    (keyset / "supervisor.key").mkdir(parents=True)
+    result = _bash(f'{_LOCK}\nvalidation_materialize_process_key "$1/supervisor.key"',
+                   _canonical(keyset), env=_env(out))
 
-
-# 鍵を書く helper と、その呼び出し（$1 = keyset、$2 = 公開鍵）。
-_WRITERS = {
-    "pair": 'validation_materialize_pair_status_keypair "$PY" "$1/pair-status-ed25519.key" "$2"',
-    "hmac": 'validation_materialize_process_key "$1/supervisor.key"',
-}
-
-# lock の状態を壊す前置き（$1 = keyset）。どれも鍵を書かずに exit 2 になるべき。
-_FORGED_STATES = {
-    # 旧実装の state 変数だけを偽装する。
-    "dir-variable-only": 'VALIDATION_KEYSET_LOCK_DIR="$1"',
-    # handle 変数に、開いていない fd 番号を入れる。
-    "handle-to-closed-fd": "VALIDATION_KEYSET_LOCK_FD=200",
-    # keyset を開いただけで lock していない fd を handle にする。
-    "handle-to-unlocked-fd": 'exec {fd}<"$1"; VALIDATION_KEYSET_LOCK_FD=$fd',
-    # 正常に lock した後、fd だけ閉じて handle を残す。
-    "stale-after-fd-closed": f'{_LOCK}; exec {{VALIDATION_KEYSET_LOCK_FD}}<&-',
-    # fd を閉じた後、同じ番号が別の file に再利用される。
-    "stale-fd-reused-for-another-file": (
-        f'{_LOCK}; n=$VALIDATION_KEYSET_LOCK_FD; exec {{n}}<&-; '
-        'eval "exec $n<\\"$1/../other\\""'
-    ),
-    # 別の keyset の lock を保持している。
-    "lock-of-another-keyset": 'mkdir -p "$1/../other-ks"; validation_lock_authority_keyset "$(dirname -- "$1")" other-ks',
-    # lock を保持したまま、keyset の path が別の directory に差し替えられる。
-    "keyset-replaced-after-lock": f'{_LOCK}; mv -- "$1" "$1.old"; mkdir -- "$1"',
-    # 別の process が同じ keyset を lock している間に、lock していない自分の fd を handle にする
-    # （判定は inode 単位ではなく、自分の open file description が lock を所有するか）。
-    "another-process-holds-the-inode": (
-        '( exec 9<"$1"; flock 9; : > "$1/../held"; exec sleep 30 ) >/dev/null 2>&1 & holder=$!; '
-        'trap \'kill $holder\' EXIT; until [[ -e "$1/../held" ]]; do sleep 0.05; done; '
-        'exec {fd}<"$1"; VALIDATION_KEYSET_LOCK_FD=$fd'
-    ),
-    # 共有 lock（READ）は排他の lock ではない。
-    "shared-flock": 'exec {fd}<"$1"; flock -s "$fd"; VALIDATION_KEYSET_LOCK_FD=$fd',
-}
-
-
-@pytest.mark.parametrize("writer", sorted(_WRITERS))
-@pytest.mark.parametrize("state", sorted(_FORGED_STATES))
-def test_key_writers_reject_a_lock_state_that_is_not_the_held_keyset_lock(tmp_path, state, writer):
-    keyset = tmp_path / "ks"
-    keyset.mkdir()
-    (tmp_path / "other").write_text("", encoding="utf-8")
-    public = tmp_path / PUBLIC_KEY
-    result = _bash(
-        f'{_FORGED_STATES[state]}\n{_WRITERS[writer]}',
-        _canonical(keyset), str(public), env={"PY": sys.executable},
-    )
-
-    assert result.returncode == 2, (result.returncode, result.stderr)
-    assert result.stderr.startswith("Error: "), result.stderr
-    assert "Traceback" not in result.stderr
-    assert os.listdir(keyset) == []
-    assert not public.exists()
-
-
-@pytest.mark.parametrize("writer", sorted(_WRITERS))
-def test_key_writers_reject_a_handle_inherited_from_the_environment(tmp_path, writer):
-    """親が export した handle と、受け継いだ lock 済み fd の組でも、この process の lock ではない。"""
-
-    keyset = tmp_path / "ks"
-    public = tmp_path / PUBLIC_KEY
-    child = f'bash -c \'set -euo pipefail; source "{COMMON}"; {_WRITERS[writer]}\' bash "$1" "$2"'
-    result = _bash(
-        f'{_LOCK}\nexport VALIDATION_KEYSET_LOCK_FD\n{child}',
-        _canonical(keyset), str(public), env={"PY": sys.executable},
-    )
-
-    assert result.returncode == 2, (result.returncode, result.stderr)
-    assert "came from the environment" in result.stderr
-    assert os.listdir(keyset) == []
-
-
-@pytest.mark.parametrize("writer", sorted(_WRITERS))
-def test_key_writers_reject_a_key_outside_the_locked_keyset(tmp_path, writer):
-    keyset = tmp_path / "ks"
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    (keyset / "sub").mkdir(parents=True)
-    for target in (elsewhere, keyset / "sub"):
-        result = _bash(
-            f'{_LOCK}\nset -- "$1" "$3"\n'
-            + _WRITERS[writer].replace('"$1/', '"$2/'),
-            _canonical(keyset), str(target), str(tmp_path / PUBLIC_KEY),
-            env={"PY": sys.executable},
-        )
-        assert result.returncode == 2, (target, result.stderr)
-        assert "is not the lock of" in result.stderr
-        assert os.listdir(target) == []
-
-
-@pytest.mark.parametrize("writer", sorted(_WRITERS))
-def test_key_writers_reject_a_symlinked_key(tmp_path, writer):
-    keyset = tmp_path / "ks"
-    keyset.mkdir()
-    victim = tmp_path / "victim"
-    name = "pair-status-ed25519.key" if writer == "pair" else "supervisor.key"
-    (keyset / name).symlink_to(victim)
-    result = _bash(
-        f'{_LOCK}\n{_WRITERS[writer]}', _canonical(keyset), str(tmp_path / PUBLIC_KEY),
-        env={"PY": sys.executable},
-    )
-
-    _assert_clean_failure(result, "must not be a symlink")
-    assert not victim.exists()
+    _assert_clean_failure(result, "is not a regular file")
 
 
 def test_lock_materialize_unlock_succeeds_and_releases(tmp_path):
-    keyset = tmp_path / "ks"
-    public = tmp_path / PUBLIC_KEY
+    keyset, out = _fresh_layout(tmp_path)
+    public = out / PUBLIC_KEY
     result = _bash(
         f"""
 {_LOCK}
 validation_materialize_process_key "$1/supervisor.key"
 validation_materialize_process_key "$1/worker.key"
 validation_materialize_pair_status_keypair "$PY" "$1/pair-status-ed25519.key" "$2"
+p=${{_VALIDATION_KEYSET_LOCK[0]}}; s=${{_VALIDATION_KEYSET_LOCK[1]}}
 validation_unlock_authority_keyset
-echo "handle=${{VALIDATION_KEYSET_LOCK_FD:-none}}"
+declare -p _VALIDATION_KEYSET_LOCK >/dev/null 2>&1 && echo state=kept || echo state=cleared
+[[ -e /dev/fd/$p || -e /dev/fd/$s ]] && echo fds=open || echo fds=closed
 rc=0; validation_materialize_process_key "$1/supervisor.key" || rc=$?
 echo "after_unlock=$rc"
 """,
-        _canonical(keyset), str(public), env={"PY": sys.executable},
+        _canonical(keyset), str(public), env=_env(out),
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == ["handle=none", "after_unlock=2"]
+    assert result.stdout.split() == ["state=cleared", "fds=closed", "after_unlock=2"]
     for name in ("supervisor.key", "worker.key"):
         assert (keyset / name).stat().st_size == 32
         assert ((keyset / name).stat().st_mode & 0o777) == 0o600
@@ -810,61 +756,124 @@ echo "after_unlock=$rc"
     assert sorted(os.listdir(keyset)) == sorted(["supervisor.key", "worker.key", PRIVATE_KEY])
 
 
-def test_process_key_is_kept_when_present_and_written_when_empty(tmp_path):
-    keyset = tmp_path / "ks"
-    keyset.mkdir()
-    (keyset / "supervisor.key").write_bytes(b"k" * 64)
-    (keyset / "worker.key").write_bytes(b"")
+# ---------------------------------------------------------------------------
+# 不変条件 1: canonical keyset は必ず OUTPUT と分離される
+#
+# oracle は実装と独立（Python の realpath と path の包含）。root の綴り × id の全組み合わせで、
+# 「重なる ⇔ resolve が拒否し、どこにも鍵を書かず、OUTPUT の mode を変えない」
+# 「重ならない ⇔ lock・両 writer・unlock が成功し、鍵は canonical keyset にだけある」を確かめる。
+# ---------------------------------------------------------------------------
+
+
+_ROOT_SPELLINGS = {
+    "output": lambda base: f"{base}/a/out",
+    "inside-output": lambda base: f"{base}/a/out/sub",
+    "output-parent": lambda base: f"{base}/a",
+    "output-grandparent": lambda base: f"{base}",
+    "sibling-tree": lambda base: f"{base}/b",
+    "double-slash-parent": lambda base: f"{base}//a",
+    "dotdot-parent": lambda base: f"{base}/b/../a",
+    "symlink-to-parent": lambda base: f"{base}/link-a",
+    "symlink-to-output": lambda base: f"{base}/link-out",
+    "relative-parent": lambda base: "a",
+}
+_IDS = ["out", "a", "ks", "sub", "link-out"]
+
+_IDENTITY_SCRIPT = f"""
+rc=0; keyset="$(validation_resolve_authority_keyset "$ROOT" "$ID" "$OUT")" || rc=$?
+echo "resolve=$rc"
+(( rc == 0 )) || exit 0
+echo "keyset=$keyset"
+validation_lock_authority_keyset "$keyset" "$OUT"
+validation_materialize_process_key "$keyset/supervisor.key"
+validation_materialize_pair_status_keypair "$PY" "$keyset/pair-status-ed25519.key" "$OUT/{PUBLIC_KEY}"
+validation_unlock_authority_keyset
+echo done
+"""
+
+
+def _overlaps(a: str, b: str) -> bool:
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
+@pytest.mark.parametrize("keyset_id", _IDS)
+@pytest.mark.parametrize("spelling", sorted(_ROOT_SPELLINGS))
+def test_canonical_keyset_is_always_separated_from_output(tmp_path, spelling, keyset_id):
+    base = Path(_canonical(tmp_path))
+    out = base / "a" / "out"
+    out.mkdir(parents=True, mode=0o755)
+    out.chmod(0o755)
+    (base / "b").mkdir()
+    (base / "link-a").symlink_to(base / "a")
+    (base / "link-out").symlink_to(out)
+    root = _ROOT_SPELLINGS[spelling](base)
+    expected_keyset = os.path.join(os.path.realpath(os.path.join(base, root)), keyset_id)
+    keyset_is_symlink = os.path.islink(expected_keyset)
+    separated = not keyset_is_symlink and not _overlaps(
+        os.path.realpath(expected_keyset), str(out)
+    )
+    before_entries = sorted(str(path) for path in base.rglob("*"))
+
+    result = _bash(_IDENTITY_SCRIPT, env=_env(out, ROOT=root, ID=keyset_id), cwd=base)
+
+    assert result.returncode == 0, result.stderr
+    assert "Traceback" not in result.stderr
+    assert (out.stat().st_mode & 0o777) == 0o755
+    assert _key_files_under(out) == []
+    if not separated:
+        assert result.stdout.split() == ["resolve=1"], (result.stdout, result.stderr)
+        assert result.stderr.startswith("Error: "), result.stderr
+        assert sorted(str(path) for path in base.rglob("*")) == before_entries
+        return
+    assert result.stdout.split() == ["resolve=0", f"keyset={expected_keyset}", "done"], result.stderr
+    keyset = Path(expected_keyset)
+    assert sorted(os.listdir(keyset)) == sorted(["supervisor.key", PRIVATE_KEY])
+    assert _key_files_under(base) == sorted(str(keyset / name) for name in ("supervisor.key", PRIVATE_KEY))
+    assert _validates(keyset / PRIVATE_KEY, out / PUBLIC_KEY)
+
+
+@pytest.mark.parametrize("relation", ["keyset-aliases-output", "output-aliases-keyset-child"])
+def test_overlap_hidden_from_canonicalization_is_caught_by_inode(tmp_path, relation):
+    """canonical な綴りで見えない別名（bind mount 相当）でも、inode で重なりを検出する。
+
+    ``realpath`` を symlink を解決しない stub に替えて、綴りの判定だけでは素通りする状況を作る。
+    """
+
+    base = Path(_canonical(tmp_path))
+    out = base / "a" / "out"
+    out.mkdir(parents=True, mode=0o755)
+    out.chmod(0o755)
+    (base / "alias").symlink_to(base / "a")
+    stub = base / "stub"
+    stub.mkdir()
+    (stub / "realpath").write_text('#!/bin/sh\nexec /usr/bin/realpath -s "$@"\n', encoding="utf-8")
+    (stub / "realpath").chmod(0o755)
+    if relation == "keyset-aliases-output":
+        root, keyset_id, output = f"{base}/alias", "out", str(out)
+    else:
+        root, keyset_id, output = f"{base}", "a", f"{base}/alias/out"
     result = _bash(
-        f'{_LOCK}\nvalidation_materialize_process_key "$1/supervisor.key"\n'
-        'validation_materialize_process_key "$1/worker.key"',
-        _canonical(keyset),
+        _IDENTITY_SCRIPT,
+        env=_env(Path(output), ROOT=root, ID=keyset_id, PATH=f"{stub}:{os.environ['PATH']}"),
+        cwd=base,
     )
 
     assert result.returncode == 0, result.stderr
-    assert (keyset / "supervisor.key").read_bytes() == b"k" * 64
-    assert (keyset / "worker.key").stat().st_size == 32
-    assert sorted(os.listdir(keyset)) == ["supervisor.key", "worker.key"]
+    assert result.stdout.split() == ["resolve=1"], (result.stdout, result.stderr)
+    assert "must be outside OUTPUT_BASE_DIR and must not contain it" in result.stderr
+    assert _key_files_under(base) == []
+    assert (out.stat().st_mode & 0o777) == 0o755
 
 
-def test_process_key_rejects_a_non_regular_file(tmp_path):
-    keyset = tmp_path / "ks"
-    (keyset / "supervisor.key").mkdir(parents=True)
-    result = _bash(f'{_LOCK}\nvalidation_materialize_process_key "$1/supervisor.key"', _canonical(keyset))
-
-    _assert_clean_failure(result, "is not a regular file")
-
-
-def test_unlock_does_not_close_an_fd_it_does_not_hold(tmp_path):
-    keyset = tmp_path / "ks"
-    result = _bash(
-        f"""
-{_LOCK}
-n=$VALIDATION_KEYSET_LOCK_FD
-exec {{n}}<&-
-eval "exec $n<\\"$2\\""
-rc=0; validation_unlock_authority_keyset || rc=$?
-echo "unlock=$rc"
-[[ -e /dev/fd/$n ]] && echo "reused_fd=open"
-rc=0; {_LOCK} || rc=$?
-echo "relock=$rc"
-""",
-        _canonical(keyset), str(COMMON),
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == ["unlock=2", "reused_fd=open", "relock=2"]
-    assert "does not hold a keyset lock; not closing it" in result.stderr
-    assert "stale authority keyset lock handle" in result.stderr
-
-
-@pytest.mark.parametrize("keyset_id", [".", "..", "", "a/b", "a b"])
-def test_lock_rejects_a_keyset_id_that_is_not_one_component(tmp_path, keyset_id):
+@pytest.mark.parametrize("keyset_id", [".", "..", "", "a/b", "a b", "../ks"])
+def test_resolve_rejects_a_keyset_id_that_is_not_one_component(tmp_path, keyset_id):
     root = tmp_path / "root"
     root.mkdir(mode=0o755)
     root.chmod(0o755)
     tmp_path.chmod(0o755)
-    result = _bash('validation_lock_authority_keyset "$1" "$2"', _canonical(root), keyset_id)
+    out = tmp_path / "out"
+    result = _bash('validation_resolve_authority_keyset "$1" "$2" "$OUT"',
+                   _canonical(root), keyset_id, env=_env(out))
 
     _assert_clean_failure(result, "authority keyset id must be one path component")
     assert (root.stat().st_mode & 0o777) == 0o755
@@ -872,25 +881,288 @@ def test_lock_rejects_a_keyset_id_that_is_not_one_component(tmp_path, keyset_id)
     assert os.listdir(root) == []
 
 
-@pytest.mark.parametrize("spelling", ["relative", "dotdot", "double-slash", "symlink"])
-def test_lock_requires_a_canonical_private_root(tmp_path, spelling):
-    real = tmp_path / "real"
-    real.mkdir()
-    (tmp_path / "link").symlink_to(real)
-    root = {
-        "relative": "real",
-        "dotdot": f"{_canonical(tmp_path)}/x/../real",
-        "double-slash": f"{_canonical(tmp_path)}//real",
-        "symlink": f"{_canonical(tmp_path)}/link",
+@pytest.mark.parametrize("spelling", [
+    "relative", "dotdot", "double-slash", "trailing-slash", "symlinked-parent",
+    "symlinked-keyset", "dot-id", "is-output", "inside-output", "contains-output",
+])
+def test_lock_rejects_a_keyset_that_is_not_a_valid_identity(tmp_path, spelling):
+    """lock は渡された keyset を resolve と同じ判定にかけ直す（手で組み立てた path も同じ規則）。"""
+
+    base = Path(_canonical(tmp_path))
+    out = base / "a" / "out"
+    out.mkdir(parents=True, mode=0o755)
+    out.chmod(0o755)
+    (base / "real").mkdir()
+    (base / "link").symlink_to(base / "real")
+    (base / "ks-link").symlink_to(base / "real")
+    keyset = {
+        "relative": "real/ks",
+        "dotdot": f"{base}/x/../real/ks",
+        "double-slash": f"{base}//real/ks",
+        "trailing-slash": f"{base}/real/ks/",
+        "symlinked-parent": f"{base}/link/ks",
+        "symlinked-keyset": f"{base}/ks-link",
+        "dot-id": f"{base}/real/.",
+        "is-output": str(out),
+        "inside-output": f"{out}/ks",
+        "contains-output": f"{base}/a",
     }[spelling]
-    result = subprocess.run(
-        ["bash", "-c", f'source "{COMMON}"; validation_lock_authority_keyset "$1" ks', "bash", root],
-        cwd=tmp_path, capture_output=True, text=True, timeout=60,
+    before_entries = sorted(str(path) for path in base.rglob("*"))
+    result = _bash(f'{_LOCK}\necho locked', keyset, env=_env(out), cwd=base)
+
+    assert result.returncode == 1, (result.returncode, result.stderr)
+    assert result.stderr.startswith("Error: authority keyset") or result.stderr.startswith(
+        "Error: private authority keyset"), result.stderr
+    assert result.stdout == ""
+    assert sorted(str(path) for path in base.rglob("*")) == before_entries
+    assert (out.stat().st_mode & 0o777) == 0o755
+
+
+# ---------------------------------------------------------------------------
+# 不変条件 2: key writer は、いま保持している keyset lock なしでは書けない
+# 不変条件 3: unlock は自分が取得した authority lock 以外を閉じない
+#
+# state は shell 変数を偽装・stale 化・再利用する全ての遷移（lock が作った state 以外）。
+# writer は必ず 2 で何も書かない。unlock は lock の state が無ければ 0、あれば 2 で、どちらも
+# process の fd を 1 つも閉じない。
+# ---------------------------------------------------------------------------
+
+
+_PRELUDE = """
+keyset_identity() { local t; exec {t}<"$1"; flock "$t"; _validation_fd_exclusive_flock_identity "$t"; exec {t}<&-; }
+"""
+
+_STALE = 'p=${_VALIDATION_KEYSET_LOCK[0]}; s=${_VALIDATION_KEYSET_LOCK[1]}; '
+
+# どの state も「lock が作り、いま所有している state」ではない。
+_NOT_HELD_STATES = {
+    "no-state": ":",
+    "legacy-dir-variable": 'VALIDATION_KEYSET_LOCK_DIR="$1"',
+    "legacy-fd-variable-with-a-real-lock": 'exec {fd}<"$1"; flock "$fd"; VALIDATION_KEYSET_LOCK_FD=$fd',
+    "forged-state-closed-fds": '_VALIDATION_KEYSET_LOCK=(200 201 "00:00:1" "$1" "$OUT")',
+    "forged-state-wrong-shape": '_VALIDATION_KEYSET_LOCK=(1 2 3)',
+    "forged-scalar-state": '_VALIDATION_KEYSET_LOCK="10 11"',
+    "forged-state-unlocked-fds-on-the-keyset": (
+        'id=$(keyset_identity "$1"); exec {a}<"$1" {b}<"$1"; '
+        '_VALIDATION_KEYSET_LOCK=("$a" "$b" "$id" "$1" "$OUT")'
+    ),
+    "forged-state-shared-lock": (
+        'id=$(keyset_identity "$1"); exec {a}<"$1"; flock -s "$a"; exec {b}<&"$a"; '
+        '_VALIDATION_KEYSET_LOCK=("$a" "$b" "$id" "$1" "$OUT")'
+    ),
+    "forged-state-while-another-process-holds-the-keyset": (
+        'id=$(keyset_identity "$1"); '
+        '( exec 9<"$1"; flock 9; : > "$1/../held"; exec sleep 30 ) >/dev/null 2>&1 & holder=$!; '
+        'trap \'kill $holder\' EXIT; until [[ -e "$1/../held" ]]; do sleep 0.05; done; '
+        'exec {a}<"$1" {b}<"$1"; _VALIDATION_KEYSET_LOCK=("$a" "$b" "$id" "$1" "$OUT")'
+    ),
+    "stale-primary-closed": f'{_LOCK}; {_STALE}exec {{p}}<&-',
+    "stale-shadow-closed": f'{_LOCK}; {_STALE}exec {{s}}<&-',
+    "stale-both-closed": f'{_LOCK}; {_STALE}exec {{p}}<&- {{s}}<&-',
+    "primary-reused-by-another-file-with-an-exclusive-flock": (
+        f'{_LOCK}; {_STALE}exec {{p}}<&-; eval "exec $p<\\"$1/../other\\""; flock "$p"'
+    ),
+    "primary-reused-by-another-directory-with-an-exclusive-flock": (
+        f'{_LOCK}; {_STALE}exec {{p}}<&-; eval "exec $p<\\"$1/../other-dir\\""; flock "$p"'
+    ),
+    "both-reused-by-one-locked-description-of-another-file": (
+        f'{_LOCK}; {_STALE}exec {{p}}<&- {{s}}<&-; eval "exec $p<\\"$1/../other\\""; '
+        'flock "$p"; eval "exec $s<&$p"'
+    ),
+    "primary-reused-by-the-keyset-reopened": (
+        f'{_LOCK}; {_STALE}exec {{p}}<&-; eval "exec $p<\\"$1\\""; flock -n "$p" || true'
+    ),
+    "state-exported": f'{_LOCK}; export _VALIDATION_KEYSET_LOCK',
+}
+
+# 所有している lock だが、書こうとしている keyset の lock ではない（writer だけが拒否する）。
+_HELD_ELSEWHERE_STATES = {
+    "lock-of-another-keyset": 'validation_lock_authority_keyset "$(dirname -- "$1")/other-ks" "$OUT"',
+    "state-of-another-keyset-relabelled": (
+        'validation_lock_authority_keyset "$(dirname -- "$1")/other-ks" "$OUT"; '
+        '_VALIDATION_KEYSET_LOCK[3]="$1"'
+    ),
+    "keyset-replaced-after-lock": f'{_LOCK}; mv -- "$1" "$1.old"; mkdir -- "$1"',
+}
+
+_WRITERS = {
+    "pair": 'validation_materialize_pair_status_keypair "$PY" "$1/pair-status-ed25519.key" "$2"',
+    "hmac": 'validation_materialize_process_key "$1/supervisor.key"',
+}
+
+_OBSERVE = """
+before=(/proc/$$/fd/*)
+rc=0; {op} || rc=$?
+after=(/proc/$$/fd/*)
+echo "rc=$rc"
+[[ "${{before[*]}}" == "${{after[*]}}" ]] && echo fds=unchanged || echo "fds=changed"
+"""
+
+
+def _state_layout(tmp_path: Path) -> tuple[Path, Path]:
+    base = Path(_canonical(tmp_path))
+    keyset = base / "keys" / "ks"
+    keyset.mkdir(parents=True)
+    (base / "keys" / "other").write_text("", encoding="utf-8")
+    (base / "keys" / "other-dir").mkdir()
+    out = base / "out"
+    out.mkdir()
+    return keyset, out
+
+
+def _run_state(tmp_path: Path, state: str, op: str) -> tuple[subprocess.CompletedProcess, Path, Path]:
+    keyset, out = _state_layout(tmp_path)
+    states = {**_NOT_HELD_STATES, **_HELD_ELSEWHERE_STATES}
+    script = _PRELUDE + states[state] + "\n" + _OBSERVE.format(op=op)
+    result = _bash(script, str(keyset), str(out / PUBLIC_KEY), env=_env(out))
+    return result, keyset, out
+
+
+@pytest.mark.parametrize("writer", sorted(_WRITERS))
+@pytest.mark.parametrize("state", sorted({**_NOT_HELD_STATES, **_HELD_ELSEWHERE_STATES}))
+def test_key_writers_require_the_held_keyset_capability(tmp_path, state, writer):
+    result, keyset, out = _run_state(tmp_path, state, _WRITERS[writer])
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["rc=2", "fds=unchanged"], (result.stdout, result.stderr)
+    assert result.stderr.startswith("Error: "), result.stderr
+    assert "Traceback" not in result.stderr
+    assert os.listdir(keyset) == []
+    assert _key_files_under(keyset.parent) == []
+    assert not (out / PUBLIC_KEY).exists()
+
+
+@pytest.mark.parametrize("state", sorted(_NOT_HELD_STATES))
+def test_unlock_closes_only_the_lock_it_acquired(tmp_path, state):
+    result, _, _ = _run_state(tmp_path, state, "validation_unlock_authority_keyset")
+
+    expected_rc = 0 if state in {"no-state", "legacy-dir-variable", "legacy-fd-variable-with-a-real-lock"} else 2
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == [f"rc={expected_rc}", "fds=unchanged"], (result.stdout, result.stderr)
+    if expected_rc == 2:
+        assert "not closing any descriptor" in result.stderr
+
+
+@pytest.mark.parametrize("state", sorted(_HELD_ELSEWHERE_STATES))
+def test_unlock_releases_its_own_lock_even_when_writers_refuse(tmp_path, state):
+    """所有している lock は、keyset の path が差し替えられても unlock で解放できる。"""
+
+    keyset, out = _state_layout(tmp_path)
+    script = _PRELUDE + _HELD_ELSEWHERE_STATES[state] + """
+p=${_VALIDATION_KEYSET_LOCK[0]}; s=${_VALIDATION_KEYSET_LOCK[1]}
+validation_unlock_authority_keyset
+[[ -e /dev/fd/$p || -e /dev/fd/$s ]] && echo fds=open || echo fds=closed
+declare -p _VALIDATION_KEYSET_LOCK >/dev/null 2>&1 && echo state=kept || echo state=cleared
+"""
+    result = _bash(script, str(keyset), str(out / PUBLIC_KEY), env=_env(out))
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["fds=closed", "state=cleared"]
+    for locked in (keyset.parent / "other-ks", keyset, Path(f"{keyset}.old")):
+        if locked.is_dir():
+            fd = os.open(locked, os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
+
+
+def test_the_acquired_lock_cannot_be_retaken_on_a_recycled_descriptor(tmp_path):
+    """primary を閉じても shadow が同じ open file description を保つので、同じ keyset を開き直した
+    fd では lock を取れない（再利用された fd 番号が自分の lock に化けない根拠）。"""
+
+    keyset, out = _state_layout(tmp_path)
+    result = _bash(
+        f'{_LOCK}\n{_STALE}exec {{p}}<&-\neval "exec $p<\\"$1\\""\n'
+        'flock -n "$p" && echo retaken=yes || echo retaken=no',
+        str(keyset), env=_env(out),
     )
 
-    assert result.returncode == 2, result.stderr
-    assert "must be a canonical absolute path" in result.stderr
-    assert os.listdir(real) == []
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["retaken=no"]
+
+
+@pytest.mark.parametrize("operation", ["lock", "unlock", "pair", "hmac"])
+def test_a_lock_state_from_the_environment_is_rejected(tmp_path, operation):
+    keyset, out = _state_layout(tmp_path)
+    op = {"lock": _LOCK, "unlock": "validation_unlock_authority_keyset", **_WRITERS}[operation]
+    result = _bash(
+        _OBSERVE.format(op=op), str(keyset), str(out / PUBLIC_KEY),
+        env=_env(out, _VALIDATION_KEYSET_LOCK=f"3 4 00:00:1 {keyset} {out}"),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["rc=2", "fds=unchanged"], (result.stdout, result.stderr)
+    assert os.listdir(keyset) == []
+
+
+@pytest.mark.parametrize("writer", sorted(_WRITERS))
+@pytest.mark.parametrize("target", [
+    "elsewhere", "subdirectory", "double-slash", "dot-component", "relative-keyset",
+])
+def test_key_writers_reject_a_key_that_is_not_directly_under_the_locked_keyset(tmp_path, writer, target):
+    keyset, out = _state_layout(tmp_path)
+    (keyset.parent / "elsewhere").mkdir()
+    directory = {
+        "elsewhere": f"{keyset.parent}/elsewhere",
+        "subdirectory": f"{keyset}/sub",
+        "double-slash": f"{keyset}/",
+        "dot-component": f"{keyset}/.",
+        "relative-keyset": os.path.relpath(keyset, REPO_ROOT),
+    }[target]
+    op = _WRITERS[writer].replace('"$1/', '"$3/')
+    result = _bash(f"{_LOCK}\n{op}", str(keyset), str(out / PUBLIC_KEY), directory, env=_env(out))
+
+    _assert_clean_failure(result, "must be a file directly under the locked keyset", rc=2)
+    assert os.listdir(keyset) == []
+    assert _key_files_under(keyset.parent) == []
+
+
+@pytest.mark.parametrize("writer", sorted(_WRITERS))
+def test_key_writers_reject_a_symlinked_key(tmp_path, writer):
+    keyset, out = _state_layout(tmp_path)
+    victim = keyset.parent / "victim"
+    name = PRIVATE_KEY if writer == "pair" else "supervisor.key"
+    (keyset / name).symlink_to(victim)
+    result = _bash(f'{_LOCK}\n{_WRITERS[writer]}', str(keyset), str(out / PUBLIC_KEY), env=_env(out))
+
+    _assert_clean_failure(result, "must not be a symlink")
+    assert not victim.exists()
+
+
+@pytest.mark.parametrize("placement", ["outside-output", "inside-keyset", "symlink-into-keyset", "is-output"])
+def test_pair_writer_requires_the_public_key_inside_output(tmp_path, placement):
+    keyset, out = _state_layout(tmp_path)
+    (out / "link").symlink_to(keyset)
+    public = {
+        "outside-output": f"{keyset.parent}/{PUBLIC_KEY}",
+        "inside-keyset": f"{keyset}/{PUBLIC_KEY}",
+        "symlink-into-keyset": f"{out}/link/{PUBLIC_KEY}",
+        "is-output": str(out),
+    }[placement]
+    result = _bash(f'{_LOCK}\n{_WRITERS["pair"]}', str(keyset), public, env=_env(out))
+
+    _assert_clean_failure(result, "pair-status public key must be inside OUTPUT_BASE_DIR")
+    assert os.listdir(keyset) == []
+    assert _key_files_under(keyset.parent) == []
+
+
+def test_key_writers_write_into_the_locked_inode_not_through_the_path():
+    """書き込み先は /dev/fd/<primary>/<name>（lock した inode）。path を見る判定と書き込みの間に
+    keyset が差し替えられても、鍵は差し替え後の directory には入らない。"""
+
+    source = COMMON.read_text(encoding="utf-8")
+    target = _shell_function(source, "_validation_keyset_member_target")
+    assert 'printf \'%s\\n\' "/dev/fd/$primary/$name"' in target
+    for writer in ("validation_materialize_process_key", "validation_materialize_pair_status_keypair"):
+        body = _shell_function(source, writer)
+        assert '_validation_keyset_member_target "' in body
+        assert '"$target' in body
+
+
+# ---------------------------------------------------------------------------
+# lock の lifecycle
+# ---------------------------------------------------------------------------
 
 
 def test_lock_rejects_a_symlinked_keyset(tmp_path):
@@ -898,45 +1170,43 @@ def test_lock_rejects_a_symlinked_keyset(tmp_path):
     target.mkdir(mode=0o755)
     link = tmp_path / "ks"
     link.symlink_to(target)
-    result = _bash(_LOCK, _canonical(tmp_path) + "/ks")
+    out = tmp_path / "out"
+    result = _bash(_LOCK, _canonical(tmp_path) + "/ks", env=_env(out))
 
     _assert_clean_failure(result, "must not be a symlink")
     assert (target.stat().st_mode & 0o777) == 0o755
 
 
 def test_lock_restricts_permissions_only_after_acquiring_it(tmp_path):
-    keyset = tmp_path / "ks"
-    keyset.mkdir(mode=0o755)
+    keyset, out = _fresh_layout(tmp_path)
+    keyset.mkdir(parents=True, mode=0o755)
     keyset.chmod(0o755)
     fd = _hold_keyset_lock(keyset)
     try:
-        refused = _bash(
-            _LOCK, _canonical(keyset),
-            env={"VALIDATION_KEYSET_LOCK_WAIT_SECONDS": "0.5"},
-        )
+        refused = _bash(_LOCK, _canonical(keyset),
+                        env=_env(out, VALIDATION_KEYSET_LOCK_WAIT_SECONDS="0.5"))
     finally:
         os.close(fd)
     assert (keyset.stat().st_mode & 0o777) == 0o755
     _assert_clean_failure(refused, "held by another run for too long")
 
-    acquired = _bash(_LOCK, _canonical(keyset))
+    acquired = _bash(_LOCK, _canonical(keyset), env=_env(out))
     assert acquired.returncode == 0, acquired.stderr
     assert (keyset.stat().st_mode & 0o777) == 0o700
 
 
 def test_lock_rejects_a_keyset_replaced_while_waiting(tmp_path):
-    keyset = tmp_path / "ks"
+    keyset, out = _fresh_layout(tmp_path)
     fd = _hold_keyset_lock(keyset)
     waiter = subprocess.Popen(
-        ["bash", "-c", f'set -euo pipefail\nsource "{COMMON}"\n{_LOCK}',
-         "bash", _canonical(keyset)],
+        ["bash", "-c", f'set -euo pipefail\nsource "{COMMON}"\n{_LOCK}', "bash", _canonical(keyset)],
         cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         start_new_session=True,
-        env={**os.environ, "VALIDATION_KEYSET_LOCK_WAIT_SECONDS": "60"},
+        env={**os.environ, **_env(out, VALIDATION_KEYSET_LOCK_WAIT_SECONDS="60")},
     )
     try:
         _wait_until(lambda: _blocked_in_flock(waiter.pid))
-        keyset.rename(tmp_path / "ks.old")
+        keyset.rename(keyset.parent / "ks.old")
         keyset.mkdir(mode=0o755)
         keyset.chmod(0o755)
     finally:
@@ -945,17 +1215,19 @@ def test_lock_rejects_a_keyset_replaced_while_waiting(tmp_path):
 
     assert waiter.returncode == 1, err
     assert "was replaced while waiting for its lock" in err
-    assert "is not the lock of" in err
     assert (keyset.stat().st_mode & 0o777) == 0o755
 
 
 def test_lock_refuses_a_second_keyset_and_unlock_releases(tmp_path):
-    first = tmp_path / "first"
-    second = tmp_path / "second"
+    base = Path(_canonical(tmp_path))
+    out = base / "out"
+    out.mkdir()
+    first = base / "keys" / "first"
+    second = base / "keys" / "second"
     result = _bash(
         """
-validation_lock_authority_keyset "$(dirname -- "$1")" "$(basename -- "$1")"
-rc=0; validation_lock_authority_keyset "$(dirname -- "$2")" "$(basename -- "$2")" || rc=$?
+validation_lock_authority_keyset "$1" "$OUT"
+rc=0; validation_lock_authority_keyset "$2" "$OUT" || rc=$?
 echo "second=$rc"
 "$PY" -c 'import fcntl, os, sys
 fd = os.open(sys.argv[1], os.O_RDONLY)
@@ -968,27 +1240,37 @@ validation_unlock_authority_keyset
 fd = os.open(sys.argv[1], os.O_RDONLY)
 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); print("after_unlock=free")' "$1"
 """,
-        _canonical(first), _canonical(tmp_path) + "/second", env={"PY": sys.executable},
+        str(first), str(second), env=_env(out),
     )
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.split() == ["second=2", "held=yes", "after_unlock=free"]
-    assert "refusing a second keyset lock" in result.stderr
+    assert "authority keyset lock state already exists" in result.stderr
     assert not second.exists()
 
 
 @pytest.mark.parametrize("value", ["", "abc", "-1", "1s"])
 def test_lock_rejects_an_invalid_wait(tmp_path, value):
-    result = _bash(
-        _LOCK, _canonical(tmp_path) + "/ks",
-        env={"VALIDATION_KEYSET_LOCK_WAIT_SECONDS": value},
-    )
+    keyset, out = _fresh_layout(tmp_path)
+    result = _bash(_LOCK, _canonical(keyset),
+                   env=_env(out, VALIDATION_KEYSET_LOCK_WAIT_SECONDS=value))
     if value == "":
         # 空は未設定と同じ（既定 120 秒）。
         assert result.returncode == 0, result.stderr
         return
     _assert_clean_failure(result, "VALIDATION_KEYSET_LOCK_WAIT_SECONDS")
-    assert not (tmp_path / "ks").exists()
+    assert not keyset.exists()
+
+
+def test_key_cli_does_not_depend_on_the_callers_cwd(tmp_path):
+    keyset, out = _fresh_layout(tmp_path)
+    python_link = tmp_path / "py"
+    python_link.symlink_to(sys.executable)
+    result = _bash(_MATERIALIZE, _canonical(keyset), str(out / PUBLIC_KEY),
+                   env=_env(out, PY="./py"), cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert _validates(keyset / PRIVATE_KEY, out / PUBLIC_KEY)
 
 
 # ---------------------------------------------------------------------------
@@ -1005,9 +1287,13 @@ def _shell_function(source: str, name: str) -> str:
     return source[start:end]
 
 
+def _repo_shell_scripts() -> list[Path]:
+    return sorted(REPO_ROOT.glob("*.sh")) + sorted((REPO_ROOT / "scripts").rglob("*.sh"))
+
+
 def test_runners_do_not_call_the_key_cli_directly():
     offenders = []
-    for script in sorted(REPO_ROOT.glob("*.sh")) + sorted((REPO_ROOT / "scripts").rglob("*.sh")):
+    for script in _repo_shell_scripts():
         source = script.read_text(encoding="utf-8")
         if script == COMMON:
             source = source.replace(
@@ -1024,7 +1310,7 @@ def test_runners_do_not_call_the_key_cli_directly():
 
 _WINDOW_PARTS = {
     "eq": (
-        'validation_lock_authority_keyset "$EQBENCH_PRIVATE_AUTHORITY_ROOT" "$AUTHORITY_KEYSET_ID" || exit 1',
+        'validation_lock_authority_keyset "$PROCESS_AUTHORITY_ROOT" "$OUTPUT_BASE_DIR" || exit 1',
         'existing_authority_evidence="$(find',
         'validation_materialize_process_key "$PROCESS_SUPERVISOR_KEY_FILE" || exit 1',
         'validation_materialize_process_key "$PROCESS_WORKER_KEY_FILE" || exit 1',
@@ -1032,7 +1318,7 @@ _WINDOW_PARTS = {
         "validation_unlock_authority_keyset || exit 1",
     ),
     "neq": (
-        'validation_lock_authority_keyset "$EQBENCH_PRIVATE_AUTHORITY_ROOT" "$KEYSET" || exit 1',
+        'validation_lock_authority_keyset "$AUTHORITY_ROOT" "$OUTPUT_BASE_DIR" || exit 1',
         'existing_status="$(find',
         'validation_materialize_process_key "$SUPERVISOR_KEY" || exit 1',
         'validation_materialize_process_key "$WORKER_KEY" || exit 1',
@@ -1040,6 +1326,7 @@ _WINDOW_PARTS = {
         "validation_unlock_authority_keyset || exit 1",
     ),
 }
+_KEYSET_VARIABLE = {"eq": "PROCESS_AUTHORITY_ROOT", "neq": "AUTHORITY_ROOT"}
 
 
 @pytest.mark.parametrize("kind", ["eq", "neq"])
@@ -1051,33 +1338,53 @@ def test_the_key_window_brackets_guard_hmac_and_helper_without_background_jobs(k
     positions = [source.index(part) for part in parts]
     assert positions == sorted(positions)
     # 秘密鍵を置く dir の作成と chmod は lock 関数の中だけ（lock の外で触らない）。
-    assert "chmod 700 \"$PROCESS_AUTHORITY_ROOT\"" not in source
-    assert "chmod 700 \"$AUTHORITY_ROOT\"" not in source
+    assert f'chmod 700 "${_KEYSET_VARIABLE[kind]}"' not in source
     window = source[positions[0]:positions[-1]]
     stripped = re.sub(r"&&|[0-9]*>&[0-9-]*|<&[0-9-]*|&>", "", window)
     assert "&" not in stripped, window
-    # keyset は正規化した private root と id から lock helper が組み立てる。
-    assert source.count("validation_resolve_private_authority_root") == 1
 
 
-def test_every_key_write_goes_through_one_owner_that_asserts_the_held_lock():
-    """鍵を書く規則は common の helper だけにあり、どの helper も lock の assertion を通る。"""
+@pytest.mark.parametrize("kind", ["eq", "neq"])
+def test_runners_take_the_keyset_only_from_the_identity_owner(kind):
+    """runner は keyset を resolve からだけ受け取り、root/id を自分で組み立てない。"""
 
+    source = (REPO_ROOT / RUNNERS[kind]).read_text(encoding="utf-8")
+    variable = _KEYSET_VARIABLE[kind]
+    assignments = re.findall(rf"^\s*{variable}=.*$", source, flags=re.MULTILINE)
+    assert assignments == [f'{variable}="$(validation_resolve_authority_keyset \\'], assignments
+    assert '"$EQBENCH_PRIVATE_AUTHORITY_ROOT/' not in source
+    resolve = source.index("validation_resolve_authority_keyset")
+    assert resolve < source.index("validation_lock_authority_keyset")
+
+
+def test_every_key_write_goes_through_one_owner_that_proves_the_held_lock():
     source = COMMON.read_text(encoding="utf-8")
     process_key = _shell_function(source, "validation_materialize_process_key")
-    member = _shell_function(source, "_validation_keyset_member_path")
+    target = _shell_function(source, "_validation_keyset_member_target")
     pair = _shell_function(source, "validation_materialize_pair_status_keypair")
+    unlock = _shell_function(source, "validation_unlock_authority_keyset")
+    lock = _shell_function(source, "validation_lock_authority_keyset")
+    resolve = _shell_function(source, "validation_resolve_authority_keyset")
     assert "(umask 077; head -c 32 /dev/urandom >" in process_key
-    assert 'validation_assert_authority_keyset_locked "$(dirname -- "$key_file")"' in member
-    assert '_validation_keyset_member_path "$1"' in process_key
-    assert '_validation_keyset_member_path "$2"' in pair
+    assert "_validation_keyset_lock_is_owned" in target
+    assert "_validation_keyset_lock_is_owned" in unlock
+    assert "_validation_keyset_lock_is_valid_for" in lock
+    assert '_validation_keyset_member_target "$key_file"' in process_key
+    assert '_validation_keyset_member_target "$private_key"' in pair
+    # keyset identity の判定は 1 つの関数だけが持ち、resolve・lock・writer がそれを使う。
+    check = _shell_function(source, "_validation_check_authority_keyset")
+    assert source.count('_validation_paths_overlap "') == 1
+    assert '_validation_paths_overlap "' in check
+    for body in (resolve, lock, target):
+        assert "_validation_check_authority_keyset" in body
     # lock を保持していることを shell 変数の path で判定しない。
     assert "VALIDATION_KEYSET_LOCK_DIR" not in source
+    assert "VALIDATION_KEYSET_LOCK_FD" not in source
     # keyset の外の鍵（run ごとの tmp にある execution authority の worker 鍵）は対象外。
     execution_authority = _shell_function(source, "validation_prepare_before_after_logs")
     offenders = [
         str(script.relative_to(REPO_ROOT))
-        for script in sorted(REPO_ROOT.glob("*.sh")) + sorted((REPO_ROOT / "scripts").rglob("*.sh"))
+        for script in _repo_shell_scripts()
         if "/dev/urandom" in script.read_text(encoding="utf-8")
         .replace(process_key, "").replace(execution_authority, "")
     ]
@@ -1089,5 +1396,5 @@ def test_lock_waits_bounded_and_restricts_permissions_under_the_lock():
     lock = _shell_function(source, "validation_lock_authority_keyset")
     assert 'flock -E 75 -w "$wait_seconds"' in lock
     assert "VALIDATION_KEYSET_LOCK_WAIT_SECONDS:-120" in lock
-    assert lock.index("flock -E 75") < lock.index('chmod 700 -- "$dir"')
+    assert lock.index("flock -E 75") < lock.index('chmod 700 -- "/dev/fd/$primary"')
     assert "&" not in re.sub(r"&&|[0-9]*>&[0-9-]*|<&[0-9-]*|&>", "", lock)

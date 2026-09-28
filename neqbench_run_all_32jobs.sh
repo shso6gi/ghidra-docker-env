@@ -193,10 +193,12 @@ if [[ -s "$OUTPUT_BASE_DIR/run_manifest.txt" ]] \
     echo "Use a fresh OUTPUT_BASE_DIR for the same-ISA caller-closure evaluation." >&2
     exit 1
 fi
-# Issue #170: key root も OUTPUT と同じく正規化してから包含を判定する（`//`、`..`、相対
-# path、symlink の綴りで秘密鍵が OUTPUT の中へ書かれる迂回を塞ぐ）。
-EQBENCH_PRIVATE_AUTHORITY_ROOT="$(validation_resolve_private_authority_root \
-    "$EQBENCH_PRIVATE_AUTHORITY_ROOT" "$OUTPUT_BASE_DIR")" || exit 1
+# Issue #170: keyset（秘密鍵の置き場所）は共通の owner が組み立てて判定する（正規化した private
+# root の直下の 1 component で、OUTPUT と分離している。`//`、`..`、相対 path、symlink の綴りでも
+# 秘密鍵が OUTPUT に書かれない）。runner は root/id を自分で組み立てない。
+KEYSET="$(printf '%s' "$OUTPUT_BASE_DIR" | sha256sum | awk '{print $1}')"
+AUTHORITY_ROOT="$(validation_resolve_authority_keyset \
+    "$EQBENCH_PRIVATE_AUTHORITY_ROOT" "$KEYSET" "$OUTPUT_BASE_DIR")" || exit 1
 CENSUS="$OUTPUT_BASE_DIR/neq_source_pairs.tsv"; : > "$CENSUS"
 SOURCE_PAIR_COUNT=0
 while IFS= read -r dir; do
@@ -277,13 +279,11 @@ if (( DRY_RUN == 1 )); then
     exit 0
 fi
 
-KEYSET="$(printf '%s' "$OUTPUT_BASE_DIR" | sha256sum | awk '{print $1}')"
-AUTHORITY_ROOT="$EQBENCH_PRIVATE_AUTHORITY_ROOT/$KEYSET"
 SUPERVISOR_KEY_ID=eqbench-neq-supervisor-v1; WORKER_KEY_ID=eqbench-neq-worker-v1
 SUPERVISOR_KEY="$AUTHORITY_ROOT/supervisor.key"; WORKER_KEY="$AUTHORITY_ROOT/worker.key"
 PAIR_PRIVATE_KEY="$AUTHORITY_ROOT/pair-status-ed25519.key"; PAIR_PUBLIC_KEY="$OUTPUT_BASE_DIR/pair-status-verification-key.json"
 # Issue #170: 鍵を読む・書く・検証する区間だけ keyset の lock を保持する（窓の中で `&` を使わない）。
-validation_lock_authority_keyset "$EQBENCH_PRIVATE_AUTHORITY_ROOT" "$KEYSET" || exit 1
+validation_lock_authority_keyset "$AUTHORITY_ROOT" "$OUTPUT_BASE_DIR" || exit 1
 existing_status="$(find "$OUTPUT_BASE_DIR" -type f -name '*.pair-status.json' -print -quit)"
 if [[ -n "$existing_status" && ( ! -s "$SUPERVISOR_KEY" || ! -s "$WORKER_KEY" || ! -s "$PAIR_PRIVATE_KEY" || ! -s "$PAIR_PUBLIC_KEY" ) ]]; then
     echo "Existing Neq authority evidence has no complete retained keyset" >&2
