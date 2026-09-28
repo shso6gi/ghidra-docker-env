@@ -6,22 +6,28 @@ solver が SAT のときに返す model は、同じ論理式の解のうちど�
 変わる。反例の replay・NaN の拒否・partition の曖昧さの判定はその 1 つの model を
 見るので、判定（NOT_EQ / UNKNOWN）まで solver の履歴で揺れていた。
 
-ここでは witness を次の値に固定する:
+ここでは witness を次の値に固定する（**canonical witness**）:
 
-    script が宣言する scalar の入力（bit-vector / Bool の定数）を宣言順に並べ、
-    各値を unsigned の整数として見たときに **辞書式で最小** の model
+    script が宣言する scalar の入力（bit-vector / Bool / Int の定数）を宣言順に並べ、
+    成分ごとの順序で **辞書式に最小** の model
+
+成分の順序は、bit-vector が unsigned の整数、Bool が false < true、Int が
+「絶対値が小さい順、同じ絶対値なら非負が先」（0, 1, -1, 2, -2, …。Int は下に
+有界でないので絶対値で並べる）。値は宣言の sort の Python 型で返す（Bool は `bool`、
+bit-vector と Int は `int`）。配列・関数・実数・浮動小数点 sort などの定数は成分に
+含めない（最小が定まらない / replay が値として使わない）。
 
 これは script の assertion の集合と宣言順だけで決まる（solver の種類・呼び出しの
-順序・先に解いた query・最初に見つかった model に依らない）。求め方は最上位 bit から
-「この bit を 0 にしても充足可能か」を順に問う greedy で、現在の model の bit が既に
-0 の位置は問わない（model-guided）。1 の bit では先に「この bit から下を全部 0 に
-できるか」を問い、できればその成分はそこで確定する。
+順序・先に解いた query・最初に見つかった model に依らない）。求め方は成分ごとの
+greedy で、今の model の値から出発する（model-guided）。bit-vector は最上位 bit から
+「この bit を 0 にしても充足可能か」を問い、既に 0 の bit は問わない。1 の bit では
+先に「この bit から下を全部 0 にできるか」を問い、できればその成分はそこで確定する。
+Int は絶対値の上限を二分探索で下げ、最後に符号を決める。
 
 問いの立て方は値を変えない（辞書式最小は 1 つしかない）ので、ここは費用だけの選択。
 浮動小数点を含む式では SAT の答えが高く UNSAT の答えが安い（tsafe/normAngle の実測で
-SAT 1 回 0.2〜0.8 秒、UNSAT は 900 回で 0.03 秒）ので、SAT になる問いを減らす順に問う:
-今の model が既に満たしている preference は問わずに確定し、下位を一度に 0 にする問いで
-bit ごとの SAT の列を 1 回にまとめる。
+SAT 1 回 0.035〜0.8 秒、UNSAT は 1332 回で 0.24 秒）ので、SAT になる問いを減らす順に
+問う。費用の改善は #205 が扱う。
 
 **witness の優先（preference）**: 何を「受け入れられる witness」とみなすかは、
 witness を使う側（replay の規則。例: 浮動小数点の引数が NaN の反例は証拠にしない）が
@@ -30,24 +36,30 @@ witness を使う側（replay の規則。例: 浮動小数点の引数が NaN �
 「その preference を満たせるなら満たす」を確定してから辞書式最小を取る。満たせる
 witness があるのに満たさない witness を返すことは無い。
 
-backend ごとの違い（制約の作り方・一時的な仮定・model の読み方）は `WitnessSession`
-の実装が持ち、探索の規則はここ 1 箇所にある。判定不能（timeout / unknown）や予算切れ
-は `WitnessUnavailable` で、呼ぶ側は model を持たない SAT として扱う（replay は model の
-無い SAT を反例として受け入れない = fail closed）。
+**責務の分け方**: 探索の規則（何が canonical か・どう問うか）はここ 1 箇所。backend
+ごとの違い（制約の作り方・一時的な仮定・model の読み方・時間予算の強制）は
+`WitnessSession` の実装が持つ。witness を決められないときは `WitnessUnavailable`
+（`kind` が予算切れ / 判定不能 / 中止のどれか）で、それを solver の結果の status へ
+どう写すかは `smt.interface` が決める（`SolverResult.model` の契約）。
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Dict, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import Dict, Mapping, Optional, Protocol, Sequence, Tuple, Union
 
 
 #: 宣言の sort のうち witness の成分になるもの
 BITVEC = "bitvec"
 BOOL = "bool"
+INT = "int"
 
 #: script が witness の優先を宣言する `define-fun` の名前の接頭辞（使う側との契約）
 WITNESS_PREFERENCE_PREFIX = "witness-preference:"
+
+#: witness の値（宣言の sort の Python 型: Bool は bool、bit-vector と Int は int）
+WitnessValue = Union[bool, int]
 
 
 def witness_preference_name(order: int) -> str:
@@ -58,19 +70,30 @@ def witness_preference_name(order: int) -> str:
 
 @dataclass(frozen=True)
 class WitnessTarget:
-    """witness の成分（宣言された scalar の定数）。Bool は幅 1（false < true）。"""
+    """witness の成分（宣言された scalar の定数）。
+
+    `name` は宣言に書かれた字面（model の key）、`symbol` は solver の中の名前
+    （quoted symbol `|x|` なら `x`）。Bool は幅 1（false < true）、Int は幅を持たない。
+    """
 
     name: str
     width: int
     sort: str = BITVEC
+    symbol: str = ""
+
+    @property
+    def solver_symbol(self) -> str:
+        return self.symbol or self.name
 
 
 @dataclass(frozen=True)
 class Constraint:
     """探索が solver に足す制約（backend が自分の項へ訳す）。
 
-    * `kind="bit"`: `target` の `bit` 番目が `value`（0 / 1）
-    * `kind="low_zero"`: `target` の `bit` 番目から下（`bit`..0）がすべて 0
+    * `kind="bit"`: bit-vector / Bool の `target` の `bit` 番目が `value`（0 / 1）
+    * `kind="low_zero"`: bit-vector / Bool の `target` の `bit` 番目から下がすべて 0
+    * `kind="abs_le"`: Int の `target` の絶対値が `value` 以下
+    * `kind="eq"`: Int の `target` が `value`
     * `kind="preference"`: script の preference（`preference` はその名前）が成り立つ
     """
 
@@ -81,21 +104,40 @@ class Constraint:
     preference: str = ""
 
 
+#: `WitnessUnavailable.kind`
+BUDGET_EXHAUSTED = "budget_exhausted"
+INCONCLUSIVE = "inconclusive"
+CANCELLED = "cancelled"
+
+
 class WitnessUnavailable(Exception):
-    """canonical な witness を決められなかった（判定不能・予算切れ）。"""
+    """canonical な witness を決められなかった。
+
+    `kind` は理由の種類（`BUDGET_EXHAUSTED` = 実行の時間予算を使い切った、
+    `INCONCLUSIVE` = 探索の問いに solver が判定不能を返した、`CANCELLED` = 実行が
+    中止された）。これを受けた backend は SAT を返さず、`smt.interface.witness_failure_result`
+    の結果（TIMEOUT / UNKNOWN）を返す（`SolverResult.model` の契約）。
+    """
+
+    def __init__(self, kind: str, detail: str) -> None:
+        if kind not in (BUDGET_EXHAUSTED, INCONCLUSIVE, CANCELLED):
+            raise ValueError(f"unknown witness failure kind: {kind}")
+        super().__init__(f"{kind}: {detail}")
+        self.kind = kind
 
 
 class WitnessSession(Protocol):
     """1 つの SAT の論理式の上で witness を探す backend 側の窓口。
 
     session は「現在の model」を 1 つ持つ（最初は元の論理式の SAT の model、以後は
-    `check_with` が SAT で返した最後の model）。
+    `check_with` が SAT で返した最後の model）。値は探索用の整数（Bool は 0 / 1）。
 
     * `values()` — 現在の model での各 target の値（未割当は model completion）
     * `holds(constraint)` — 現在の model で `constraint` が成り立つか（solver に問わない）
     * `check_with(constraint)` — これまで `fix` した制約に `constraint` を **一時的に**
       足して解く。SAT ならその model が現在の model になり、その各 target の値を返す。
-      UNSAT なら `None`（現在の model は変わらない）、判定不能なら `WitnessUnavailable`
+      UNSAT なら `None`（現在の model は変わらない）。判定不能・予算切れ・中止は
+      `WitnessUnavailable`（時間予算と中止の確認は session の責務）
     * `fix(constraint)` — 制約を以後ずっと足す
     """
 
@@ -112,14 +154,13 @@ def canonical_witness(
     session: WitnessSession,
     targets: Sequence[WitnessTarget],
     preferences: Sequence[str] = (),
-) -> Dict[str, int]:
-    """`targets`（宣言順）について辞書式最小の model を返す。
+) -> Dict[str, WitnessValue]:
+    """`targets`（宣言順）について辞書式最小の model を返す（値は sort の Python 型）。
 
-    まず `preferences` を順に「満たせるなら満たす」と確定し、その中で最上位 bit から
-    順に「0 にできるなら 0」を確定する。不変条件: `values` は常に「元の論理式 ∧ これまで
-    fix した制約」の model（= session の現在の model）。終わったときの `values` は、元の
-    論理式の model のうち（満たせる preference をすべて満たし）`targets` の値の列が
-    辞書式最小のもの。
+    まず `preferences` を順に「満たせるなら満たす」と確定し、その中で成分を宣言順に
+    最小へ確定する。不変条件: `values` は常に「元の論理式 ∧ これまで fix した制約」の
+    model（= session の現在の model）。終わったときの `values` は、元の論理式の model
+    のうち（満たせる preference をすべて満たし）`targets` の値の列が辞書式最小のもの。
     """
 
     values: Dict[str, int] = {target.name: int(session.values()[target.name]) for target in targets}
@@ -136,28 +177,81 @@ def canonical_witness(
             adopt(satisfied)
         session.fix(preference)
     for target in targets:
-        for bit in reversed(range(target.width)):
-            current = values[target.name]
-            if not (current >> bit) & 1:
-                session.fix(Constraint("bit", target, 0, bit))
-                continue
-            # 上位は確定済み。この bit から下を全部 0 にできるなら、それがこの成分の最小
-            cleared = session.check_with(Constraint("low_zero", target, bit=bit))
-            if cleared is not None:
-                adopt(cleared)
-                session.fix(Constraint("low_zero", target, bit=bit))
-                break
-            if bit == 0:
-                # 最下位では「この bit を 0」は今の問いと同じ: 1 に決まる
-                session.fix(Constraint("bit", target, 1, bit))
-                continue
-            alternative = session.check_with(Constraint("bit", target, 0, bit))
-            if alternative is None:
-                session.fix(Constraint("bit", target, 1, bit))
-                continue
-            adopt(alternative)
+        if target.sort == INT:
+            _minimize_int(session, target, values, adopt)
+        else:
+            _minimize_bits(session, target, values, adopt)
+    return {target.name: witness_value(target, values[target.name]) for target in targets}
+
+
+def _minimize_bits(session, target, values, adopt) -> None:
+    """bit-vector / Bool の成分を unsigned の最小へ確定する（上位 bit から）。"""
+
+    for bit in reversed(range(target.width)):
+        current = values[target.name]
+        if not (current >> bit) & 1:
             session.fix(Constraint("bit", target, 0, bit))
-    return dict(values)
+            continue
+        # 上位は確定済み。この bit から下を全部 0 にできるなら、それがこの成分の最小
+        cleared = session.check_with(Constraint("low_zero", target, bit=bit))
+        if cleared is not None:
+            adopt(cleared)
+            session.fix(Constraint("low_zero", target, bit=bit))
+            return
+        if bit == 0:
+            # 最下位では「この bit を 0」は今の問いと同じ: 1 に決まる
+            session.fix(Constraint("bit", target, 1, bit))
+            continue
+        alternative = session.check_with(Constraint("bit", target, 0, bit))
+        if alternative is None:
+            session.fix(Constraint("bit", target, 1, bit))
+            continue
+        adopt(alternative)
+        session.fix(Constraint("bit", target, 0, bit))
+
+
+def _minimize_int(session, target, values, adopt) -> None:
+    """Int の成分を (絶対値, 負か) の最小へ確定する。
+
+    今の値の絶対値を上限として、「絶対値が m 以下」を二分探索で下げる（SAT なら
+    その model の絶対値まで一気に下げる）。上限 m が決まったら、m 未満は充足不能
+    なので値は m か -m で、非負を優先する。
+    """
+
+    low, high = 0, abs(values[target.name])
+    while low < high:
+        middle = (low + high) // 2
+        smaller = session.check_with(Constraint("abs_le", target, middle))
+        if smaller is None:
+            low = middle + 1
+            continue
+        adopt(smaller)
+        high = abs(values[target.name])
+    session.fix(Constraint("abs_le", target, high))
+    if values[target.name] != high:
+        positive = session.check_with(Constraint("eq", target, high))
+        if positive is not None:
+            adopt(positive)
+    session.fix(Constraint("eq", target, values[target.name]))
+
+
+def witness_value(target: WitnessTarget, value: int) -> WitnessValue:
+    """探索用の整数を、宣言の sort の Python 型にする。"""
+
+    if target.sort == BOOL:
+        return bool(value)
+    return int(value)
+
+
+def unquoted_symbol(name: str) -> str:
+    """SMT-LIB の quoted symbol（`|x|`）を solver の中の名前（`x`）にする。"""
+
+    if len(name) >= 2 and name.startswith("|") and name.endswith("|"):
+        return name[1:-1]
+    return name
+
+
+_BITVEC_SORT = re.compile(r"\(_ BitVec ([1-9][0-9]*)\)")
 
 
 def targets_in_declaration_order(
@@ -165,33 +259,42 @@ def targets_in_declaration_order(
 ) -> Tuple[WitnessTarget, ...]:
     """`(name, sort text)` の宣言列から witness の成分を宣言順に取り出す。
 
-    bit-vector と Bool だけが成分になる。配列・関数・実数などの解釈は witness に含めない
-    （値としての最小が定まらず、replay も使わない）。
+    bit-vector・Bool・Int だけが成分になる。配列・関数・実数・浮動小数点 sort などの
+    解釈は witness に含めない（値としての最小が定まらず、replay も使わない）。
     """
-
-    import re
 
     targets = []
     for name, sort_text in declarations:
         sort_text = sort_text.strip()
+        symbol = unquoted_symbol(name)
         if sort_text == "Bool":
-            targets.append(WitnessTarget(name, 1, BOOL))
+            targets.append(WitnessTarget(name, 1, BOOL, symbol))
             continue
-        match = re.fullmatch(r"\(_ BitVec ([1-9][0-9]*)\)", sort_text)
+        if sort_text == "Int":
+            targets.append(WitnessTarget(name, 0, INT, symbol))
+            continue
+        match = _BITVEC_SORT.fullmatch(sort_text)
         if match is not None:
-            targets.append(WitnessTarget(name, int(match.group(1)), BITVEC))
+            targets.append(WitnessTarget(name, int(match.group(1)), BITVEC, symbol))
     return tuple(targets)
 
 
 __all__ = [
     "BITVEC",
     "BOOL",
+    "INT",
+    "BUDGET_EXHAUSTED",
+    "CANCELLED",
+    "INCONCLUSIVE",
     "WITNESS_PREFERENCE_PREFIX",
     "witness_preference_name",
     "Constraint",
     "WitnessSession",
     "WitnessTarget",
     "WitnessUnavailable",
+    "WitnessValue",
     "canonical_witness",
     "targets_in_declaration_order",
+    "unquoted_symbol",
+    "witness_value",
 ]

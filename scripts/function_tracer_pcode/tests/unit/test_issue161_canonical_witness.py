@@ -4,13 +4,22 @@
 固定する契約:
 
 * `canonical_witness` の結果は、元の論理式の model のうち（満たせる preference を満たし）
-  宣言順の値の列が辞書式最小のもの。**最初に渡された model に依らない**
+  宣言順の値の列が辞書式最小のもの（bit-vector は unsigned、Bool は false < true、
+  Int は (絶対値, 負か)）。**最初に渡された model にも solver の答えの順にも依らない**
+* 値は宣言の sort の Python 型（Bool は bool）で、宣言した scalar 入力（bit-vector /
+  Bool / Int）をすべて束縛する。quoted symbol も solver の中の同じ定数を指す。
+  authority の witness replay（`RelationalWitnessReplayReceipt`）がそのまま受け入れる
 * z3 backend が返す SAT の model は、同じ process で先に何を解いたか・z3 の random
   seed・assertion の並べ方・同じ意味の別の書き方に依らない
 * 浮動小数点の引数が NaN でない witness が存在すれば、NaN の witness は返らない
   （NaN の規則の定義は `proof.formula.witness_domain` の 1 箇所）
-* witness を決められない SAT は model 無し（replay は受け入れない = fail closed）
+* canonical witness を作れる backend は witness の無い SAT を返さない。決められない
+  ときは予算切れが TIMEOUT、判定不能・中止が UNKNOWN（`smt.interface`）
+* 時間予算は 1 回の実行に 1 つ: 初回の check と witness の探索が同じ期限を共有する
+  （`Z3Solver` と monolithic の共有 session の両方）
 * production の z3 利用は process 共有の main context を使わない
+
+race / 結果の集約は `test_issue161_backend_aggregation.py`。
 """
 
 from __future__ import annotations
@@ -33,6 +42,11 @@ from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers import z3 as z3_backend
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.smt.witness import (
+    BOOL,
+    BUDGET_EXHAUSTED,
+    CANCELLED,
+    INCONCLUSIVE,
+    INT,
     WitnessTarget,
     WitnessUnavailable,
     canonical_witness,
@@ -64,6 +78,10 @@ class _EnumeratedSession:
         value = model[constraint.target.name]
         if constraint.kind == "bit":
             return ((value >> constraint.bit) & 1) == constraint.value
+        if constraint.kind == "abs_le":
+            return abs(value) <= constraint.value
+        if constraint.kind == "eq":
+            return value == constraint.value
         assert constraint.kind == "low_zero", constraint
         return value & ((1 << (constraint.bit + 1)) - 1) == 0
 
@@ -130,6 +148,40 @@ def test_the_witness_is_the_least_model_for_random_solution_sets():
         assert canonical_witness(_EnumeratedSession(shuffled, start), TARGETS) == expected
 
 
+def _int_order(value):
+    return (abs(value), value < 0)
+
+
+def test_an_int_component_is_the_least_by_magnitude_then_sign():
+    rng = random.Random(1610)
+    targets = (WitnessTarget("i", 0, INT), WitnessTarget("j", 0, INT))
+    universe = [{"i": i, "j": j} for i, j in itertools.product(range(-9, 10), repeat=2)]
+    for _ in range(300):
+        models = rng.sample(universe, rng.randint(1, 10))
+        expected = min(models, key=lambda m: (_int_order(m["i"]), _int_order(m["j"])))
+        shuffled = list(models)
+        rng.shuffle(shuffled)
+        session = _EnumeratedSession(shuffled, rng.choice(models))
+        assert canonical_witness(session, targets) == expected
+
+
+def test_mixed_sorts_follow_declaration_order_and_come_back_as_their_python_types():
+    rng = random.Random(16100)
+    targets = (WitnessTarget("f", 1, BOOL), WitnessTarget("n", 0, INT), WitnessTarget("v", 3))
+    universe = [
+        {"f": f, "n": n, "v": v}
+        for f, n, v in itertools.product((0, 1), range(-4, 5), range(8))
+    ]
+    for _ in range(300):
+        models = rng.sample(universe, rng.randint(1, 10))
+        expected = min(models, key=lambda m: (m["f"], _int_order(m["n"]), m["v"]))
+        shuffled = list(models)
+        rng.shuffle(shuffled)
+        witness = canonical_witness(_EnumeratedSession(shuffled, rng.choice(models)), targets)
+        assert witness == {"f": bool(expected["f"]), "n": expected["n"], "v": expected["v"]}
+        assert type(witness["f"]) is bool and type(witness["n"]) is int
+
+
 def test_a_satisfiable_preference_is_always_satisfied_by_the_witness():
     models = _models(lambda a, b: a + b == 17)
     preferred = {"|p:0|": lambda m: m["a"] >= 8}
@@ -178,7 +230,7 @@ def test_a_preference_the_current_model_satisfies_is_not_asked():
 def test_an_inconclusive_question_is_not_turned_into_an_answer():
     class _Inconclusive(_EnumeratedSession):
         def check_with(self, constraint):
-            raise WitnessUnavailable("timeout")
+            raise WitnessUnavailable(INCONCLUSIVE, "unknown")
 
     models = _models(lambda a, b: a + b == 17)
     with pytest.raises(WitnessUnavailable):
@@ -259,17 +311,202 @@ def test_only_declared_scalar_inputs_are_part_of_the_witness():
     assert _solve(script) == {"p": 0}
 
 
-def test_a_witness_that_cannot_be_determined_leaves_the_sat_without_a_model(monkeypatch):
+@pytest.mark.parametrize(
+    "kind, status",
+    [
+        (BUDGET_EXHAUSTED, SolverStatus.TIMEOUT),
+        (INCONCLUSIVE, SolverStatus.UNKNOWN),
+        (CANCELLED, SolverStatus.UNKNOWN),
+    ],
+)
+def test_a_sat_whose_witness_cannot_be_determined_is_not_reported_as_sat(monkeypatch, kind, status):
+    """witness の無い SAT は返さない: 既存の「判定できなかった」経路（TIMEOUT / UNKNOWN）へ。"""
+
     def _unavailable(*_args, **_kwargs):
-        raise WitnessUnavailable("budget")
+        raise WitnessUnavailable(kind, "test")
 
     monkeypatch.setattr(z3_backend, "canonical_declared_model", _unavailable)
     solver = Z3Solver(timeout=10)
     solver.check_availability()
     result = solver.check_equivalence_direct(SCRIPT)
-    assert result.status == SolverStatus.SAT
+    assert result.status == status
     assert result.model is None
-    assert "canonical witness unavailable" in (result.error_message or "")
+    assert "SAT without canonical witness" in (result.error_message or "")
+
+
+SORTS = """(set-logic ALL)
+(declare-const flag Bool)
+(declare-const count Int)
+(declare-const |odd name| (_ BitVec 8))
+(declare-fun late () (_ BitVec 4))
+(declare-const mem (Array (_ BitVec 8) (_ BitVec 8)))
+(assert (=> flag (> count 3)))
+(assert (or flag (< count (- 2))))
+(assert (= (select mem |odd name|) #x07))
+(assert (bvugt |odd name| #x10))
+(assert (= late #x3))
+(check-sat)
+"""
+
+
+def test_every_declared_scalar_input_is_bound_with_its_python_type():
+    model = _solve(SORTS)
+    # 宣言順・成分ごとの最小: flag=false が最小 → count は < -2 のうち絶対値最小の -3
+    assert model == {"flag": False, "count": -3, "|odd name|": 0x11, "late": 3}
+    assert type(model["flag"]) is bool and type(model["count"]) is int
+    assert "mem" not in model
+
+
+def test_a_quoted_symbol_names_the_constant_the_formula_uses():
+    script = """(declare-const |a b| (_ BitVec 8))
+(assert (= |a b| #x2a))
+(check-sat)
+"""
+    assert _solve(script) == {"|a b|": 0x2A}
+
+
+def test_the_authority_witness_replay_accepts_the_backend_witness():
+    """z3 の SAT の witness を、authority の witness replay の契約（全宣言の束縛・sort
+    どおりの値）がそのまま受け入れる。fixture の model ではなく実 backend の model で見る。"""
+
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
+        NONPRODUCTION_TEST_SOLVER_EXECUTION_ISSUER,
+        PINNED_RELATIONAL_WITNESS_VERIFIER,
+        ProducerAttemptMembership,
+        ProducerStageContract,
+        ProducerStageRegistry,
+    )
+    from scripts.function_tracer_pcode.smt.interface import SolverResult
+
+    declarations = (
+        "(declare-const flag Bool)",
+        "(declare-const count Int)",
+        "(declare-const v (_ BitVec 8))",
+    )
+    premise = ("(assert (=> flag (> count 3)))", "(assert (bvugt v #x10))")
+    normalized = "(or flag (< count 0))"
+    query = "\n".join(declarations + premise + (f"(assert {normalized})", "(check-sat)"))
+    backend = Z3Solver(timeout=10)
+    backend.check_availability()
+    sat = backend.check_equivalence_direct(query)
+    assert sat.status == SolverStatus.SAT and sat.model is not None
+
+    stage = ProducerStageContract(
+        "call-effect-domain-v1", "typed-call-effect-solver-v1", "1", "guard_relation",
+        "nonproduction-test-solver-results-v1",
+        frozenset(("proved", "unknown", "timeout", "error", "refuted")), frozenset(("timeout",)), 10,
+    )
+    registry = ProducerStageRegistry(1, (stage,))
+    membership = ProducerAttemptMembership(
+        "call-effect-domain-v1", "typed-call-effect-solver-v1", "1", "guard_relation", "req-guard",
+        "obligation-1", "observation-contract", "refuted", "attempt-1", 1, "execution-identity",
+    )
+    execution = NONPRODUCTION_TEST_SOLVER_EXECUTION_ISSUER.issue_results(
+        registry=registry, result_occurrence_id="result-1", membership=membership,
+        invocation_identity="invocation-1", first_invocation_ordinal=1, query=query,
+        configured_timeout_ms=10000, results=(sat,),
+    )[0]
+    replay = PINNED_RELATIONAL_WITNESS_VERIFIER.issue(
+        execution, registry=registry, membership=membership, obligation_id="obligation-1",
+        prepared_surface_digest="prepared-surface", observation_contract_id="observation-contract",
+        normalized_assertion=normalized, premise={"assertions": premise},
+        stage_input={"declarations": declarations}, model=execution.model_authority,
+        configured_timeout_ms=10000,
+        nonproduction_replay_results=(SolverResult("fixture", SolverStatus.SAT, model=dict(sat.model)),),
+    )
+    assert replay is not None
+
+
+# ---------------------------------------------------------------------------
+# 時間予算: 1 回の実行に 1 つの期限（初回の check と witness の探索で共有）
+# ---------------------------------------------------------------------------
+
+
+class _SlowFirstCheck:
+    """最初の `check()` だけ `delay` 秒かかる z3 solver（それ以外は委譲）。"""
+
+    def __init__(self, inner, delay):
+        self._inner = inner
+        self._delay = delay
+        self._first = True
+
+    def check(self, *args):
+        if self._first:
+            self._first = False
+            import time
+
+            time.sleep(self._delay)
+        return self._inner.check(*args)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _capture_witness_deadline(monkeypatch):
+    import time
+
+    seen = {}
+    original = z3_backend.canonical_declared_model
+
+    def _capture(z3_module, solver, script, *, deadline, cancellation_token=None):
+        seen["remaining"] = deadline - time.monotonic()
+        return original(z3_module, solver, script, deadline=deadline,
+                        cancellation_token=cancellation_token)
+
+    monkeypatch.setattr(z3_backend, "canonical_declared_model", _capture)
+    return seen
+
+
+def test_the_witness_search_gets_only_what_the_first_check_left(monkeypatch):
+    seen = _capture_witness_deadline(monkeypatch)
+    original_isolated = z3_backend.isolated_solver
+    monkeypatch.setattr(
+        z3_backend, "isolated_solver",
+        lambda *args: _SlowFirstCheck(original_isolated(*args), 1.5),
+    )
+    solver = Z3Solver(timeout=3)
+    solver.check_availability()
+    assert solver.check_equivalence_direct(SCRIPT).status == SolverStatus.SAT
+    assert seen["remaining"] <= 3 - 1.5 + 0.05
+
+
+def test_one_execution_never_uses_more_than_its_budget(monkeypatch):
+    import time
+
+    original_isolated = z3_backend.isolated_solver
+    monkeypatch.setattr(
+        z3_backend, "isolated_solver",
+        lambda *args: _SlowFirstCheck(original_isolated(*args), 1.2),
+    )
+    original_check_with = z3_backend._Z3WitnessSession.check_with
+
+    def _slow_check_with(self, constraint):
+        time.sleep(0.3)
+        return original_check_with(self, constraint)
+
+    monkeypatch.setattr(z3_backend._Z3WitnessSession, "check_with", _slow_check_with)
+    solver = Z3Solver(timeout=2)
+    solver.check_availability()
+    started = time.monotonic()
+    result = solver.check_equivalence_direct(SCRIPT)
+    elapsed = time.monotonic() - started
+    # 探索が期限で打ち切られ、SAT ではなく TIMEOUT（予算切れ）になる
+    assert result.status == SolverStatus.TIMEOUT
+    assert result.model is None
+    assert elapsed <= 2 + 0.4
+
+
+def test_the_shared_region_session_shares_one_budget_between_check_and_witness(monkeypatch):
+    from scripts.function_tracer_pcode.proof import monolithic_authority
+
+    seen = _capture_witness_deadline(monkeypatch)
+    formula = "(declare-const x (_ BitVec 16))\n(assert (bvugt x #x0010))\n(check-sat)"
+    session = _shared_session([formula])
+    session._solver = _SlowFirstCheck(session._solver, 1.5)
+    assert isinstance(session, monolithic_authority.SharedZ3RegionSession)
+    item = session.execute(formula, 3).results[0]
+    assert item.status == SolverStatus.SAT and item.model == {"x": 0x11}
+    assert seen["remaining"] <= 3 - 1.5 + 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -361,40 +598,42 @@ def test_the_formula_header_carries_the_preference():
 # ---------------------------------------------------------------------------
 
 
-def test_the_shared_region_session_returns_the_same_witness_in_any_region_order():
+class _Query:
+    def __init__(self, formula):
+        import hashlib
+
+        self.formula = formula
+        self.contract = type("C", (), {"formula_digest": hashlib.sha256(formula.encode()).hexdigest()})()
+
+
+def _shared_session(formulas):
     from scripts.function_tracer_pcode.proof import monolithic_authority
 
+    session = monolithic_authority.SharedZ3RegionSession.__new__(
+        monolithic_authority.SharedZ3RegionSession
+    )
+    session._z3 = z3
+    session._ctx = z3.Context()
+    session._solver = z3.Solver(ctx=session._ctx)
+    session._specific = {
+        query.contract.formula_digest: tuple(z3.parse_smt2_string(query.formula, ctx=session._ctx))
+        for query in map(_Query, formulas)
+    }
+    session.check_count = 0
+    return session
+
+
+def test_the_shared_region_session_returns_the_same_witness_in_any_region_order():
     common = "(declare-const x (_ BitVec 16))\n(declare-const y (_ BitVec 16))\n(assert (bvugt x #x0010))\n"
     region_a = common + "(assert (= (bvadd x y) #x0100))\n(check-sat)"
     region_b = common + "(assert (= (bvxor x y) #x00ff))\n(check-sat)"
 
-    class _Query:
-        def __init__(self, formula):
-            import hashlib
+    def _run(order):
+        session = _shared_session([region_a, region_b])
+        return {formula: session.execute(formula, 5).results[0].model for formula in order}
 
-            self.formula = formula
-            self.contract = type("C", (), {"formula_digest": hashlib.sha256(formula.encode()).hexdigest()})()
-
-    def _session(order):
-        session = monolithic_authority.SharedZ3RegionSession.__new__(
-            monolithic_authority.SharedZ3RegionSession
-        )
-        session._z3 = z3
-        session._ctx = z3.Context()
-        session._solver = z3.Solver(ctx=session._ctx)
-        session._specific = {
-            query.contract.formula_digest: tuple(z3.parse_smt2_string(query.formula, ctx=session._ctx))
-            for query in (_Query(region_a), _Query(region_b))
-        }
-        session.check_count = 0
-        results = {}
-        for formula in order:
-            parallel = session.execute(formula, 5)
-            results[formula] = parallel.results[0].model
-        return results
-
-    forward = _session([region_a, region_b])
-    backward = _session([region_b, region_a])
+    forward = _run([region_a, region_b])
+    backward = _run([region_b, region_a])
     assert forward == backward
     assert forward[region_a] == {"x": 0x11, "y": 0xEF}
 
@@ -436,91 +675,3 @@ def test_production_z3_solvers_and_parses_name_their_context():
 def test_the_static_rule_detects_a_context_free_solver():
     tree = ast.parse("import z3\ns = z3.Solver()\nz3.parse_smt2_string('x', ctx=c)\n")
     assert _z3_calls_without_context(tree) == [2]
-
-
-# ---------------------------------------------------------------------------
-# runner: canonical な witness を作れない backend の model は採らない
-# ---------------------------------------------------------------------------
-
-
-def test_the_runner_drops_a_model_from_a_backend_without_the_witness_contract():
-    from scripts.function_tracer_pcode.smt.interface import SMTSolver, SolverResult
-    from scripts.function_tracer_pcode.smt.parallel import ParallelSolverRunner
-
-    class _ArbitraryModelBackend(SMTSolver):
-        @property
-        def name(self):
-            return "arbitrary"
-
-        def check_availability(self):
-            return True, "test"
-
-        def check_equivalence_direct(self, smt_script, cancellation_token=None):
-            return SolverResult(self.name, SolverStatus.SAT, model={"x": 42})
-
-    class _CanonicalBackend(_ArbitraryModelBackend):
-        PROVIDES_CANONICAL_WITNESS = True
-
-    arbitrary = ParallelSolverRunner(timeout=1, solver_classes=[_ArbitraryModelBackend])
-    result = arbitrary.run_sequential("(check-sat)")
-    assert result.is_equivalent is False
-    assert result.get_counterexample() is None
-    assert "canonical witness unavailable" in result.results[0].error_message
-
-    canonical = ParallelSolverRunner(timeout=1, solver_classes=[_CanonicalBackend])
-    assert canonical.run_sequential("(check-sat)").get_counterexample() == {"x": 42}
-    assert Z3Solver.PROVIDES_CANONICAL_WITNESS is True
-
-
-@pytest.mark.parametrize("canonical_status", [SolverStatus.SAT, SolverStatus.TIMEOUT])
-def test_a_race_is_not_decided_by_a_sat_without_witness_while_a_canonical_backend_runs(
-    canonical_status,
-):
-    """どの backend が先に終わったかで反例の有無（= 判定）が変わらない。"""
-
-    import threading
-    import time
-
-    from scripts.function_tracer_pcode.smt.interface import SMTSolver, SolverResult
-    from scripts.function_tracer_pcode.smt.parallel import ParallelSolverRunner
-
-    finished_first = threading.Event()
-
-    class _FastArbitrary(SMTSolver):
-        @property
-        def name(self):
-            return "fast-arbitrary"
-
-        def check_availability(self):
-            return True, "test"
-
-        def check_equivalence_direct(self, smt_script, cancellation_token=None):
-            try:
-                return SolverResult(self.name, SolverStatus.SAT, model={"x": 42})
-            finally:
-                finished_first.set()
-
-    class _SlowCanonical(_FastArbitrary):
-        PROVIDES_CANONICAL_WITNESS = True
-
-        @property
-        def name(self):
-            return "slow-canonical"
-
-        def check_equivalence_direct(self, smt_script, cancellation_token=None):
-            assert finished_first.wait(5)
-            time.sleep(0.2)
-            if canonical_status == SolverStatus.SAT:
-                return SolverResult(self.name, SolverStatus.SAT, model={"x": 0})
-            return SolverResult(self.name, SolverStatus.TIMEOUT)
-
-    runner = ParallelSolverRunner(timeout=5, solver_classes=[_FastArbitrary, _SlowCanonical])
-    result = runner.run_parallel("(check-sat)")
-    assert result.is_equivalent is False
-    if canonical_status == SolverStatus.SAT:
-        assert result.first_definitive.solver_name == "slow-canonical"
-        assert result.get_counterexample() == {"x": 0}
-    else:
-        # canonical な backend が決められなかったときだけ witness 無しの SAT が残る
-        assert result.first_definitive.solver_name == "fast-arbitrary"
-        assert result.get_counterexample() is None

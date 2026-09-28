@@ -765,28 +765,23 @@ class SharedZ3RegionSession:
         try:
             self._solver.set(timeout=max(1, int(timeout)) * 1000)
             self._solver.add(*self._specific[digest])
+            # Issue #161: 時間予算は 1 回の実行に 1 つ。初回の check と canonical witness
+            # の探索が同じ期限を共有する（探索は残りの時間だけを使う）。
+            deadline = time.monotonic() + max(1, int(timeout))
             verdict = self._solver.check()
             elapsed = time.time() - started
             self.check_count += 1
             if verdict == self._z3.sat:
                 from scripts.function_tracer_pcode.smt.solvers.z3 import (
-                    canonical_declared_model,
+                    sat_result_with_witness,
                 )
-                from scripts.function_tracer_pcode.smt.witness import WitnessUnavailable
 
-                # Issue #161: 共有 session の履歴（先に解いた region）に依らない
-                # canonical な witness。決められなければ model 無しの SAT。
-                try:
-                    values = canonical_declared_model(
-                        self._z3, self._solver, query, budget_seconds=max(1, int(timeout))
-                    )
-                    note = None
-                except WitnessUnavailable as exc:
-                    values = None
-                    note = f"canonical witness unavailable: {exc}"
-                item = SolverResult("Z3(shared-region)", SolverStatus.SAT,
-                                    elapsed_time=time.time() - started, model=values,
-                                    error_message=note)
+                # 共有 session の履歴（先に解いた region）に依らない canonical witness。
+                # 決められなければ SAT にしない（`SolverResult.model` の契約）。
+                item = sat_result_with_witness(
+                    self._z3, self._solver, query, solver_name="Z3(shared-region)",
+                    started=started, deadline=deadline,
+                )
             elif verdict == self._z3.unsat:
                 item = SolverResult("Z3(shared-region)", SolverStatus.UNSAT,
                                     elapsed_time=elapsed)
