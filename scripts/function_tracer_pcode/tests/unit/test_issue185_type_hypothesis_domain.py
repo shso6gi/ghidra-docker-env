@@ -833,3 +833,41 @@ def test_an_unsealed_analysis_is_a_different_premise_from_the_sealed_raw_analysi
     assert AnalysisSnapshot.from_function_analysis(unsealed).semantic_fingerprint != (
         AnalysisSnapshot.from_function_analysis(right).semantic_fingerprint
     )
+
+
+def test_a_rebuilt_relation_that_claims_a_hypothesized_domain_is_insufficient_even_over_the_raw_table():
+    """作り直しの parameter 表（式が使う幅）が仮説の表なら、いまの表が正本どおりでも不十分。"""
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.relation import (
+        rebuild_input_correspondence_set,
+    )
+
+    left, right = _int_pair()
+    previous = _relation(left, right.semantic_successor(parameters=[_descriptor("a", 4, "int", False)]))
+    rebuilt = rebuild_input_correspondence_set(previous, left, right)
+    assert not rebuilt.decisive_sufficient
+    assert "right:parameter_domain_changed:s32->u32" in _evidence(rebuilt)
+
+
+def test_a_baseline_without_the_seal_mark_is_no_authority():
+    """型が同じでも封印の印の無い baseline（constructor を通らずに作った値）は正本ではない。"""
+
+    left, right = _int_pair()
+    forged = object.__new__(RawParameterDomains)
+    object.__setattr__(forged, "certified", ((0, ParameterDomain(32, True)),))
+    object.__setattr__(forged, "uncertified", ())
+    object.__setattr__(forged, "unindexed", 0)
+    object.__setattr__(forged, "_seal", object())
+    object.__setattr__(forged, "certified_rows", ((0, 32, True),))
+    relation = _relation(left, replace(right, raw_parameter_domains=forged))
+    assert not relation.decisive_sufficient
+    assert "parameter_domain_origin_unavailable:right" in relation.structural_defects
+
+
+def test_a_table_that_gained_a_duplicate_index_after_the_seal_is_unmatched_per_parameter():
+    from scripts.function_tracer_pcode.core.parameter_domain import ParameterDomainAudit
+
+    _left, right = _int_pair()
+    duplicated = right.semantic_successor(parameters=[dict(right.parameters[0]), dict(right.parameters[0], name="b")])
+    defects = ParameterDomainAudit.of(duplicated).parameter_defects(index=0, bits=32, signed=True, synthetic_kind=None)
+    assert [defect.as_evidence_ref() for defect in defects] == ["parameter_domain_origin_unmatched:0"]
