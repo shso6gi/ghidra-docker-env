@@ -891,6 +891,25 @@ def test_overlap_hidden_from_canonicalization_is_caught_by_inode(tmp_path, relat
     assert (out.stat().st_mode & 0o777) == 0o755
 
 
+@pytest.mark.parametrize("relation", ["keyset-is-output", "keyset-contains-output", "keyset-inside-output"])
+def test_separation_holds_when_neither_keyset_nor_output_exists_yet(tmp_path, relation):
+    """存在しない path どうし（inode では判定できない）でも、canonical な綴りで重なりを拒否する。"""
+
+    base = Path(_canonical(tmp_path))
+    out = base / "c" / "d" / "out"
+    root, keyset_id = {
+        "keyset-is-output": (out.parent, "out"),
+        "keyset-contains-output": (base, "c"),
+        "keyset-inside-output": (out, "ks"),
+    }[relation]
+    result = _bash(_IDENTITY_SCRIPT, env=_env(out, ROOT=str(root), ID=keyset_id), cwd=base)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["resolve=1"], (result.stdout, result.stderr)
+    assert "must be outside OUTPUT_BASE_DIR and must not contain it" in result.stderr
+    assert sorted(os.listdir(base)) == []
+
+
 @pytest.mark.parametrize("keyset_id", [".", "..", "", "a/b", "a b", "../ks"])
 def test_resolve_rejects_a_keyset_id_that_is_not_one_component(tmp_path, keyset_id):
     root = tmp_path / "root"
@@ -909,7 +928,8 @@ def test_resolve_rejects_a_keyset_id_that_is_not_one_component(tmp_path, keyset_
 
 @pytest.mark.parametrize("spelling", [
     "relative", "dotdot", "double-slash", "trailing-slash", "symlinked-parent",
-    "symlinked-keyset", "dot-id", "is-output", "inside-output", "contains-output",
+    "symlinked-keyset", "dot-id", "bad-character", "filesystem-root",
+    "is-output", "inside-output", "contains-output",
 ])
 def test_lock_rejects_a_keyset_that_is_not_a_valid_identity(tmp_path, spelling):
     """lock は渡された keyset を resolve と同じ判定にかけ直す（手で組み立てた path も同じ規則）。"""
@@ -929,6 +949,8 @@ def test_lock_rejects_a_keyset_that_is_not_a_valid_identity(tmp_path, spelling):
         "symlinked-parent": f"{base}/link/ks",
         "symlinked-keyset": f"{base}/ks-link",
         "dot-id": f"{base}/real/.",
+        "bad-character": f"{base}/real/a b",
+        "filesystem-root": "/",
         "is-output": str(out),
         "inside-output": f"{out}/ks",
         "contains-output": f"{base}/a",
