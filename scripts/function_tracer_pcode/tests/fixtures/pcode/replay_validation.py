@@ -633,6 +633,15 @@ def validate_replay(
     # (5) regression（遷移検出）
     _compare_regression(payload, expected, where)
 
+    # (5b) Issue #105 PR-105-B（D14）: 既定の予算では条件簡約の fallback の予算に当たらない。
+    #      当たったなら、既定値を決めた decision gate の前提（正しい pair は予算の内側で
+    #      答えが出る）が崩れているので、値を見直す（遷移と同じく PR に表を残す）。
+    simplify = ((payload.get("diagnostics") or {}).get("condition_simplify") or {})
+    assert not simplify.get("budget_events_total"), (
+        where + ": the default condition-simplification budgets were hit: "
+        + json.dumps(simplify.get("budget_events"), sort_keys=True)[:2000]
+    )
+
     # (6) wall clock。per-case budget は `run_replay_worker` が **deadline として**
     #     適用済みで、ここへ来た時点で budget 内に終わっている（超過した replay は
     #     worker を落として RecordedReplayBudgetExceeded になる）。所要は報告する。
