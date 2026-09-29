@@ -21,7 +21,8 @@ consumer（何を覚えるか）          smt_oracle（verdict・書き換え）
   呼び出し）では **何も覚えない**（lookup は常に miss、store は捨てる）: process 全体に
   生きる意味の cache は作らない。
 * 並び単位の memo（`sequence_lookup` / `sequence_store`、PR-105-B）は root の memo を object の
-  並びへ広げたもの（同じ object を同じ順で持つ並びだけが hit）。
+  並びへ広げたもの（同じ object を同じ順で持つ並びだけが hit）。root 単位の memo と同じ実装
+  （`_ObjectMemo`）で、root は長さ 1 の並び。
 * root 単位の memo（`root_memo`）は root **object** を key にする（取り出した参照が
   同じ object を指すときだけ hit。式 object は弱参照で持ち、回収されたら entry も消える
   ので、memo が DAG を生かし続けない）。root だけに依存する値にしか使わない
@@ -215,24 +216,34 @@ class IdentityTable:
         self._weight = 0
 
 
-class _RootMemo:
-    """root object ごとの memo 1 種（弱参照、件数と重みで FIFO）。
+class _ObjectMemo:
+    """object の **並び**（順序を含む。root 1 つなら長さ 1）ごとの memo 1 種（弱参照、件数と重みで FIFO）。
 
-    root が回収されたときの弱参照の callback は **消す予定を積むだけ** で、表そのものは
-    触らない（callback は GC の途中、どの thread のどの bytecode の間でも走り得る。
-    `put` が古い順に捨てている最中に表の大きさが変わると壊れる）。積んだ予定は次の
-    `get` / `put`（store の lock の中）で片付ける。
+    root 単位の memo（`root_memo`）と並び単位の memo（`sequence_lookup` / `sequence_store`、
+    Issue #105 PR-105-B）の **唯一の実装**: 引き当て・片付け・追い出しの規則はここだけにある。
+    取り出した参照が並びの **同じ object を同じ順で** 指すときだけ hit（`id()` は引くためだけに
+    使い、hit は参照の同一性で確かめる）。値は並びの object だけで決まるものにしか使わない
+    （identity で一致する別の object の並びには使い回さない: それは identity を key にした表の仕事）。
+
+    要素は弱参照で持ち、どれか 1 つが回収されたら entry を消す予定を積む。callback は
+    **消す予定を積むだけ** で、表そのものは触らない（callback は GC の途中、どの thread のどの
+    bytecode の間でも走り得る。`put` が古い順に捨てている最中に表の大きさが変わると壊れる）。
+    積んだ予定は次の `get` / `put`（store の lock の中）で片付ける。
+
+    重みは値の重み + 要素ごとの `element_weight`（弱参照を持てない要素は memo が生かすので
+    その要素の重みも足す）。
     """
 
-    __slots__ = ("kind", "_entries", "_weight", "_dead")
+    __slots__ = ("kind", "_element_weight", "_entries", "_weight", "_dead")
 
-    def __init__(self, kind: str) -> None:
+    def __init__(self, kind: str, *, element_weight: int) -> None:
         self.kind = kind
-        #: id(root) → (root を指す参照, 値, 重み)。挿入順（古い順）
-        self._entries: Dict[int, Tuple[Callable[[], Any], Any, int]] = {}
+        self._element_weight = int(element_weight)
+        #: 要素の id の並び → (要素を指す参照の並び, 値, 重み, entry の印)。挿入順（古い順）
+        self._entries: Dict[Tuple[int, ...], Tuple[Tuple[Callable[[], Any], ...], Any, int, object]] = {}
         self._weight = 0
-        #: 回収された root の (id, 参照)。callback が積み、`_reap` が片付ける
-        self._dead: List[Tuple[int, Any]] = []
+        #: 回収された要素の (key, entry の印)。callback が積み、`_reap` が片付ける
+        self._dead: List[Tuple[Tuple[int, ...], Any]] = []
 
     def __len__(self) -> int:
         self._reap()
@@ -242,69 +253,6 @@ class _RootMemo:
     def weight(self) -> int:
         self._reap()
         return self._weight
-
-    def _reap(self) -> None:
-        while self._dead:
-            key, reference = self._dead.pop()
-            self._discard(key, reference)
-
-    def get(self, root: Any) -> Tuple[bool, Any]:
-        self._reap()
-        entry = self._entries.get(id(root))
-        if entry is not None and entry[0]() is root:
-            return True, entry[1]
-        return False, None
-
-    def put(self, root: Any, value: Any) -> None:
-        self._reap()
-        key = id(root)
-        self._discard(key, None)
-        reference, strong = _root_reference(root, self._dead, key)
-        weight = cache_weight(value)
-        if strong:
-            # 弱参照を持てない root（tuple の構造 key など）は memo が生かすので重みに入れる
-            weight += cache_weight(root)
-        if weight > DEFAULT_ROOT_MEMO_WEIGHT_LIMIT:
-            note(f"memo.{self.kind}.too_large")
-            return
-        self._entries[key] = (reference, value, weight)
-        self._weight += weight
-        while len(self._entries) > DEFAULT_ROOT_MEMO_LIMIT or self._weight > DEFAULT_ROOT_MEMO_WEIGHT_LIMIT:
-            self._discard(next(iter(self._entries)), None)
-            note(f"memo.{self.kind}.evicted")
-
-    def _discard(self, key: int, reference: Any) -> None:
-        """entry を消す（`reference` を渡したら、その参照の entry のときだけ）。"""
-
-        entry = self._entries.get(key)
-        if entry is None or (reference is not None and entry[0] is not reference):
-            return
-        del self._entries[key]
-        self._weight -= entry[2]
-
-
-class _SequenceMemo:
-    """object の **並び**（順序を含む）ごとの memo 1 種（Issue #105 PR-105-B）。
-
-    `_RootMemo` を root の並びへ広げたもの: 取り出した参照が並びの **同じ object を同じ順で**
-    指すときだけ hit（`id()` は引くためだけに使い、hit は参照の同一性で確かめる）。要素は
-    弱参照で持ち、どれか 1 つが回収されたら entry を消す予定を積む（`_RootMemo` と同じ
-    片付け方）。値は並びの object だけで決まるものにしか使わない（identity で一致する別の
-    object の並びには使い回さない: それは identity を key にした表の仕事）。
-    """
-
-    __slots__ = ("kind", "_entries", "_weight", "_dead")
-
-    def __init__(self, kind: str) -> None:
-        self.kind = kind
-        #: 要素の id の並び → (要素を指す参照の並び, 値, 重み, entry の印)。挿入順（古い順）
-        self._entries: Dict[Tuple[int, ...], Tuple[Tuple[Callable[[], Any], ...], Any, int, object]] = {}
-        self._weight = 0
-        self._dead: List[Tuple[Tuple[int, ...], Any]] = []
-
-    def __len__(self) -> int:
-        self._reap()
-        return len(self._entries)
 
     def _reap(self) -> None:
         while self._dead:
@@ -328,7 +276,7 @@ class _SequenceMemo:
         self._discard(key, None)
         marker = object()
         references = []
-        weight = cache_weight(value) + len(items)
+        weight = cache_weight(value) + self._element_weight * len(items)
         for item in items:
             reference, strong = _root_reference(item, self._dead, key, marker)
             if strong:
@@ -353,14 +301,19 @@ class _SequenceMemo:
         self._weight -= entry[2]
 
 
+#: root 1 つの memo は値の重みだけ、並びの memo は要素 1 つにつき 1 を足す（要素の参照の分）
+_ROOT_ELEMENT_WEIGHT = 0
+_SEQUENCE_ELEMENT_WEIGHT = 1
+
+
 class ConditionCacheStore:
     """1 pair 分の cache（表と root 単位の memo と並び単位の memo）。"""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._tables: Dict[str, IdentityTable] = {}
-        self._roots: Dict[str, _RootMemo] = {}
-        self._sequences: Dict[str, _SequenceMemo] = {}
+        self._roots: Dict[str, _ObjectMemo] = {}
+        self._sequences: Dict[str, _ObjectMemo] = {}
 
     def sequence_lookup(self, kind: str, items: Tuple[Any, ...]) -> Tuple[bool, Any]:
         with self._lock:
@@ -373,7 +326,7 @@ class ConditionCacheStore:
         with self._lock:
             memo = self._sequences.get(kind)
             if memo is None:
-                memo = self._sequences[kind] = _SequenceMemo(kind)
+                memo = self._sequences[kind] = _ObjectMemo(kind, element_weight=_SEQUENCE_ELEMENT_WEIGHT)
             memo.put(items, value)
 
     def table(self, name: str, limit: int = DEFAULT_TABLE_LIMIT) -> IdentityTable:
@@ -396,7 +349,7 @@ class ConditionCacheStore:
         with self._lock:
             memo = self._roots.get(kind)
             if memo is not None:
-                found, value = memo.get(root)
+                found, value = memo.get((root,))
                 if found:
                     note(f"memo.{kind}.hit")
                     return value
@@ -404,8 +357,8 @@ class ConditionCacheStore:
         with self._lock:
             memo = self._roots.get(kind)
             if memo is None:
-                memo = self._roots[kind] = _RootMemo(kind)
-            memo.put(root, value)
+                memo = self._roots[kind] = _ObjectMemo(kind, element_weight=_ROOT_ELEMENT_WEIGHT)
+            memo.put((root,), value)
         return value
 
     def clear(self, names: Optional[Tuple[str, ...]] = None) -> None:
@@ -424,20 +377,19 @@ class ConditionCacheStore:
                 self._sequences.pop(name, None)
 
 
-def _root_reference(root: Any, dead: List[Tuple[Any, Any]], key: Any, marker: Any = None) -> Tuple[Callable[[], Any], bool]:
+def _root_reference(root: Any, dead: List[Tuple[Any, Any]], key: Any, marker: Any) -> Tuple[Callable[[], Any], bool]:
     """root を指す参照（取り出すと root か `None`）と、それが強参照か。
 
     式 object は弱参照で持つ: memo が root を生かし続けると、pair の間ずっと本来は
-    捨てられる DAG が残る。root が回収されたら entry を消す予定を積む（callback は
-    回収の途中、memory が再利用される前に走るので、同じ `id()` の別の object の entry と
-    取り違えない: 消すのは積んだ参照の entry だけ）。値は root だけで決まるので、root が
+    捨てられる DAG が残る。root が回収されたら entry を消す予定（key と entry の印）を積む
+    （callback は回収の途中、memory が再利用される前に走るので、同じ `id()` の別の object の
+    entry と取り違えない: 消すのは印が一致する entry だけ）。値は root だけで決まるので、root が
     消えた entry は誰にも引かれず、捨てても答えは変わらない。弱参照を持てない値
     （tuple の構造 key など）は強参照で持つ（件数と重みの上限で有界）。
     """
 
-    def _collected(reference: Any) -> None:
-        # 並びの memo は entry の印を積む（要素の参照は entry に複数ある）
-        dead.append((key, reference if marker is None else marker))
+    def _collected(_reference: Any) -> None:
+        dead.append((key, marker))
 
     try:
         return weakref.ref(root, _collected), False

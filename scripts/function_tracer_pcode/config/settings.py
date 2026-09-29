@@ -310,7 +310,7 @@ EXPRESSION_BUDGET_DEFAULTS = (
     ("envelope_headroom_bytes", "FT_ENVELOPE_HEADROOM_BYTES", 1 << 25),  # 32 MiB
     # Issue #105 PR-105-B: 条件簡約の fallback の予算（超えても限界・UNKNOWN の reason に
     # しない。その問いに答えない = 元の条件を残す / oracle 無し）。値の根拠（PR-105-A merge 後の
-    # main で固定 subset 146 pair + `ell/ellProgram` B12_B16 を予算無しで流した分布）:
+    # main で固定 subset 144 pair（Eq 64 + Neq 80）+ `ell/ellProgram` B12_B16 を予算無しで流した分布）:
     #
     # * DPLL の決定（最上位の判定 1 回あたり）: max 2・p99 1（subset）、ellpi 3、kill された
     #   ell snippet の下限 4。時間の掛かる pair はどれも決定回数では止まっていない（kill 位置は

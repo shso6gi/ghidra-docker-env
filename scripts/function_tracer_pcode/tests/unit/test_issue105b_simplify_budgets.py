@@ -673,8 +673,13 @@ def test_the_default_values_come_from_config_and_can_be_turned_off():
     assert (tuned.dpll_decisions, tuned.oracle_queries) == (7, 9)
 
 
-def test_no_numeric_budget_limit_lives_outside_config():
-    """深い module は予算の数値を持たない（`BudgetPolicy` の field 名を直接比べない）。"""
+def test_no_module_reads_the_fallback_budget_fields_directly():
+    """深い module は fallback の予算の policy field（`dpll_decisions` / `oracle_queries`）を
+    属性として直接参照しない（上限は `BudgetPolicy.limit(kind)` と `FallbackBudgetMeter` 経由だけ）。
+
+    保証するのはこの field の参照が 0 であることで、数値 literal 一般の禁止ではない（既定値は
+    `config/settings.py` の表が field 名の文字列で持つ）。
+    """
 
     readers = []
     for path, tree in _package_sources():
