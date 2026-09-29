@@ -252,18 +252,20 @@ def exact_tail_statistics() -> dict:
     return _TAIL_INTERN.statistics()
 
 
-def _identity_atom(value: Any) -> Any:
+def _identity_atom(value: Any) -> Tuple[Any, bool]:
     """node の値を key の atom にする。process 依存の atom は識別不能 token にする。
 
     `canonical_atom` の最後の手段 `("object_id", …, id(value))` は「同じ object か」
     しか言わず、object の死後に id が再利用されると別物と一致する（C-K5）。float は
     `canonical_atom` が object として扱うので、ここで bit 列の atom にする。
+    返すのは (atom, 識別不能な部分を含むか)。
     """
 
     if type(value) is float:
-        return ("float", struct.pack(">d", value).hex())
+        return ("float", struct.pack(">d", value).hex()), False
     atom = _atom_key(value)
-    return _without_object_ids(atom)
+    replaced = _without_object_ids(atom)
+    return replaced, replaced is not atom
 
 
 def _without_object_ids(atom: Any) -> Any:
@@ -297,13 +299,18 @@ class _KeyView:
     node の読み方はこの 1 か所にしかない）。
     """
 
-    __slots__ = ("kind", "label", "children", "commutative")
+    __slots__ = ("kind", "label", "children", "commutative", "unidentified")
 
-    def __init__(self, kind: str, label: tuple, children: tuple = (), commutative: bool = False) -> None:
+    def __init__(
+        self, kind: str, label: tuple, children: tuple = (), commutative: bool = False,
+        unidentified: bool = False,
+    ) -> None:
         self.kind = kind
         self.label = label
         self.children = children
         self.commutative = commutative
+        # label に識別不能な atom（旧 `object_id`）がある: その node は何とも等しくならない
+        self.unidentified = unidentified
 
 
 def _key_view(node: Expression, options: ExactTailOptions):
@@ -335,24 +342,26 @@ def _key_view(node: Expression, options: ExactTailOptions):
     size = int(current.size or 0)
 
     if expr_type == ExpressionType.CONSTANT:
-        return _KeyView("leaf", ("const", _identity_atom(current.value), size))
+        atom, unidentified = _identity_atom(current.value)
+        return _KeyView("leaf", ("const", atom, size), unidentified=unidentified)
 
     if expr_type == ExpressionType.LITERAL:
-        return _KeyView("leaf", ("literal", _identity_atom(current.value), size))
+        atom, unidentified = _identity_atom(current.value)
+        return _KeyView("leaf", ("literal", atom, size), unidentified=unidentified)
 
     if expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
+        atom, unidentified = _identity_atom(current.value)
         return _KeyView(
-            "leaf",
-            (expr_type.name.lower(), current.name or "", _identity_atom(current.value), size),
+            "leaf", (expr_type.name.lower(), current.name or "", atom, size), unidentified=unidentified,
         )
 
     if expr_type == ExpressionType.UNKNOWN:
         runtime_metadata = (
             _expression_runtime_metadata(current) if options.include_semantic_runtime_refs else ()
         )
+        atom, unidentified = _identity_atom(current.value)
         return _KeyView(
-            "leaf",
-            ("unknown", current.name or "", _identity_atom(current.value), size, *runtime_metadata),
+            "leaf", ("unknown", current.name or "", atom, size, *runtime_metadata), unidentified=unidentified,
         )
 
     if expr_type == ExpressionType.UNARY_OP:
@@ -556,7 +565,7 @@ def _exact_tail_token(
         if any(item is None for item in frame.tokens):
             final = unidentified_identity("unidentified_child")
             break
-        if _key_has_tag(frame.view.label, NON_STRUCTURAL_IDENTITY_TAGS):
+        if frame.view.unidentified:
             # label に識別不能な atom（旧 `object_id`）がある: tail も識別できない
             final = unidentified_identity("unidentified_atom")
             break
@@ -657,13 +666,54 @@ def expression_key(
 
     # option は `ExactTailOptions` だけが定義する（未知の名前は TypeError）。足すときに
     # 公開 API の引数列を複製して直す必要が無いよう、ここより上では列挙しない
-    options = ExactTailOptions.of(**options)
+    return expression_key_status(expr, budget=budget, **options)[0]
+
+
+def expression_key_status(
+    expr: Optional[Expression],
+    *,
+    budget: int = 256,
+    **options: bool,
+) -> Tuple[StructuralKey, bool]:
+    """(`expression_key` の key, その key が比較可能か) を 1 回の走査で返す。
+
+    比較可能 ⇔ `key_is_comparable(key)`（C-K3）。key を保持して何度も比較可否を問う
+    呼び出し側は、key を全走査し直さずにこの組を保持する。
+    """
+
+    key, has_placeholder = _build_expression_key(expr, int(budget), ExactTailOptions.of(**options))
+    return key, not has_placeholder
+
+
+class _PlaceholderReached(Exception):
+    """`stop_at_placeholder` の build が最初の placeholder に達した（key は作らない）。"""
+
+
+def _build_expression_key(
+    expr: Optional[Expression],
+    budget: int,
+    options: ExactTailOptions,
+    *,
+    stop_at_placeholder: bool = False,
+) -> Tuple[StructuralKey, bool]:
+    """key と「placeholder を含むか」を 1 回の走査で求める（`expression_key` の本体）。
+
+    `stop_at_placeholder` なら、最初の placeholder で `_PlaceholderReached` を送出する。
+    比較可能な key だけが要る呼び出し（`expression_key_safe`）が、捨てる key のために
+    打ち切った先の tail token を計算しないようにするため。
+    """
+
     path: list = []
     depth_of: dict = {}
     memo: dict[int, StructuralKey] = {}
     tail_memo: dict = {}
     # 予算と placeholder 件数は再帰の外で数える（key の memo 可否の判定に使う）。
-    state = {"remaining": int(budget), "placeholders": 0}
+    state = {"remaining": budget, "placeholders": 0}
+
+    def _placeholder() -> None:
+        if stop_at_placeholder:
+            raise _PlaceholderReached()
+        state["placeholders"] += 1
 
     def _build(node: Optional[Expression]) -> StructuralKey:
         if node is None:
@@ -674,11 +724,11 @@ def expression_key(
             return cached
         depth = depth_of.get(node_id)
         if depth is not None:
-            state["placeholders"] += 1
+            _placeholder()
             return ("cycle", node.expr_type.name, node.name or "", int(node.size or 0),
                     ("back_ref", len(path) - depth))
         if state["remaining"] <= 0:
-            state["placeholders"] += 1
+            _placeholder()
             return (
                 "truncated",
                 *_node_descriptor(node),
@@ -703,11 +753,28 @@ def expression_key(
         if isinstance(view, _Redirect):
             return _build(view.target)
         if view.kind == "opaque":
-            state["placeholders"] += 1
+            _placeholder()
             return (*view.label, unidentified_identity("unknown_node_kind"))
+        if view.unidentified:
+            _placeholder()
         return _assemble_key(view, [_build(child) for child in view.children])
 
-    return _build(expr)
+    key = _build(expr)
+    return key, state["placeholders"] > 0
+
+
+def exact_structural_identity(expr: Optional[Expression], **options: bool) -> StructuralKey:
+    """予算を持たない厳密な identity（大きさは O(1)）。
+
+    等しい ⇔ option の下の展開 T_o が等しい（非巡回で識別済みのとき。C-K2(b)）。識別
+    できない部分を含めば何とも等しくならない（C-K5）。予算付き key が打ち切られて比較
+    に使えない式の identity（dedup / memo の key）に使う: 予算 256 の key を丸ごと持つ
+    より小さく、object identity と違って構造が等しい式どうしは一致する。
+    """
+
+    if expr is None:
+        return ("none",)
+    return ("exact_identity", _exact_tail_token(expr, ExactTailOptions.of(**options)))
 
 
 def condition_key(
@@ -723,6 +790,22 @@ def condition_key(
         expression_key(condition.expression, budget=budget, **options),
         bool(condition.negated),
     )
+
+
+def condition_key_safe(
+    condition: Optional[Condition],
+    *,
+    budget: int = 256,
+    **options: bool,
+) -> Optional[StructuralKey]:
+    """比較可能なときだけ `condition_key` と同じ key、そうでなければ None（`expression_key_safe` と同じ打ち切り）。"""
+
+    if condition is None:
+        return ("none",)
+    expression = expression_key_safe(condition.expression, budget=budget, **options)
+    if expression is None:
+        return None
+    return ("condition", expression, bool(condition.negated))
 
 
 def _key_has_tag(key: Any, tags: frozenset) -> bool:
@@ -805,14 +888,16 @@ def expression_key_safe(
 
     If a bounded traversal is truncated/cycle-detected/opaque, the result is None
     so callers can avoid treating two unrelated deep expressions as equal.
+
+    最初の placeholder で走査を止める（捨てる key のために tail token を計算しない）。
+    値は `expression_key` の結果が placeholder を含まないときのその key と同じ。
     """
 
-    key = expression_key(
-        expr,
-        budget=budget,
-        **options,
-    )
-    if not key_is_comparable(key):
+    try:
+        key, _has_placeholder = _build_expression_key(
+            expr, int(budget), ExactTailOptions.of(**options), stop_at_placeholder=True,
+        )
+    except _PlaceholderReached:
         return None
     return key
 

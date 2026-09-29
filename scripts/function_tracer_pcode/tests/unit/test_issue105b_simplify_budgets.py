@@ -1006,7 +1006,7 @@ def test_public_entries_do_not_remember_a_truncated_answer(monkeypatch):
 
 
 def test_the_fallback_key_of_a_large_expression_is_built_once_per_object(monkeypatch):
-    """小さい予算で比べられない式の key（`expression_key_or_identity`）は式 object ごとに 1 回。"""
+    """小さい予算で比べられない式の key（`exact_structural_identity`）は式 object ごとに 1 回。"""
 
     from scripts.function_tracer_pcode.analysis.condition import normalizer as normalizer_module
     from scripts.function_tracer_pcode.analysis.condition.normalizer import ConditionNormalizer
@@ -1015,8 +1015,8 @@ def test_the_fallback_key_of_a_large_expression_is_built_once_per_object(monkeyp
     for step in range(60):
         large = Expression.binary_op("INT_ADD", large, _param(f"param_s{step}", 20 + step))
     built = []
-    original = normalizer_module.expression_key_or_identity
-    monkeypatch.setattr(normalizer_module, "expression_key_or_identity", lambda e: built.append(1) or original(e))
+    original = normalizer_module.exact_structural_identity
+    monkeypatch.setattr(normalizer_module, "exact_structural_identity", lambda e: built.append(1) or original(e))
     with condition_cache_scope():
         first = ConditionNormalizer.expression_signature(large)
         again = ConditionNormalizer.expression_signature(large)

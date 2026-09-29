@@ -83,6 +83,7 @@ from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.structural import (
     StructuralKey,
     expression_key,
+    expression_key_status,
     expression_key_safe,
     expression_key_or_identity,
     expression_provenance_key,
@@ -173,6 +174,7 @@ __all__ = [
     "Condition",
     "StructuralKey",
     "expression_key",
+    "expression_key_status",
     "expression_key_safe",
     "expression_key_or_identity",
     "expression_provenance_key",

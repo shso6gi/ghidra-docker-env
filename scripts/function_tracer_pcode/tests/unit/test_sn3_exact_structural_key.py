@@ -26,6 +26,7 @@ from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
 from scripts.function_tracer_pcode.core import structural
 from scripts.function_tracer_pcode.core.atomic_tables import AppendOnlyBuckets
+from scripts.function_tracer_pcode.core.errors import ExpressionCycleError
 from scripts.function_tracer_pcode.core.structural import (
     condition_key,
     expression_key,
@@ -665,3 +666,78 @@ def test_equal_tail_tokens_agree_with_the_complete_comparison():
             freeze_expression(left), freeze_expression(right), budget=10 ** 6
         )
         assert same_token == same_structure
+
+
+# --------------------------------------------------------------------------
+# 比較可否を key と一緒に返す API と、予算の無い厳密な identity
+# --------------------------------------------------------------------------
+
+def _status_corpus():
+    leaf = _const(0)
+    leaf.value = _Opaque()
+    fake = _param()
+    fake.expr_type = type("FakeType", (), {"name": "FAKE"})()
+    return [
+        *_corpus_without_truncation(),
+        _chain(1, 100),
+        _call("f", _chain(2, 100)),
+        _phi((Condition(_chain(3, 100)), _const(0)), (None, _const(1))),
+        _cycle(3),
+        leaf,
+        _binary("INT_ADD", _param(), leaf),
+        fake,
+        _call("f", fake),
+    ]
+
+
+@pytest.mark.parametrize("budget", [8, 32, 256])
+def test_the_status_agrees_with_the_key_walk_and_the_safe_key(budget):
+    for expr in _status_corpus():
+        key, comparable = structural.expression_key_status(expr, budget=budget)
+        assert comparable == key_is_comparable(key)
+        safe = expression_key_safe(expr, budget=budget)
+        if comparable:
+            assert safe == key == expression_key(expr, budget=budget)
+        else:
+            assert safe is None
+
+
+@pytest.mark.parametrize("budget", [8, 256])
+def test_the_safe_condition_key_is_the_condition_key_only_when_comparable(budget):
+    assert structural.condition_key_safe(None) == condition_key(None)
+    for expr in _status_corpus():
+        for negated in (False, True):
+            try:
+                condition = Condition(expr, negated)
+            except ExpressionCycleError:  # 巡回する式は Condition にできない
+                continue
+            key = condition_key(condition, budget=budget)
+            safe = structural.condition_key_safe(condition, budget=budget)
+            assert (safe is None) == key_contains_placeholder(key)
+            if safe is not None:
+                assert safe == key
+            assert condition._safe_structural_key(budget=budget) == safe
+
+
+def test_the_exact_identity_is_structural_and_small():
+    left, right = _chain(1, 400), _chain(1, 400)
+    identity = structural.exact_structural_identity(left)
+    assert identity == structural.exact_structural_identity(right)  # 別 object でも構造が等しい
+    assert identity != structural.exact_structural_identity(_chain(2, 400))  # 末尾だけ違う
+    assert len(json.dumps(identity)) < 200
+    assert structural.exact_structural_identity(None) == ("none",)
+    # option は key の同値関係と同じく区別する
+    commuted = _binary("INT_ADD", _param("b", 1), _param("a", 0))
+    plain = _binary("INT_ADD", _param("a", 0), _param("b", 1))
+    assert structural.exact_structural_identity(
+        commuted, normalize_commutative=False
+    ) != structural.exact_structural_identity(plain, normalize_commutative=False)
+    assert structural.exact_structural_identity(commuted) == structural.exact_structural_identity(plain)
+
+
+def test_an_unidentified_expression_has_no_equal_exact_identity():
+    leaf = _const(0)
+    leaf.value = _Opaque()
+    expr = _chain(1, 10, base=leaf)
+    assert structural.exact_structural_identity(expr) != structural.exact_structural_identity(expr)
+    assert not structural.key_is_process_independent(structural.exact_structural_identity(expr))
