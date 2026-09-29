@@ -4,10 +4,13 @@
 consumer 側に個別の検査は足していない。`core/structural` の key が「等しい ⇒ 構造が
 等しい」（C-K1）になったことで、`==` / `hash` だけで判定する consumer がそのまま健全に
 なることを、代表的な consumer ごとに確かめる。consumer が独自に持っていた identity
-（`hash()` に潰す `_safe_condition_id`、比較不能を `None` に潰す `condition_identity_key`）
-は owner の key を使う形に寄せた。
+（比較不能を `None` / 型名に潰す `condition_identity_key` や summary key）は owner の key
+を使う形に寄せた。
 
-main（`2f30b9f`）では下の test はすべて FAIL する（PR 本文に記録）。
+条件 oracle / simplifier の cache identity は #105（PR #214 の `SolverQueryIdentity` /
+`ImplicationIdentity`、完全比較）が所有するので、ここでは扱わない。
+
+修正前の main では、下の test（`test_simplify_…` を除く）は FAIL する（PR 本文に記録）。
 """
 
 from __future__ import annotations
@@ -56,33 +59,6 @@ def _nested_call_less(tail, depth=200):
 # --------------------------------------------------------------------------
 # condition simplifier / SMT oracle
 # --------------------------------------------------------------------------
-
-def test_the_oracle_cache_key_does_not_share_an_entry_between_different_nested_tails():
-    from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
-
-    left = ConditionSMTOracle._build_cache_key([_nested_call_less(1)])
-    right = ConditionSMTOracle._build_cache_key([_nested_call_less(2)])
-    assert left is None or right is None or left != right
-
-
-def test_the_raw_unsat_cache_key_separates_deep_conditions():
-    from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
-
-    assert ConditionSimplifier._safe_condition_cache_key([_deep_less(10)]) != \
-        ConditionSimplifier._safe_condition_cache_key([_deep_less(20)])
-
-
-def test_the_condition_identity_is_not_a_hash():
-    from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier
-
-    left = ConditionSimplifier._safe_condition_id(_deep_less(10))
-    right = ConditionSimplifier._safe_condition_id(_deep_less(20))
-    assert not isinstance(left, int)
-    assert left != right
-    assert left == ConditionSimplifier._safe_condition_id(_deep_less(10))
-    assert ConditionSimplifier._safe_condition_ids([_deep_less(10), _deep_less(20)]) == \
-        ConditionSimplifier._safe_condition_ids([_deep_less(20), _deep_less(10)])
-
 
 def test_simplify_conditions_keeps_two_deep_conditions_that_differ_at_the_tail():
     from scripts.function_tracer_pcode.analysis.condition.simplifier import ConditionSimplifier

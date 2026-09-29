@@ -156,7 +156,7 @@ def test_a_persisted_token_is_never_accepted_as_the_identity_of_a_fresh_process_
     persisted = _run_child(["X"])["keys"]["X"]  # process A が X を書いた
     # この process（B）は Y だけを見る。衝突させると Y も index 0 になる
     monkeypatch.setattr(structural, "_TAIL_INTERN", _colliding_intern())
-    monkeypatch.setattr(structural, "_VALIDATED_TAIL_MEMO", structural.weakref.WeakKeyDictionary())
+    monkeypatch.setattr(structural, "_VALIDATED_TAIL_MEMO", structural.WeakKeyedTable())
     fresh = json.loads(json.dumps(expression_key(build("Y"), budget=BUDGET)))
     assert fresh == persisted  # 値は一致してしまう
     assert not key_is_process_independent(persisted)
@@ -259,3 +259,88 @@ def test_the_root_blocker_summary_identity_goes_through_the_single_resolver():
     blocker, typed = root_blocker_summary._blocker_id(record, stable, diagnostics)
     assert blocker is None and typed is False
     assert "process_scoped_cause_identity" in json.dumps(diagnostics)
+
+
+# --------------------------------------------------------------------------
+# 6. 唯一の昇格点: 結果 JSON から作る identity はすべて `freeze_identity` を通る
+# --------------------------------------------------------------------------
+
+def test_freeze_identity_never_lets_a_process_scoped_token_compare_equal():
+    a = _run_child(["X", "Y"])
+    b = _run_child(["Y", "X"])
+    # 同じ永続化値を 2 回凍らせても、別 process の値と比べても一致しない（過分割）
+    assert freeze_identity(a["keys"]["X"]) != freeze_identity(b["keys"]["Y"])
+    assert freeze_identity(a["keys"]["X"]) != freeze_identity(a["keys"]["X"])
+    # token を持たない値は従来どおり、JSON の往復に依らず一致する
+    plain = expression_key(build("X"), budget=10_000)
+    assert freeze_identity(plain) == freeze_identity(json.loads(json.dumps(plain)))
+
+
+def test_required_proof_keys_from_different_processes_are_not_merged():
+    from scripts.function_tracer_pcode.checker.cause_aggregate import resolve_required_proofs
+    from scripts.function_tracer_pcode.proof.cause_identity import ProofRequirementId
+
+    a = _run_child(["X", "Y"])
+    b = _run_child(["Y", "X"])
+
+    def keys(structural_key):
+        requirement = ProofRequirementId.create("return_coverage", ("target", structural_key), ("contract",))
+        payload = json.loads(json.dumps(requirement.to_dict()))
+        return resolve_required_proofs(
+            proof_requirement_ids=[payload], object_target_key=None, identity_scope="unary",
+            canonical_cause_key=("cause",), recovery_actions=(),
+        ).keys
+
+    assert a["keys"]["X"] == b["keys"]["Y"]  # 生の値は一致してしまう
+    assert set(keys(a["keys"]["X"])).isdisjoint(keys(b["keys"]["Y"]))
+    plain = json.loads(json.dumps(expression_key(build("X"), budget=10_000)))
+    assert keys(plain) == keys(plain)
+
+
+def test_case_pair_refs_from_different_processes_are_not_merged():
+    from scripts.function_tracer_pcode.reporting import root_blocker_summary
+
+    a = _run_child(["X", "Y"])
+    b = _run_child(["Y", "X"])
+    stable = SimpleNamespace(to_key=lambda: ("stable",))
+    occurrence = {"attempt_identity": {"strategy_identity": "pairwise"}}
+
+    def ref(case_key):
+        return root_blocker_summary._case_pair_ref({}, stable, occurrence, {"pair_or_case": [case_key, case_key]})
+
+    assert ref(a["keys"]["X"]) != ref(b["keys"]["Y"])
+
+
+#: reporting が結果 JSON の identity field を読んでよい関数（読んだ値は必ず
+#: `freeze_identity` / `identity_tuple` か `cause_aggregate` の resolver へ渡す）。
+#: 関数を足すなら、ここへ足す前にその経路が昇格点を通ることを確かめること。
+_PERSISTED_IDENTITY_FIELDS = frozenset({
+    "object_target_key", "typed_cause_key", "proof_requirement_ids", "proof_obligation_id",
+    "pair_or_case", "canonical_cause_key", "canonical_target_key", "identity_pool",
+    "required_proof_id_refs", "cause_ref", "case_pair_ref", "target_occurrence_id",
+})
+_PERSISTED_IDENTITY_READERS = {
+    ("reporting/root_blocker_summary.py", "summarize_root_blockers"),
+    ("reporting/root_blocker_summary.py", "_blocker_id"),
+    ("reporting/root_blocker_summary.py", "_case_pair_ref"),
+    ("reporting/root_blocker_summary.py", "_add_occurrence"),
+    ("reporting/root_blocker_summary.py", "_add_cause_group"),
+}
+
+
+def test_only_registered_reporting_functions_read_persisted_identity_fields():
+    """新しい cross-process consumer が、昇格点を通さずに永続化した key を比べ始めないこと。"""
+
+    readers = set()
+    for path in sorted((PACKAGE_ROOT / "reporting").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+
+        def visit(node, function):
+            for child in ast.iter_child_nodes(node):
+                name = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else function
+                if isinstance(child, ast.Constant) and child.value in _PERSISTED_IDENTITY_FIELDS:
+                    readers.add((str(path.relative_to(PACKAGE_ROOT)), function))
+                visit(child, name)
+
+        visit(tree, "<module>")
+    assert readers == _PERSISTED_IDENTITY_READERS

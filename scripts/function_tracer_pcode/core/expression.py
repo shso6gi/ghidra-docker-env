@@ -701,28 +701,14 @@ class Expression:
                 return False
         return True
 
-    def structural_key(
-        self,
-        *,
-        budget: int = 256,
-        normalize_commutative: bool = True,
-        strip_width_adapters: bool = False,
-        collapse_full_masks: bool = False,
-        include_memory_read_order: bool = True,
-        include_semantic_runtime_refs: bool = True,
-    ):
-        """Hashable structural key for AST/P-code based comparisons."""
+    def structural_key(self, *, budget: int = 256, **options: bool):
+        """Hashable structural key for AST/P-code based comparisons.
+
+        option の名前と意味は `core.structural.ExactTailOptions` が唯一の定義。
+        """
         from scripts.function_tracer_pcode.core.structural import expression_key
 
-        return expression_key(
-            self,
-            budget=budget,
-            normalize_commutative=normalize_commutative,
-            strip_width_adapters=strip_width_adapters,
-            collapse_full_masks=collapse_full_masks,
-            include_memory_read_order=include_memory_read_order,
-            include_semantic_runtime_refs=include_semantic_runtime_refs,
-        )
+        return expression_key(self, budget=budget, **options)
     
     def to_smt(
         self,

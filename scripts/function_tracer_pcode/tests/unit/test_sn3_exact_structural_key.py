@@ -25,6 +25,7 @@ import pytest
 from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
 from scripts.function_tracer_pcode.core import structural
+from scripts.function_tracer_pcode.core.atomic_tables import AppendOnlyBuckets
 from scripts.function_tracer_pcode.core.structural import (
     condition_key,
     expression_key,
@@ -513,7 +514,7 @@ def _colliding_intern_class():
 def colliding_intern(monkeypatch):
     intern = _colliding_intern_class()()
     monkeypatch.setattr(structural, "_TAIL_INTERN", intern)
-    monkeypatch.setattr(structural, "_VALIDATED_TAIL_MEMO", structural.weakref.WeakKeyDictionary())
+    monkeypatch.setattr(structural, "_VALIDATED_TAIL_MEMO", structural.WeakKeyedTable())
     return intern
 
 
@@ -523,7 +524,7 @@ def test_a_digest_collision_does_not_make_different_tails_equal(colliding_intern
     again = expression_key(_chain(1, 100), budget=8)
     assert left != right
     assert left == again
-    assert colliding_intern.collisions > 0
+    assert colliding_intern.statistics()["collisions"] > 0
 
 
 def test_option_b_digest_only_identity_would_lose_c_k1_under_a_collision(colliding_intern):
@@ -544,34 +545,42 @@ def test_option_b_digest_only_identity_would_lose_c_k1_under_a_collision(collidi
 # Gate B: 並行 intern（bucket を見た後・index を決める直前で同期する）
 # --------------------------------------------------------------------------
 
-def _RacingIntern(parties):
-    """`_decide_index` の入口（bucket 確認後・index 決定直前）で thread を揃える intern。"""
+class _RacingBuckets(AppendOnlyBuckets):
+    """`AppendOnlyBuckets` の「bucket を読んだ後・位置を決める直前」で thread を揃える。
 
-    class _Racing(_colliding_intern_class()):
-        def __init__(self):
-            super().__init__()
-            self.barrier = threading.Barrier(parties)
-            self.inside = 0
-            self.max_inside = 0
-            self._count_lock = threading.Lock()
+    lock が無い実装なら全員がここへ同時に来て揃う。lock があれば 1 つずつしか来ないので
+    barrier は timeout で抜ける（どちらでも下の不変条件は成り立たねばならない）。
+    """
 
-        def _decide_index(self, bucket, record):
+    def __init__(self, parties):
+        super().__init__()
+        self.barrier = threading.Barrier(parties)
+        self.inside = 0
+        self.max_inside = 0
+        self._count_lock = threading.Lock()
+
+    def _position_in(self, bucket, item):
+        with self._count_lock:
+            self.inside += 1
+            self.max_inside = max(self.max_inside, self.inside)
+        try:
+            self.barrier.wait(timeout=0.2)
+        except threading.BrokenBarrierError:
+            pass
+        try:
+            return super()._position_in(bucket, item)
+        finally:
             with self._count_lock:
-                self.inside += 1
-                self.max_inside = max(self.max_inside, self.inside)
-            try:
-                # lock が無い実装なら全員がここへ同時に来て揃う。lock があれば 1 つずつ
-                # しか来ないので timeout で抜ける（どちらでも下の不変条件は成り立つこと）
-                self.barrier.wait(timeout=0.2)
-            except threading.BrokenBarrierError:
-                pass
-            try:
-                return super()._decide_index(bucket, record)
-            finally:
-                with self._count_lock:
-                    self.inside -= 1
+                self.inside -= 1
 
-    return _Racing()
+
+def _RacingIntern(parties):
+    """digest が常に衝突し、表の操作で thread を揃える intern（Gate B の再現）。"""
+
+    buckets = _RacingBuckets(parties)
+    intern = _colliding_intern_class()(buckets=buckets)
+    intern.buckets = buckets
+    return intern
 
 
 def _race(intern, records):
@@ -594,7 +603,7 @@ def test_concurrent_intern_of_different_records_with_the_same_digest(round_):
     x, y = b"record-x", b"record-y"
     first_x, first_y = _race(intern, [x, y])
     assert first_x != first_y  # 同じ index が異なる record に割り当てられない
-    assert intern.max_inside == 1  # index 決定は 1 つずつ
+    assert intern.buckets.max_inside == 1  # index 決定は 1 つずつ
     # 表が壊れていない: 同じ record を引き直すと同じ identity、重複登録も無い
     assert intern.intern(x) == first_x
     assert intern.intern(y) == first_y
@@ -607,7 +616,7 @@ def test_concurrent_intern_of_the_same_record(round_):
     record = b"record-same"
     first, second = _race(intern, [record, record])
     assert first == second
-    assert intern.max_inside == 1
+    assert intern.buckets.max_inside == 1
     assert intern.statistics()["records"] == 1
 
 
@@ -620,7 +629,7 @@ def test_many_concurrent_interns_keep_the_table_injective():
         by_record.setdefault(record, set()).add(token)
     assert all(len(tokens) == 1 for tokens in by_record.values())
     assert len({next(iter(tokens)) for tokens in by_record.values()}) == 5
-    assert intern.max_inside == 1
+    assert intern.buckets.max_inside == 1
     assert intern.statistics()["records"] == 5
 
 

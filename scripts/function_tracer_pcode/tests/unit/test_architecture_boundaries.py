@@ -127,6 +127,15 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
         "scripts.function_tracer_pcode.reporting",
         "scripts.function_tracer_pcode.config",
         "os",
+        # Issue #215 Gate B: 構造 identity の意味（intern の方針・C-K 契約）と同期の実装は
+        # 変更軸が違う。不可分な表の操作は `core/atomic_tables` が持ち、ここは lock を持たない。
+        "threading",
+        "multiprocessing",
+    ),
+    "core/atomic_tables.py": (
+        # 同期の実装だけを持つ: 何を登録し何を identity とするかを知らない。
+        "scripts.function_tracer_pcode",
+        "os",
     ),
     "core/render_smt/loop_lowering.py": (
         # ref の class を知らない = どの lowering かを renderer が判定しない。

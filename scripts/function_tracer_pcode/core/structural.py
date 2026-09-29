@@ -9,14 +9,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import itertools
 import json
 import struct
-import threading
 from typing import Any, Optional, Tuple
-import weakref
 
 from scripts.function_tracer_pcode.core import live_values
+from scripts.function_tracer_pcode.core.atomic_tables import (
+    AppendOnlyBuckets,
+    SerialCounter,
+    WeakKeyedTable,
+)
 from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.semantic_lifecycle import is_validated
@@ -85,9 +87,10 @@ def _is_all_ones_mask_for_size(expr: Optional[Expression], size: int) -> bool:
 # **token は process の中でだけ identity になる**（Issue #215 Gate A）。index は
 # 「この process で同じ digest に何番目に来た record か」なので、別の process が
 # 同じ `(digest, index)` を別の record に割り当て得る（A: X→0, Y→1 / B: Y→0, X→1）。
-# 永続化した key を別 process の key と identity として比べる側は、
-# `key_is_process_independent()` が偽の key を比較不能として扱うこと
-# （`checker/cause_aggregate.resolve_cause_identity` がその唯一の入口）。
+# 永続化した値を process をまたぐ identity にする規則は `cross_process_node` 1 つで、
+# それを適用する normalizer は `checker/cause_aggregate.freeze_identity` 1 つ（reporting は
+# 生の key を比べない。`test_sn3_cross_process_identity.py` の登録表が固定する）。
+# consumer が述語を呼び忘れても false match にならないよう、規則は normalizer の中にある。
 
 #: tail token の domain separation（record の digest 専用）
 _EXACT_TAIL_DOMAIN = b"sn3-exact-structural-tail-v1\x00"
@@ -122,6 +125,12 @@ class ExactTailOptions:
     collapse_full_masks: bool = False
     include_memory_read_order: bool = True
     include_semantic_runtime_refs: bool = True
+
+    @classmethod
+    def of(cls, **options: Any) -> "ExactTailOptions":
+        """key の option（未知の名前は TypeError）。値は真偽に正規化する（`1` と `True` を分けない）。"""
+
+        return cls(**{name: bool(value) for name, value in options.items()})
 
 
 class _NotCanonical(Exception):
@@ -172,24 +181,23 @@ def _canonical_bytes(value: Any) -> bytes:
 
 
 class _ExactTailIntern:
-    """record → 識別済み token の intern（C-K6）。
+    """record → 識別済み token の intern（C-K6）。**意味の owner**。
 
-    **表を読む → index を決める → 登録する** は 1 つの lock の中で行う。
-    `dict.setdefault` と `list.append` がそれぞれ atomic でも、その間に別の thread
-    が同じ bucket へ登録すると、異なる record に同じ index を返し得る
-    （Issue #215 Gate B の race test が固定している）。lock の中では Python の
-    callback を呼ばない（bytes の比較だけ）ので、再入も deadlock も無い。
+    ここが決めるのは token の意味だけ: digest の domain、record と token の対応、
+    衝突を index で解決すること、識別不能 token と object identity serial の形。
+    「表を読む → index を決める → 登録する」の不可分性は `core/atomic_tables` の
+    `AppendOnlyBuckets.position` が 1 操作として保証する（Gate B: 個々の
+    `dict.setdefault` / `list.append` の atomicity を合成しても不可分にならない）。
+    同期の方式を変えてもこの class は変わらない。
 
     record は削除しない。したがって index は process の中で安定で、record に対して
-    単射。**別の process の index とは対応しない**（上の Gate A 参照）。
+    単射。**別の process の index とは対応しない**（Gate A、`cross_process_node`）。
     """
 
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._buckets: dict = {}
-        self._unidentified = itertools.count()
-        self._process_objects = itertools.count()
-        self.collisions = 0
+    def __init__(self, buckets: Optional[AppendOnlyBuckets] = None) -> None:
+        self._buckets = buckets if buckets is not None else AppendOnlyBuckets()
+        self._unidentified = SerialCounter()
+        self._process_objects = SerialCounter()
 
     @staticmethod
     def digest(record: bytes) -> str:
@@ -197,39 +205,23 @@ class _ExactTailIntern:
 
     def intern(self, record: bytes) -> StructuralKey:
         digest = self.digest(record)
-        with self._lock:
-            bucket = self._buckets.setdefault(digest, [])
-            index = self._decide_index(bucket, record)
-        return (EXACT_TAIL_TAG, digest, index)
-
-    def _decide_index(self, bucket: list, record: bytes) -> int:
-        """bucket 内の位置を返す（無ければ末尾に登録）。呼ぶのは lock の中だけ。"""
-
-        for index, existing in enumerate(bucket):
-            if existing == record:
-                return index
-        bucket.append(record)
-        if len(bucket) > 1:
-            self.collisions += 1
-        return len(bucket) - 1
+        return (EXACT_TAIL_TAG, digest, self._buckets.position(digest, record))
 
     def unidentified(self, reason: str) -> StructuralKey:
-        with self._lock:
-            serial = next(self._unidentified)
-        return (UNIDENTIFIED_TAG, str(reason), serial)
+        return (UNIDENTIFIED_TAG, str(reason), self._unidentified.next())
 
     def process_object_serial(self) -> int:
-        with self._lock:
-            return next(self._process_objects)
+        return self._process_objects.next()
 
     def statistics(self) -> dict:
-        with self._lock:
-            return {
-                "digests": len(self._buckets),
-                "records": sum(len(bucket) for bucket in self._buckets.values()),
-                "record_bytes": sum(len(r) for bucket in self._buckets.values() for r in bucket),
-                "collisions": self.collisions,
-            }
+        table = self._buckets.statistics(size=len)
+        return {
+            "digests": table["buckets"],
+            "records": table["items"],
+            "record_bytes": table["item_bytes"],
+            "collisions": table["items"] - table["buckets"],
+            "unidentified_tokens": self._unidentified.issued(),
+        }
 
 
 _TAIL_INTERN = _ExactTailIntern()
@@ -237,12 +229,11 @@ _TAIL_INTERN = _ExactTailIntern()
 #: validated（凍結済み）node の tail token の process 全体の memo（C-K4）。
 #: 凍結済みの node と closure は immutable かつ非巡回なので、token は node と
 #: option だけで決まる。未凍結の node は入れない（生成後に `size` 等が書き換わる）。
-_VALIDATED_TAIL_MEMO: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
-_VALIDATED_TAIL_MEMO_LOCK = threading.Lock()
+_VALIDATED_TAIL_MEMO = WeakKeyedTable()
 
 #: `expression_key_or_identity` の object identity（同じ live object → 同じ serial、
 #: serial は再利用しない。`id()` は object の死後に再利用されるので使わない）
-_PROCESS_OBJECT_SERIALS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_PROCESS_OBJECT_SERIALS = WeakKeyedTable()
 
 
 def unidentified_identity(reason: str) -> StructuralKey:
@@ -506,9 +497,7 @@ def _exact_tail_token(
             if cached is not None:
                 return cached, None
             if is_validated(node):
-                with _VALIDATED_TAIL_MEMO_LOCK:
-                    known = _VALIDATED_TAIL_MEMO.get(node)
-                    token = known.get(options) if known is not None else None
+                token = _VALIDATED_TAIL_MEMO.get(node, options)
                 if token is not None:
                     memo[node_id] = (token, None)
                     return (token, None), None
@@ -585,8 +574,7 @@ def _exact_tail_token(
         if path_independent:
             memo[node_id] = (token, None)
             if frame.min_ref is None and is_validated(frame.node):
-                with _VALIDATED_TAIL_MEMO_LOCK:
-                    _VALIDATED_TAIL_MEMO.setdefault(frame.node, {})[options] = token
+                _VALIDATED_TAIL_MEMO.put(frame.node, options, token)
         result = (token, frame.min_ref if not path_independent else None)
         if not stack:
             final = token
@@ -627,11 +615,7 @@ def expression_key(
     expr: Optional[Expression],
     *,
     budget: int = 256,
-    normalize_commutative: bool = True,
-    strip_width_adapters: bool = False,
-    collapse_full_masks: bool = False,
-    include_memory_read_order: bool = True,
-    include_semantic_runtime_refs: bool = True,
+    **options: bool,
 ) -> StructuralKey:
     """Return a stable, hashable structural key for an expression tree.
 
@@ -671,13 +655,9 @@ def expression_key(
     なる（placeholder を作らない）。
     """
 
-    options = ExactTailOptions(
-        normalize_commutative=bool(normalize_commutative),
-        strip_width_adapters=bool(strip_width_adapters),
-        collapse_full_masks=bool(collapse_full_masks),
-        include_memory_read_order=bool(include_memory_read_order),
-        include_semantic_runtime_refs=bool(include_semantic_runtime_refs),
-    )
+    # option は `ExactTailOptions` だけが定義する（未知の名前は TypeError）。足すときに
+    # 公開 API の引数列を複製して直す必要が無いよう、ここより上では列挙しない
+    options = ExactTailOptions.of(**options)
     path: list = []
     depth_of: dict = {}
     memo: dict[int, StructuralKey] = {}
@@ -734,17 +714,13 @@ def condition_key(
     condition: Optional[Condition],
     *,
     budget: int = 256,
-    normalize_commutative: bool = True,
+    **options: bool,
 ) -> StructuralKey:
     if condition is None:
         return ("none",)
     return (
         "condition",
-        expression_key(
-            condition.expression,
-            budget=budget,
-            normalize_commutative=normalize_commutative,
-        ),
+        expression_key(condition.expression, budget=budget, **options),
         bool(condition.negated),
     )
 
@@ -790,22 +766,40 @@ def key_is_process_independent(key: Any) -> bool:
 
     tail token・識別不能 token・object identity token を含む key は、その値が
     発行した process の中でだけ identity になる。別の process が同じ値を別の構造に
-    割り当て得るので、永続化した key を別 process の key と比べる側は偽のとき
-    比較不能として扱う（fail-closed）。
+    割り当て得る。process をまたぐ比較そのものは `cross_process_node`（を適用する
+    `freeze_identity`）が fail-closed にするので、これは「その key を identity として
+    解決してよいか」を問う側（`resolve_cause_identity`）が使う判定。
     """
 
     return not _key_has_tag(key, PROCESS_SCOPED_TAGS)
+
+
+def cross_process_node(node: Any) -> Any:
+    """永続化した値を process をまたぐ identity にするときの **唯一の規則**（Gate A）。
+
+    tail token・識別不能 token・object identity token は、発行した process の中でだけ
+    identity になる（別の process は同じ値を別の構造へ割り当て得る）。そのような node は
+    毎回新しい識別不能 token に置き換え、何とも等しくならないようにする（過分割に倒す）。
+    それ以外の node はそのまま返す。
+
+    子から先に正規化する normalizer が node ごとに呼ぶ（O(1)）。結果 JSON などから読んだ
+    identity を比べる側は、自分で key を比べず、この規則を適用する normalizer
+    （`checker/cause_aggregate.freeze_identity`）を通すこと。
+    """
+
+    if (type(node) is tuple or type(node) is list) and node:
+        # 先頭が組み込みの文字列のときだけ tag として読む（`live_values` が owner の読み方）
+        tag = live_values.plain_scalar(node[0])
+        if type(tag) is str and tag in PROCESS_SCOPED_TAGS:
+            return unidentified_identity("process_scoped")
+    return node
 
 
 def expression_key_safe(
     expr: Optional[Expression],
     *,
     budget: int = 256,
-    normalize_commutative: bool = True,
-    strip_width_adapters: bool = False,
-    collapse_full_masks: bool = False,
-    include_memory_read_order: bool = True,
-    include_semantic_runtime_refs: bool = True,
+    **options: bool,
 ) -> Optional[StructuralKey]:
     """Return structural key only when it is safe for semantic equality.
 
@@ -816,11 +810,7 @@ def expression_key_safe(
     key = expression_key(
         expr,
         budget=budget,
-        normalize_commutative=normalize_commutative,
-        strip_width_adapters=strip_width_adapters,
-        collapse_full_masks=collapse_full_masks,
-        include_memory_read_order=include_memory_read_order,
-        include_semantic_runtime_refs=include_semantic_runtime_refs,
+        **options,
     )
     if not key_is_comparable(key):
         return None
@@ -831,11 +821,7 @@ def expression_key_or_identity(
     expr: Optional[Expression],
     *,
     budget: int = 256,
-    normalize_commutative: bool = True,
-    strip_width_adapters: bool = False,
-    collapse_full_masks: bool = False,
-    include_memory_read_order: bool = True,
-    include_semantic_runtime_refs: bool = True,
+    **options: bool,
 ) -> StructuralKey:
     """Safe structural key with identity fallback for non-comparable inputs.
 
@@ -849,11 +835,7 @@ def expression_key_or_identity(
     safe = expression_key_safe(
         expr,
         budget=budget,
-        normalize_commutative=normalize_commutative,
-        strip_width_adapters=strip_width_adapters,
-        collapse_full_masks=collapse_full_masks,
-        include_memory_read_order=include_memory_read_order,
-        include_semantic_runtime_refs=include_semantic_runtime_refs,
+        **options,
     )
     if safe is not None:
         return safe
@@ -864,11 +846,7 @@ def expression_key_or_identity(
 
 def _process_object_identity(expr: Any) -> StructuralKey:
     try:
-        with _VALIDATED_TAIL_MEMO_LOCK:
-            serial = _PROCESS_OBJECT_SERIALS.get(expr)
-            if serial is None:
-                serial = _TAIL_INTERN.process_object_serial()
-                _PROCESS_OBJECT_SERIALS[expr] = serial
+        serial = _PROCESS_OBJECT_SERIALS.get_or_create(expr, "serial", _TAIL_INTERN.process_object_serial)
     except TypeError:
         return unidentified_identity("object_not_weakly_referenceable")
     return (PROCESS_OBJECT_TAG, serial)

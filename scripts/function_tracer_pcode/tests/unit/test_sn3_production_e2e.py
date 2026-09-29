@@ -7,15 +7,15 @@ phase workflow・stage plan・pairwise strategy・z3 CLI・production cutover co
 * **E2E-3**（1 回の case merge）: 左は ordered に ``(A → 1), (B → 1), (else → 0)``、
   右は ``(A → 1), (else → 0)``。A と B は末尾の定数だけが違う深い条件
   （``param_1 + 0 + … + (N-2) <s 10`` / ``<s 20`` を balanced な和で組む）。``param_1 + Σ ∈ [10, 20)`` で
-  左は 1、右は 0 を返すので **NOT_EQ が正しい**。main（`2f30b9f`）では予算 256 の
-  case key が A と B を同じにし、`extract_return_cases` が B の case を A に merge して
-  捨てるので **final EQUIVALENT（偽）** になる。
-* **E2E-1**（process 全体の oracle cache の汚染）: 左の最初の case は死んだ条件
-  ``… <s INT_MIN``、次の case は末尾だけが違う生きた条件 ``… <s 20``。main では死んだ
-  条件の UNSAT が cache され、budget 96 の key が同じ生きた条件もその UNSAT を引いて
-  case が消える。右も同じ形で値だけが違う（1 と 2）ので **NOT_EQ が正しい**。main では
-  消えた case のせいで return coverage の証明束が欠け、monolithic の結合で ERROR になる
-  （誤った事実が判定面まで届いている）。
+  左は 1、右は 0 を返すので **NOT_EQ が正しい**。予算付きの case key（`extract_return_cases`）が
+  A と B を同じにすると B の case が A に merge されて消え、**final EQUIVALENT（偽）** になる。
+  PR #214 の後の main（`17a1990`）でも再現する（case merge は #105 の cache とは別の経路）。
+* **E2E-1**（深い条件の solver 事実の共有）: 左の最初の case は死んだ条件 ``… <s INT_MIN``、
+  次の case は末尾だけが違う生きた条件 ``… <s 20``。右も同じ形で値だけが違う（1 と 2）ので
+  **NOT_EQ が正しい**。旧 main（`2f30b9f`）では予算付き key の oracle cache が死んだ条件の
+  UNSAT を生きた条件へ渡して ERROR になった。PR #214 で cache は完全比較の
+  `SolverQueryIdentity` になりこの経路は閉じたので、ここでは「#105 の cache と構造 key の
+  変更を合わせても再発しない」ことを production path で固定する（main でも PASS）。
 * control: width 10（予算内）では main でも NOT_EQ。
 """
 
@@ -97,9 +97,6 @@ def test_e2e3_a_single_case_merge_does_not_reach_a_false_equivalent(width):
 
 @pytest.mark.parametrize("width", [10, 60])
 def test_e2e1_the_oracle_cache_is_not_shared_between_different_deep_conditions(width):
-    from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
-
-    ConditionSMTOracle._unsat_cache.clear()
     left, right = _e2e1(width)
     result = run_production_check(f"sn3-e2e1-{width}", left, right)
     assert result["final_outcome"] == "NOT_EQ", (result["final_outcome"], result.get("error_message"))

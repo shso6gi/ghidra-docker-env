@@ -53,7 +53,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core import json_encoding, live_values
-from scripts.function_tracer_pcode.core.structural import key_is_process_independent
+from scripts.function_tracer_pcode.core.structural import cross_process_node, key_is_process_independent
 from scripts.function_tracer_pcode.core.json_encoding import (
     CANONICAL,
     LEGACY,
@@ -159,6 +159,11 @@ def freeze_identity(value: Any) -> Any:
     名前、dataclass は field）。field も持たない object だけが identity の印（旧実装の既定の `repr`
     と同じく object ごとに区別する）。JSON から読んだ値（reporting）は常に組み込みの値なので変わらない。
 
+    Issue #215 Gate A: **結果 JSON から読んだ identity を process をまたいで比べる入口はこの関数**。
+    列の段ごとに `core.structural.cross_process_node` を通し、構造 key の tail token などの
+    process の中でだけ意味を持つ値を、何とも等しくならない印に置き換える（過分割に倒す）。
+    reporting が identity を作るときは、生の値を比べずにこの写しを使うこと。
+
     容器は `live_values` の `items_of` / `elements_of` だけで辿り、写しは package が組む tuple と
     owner が作る葉（`builtin_str` の key・`value_token`）だけから成る（写しは組み込みの値）。
     再帰せずに明示の段で辿る（深い入れ子で `RecursionError` にならない。閉路は `ValueError`）。
@@ -177,7 +182,9 @@ def freeze_identity(value: Any) -> Any:
             frames.pop()
             active.discard(frame[3])
             keys = frame[2]
-            frozen = tuple(frame[1]) if keys is None else tuple(zip(keys, frame[1]))
+            # 列は構造 key の token であり得る: process をまたぐ比較で一致しないよう、
+            # 構造 identity の owner の規則を通す（Issue #215 Gate A）
+            frozen = cross_process_node(tuple(frame[1])) if keys is None else tuple(zip(keys, frame[1]))
             (frames[-1][1] if frames else root).append(frozen)
             continue
         _freeze_enter(child, frame[1], frames, active)
@@ -496,7 +503,9 @@ def _requirement_key(requirement: Any) -> Tuple[Any, ...]:
     requirement_id = ProofRequirementId.from_dict(requirement)
     if type(requirement_id) is not ProofRequirementId:
         raise TypeError("proof requirement is not a ProofRequirementId")
-    return requirement_id.to_key()
+    # target は構造 key を持ち得る: 別 process の結果と比べる key なので、owner の昇格規則を
+    # 通す `freeze_identity` の写しにする（Issue #215 Gate A）
+    return freeze_identity(requirement_id.to_key())
 
 
 @dataclass(frozen=True)
@@ -555,7 +564,7 @@ def resolve_required_proofs(
                 )
             except ValueError:
                 continue
-            keys.append(requirement.to_key())
+            keys.append(freeze_identity(requirement.to_key()))
     return RequiredProofResolution(tuple(keys), complete, tuple(diagnostics))
 
 
