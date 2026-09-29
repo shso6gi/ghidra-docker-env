@@ -20,9 +20,13 @@ from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
     cache_lookup,
     cache_store,
     clear_condition_caches,
+    root_memo,
+    sequence_lookup,
+    sequence_store,
 )
 from scripts.function_tracer_pcode.analysis.condition.query_identity import (
     ImplicationIdentity,
+    OrderedConditionsIdentity,
     SolverQueryIdentity,
 )
 from scripts.function_tracer_pcode.analysis.debug import summarize_expression, summarize_condition
@@ -159,6 +163,14 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
     # （`_formula_is_unsat` / `_formula_implies` の共通の問い）と含意の問いの 2 つだけ。
     CONJUNCTION_UNSAT_TABLE: str = "simplifier.conjunction_unsat"
     IMPLIED_TABLE: str = "simplifier.implied"
+    #: Issue #105 PR-105-B: 条件の並びの basis（残す位置）と、条件 object ごとの平坦化
+    BASIS_TABLE: str = "simplifier.basis"
+    FLATTEN_MEMO: str = "simplifier.flatten"
+    #: 条件 object の並びごとの答え（同じ object を同じ順で持つ並びだけに使い回す）
+    BASIS_BY_OBJECTS: str = "simplifier.basis_by_objects"
+    OBJECT_CENTRIC_CONTRADICTION_BY_OBJECTS: str = "simplifier.object_centric_contradiction_by_objects"
+    CONTRADICTION_BY_OBJECTS: str = "simplifier.contradiction_by_objects"
+    _BASIS_CACHE_LIMIT: int = 8192
     _FORMULA_IMPLIES_CACHE_LIMIT: int = 8192
     _IMPLIED_CACHE_LIMIT: int = 8192
     _CONTEXTUAL_REDUCTION_MAX_ITERATIONS: int = 4
@@ -168,7 +180,10 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
     def reset_caches(cls) -> None:
         """今の pair の store から、条件簡約の表を消す（pair 境界の scope とは別に使える）。"""
 
-        clear_condition_caches((cls.CONJUNCTION_UNSAT_TABLE, cls.IMPLIED_TABLE))
+        clear_condition_caches((
+            cls.CONJUNCTION_UNSAT_TABLE, cls.IMPLIED_TABLE, cls.BASIS_TABLE,
+            cls.BASIS_BY_OBJECTS, cls.OBJECT_CENTRIC_CONTRADICTION_BY_OBJECTS, cls.CONTRADICTION_BY_OBJECTS,
+        ))
         ConditionSMTOracle.reset_caches()
 
     @classmethod
@@ -547,13 +562,13 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
             if cls._expression_can_collapse_to_boolean_constant(expr):
                 try:
                     true_condition = Condition(expr, False)
-                    if cls._formula_implies(conditions, true_condition):
+                    if cls._formula_implies(conditions, true_condition) is True:
                         return cls._constant_expression_from_eval(
                             expr,
                             1,
                             max(1, expr.get_bit_width()),
                         )
-                    if cls._formula_implies(conditions, true_condition.negate()):
+                    if cls._formula_implies(conditions, true_condition.negate()) is True:
                         return cls._constant_expression_from_eval(
                             expr,
                             0,
@@ -817,7 +832,7 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
                         contradiction_indices.update({index_i, index_j})
 
             formula_unsat = cls._formula_is_unsat(unique_conditions)
-            if formula_unsat:
+            if formula_unsat is True:
                 contradiction_indices.update(range(len(unique_conditions)))
 
             keep_indices: Set[int] = set(unsupported_indices)
@@ -1078,6 +1093,45 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         cls,
         conditions: Iterable[Condition],
     ) -> List[Condition]:
+        """条件の並びの basis（平坦化し、定数で真のもの・重複・残りに含意されるものを除く）。
+
+        Issue #105 PR-105-B: expander は入力の展開の組み合わせごとに同じ条件の並びの basis を
+        何度も求める（固定 subset の barthe2big で 1 pair 約 77 万回、並びは約 190 通り）。
+        平坦化は条件 object ごと（`FLATTEN_MEMO`、同じ object には同じ結果の object）、
+        どれを残すかは平坦化した並びの **順序を含む** identity（`OrderedConditionsIdentity`）
+        ごとに 1 回だけ求めて覚える。覚えるのは残す位置の添字だけで、返す条件はいつもこの
+        呼び出しの並びの object（別の入力の object を返さない）。打ち切り（再入 guard・予算）を
+        材料にした選び方は覚えない（`reentry_guard_scope`）。
+
+        同じ条件 object の並び（同じ順）の答えは、identity も組まずに並び単位の memo から返す
+        （`_by_condition_objects`。同じ object の並びが呼び出しの 9 割以上を占める）。
+        """
+
+        return list(
+            cls._by_condition_objects(cls.BASIS_BY_OBJECTS, conditions, cls._compute_condition_basis)
+        )
+
+    @classmethod
+    def _by_condition_objects(cls, kind: str, conditions: Iterable[Condition], compute) -> Any:
+        """条件 object の並びだけで決まる答えを、並び単位の memo（`condition_cache`）から返す。
+
+        同じ object を同じ順で持つ並びにだけ使い回す（構造が同じ別の object の並びには使わない:
+        それは identity を key にした表の仕事）。打ち切り（再入 guard・DPLL の予算）を材料にした
+        答えは覚えない。
+        """
+
+        items = tuple(conditions or ())
+        found, value = sequence_lookup(kind, items)
+        if found:
+            return value
+        with reentry_guard_scope() as guard:
+            value = compute(items)
+        if guard.clean:
+            sequence_store(kind, items, value)
+        return value
+
+    @classmethod
+    def _compute_condition_basis(cls, conditions: Tuple[Optional[Condition], ...]) -> Tuple[Condition, ...]:
         flattened: List[Condition] = []
         # 重複の判定は bucket（candidate hash）→ `Condition.equals`（完全比較）。
         # 条件どうしの総当たりにしない（Issue #105 の B3_B11 の kill 位置）。
@@ -1085,14 +1139,42 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         for condition in list(conditions or []):
             if condition is None:
                 continue
-            for flat in cls.flatten_condition(condition):
-                truth_value = cls.evaluate_condition_truth(flat)
-                if truth_value is True:
-                    continue
+            for flat in root_memo(cls.FLATTEN_MEMO, condition, cls._flattened_nontrivial):
                 if flat in seen:
                     continue
                 seen.add(flat)
                 flattened.append(flat)
+        if not flattened:
+            return ()
+
+        try:
+            key: Optional[OrderedConditionsIdentity] = OrderedConditionsIdentity.of(flattened)
+        except _CONDITION_RECOVERABLE_ERRORS:
+            key = None
+        if key is not None:
+            found, kept = cache_lookup(cls.BASIS_TABLE, key, limit=cls._BASIS_CACHE_LIMIT)
+            if found:
+                return tuple(flattened[index] for index in kept)
+        with reentry_guard_scope() as guard:
+            kept = cls._basis_positions(flattened)
+        if key is not None and guard.clean:
+            cache_store(cls.BASIS_TABLE, key, kept, limit=cls._BASIS_CACHE_LIMIT)
+        return tuple(flattened[index] for index in kept)
+
+    @classmethod
+    def _flattened_nontrivial(cls, condition: Condition) -> Tuple[Condition, ...]:
+        """条件 1 つを平坦化し、定数で真のものを除いた並び（条件 object だけで決まる値）。"""
+
+        return tuple(
+            flat
+            for flat in cls.flatten_condition(condition)
+            if cls.evaluate_condition_truth(flat) is not True
+        )
+
+    @classmethod
+    def _basis_positions(cls, flattened: List[Condition]) -> Tuple[int, ...]:
+        """basis に残す位置（入力の順）。複雑さの小さい順に見て、それまでに残したものに
+        含意されるものを捨てる（同じ複雑さなら入力順）。"""
 
         ranked_conditions = sorted(
             enumerate(flattened),
@@ -1100,7 +1182,8 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         )
 
         basis: List[Condition] = []
-        for _index, condition in ranked_conditions:
+        positions: List[int] = []
+        for index, condition in ranked_conditions:
             if cls._condition_is_implied(
                 condition,
                 list(basis),
@@ -1108,7 +1191,8 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
             ):
                 continue
             basis.append(condition)
-        return basis
+            positions.append(index)
+        return tuple(positions)
 
     @classmethod
     def _condition_complexity_key(
@@ -1156,6 +1240,12 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         cls,
         conditions: Iterable[Condition],
     ) -> bool:
+        return cls._by_condition_objects(
+            cls.OBJECT_CENTRIC_CONTRADICTION_BY_OBJECTS, conditions, cls._compute_object_centric_is_contradiction
+        )
+
+    @classmethod
+    def _compute_object_centric_is_contradiction(cls, conditions: Tuple[Optional[Condition], ...]) -> bool:
         basis = cls.build_object_centric_condition_basis(conditions)
         if not basis:
             return False
@@ -1193,8 +1283,11 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
     
     @classmethod
     def is_contradiction(cls, conditions: List[Condition]) -> bool:
-        """条件リストが矛盾しているかチェックする。"""
-        return cls.build_constraint_set(conditions).is_contradictory
+        """条件リストが矛盾しているかチェックする（同じ object の並びは並び単位の memo）。"""
+        return cls._by_condition_objects(
+            cls.CONTRADICTION_BY_OBJECTS, conditions,
+            lambda items: cls.build_constraint_set(list(items)).is_contradictory,
+        )
     
     @classmethod
     def are_equivalent_conditions(cls, cond1: Condition, cond2: Condition) -> bool:

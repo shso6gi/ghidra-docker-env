@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""条件 oracle の solver query identity と rewrite identity（Issue #105 PR-105-A）。
+"""条件簡約・条件 oracle の identity（Issue #105 PR-105-A / PR-105-B）。
 
-この module が所有するのは **「2 つの query / rewrite が同じ入力か」** だけ:
+この module が所有するのは **「2 つの query / rewrite / 条件の並びが同じ入力か」** だけ:
 
 * `RootQueryGraph` — 式 1 つ（root）の canonical な DAG 表現。`walk_dag` の graph
   （structural な local payload と順序付き辺）に、solver が node ごとに読む意味値
@@ -12,6 +12,10 @@
   schema を持つ。symbol（`objvar_<n>`）の割当はここから決まる。
 * `RewriteIdentity` — root を symbol mapping の下で書き換えた結果の identity
   （root graph + mapping の全体 + render context + schema）。
+* `OrderedConditionsIdentity`（PR-105-B）— simplifier の basis（条件の並びから残す条件を
+  選ぶ計算）の key にする、**順序を含む** 条件の並びの identity。同じ
+  `SolverQueryIdentity` に加えて入力の順（`order`）まで一致することを求める。
+* `ImplicationIdentity` — 含意の問い（文脈・条件・正規形の集合）の identity。
 * solver symbol identity の規則（`solver_symbol_identity` /
   `solver_symbol_identity_is_safe`）。symbol の同一視は query の意味そのものなので
   ここが唯一の owner で、oracle は委譲するだけ。
@@ -26,6 +30,13 @@ structural identity（`core/structural.py`、可換の正規化あり・runtime 
 **別の同値関係**: 構造が同じでも solver symbol や宣言型が違えば別の query で
 （計画 I-4）、逆に `ADD(a,3)` と `ADD(3,a)` は構造上同じでも表現としては別の query に
 なる（cache の miss になるだけ）。相互に代用しない。
+
+solver query identity（conjunction の意味: 入力の順に依らない）と order-sensitive な
+simplifier identity（`OrderedConditionsIdentity`: 入力の順で答えが変わる計算の key）も
+**別の同値関係**: 前者で一致しても順が違えば後者では別で、後者の key を solver query の
+cache に使ったり、前者を basis の key に使ったりしない（型が違うので `==` も一致しない）。
+条件 object そのものの同一性で引く memo（`condition_cache` の並び単位の memo）はどちらの
+identity でもなく、この module は持たない。
 
 持たないもの: cache の保存と寿命（`condition_cache`）、script の組み立てと solver の実行
 （`smt_oracle`）、計測（`condition_metrics`）。依存は `core` の表現（`semantic_snapshot`）
@@ -515,6 +526,46 @@ class SolverQueryIdentity:
         )
 
 
+@dataclass(frozen=True, eq=False)
+class OrderedConditionsIdentity:
+    """条件の **並び**（順序を含む）の identity（Issue #105 PR-105-B）。
+
+    `SolverQueryIdentity` は conjunction の意味（順序に依らない）なので、入力の順で答えが
+    変わる計算（条件の basis: 同じ複雑さの条件は入力順で残す方が決まる）の key には足りない。
+    ここでは同じ `SolverQueryIdentity` に加えて `order`（canonical な順の i 番目が入力の何番目か）
+    まで一致することを求める: 一致すれば、入力の i 番目どうしが同じ graph・同じ向きになる。
+    """
+
+    query: SolverQueryIdentity
+
+    @classmethod
+    def of(cls, conditions: Sequence[Any]) -> "OrderedConditionsIdentity":
+        return cls(SolverQueryIdentity.from_conditions(conditions))
+
+    @property
+    def cacheable(self) -> bool:
+        return self.query.cacheable
+
+    def cache_weight(self) -> int:
+        return 1 + self.query.cache_weight()
+
+    def __eq__(self, other: Any) -> bool:
+        if self is other:
+            return True
+        if not isinstance(other, OrderedConditionsIdentity):
+            return False
+        return self.query.order == other.query.order and self.query == other.query
+
+    def __ne__(self, other: Any) -> bool:
+        return not self.__eq__(other)
+
+    def __hash__(self) -> int:
+        return hash((self.query.fast, self.query.order))
+
+    def __repr__(self) -> str:
+        return f"OrderedConditionsIdentity(conditions={len(self.query)}, fast={self.query.fast.hex()[:12]})"
+
+
 #: 条件に式が無いときの root の代わり（`None` は「回収済み」と区別できないので使わない）
 _NO_EXPRESSION = object()
 
@@ -733,6 +784,7 @@ class ImplicationIdentity:
 
 __all__ = [
     "ImplicationIdentity",
+    "OrderedConditionsIdentity",
     "ORACLE_RENDER_CONTEXT",
     "QUERY_IDENTITY_SCHEMA",
     "REWRITE_IDENTITY_SCHEMA",

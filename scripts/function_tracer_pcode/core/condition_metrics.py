@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """条件簡約・条件 oracle の **計測** の owner（Issue #105 PR-105-A）。診断専用。
 
-PR-105-B が DPLL の決定回数予算・oracle の query 数予算を決めるための分布を取る。
-ここにある値は **判定にも cache の意味にも使わない**: 数えるだけで、何も止めず、
-何も選ばない（`note` / `observe` は値を返さない）。予算の有効化は PR-105-B の責務。
+DPLL の決定回数予算・oracle の query 数予算（PR-105-B）の値を決める分布と、予算が
+尽きて fallback した記録（`budget_events`）を持つ。ここにある値は **判定にも cache の
+意味にも使わない**: 数えるだけで、何も止めず、何も選ばない（`note` / `observe` /
+`budget_event` は値を返さない）。予算の消費と上限の比較は `core/budget_policy` の
+`FallbackBudgetMeter`、尽きたときの fallback は数える側（`analysis/condition/`）が持つ。
 
 独立に数える counter（名前は `snapshot()` の key）:
 
 * `dpll.decisions` — DPLL の分岐（決定）の総数。1 回の充足可能性判定あたりの分布は
   `dpll.decisions_per_call`（log2 の度数・最大・合計・件数）
-* `dpll.satisfiability_calls` — 充足可能性判定（`_clauses_are_satisfiable` の最上位
+* `dpll.satisfiability_calls` — 充足可能性判定（`_clauses_satisfiability` の最上位
   呼び出し）の回数
 * `oracle.queries` — solver（z3）を実際に呼んだ回数。1 回の時間は `oracle.check_ms`
 * `oracle.timeouts` — solver が `unknown`（timeout / canceled）を返した回数
@@ -20,7 +22,11 @@ PR-105-B が DPLL の決定回数予算・oracle の query 数予算を決める
 * `oracle.unknown_hit` — cache hit のうち記憶していた値が `None`（未判定）だったもの
 * `identity.*` / `memo.*` — identity の構築と root 単位 memo の hit
 * `simplifier.reentry_guard_hit` / `simplifier.guard_tainted_not_stored` — 再入 guard の
-  打ち切りと、それを材料にしたので覚えなかった答え
+  打ち切り（と予算の fallback）と、それを材料にしたので覚えなかった答え
+* `budget.<種類>.exceeded` — fallback の予算（Issue #105 PR-105-B、`core/budget_policy`
+  の `FallbackBudgetKind`）が尽きて問いに答えなかった回数。1 件ずつの記録は
+  `budget_events`（`{budget_type, site, limit, consumed, fallback_taken}`、先頭
+  `MAX_BUDGET_EVENTS` 件まで。超えた分は `budget_events_dropped` の件数だけ）
 
 置き場所が `core` なのは、値を書く側（`analysis/condition`）と読む側（出力の準備
 `checker/output_preparation`。出力層は analysis に依存しない）の両方から下向きに参照
@@ -55,6 +61,12 @@ JOURNALED_COUNTERS = frozenset(
         "cache.oracle.verdict.hit",
     }
 )
+
+#: `budget_events` に 1 件ずつ残す上限（超えた分は件数だけ: 出力を有界にする）
+MAX_BUDGET_EVENTS = 256
+
+#: 予算の fallback の記録の field（この順で出す）
+BUDGET_EVENT_FIELDS = ("budget_type", "site", "limit", "consumed", "fallback_taken")
 
 #: 分布の最大値を journal にも残す観測
 JOURNALED_OBSERVATIONS = frozenset({"dpll.decisions_per_call", "oracle.check_ms"})
@@ -97,6 +109,31 @@ class ConditionSimplifyMetrics:
         self._lock = threading.Lock()
         self._counts: Dict[str, int] = {}
         self._distributions: Dict[str, _Distribution] = {}
+        self._budget_events: List[Dict[str, Any]] = []
+        self._budget_events_total = 0
+
+    def budget_event(
+        self, *, budget_type: str, site: str, limit: Optional[int], consumed: int, fallback_taken: str
+    ) -> None:
+        """予算が尽きて fallback した 1 件（診断専用: 何も止めず、何も選ばない）。"""
+
+        with self._lock:
+            self._budget_events_total += 1
+            total = self._budget_events_total
+            if len(self._budget_events) < MAX_BUDGET_EVENTS:
+                self._budget_events.append(
+                    {
+                        "budget_type": str(budget_type),
+                        "site": str(site),
+                        "limit": None if limit is None else int(limit),
+                        "consumed": int(consumed),
+                        "fallback_taken": str(fallback_taken),
+                    }
+                )
+        self.note(f"budget.{budget_type}.exceeded")
+        if total == 1:
+            # kill された pair にも「予算で答えなかった」事実が残るように最初の 1 件だけ
+            journal_note("condition_simplify_budget", {"budget": str(budget_type), "site": str(site)})
 
     def note(self, name: str, amount: int = 1) -> None:
         with self._lock:
@@ -122,7 +159,7 @@ class ConditionSimplifyMetrics:
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
-            return {
+            snapshot: Dict[str, Any] = {
                 "schema": METRICS_SCHEMA,
                 "counters": {name: self._counts[name] for name in sorted(self._counts)},
                 "distributions": {
@@ -130,6 +167,11 @@ class ConditionSimplifyMetrics:
                     for name in sorted(self._distributions)
                 },
             }
+            if self._budget_events_total:
+                snapshot["budget_events"] = [dict(event) for event in self._budget_events]
+                snapshot["budget_events_total"] = self._budget_events_total
+                snapshot["budget_events_dropped"] = self._budget_events_total - len(self._budget_events)
+            return snapshot
 
 
 _SCOPE_LOCK = threading.Lock()
@@ -175,6 +217,19 @@ def observe(name: str, value: int) -> None:
         metrics.observe(name, value)
 
 
+def budget_event(
+    *, budget_type: str, site: str, limit: Optional[int], consumed: int, fallback_taken: str
+) -> None:
+    """予算の fallback を 1 件記録する（scope の外では何もしない）。"""
+
+    metrics = active_condition_metrics()
+    if metrics is not None:
+        metrics.budget_event(
+            budget_type=budget_type, site=site, limit=limit, consumed=consumed,
+            fallback_taken=fallback_taken,
+        )
+
+
 def condition_metrics_snapshot() -> Dict[str, Any]:
     """今の scope の計測値（scope の外では空）。出力の準備が診断へ写す。"""
 
@@ -198,8 +253,16 @@ _PAIRWISE_DEBUG_COUNTERS = (
 
 
 #: `pairwise_debug_counters()` が書く key の全部（出力の準備が上書きの対象を知るため）
+#: 予算の fallback の件数（`budget_events` の全件。計画 §6.B-2 の `pairwise_debug_stats` 名）
+SIMPLIFY_BUDGET_EXCEEDED_STAT = "simplify_budget_exceeded"
+
 CONDITION_COUNTER_STAT_KEYS = frozenset(
-    {"structural_key_cache_hit", "structural_key_cache_miss", "condition_dpll_decisions_per_call_max"}
+    {
+        "structural_key_cache_hit",
+        "structural_key_cache_miss",
+        "condition_dpll_decisions_per_call_max",
+        SIMPLIFY_BUDGET_EXCEEDED_STAT,
+    }
     | {key for key, _name in _PAIRWISE_DEBUG_COUNTERS}
 )
 
@@ -229,6 +292,7 @@ def pairwise_debug_counters(snapshot: Optional[Dict[str, Any]] = None) -> Dict[s
         summary[key] = counters.get(name, 0)
     decisions = (snapshot.get("distributions") or {}).get("dpll.decisions_per_call")
     summary["condition_dpll_decisions_per_call_max"] = int(decisions["max"]) if decisions else 0
+    summary[SIMPLIFY_BUDGET_EXCEEDED_STAT] = int(snapshot.get("budget_events_total") or 0)
     return {key: value for key, value in summary.items() if value}
 
 
@@ -270,7 +334,11 @@ def note_dpll_decision() -> None:
 
 
 __all__ = [
+    "BUDGET_EVENT_FIELDS",
+    "MAX_BUDGET_EVENTS",
     "METRICS_SCHEMA",
+    "SIMPLIFY_BUDGET_EXCEEDED_STAT",
+    "budget_event",
     "CONDITION_COUNTER_STAT_KEYS",
     "ConditionSimplifyMetrics",
     "active_condition_metrics",
