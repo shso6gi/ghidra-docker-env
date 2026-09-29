@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Iterable, List, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.budget_policy import (
+    FallbackBudgetKind,
+    FallbackBudgetMeter,
+)
 from scripts.function_tracer_pcode.core import Expression, Condition, ExpressionType
 from scripts.function_tracer_pcode.core.structural import expression_provenance_key
 from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
@@ -23,9 +28,50 @@ from scripts.function_tracer_pcode.analysis.condition.simplifier_support import 
     BooleanAtom,
     BooleanLiteral,
     BooleanClause,
+    note_budget_fallback,
     note_reentry_guard_hit,
     reentry_guard_scope,
 )
+
+
+class SatVerdictTruthinessError(RuntimeError):
+    """`SatVerdict` を真偽値として読もうとした（`not verdict` / `if verdict:` など）。
+
+    三値を二値へ畳むと `INDETERMINATE` が `SAT` か `UNSAT` のどちらかに化ける（`not` なら
+    充足不能として読まれ、証明を強める）。畳み方は `SatVerdict.as_unsat_answer()` の 1 箇所
+    だけ。条件簡約の回復可能な例外（`TypeError` など）ではないので、握り潰されずに上がる。
+    """
+
+
+class SatVerdict(Enum):
+    """CNF の充足可能性判定の三値（Issue #105 PR-105-B）。
+
+    `INDETERMINATE` は「決定回数の予算で判定をやめた」で、充足可能とも不能とも言っていない。
+    真偽値にはならない（`__bool__` が `SatVerdictTruthinessError`）: 比べるなら `is` で、
+    「充足不能か」の問いへ写すなら `as_unsat_answer()`（`True` / `False` / `None`）。
+    """
+
+    SAT = "sat"
+    UNSAT = "unsat"
+    INDETERMINATE = "indeterminate"
+
+    def __bool__(self) -> bool:
+        raise SatVerdictTruthinessError(
+            "SatVerdict has no truth value; compare with `is` or use as_unsat_answer()"
+        )
+
+    def as_unsat_answer(self) -> Optional[bool]:
+        """充足不能か: `UNSAT` → `True`、`SAT` → `False`、`INDETERMINATE` → `None`。"""
+
+        if self is SatVerdict.UNSAT:
+            return True
+        if self is SatVerdict.SAT:
+            return False
+        return None
+
+
+#: DPLL の決定回数予算が尽きた記録の site
+DPLL_BUDGET_SITE = "simplifier_cnf.dpll"
 
 
 class CnfReasoningMixin:
@@ -394,20 +440,32 @@ class CnfReasoningMixin:
         return simplified
 
     @classmethod
-    def _clauses_are_satisfiable(
+    def _clauses_satisfiability(
         cls,
         clauses: List[Tuple[BooleanLiteral, ...]],
-        assignments: Optional[Dict[BooleanAtom, bool]] = None,
-    ) -> bool:
+        assignments: Optional[Dict[BooleanAtom, bool]],
+        budget: FallbackBudgetMeter,
+    ) -> SatVerdict:
+        """節の集合の充足可能性（DPLL、三値）。
+
+        `budget` は最上位の問い合わせ 1 回の決定回数予算で、再帰の枝へ **同じ object** を
+        渡す（枝ごとに作り直すと予算が指数的に増える）。規則:
+
+        * unit propagation で矛盾 → `UNSAT`、節が空 → `SAT`
+        * 分岐する前に決定を 1 つ `budget.take()`。尽きていれば `INDETERMINATE`
+        * true 側 `SAT` → `SAT`、true 側 `INDETERMINATE` → false 側を試さず `INDETERMINATE`
+        * true 側 `UNSAT` なら false 側の答え（`SAT` / `UNSAT` / `INDETERMINATE`）
+        """
+
         current_assignments = dict(assignments or {})
         current_clauses = list(clauses)
 
         while True:
             reduced = cls._simplify_clauses_with_assignment(current_clauses, current_assignments)
             if reduced is None:
-                return False
+                return SatVerdict.UNSAT
             if not reduced:
-                return True
+                return SatVerdict.SAT
 
             unit_literals = [clause[0] for clause in reduced if len(clause) == 1]
             if not unit_literals:
@@ -419,7 +477,7 @@ class CnfReasoningMixin:
                 existing = current_assignments.get(atom)
                 if existing is not None:
                     if existing != polarity:
-                        return False
+                        return SatVerdict.UNSAT
                     continue
                 current_assignments[atom] = polarity
                 changed = True
@@ -427,34 +485,45 @@ class CnfReasoningMixin:
             if not changed:
                 break
 
+        # 決定 1 つ = 分岐 1 回（計測 `dpll.decisions` と同じ単位）
+        if not budget.take():
+            return SatVerdict.INDETERMINATE
+        note_dpll_decision()
         branch_literal = min(current_clauses, key=len)[0]
         branch_atom, branch_polarity = branch_literal
-        # 計測だけ（PR-105-B の決定回数予算の分布）。判定には触れない。
-        note_dpll_decision()
 
         true_assignments = dict(current_assignments)
         true_assignments[branch_atom] = branch_polarity
-        if cls._clauses_are_satisfiable(current_clauses, true_assignments):
-            return True
+        true_verdict = cls._clauses_satisfiability(current_clauses, true_assignments, budget)
+        if true_verdict is not SatVerdict.UNSAT:
+            # SAT はそのまま、INDETERMINATE は false 側を試さない
+            return true_verdict
 
         false_assignments = dict(current_assignments)
         false_assignments[branch_atom] = not branch_polarity
-        return cls._clauses_are_satisfiable(current_clauses, false_assignments)
+        return cls._clauses_satisfiability(current_clauses, false_assignments, budget)
 
     @classmethod
     def _clause_set_is_unsat(cls, condition_list: List[Condition]) -> Optional[bool]:
-        """CNF + DPLL による判定（最上位の充足可能性判定 1 回 = 計測枠 1 つ）。
+        """CNF + DPLL による判定（最上位の充足可能性判定 1 回 = 計測枠 1 つ = 予算 1 つ）。
 
-        二値（`_clauses_are_satisfiable` の否定）: 予算の無い今の DPLL は完全なので
-        `not` は正確。三値の `SatVerdict` へ移して `not` を消すのは PR-105-B（D1-B）。
+        三値（`SatVerdict`）を「充足不能か」へ写すのは `as_unsat_answer()` だけで、
+        `INDETERMINATE`（決定回数の予算で打ち切った）は `None`（判定できない）。
         """
 
         clauses = cls._conditions_to_cnf_clauses(condition_list)
         if clauses is None:
             return None
         clause_literals = [clause.literals for clause in clauses]
+        budget = FallbackBudgetMeter.for_active_policy(FallbackBudgetKind.DPLL_DECISIONS)
         with satisfiability_call():
-            return not cls._clauses_are_satisfiable(clause_literals)
+            verdict = cls._clauses_satisfiability(clause_literals, None, budget)
+        if verdict is SatVerdict.INDETERMINATE:
+            # 決定の数は節の順に依存する（identity は条件の順に依らない）: 覚えさせない
+            note_budget_fallback(
+                budget, site=DPLL_BUDGET_SITE, fallback_taken="indeterminate", history_dependent=True
+            )
+        return verdict.as_unsat_answer()
 
     @classmethod
     def _conjunction_is_unsat(cls, condition_list: List[Condition]) -> Optional[bool]:

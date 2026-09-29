@@ -515,6 +515,46 @@ class SolverQueryIdentity:
         )
 
 
+@dataclass(frozen=True, eq=False)
+class OrderedConditionsIdentity:
+    """条件の **並び**（順序を含む）の identity（Issue #105 PR-105-B）。
+
+    `SolverQueryIdentity` は conjunction の意味（順序に依らない）なので、入力の順で答えが
+    変わる計算（条件の basis: 同じ複雑さの条件は入力順で残す方が決まる）の key には足りない。
+    ここでは同じ `SolverQueryIdentity` に加えて `order`（canonical な順の i 番目が入力の何番目か）
+    まで一致することを求める: 一致すれば、入力の i 番目どうしが同じ graph・同じ向きになる。
+    """
+
+    query: SolverQueryIdentity
+
+    @classmethod
+    def of(cls, conditions: Sequence[Any]) -> "OrderedConditionsIdentity":
+        return cls(SolverQueryIdentity.from_conditions(conditions))
+
+    @property
+    def cacheable(self) -> bool:
+        return self.query.cacheable
+
+    def cache_weight(self) -> int:
+        return 1 + self.query.cache_weight()
+
+    def __eq__(self, other: Any) -> bool:
+        if self is other:
+            return True
+        if not isinstance(other, OrderedConditionsIdentity):
+            return False
+        return self.query.order == other.query.order and self.query == other.query
+
+    def __ne__(self, other: Any) -> bool:
+        return not self.__eq__(other)
+
+    def __hash__(self) -> int:
+        return hash((self.query.fast, self.query.order))
+
+    def __repr__(self) -> str:
+        return f"OrderedConditionsIdentity(conditions={len(self.query)}, fast={self.query.fast.hex()[:12]})"
+
+
 #: 条件に式が無いときの root の代わり（`None` は「回収済み」と区別できないので使わない）
 _NO_EXPRESSION = object()
 
@@ -733,6 +773,7 @@ class ImplicationIdentity:
 
 __all__ = [
     "ImplicationIdentity",
+    "OrderedConditionsIdentity",
     "ORACLE_RENDER_CONTEXT",
     "QUERY_IDENTITY_SCHEMA",
     "REWRITE_IDENTITY_SCHEMA",

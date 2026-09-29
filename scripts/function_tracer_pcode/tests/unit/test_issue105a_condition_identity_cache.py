@@ -227,7 +227,7 @@ def test_d1_condition_simplification_has_no_repr_ordered_keys():
 
     計画 D1 は 2 つの責務に分かれる。D1-A（`repr` 依存の条件 / query identity・並べ替えの
     撤去）は本 PR、D1-B（`not cls._clauses_satisfiability(...)` の禁止）は `SatVerdict`
-    を入れる PR-105-B（`test_d1b_the_boolean_negation_of_dpll_has_one_owner_for_pr_105b`）。
+    を入れた PR-105-B（`test_d1b_the_boolean_negation_of_dpll_is_gone`）。
 
     `analysis/returns/lifecycle.py` の scope key（storage の束縛の並べ替え）は対象外:
     その key は `AnalysisSnapshot` の意味 fingerprint（`analysis_scope_key`）に入るので、
@@ -243,13 +243,13 @@ def test_d1_condition_simplification_has_no_repr_ordered_keys():
     assert offenders == {}
 
 
-def test_d1b_the_boolean_negation_of_dpll_has_one_owner_for_pr_105b():
-    """D1-B の引継ぎ: DPLL の二値の否定（`not cls._clauses_are_satisfiable(...)`）は 1 箇所だけ。
+def test_d1b_the_boolean_negation_of_dpll_is_gone():
+    """D1-B: DPLL の答えの二値の否定（`not cls._clauses_satisfiability(...)`）は 0 箇所。
 
-    予算の無い今の DPLL は完全なので `not` は正確で、本 PR では消さない（三値の
-    `SatVerdict` と一体で PR-105-B が消す）。main には 3 箇所あったものを
-    `_clause_set_is_unsat` 1 つにまとめたので、PR-105-B が変える場所はそこだけになる。
-    増えたらこの test が落ちる。
+    PR-105-A で `_clause_set_is_unsat` 1 箇所へ集約し、PR-105-B が三値の `SatVerdict`
+    （`as_unsat_answer()`）へ置き換えた。旧名 `_clauses_are_satisfiable` も含めて数える。
+    三値の真偽値化そのものの禁止（`if verdict:` など）は
+    `test_issue105b_simplify_budgets.py` の D1-B / D5 の test が固定する。
     """
 
     tree = ast.parse((PACKAGE_ROOT / "analysis" / "condition" / "simplifier_cnf.py").read_text(encoding="utf-8"))
@@ -266,7 +266,7 @@ def test_d1b_the_boolean_negation_of_dpll_has_one_owner_for_pr_105b():
                 and node.operand.func.attr in {"_clauses_are_satisfiable", "_clauses_satisfiability"}
             ):
                 owners.append(function.name)
-    assert owners == ["_clause_set_is_unsat"]
+    assert owners == []
 
 
 def test_d1_the_ast_rule_detects_both_repr_forms():

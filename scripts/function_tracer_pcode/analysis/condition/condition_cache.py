@@ -20,6 +20,8 @@ consumer（何を覚えるか）          smt_oracle（verdict・書き換え）
   始めて抜けたら捨てる。次の pair へ意味の状態を持ち越さない。scope の外（部品単体の
   呼び出し）では **何も覚えない**（lookup は常に miss、store は捨てる）: process 全体に
   生きる意味の cache は作らない。
+* 並び単位の memo（`sequence_lookup` / `sequence_store`、PR-105-B）は root の memo を object の
+  並びへ広げたもの（同じ object を同じ順で持つ並びだけが hit）。
 * root 単位の memo（`root_memo`）は root **object** を key にする（取り出した参照が
   同じ object を指すときだけ hit。式 object は弱参照で持ち、回収されたら entry も消える
   ので、memo が DAG を生かし続けない）。root だけに依存する値にしか使わない
@@ -281,13 +283,98 @@ class _RootMemo:
         self._weight -= entry[2]
 
 
+class _SequenceMemo:
+    """object の **並び**（順序を含む）ごとの memo 1 種（Issue #105 PR-105-B）。
+
+    `_RootMemo` を root の並びへ広げたもの: 取り出した参照が並びの **同じ object を同じ順で**
+    指すときだけ hit（`id()` は引くためだけに使い、hit は参照の同一性で確かめる）。要素は
+    弱参照で持ち、どれか 1 つが回収されたら entry を消す予定を積む（`_RootMemo` と同じ
+    片付け方）。値は並びの object だけで決まるものにしか使わない（identity で一致する別の
+    object の並びには使い回さない: それは identity を key にした表の仕事）。
+    """
+
+    __slots__ = ("kind", "_entries", "_weight", "_dead")
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+        #: 要素の id の並び → (要素を指す参照の並び, 値, 重み, entry の印)。挿入順（古い順）
+        self._entries: Dict[Tuple[int, ...], Tuple[Tuple[Callable[[], Any], ...], Any, int, object]] = {}
+        self._weight = 0
+        self._dead: List[Tuple[Tuple[int, ...], Any]] = []
+
+    def __len__(self) -> int:
+        self._reap()
+        return len(self._entries)
+
+    def _reap(self) -> None:
+        while self._dead:
+            key, marker = self._dead.pop()
+            self._discard(key, marker)
+
+    def get(self, items: Tuple[Any, ...]) -> Tuple[bool, Any]:
+        self._reap()
+        entry = self._entries.get(tuple(id(item) for item in items))
+        if (
+            entry is not None
+            and len(entry[0]) == len(items)
+            and all(reference() is item for reference, item in zip(entry[0], items))
+        ):
+            return True, entry[1]
+        return False, None
+
+    def put(self, items: Tuple[Any, ...], value: Any) -> None:
+        self._reap()
+        key = tuple(id(item) for item in items)
+        self._discard(key, None)
+        marker = object()
+        references = []
+        weight = cache_weight(value) + len(items)
+        for item in items:
+            reference, strong = _root_reference(item, self._dead, key, marker)
+            if strong:
+                weight += cache_weight(item)
+            references.append(reference)
+        if weight > DEFAULT_ROOT_MEMO_WEIGHT_LIMIT:
+            note(f"memo.{self.kind}.too_large")
+            return
+        self._entries[key] = (tuple(references), value, weight, marker)
+        self._weight += weight
+        while len(self._entries) > DEFAULT_ROOT_MEMO_LIMIT or self._weight > DEFAULT_ROOT_MEMO_WEIGHT_LIMIT:
+            self._discard(next(iter(self._entries)), None)
+            note(f"memo.{self.kind}.evicted")
+
+    def _discard(self, key: Tuple[int, ...], marker: Any) -> None:
+        """entry を消す（`marker` を渡したら、その印の entry のときだけ）。"""
+
+        entry = self._entries.get(key)
+        if entry is None or (marker is not None and entry[3] is not marker):
+            return
+        del self._entries[key]
+        self._weight -= entry[2]
+
+
 class ConditionCacheStore:
-    """1 pair 分の cache（表と root 単位の memo）。"""
+    """1 pair 分の cache（表と root 単位の memo と並び単位の memo）。"""
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._tables: Dict[str, IdentityTable] = {}
         self._roots: Dict[str, _RootMemo] = {}
+        self._sequences: Dict[str, _SequenceMemo] = {}
+
+    def sequence_lookup(self, kind: str, items: Tuple[Any, ...]) -> Tuple[bool, Any]:
+        with self._lock:
+            memo = self._sequences.get(kind)
+            found, value = (False, None) if memo is None else memo.get(items)
+        note(f"memo.{kind}.{'hit' if found else 'miss'}")
+        return found, value
+
+    def sequence_store(self, kind: str, items: Tuple[Any, ...], value: Any) -> None:
+        with self._lock:
+            memo = self._sequences.get(kind)
+            if memo is None:
+                memo = self._sequences[kind] = _SequenceMemo(kind)
+            memo.put(items, value)
 
     def table(self, name: str, limit: int = DEFAULT_TABLE_LIMIT) -> IdentityTable:
         with self._lock:
@@ -328,14 +415,16 @@ class ConditionCacheStore:
             if names is None:
                 self._tables.clear()
                 self._roots.clear()
+                self._sequences.clear()
                 return
             for name in names:
                 table = self._tables.get(name)
                 if table is not None:
                     table.clear()
+                self._sequences.pop(name, None)
 
 
-def _root_reference(root: Any, dead: List[Tuple[int, Any]], key: int) -> Tuple[Callable[[], Any], bool]:
+def _root_reference(root: Any, dead: List[Tuple[Any, Any]], key: Any, marker: Any = None) -> Tuple[Callable[[], Any], bool]:
     """root を指す参照（取り出すと root か `None`）と、それが強参照か。
 
     式 object は弱参照で持つ: memo が root を生かし続けると、pair の間ずっと本来は
@@ -347,7 +436,8 @@ def _root_reference(root: Any, dead: List[Tuple[int, Any]], key: int) -> Tuple[C
     """
 
     def _collected(reference: Any) -> None:
-        dead.append((key, reference))
+        # 並びの memo は entry の印を積む（要素の参照は entry に複数ある）
+        dead.append((key, reference if marker is None else marker))
 
     try:
         return weakref.ref(root, _collected), False
@@ -408,6 +498,24 @@ def root_memo(kind: str, root: Any, build: Callable[[Any], Any]) -> Any:
     return store.root_memo(kind, root, build)
 
 
+def sequence_lookup(kind: str, items: Tuple[Any, ...]) -> Tuple[bool, Any]:
+    """object の並びごとの memo を引く（scope の外では常に miss）。"""
+
+    store = active_condition_cache()
+    if store is None:
+        return False, None
+    return store.sequence_lookup(kind, items)
+
+
+def sequence_store(kind: str, items: Tuple[Any, ...], value: Any) -> None:
+    """object の並びごとの memo に覚える（scope の外では捨てる）。値は並びの object だけで
+    決まるものに限る（覚えてよい答えかの判断は consumer: 打ち切りを材料にした答えは渡さない）。"""
+
+    store = active_condition_cache()
+    if store is not None:
+        store.sequence_store(kind, items, value)
+
+
 def clear_condition_caches(names: Tuple[str, ...]) -> None:
     """今の pair の store から、指定した表だけを消す（owner の `reset_caches()` 用）。"""
 
@@ -431,4 +539,6 @@ __all__ = [
     "clear_condition_caches",
     "condition_cache_scope",
     "root_memo",
+    "sequence_lookup",
+    "sequence_store",
 ]
