@@ -1,6 +1,6 @@
 {
  "header": {
-  "analysis_source_digest": "5ae44896f515066ad4dd4e84be7154dc9fd585232f1e933b87ef7d26535b25f8",
+  "analysis_source_digest": "a767cdbc80a72bdfbff038fdeb8942801e8aed0baa00579ccc3679484415f0e3",
   "binary": {
    "binary_id": "B11",
    "eqbench_relative_path": "REVE/barthe2big/Eq/source/new-mips64-clang-O2",
@@ -15,9 +15,9 @@
   "fixture_id": "barthe2big_f_B3_B11",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-09-16T22:44:50+00:00",
+  "recorded_at_utc": "2026-09-29T09:49:37+00:00",
   "recorder_version": "2",
-  "recording_commit": "756eaa2766b6c6d3d53986ed1c873d23f7997b9b",
+  "recording_commit": "116ab288560fb694da9f16a79e5d7d2092a65860",
   "recording_dirty": false,
   "recording_mode": {
    "connector": "production",

@@ -144,8 +144,7 @@
   "B3": [
    {
     "analysis_notes": [
-     "object_centric_scalar_signedness_repair",
-     "object_centric_callother_userop_normalization"
+     "object_centric_scalar_signedness_repair"
     ],
     "effect_summary": {
      "effects": [],
@@ -161,13 +160,13 @@
     "expansion_budget_truncations": [
      {
       "dedup": {
-       "candidate_count": 256,
+       "candidate_count": 513,
        "kept_count": 64,
        "limit": 64
       },
-      "event_id": "8ffe4178782d13de03c2fa025866fb8a96eb5272cf45494d14c0e5c19b15ee40",
+      "event_id": "7f5625c7e7dbe8ea95340a4fc93b297c8e586829e9bcf2e3953854a3767c792c",
       "kind": "dedup_case_limit",
-      "label": "INT_MULT combinations",
+      "label": "CALLOTHER combinations",
       "owner_scope_key": [
        "analysis_scope",
        [
@@ -179,150 +178,27 @@
        []
       ],
       "pcode_op_ref": {
-       "address_offset": 1048664,
+       "address_offset": 1048660,
        "binary_id": "B3",
        "block_index": 5,
        "function_entry_offset": 1048576,
        "function_entry_space": "ram",
        "input_sizes": [
         4,
-        4
-       ],
-       "kind": "pcode_op",
-       "local_op_ordinal": 21,
-       "mnemonic": "INT_MULT",
-       "opcode": 32,
-       "output_size": 4,
-       "program_uid": 1001000000000,
-       "seq_order": 21,
-       "seq_time": 159,
-       "target_offset": 1048664,
-       "target_space": "ram"
-      },
-      "surface": "return_value"
-     },
-     {
-      "dedup": {
-       "candidate_count": 88,
-       "kept_count": 64,
-       "limit": 64
-      },
-      "event_id": "b4cd66a8c1754fdb4e6488e9feb9bd847a0082ad822cfe4e7fdaad140fcd2d41",
-      "kind": "dedup_case_limit",
-      "label": "SUBPIECE input[0]",
-      "owner_scope_key": [
-       "analysis_scope",
-       [
-        "function",
-        1001000000000,
-        1048576
-       ],
-       [],
-       []
-      ],
-      "pcode_op_ref": {
-       "address_offset": 1048664,
-       "binary_id": "B3",
-       "block_index": 5,
-       "function_entry_offset": 1048576,
-       "function_entry_space": "ram",
-       "input_sizes": [
         16,
-        4
-       ],
-       "kind": "pcode_op",
-       "local_op_ordinal": 22,
-       "mnemonic": "SUBPIECE",
-       "opcode": 63,
-       "output_size": 4,
-       "program_uid": 1001000000000,
-       "seq_order": 22,
-       "seq_time": 343,
-       "target_offset": 1048664,
-       "target_space": "ram"
-      },
-      "surface": "return_value"
-     },
-     {
-      "dedup": {
-       "candidate_count": 88,
-       "kept_count": 64,
-       "limit": 64
-      },
-      "event_id": "caaac415c000c9d44f2bf56ccdd1581bca26a6ed80db1f5f1f4ca91176b2f3a7",
-      "kind": "dedup_case_limit",
-      "label": "SUBPIECE input[0]",
-      "owner_scope_key": [
-       "analysis_scope",
-       [
-        "function",
-        1001000000000,
-        1048576
-       ],
-       [],
-       []
-      ],
-      "pcode_op_ref": {
-       "address_offset": 1048664,
-       "binary_id": "B3",
-       "block_index": 5,
-       "function_entry_offset": 1048576,
-       "function_entry_space": "ram",
-       "input_sizes": [
         16,
-        4
+        1,
+        1
        ],
        "kind": "pcode_op",
-       "local_op_ordinal": 20,
-       "mnemonic": "SUBPIECE",
-       "opcode": 63,
-       "output_size": 4,
+       "local_op_ordinal": 19,
+       "mnemonic": "CALLOTHER",
+       "opcode": 9,
+       "output_size": 16,
        "program_uid": 1001000000000,
-       "seq_order": 20,
-       "seq_time": 340,
-       "target_offset": 1048664,
-       "target_space": "ram"
-      },
-      "surface": "return_value"
-     },
-     {
-      "dedup": {
-       "candidate_count": 256,
-       "kept_count": 64,
-       "limit": 64
-      },
-      "event_id": "e880d7178f8317e04628695653505387223154e745f52b3275bba625078cde86",
-      "kind": "dedup_case_limit",
-      "label": "INT_MULT combinations",
-      "owner_scope_key": [
-       "analysis_scope",
-       [
-        "function",
-        1001000000000,
-        1048576
-       ],
-       [],
-       []
-      ],
-      "pcode_op_ref": {
-       "address_offset": 1048664,
-       "binary_id": "B3",
-       "block_index": 5,
-       "function_entry_offset": 1048576,
-       "function_entry_space": "ram",
-       "input_sizes": [
-        4,
-        4
-       ],
-       "kind": "pcode_op",
-       "local_op_ordinal": 23,
-       "mnemonic": "INT_MULT",
-       "opcode": 32,
-       "output_size": 4,
-       "program_uid": 1001000000000,
-       "seq_order": 23,
-       "seq_time": 160,
-       "target_offset": 1048664,
+       "seq_order": 19,
+       "seq_time": 158,
+       "target_offset": 1048660,
        "target_space": "ram"
       },
       "surface": "return_value"
@@ -501,7 +377,7 @@
       "pcode_time": 94,
       "return_kind": "exact",
       "validation_blockers": [],
-      "value": "((((((25 * (NEON_ext(((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), ((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), 8, 1) & 4294967295)) * (25 * ((NEON_ext(((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), ((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), 8, 1) >> 32) & 4294967295))) * 5) + (param_1 * 2)) + (((int((param_1 - 1)) * int((param_1 - 2))) >> 1) & 4294967295)) + 4294967295)"
+      "value": "((((((25 * (@ha2e16a94 & 4294967295)) * (25 * ((@ha2e16a94_1 >> 32) & 4294967295))) * 5) + (param_1 * 2)) + (((int((param_1 - 1)) * int((param_1 - 2))) >> 1) & 4294967295)) + 4294967295) where @ha2e16a94 = NEON_ext(((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 96) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 64) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 32) | ((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5))))), ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 96) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 64) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 32) | ((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5))))), 8, 1); @ha2e16a94_1 = NEON_ext(((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 96) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 64) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 32) | ((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5))))), ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 96) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 64) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 32) | ((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5))))), 8, 1)"
      },
      {
       "acceptance_status": null,
@@ -533,9 +409,9 @@
       "pcode_identity": "001000a4:t94",
       "pcode_order": 2,
       "pcode_time": 94,
-      "return_kind": "phi_expansion",
+      "return_kind": "exact",
       "validation_blockers": [],
-      "value": "(((((25 * (NEON_ext(((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), ((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), 8, 1) & 4294967295)) * (25 * ((NEON_ext(((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), ((((1 * 5) * (1 * 5)) << 96) | ((((1 * 5) * (1 * 5)) << 64) | ((((1 * 5) * (1 * 5)) << 32) | ((1 * 5) * (1 * 5))))), 8, 1) >> 32) & 4294967295))) + (param_1 * 2)) + (((int((param_1 - 1)) * int((param_1 - 2))) >> 1) & 4294967295)) + 4294967295)"
+      "value": "(((((25 * (@ha2e16a94 & 4294967295)) * (25 * ((@ha2e16a94_1 >> 32) & 4294967295))) + (param_1 * 2)) + (((int((param_1 - 1)) * int((param_1 - 2))) >> 1) & 4294967295)) + 4294967295) where @ha2e16a94 = NEON_ext(((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 96) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 64) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 32) | ((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5))))), ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 96) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 64) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 32) | ((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5))))), 8, 1); @ha2e16a94_1 = NEON_ext(((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 96) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 64) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 32) | ((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5))))), ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 96) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 64) | ((((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5)) << 32) | ((PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5) * (PHI(1 if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular * 5) if (((not (param_1 < 1)) and (not (param_1 < 8))) and ((PHI((param_1 & 4294967288) if ((not (param_1 < 1)) and (not (param_1 < 8))), (phi_circular - 8) if ((not (param_1 < 1)) and (not (param_1 < 8)))) - 8) != 0))) * 5))))), 8, 1)"
      },
      {
       "acceptance_status": null,
