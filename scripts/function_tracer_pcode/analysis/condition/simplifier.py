@@ -12,7 +12,19 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
-from scripts.function_tracer_pcode.core.structural import expression_provenance_key
+from scripts.function_tracer_pcode.core.structural import (
+    ConditionsSignature,
+    expression_provenance_key,
+)
+from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
+    cache_lookup,
+    cache_store,
+    clear_condition_caches,
+)
+from scripts.function_tracer_pcode.analysis.condition.query_identity import (
+    ImplicationIdentity,
+    SolverQueryIdentity,
+)
 from scripts.function_tracer_pcode.analysis.debug import summarize_expression, summarize_condition
 from scripts.function_tracer_pcode.analysis.condition.bitvector import (
     eval_constant_raw,
@@ -39,6 +51,8 @@ from scripts.function_tracer_pcode.analysis.condition.simplifier_support import 
     BooleanAtom,
     BooleanLiteral,
     BooleanClause,
+    note_reentry_guard_hit,
+    reentry_guard_scope,
 )
 
 
@@ -134,17 +148,29 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
     _debug_suppressed: bool = False
     _DEBUG_REPEAT_LIMIT: int = 8
     _debug_repeat_counts: Dict[Tuple[str, str], int] = {}
-    _active_normalization_keys: Set[Tuple[object, ...]] = set()
+    # 再入 guard（今の呼び出しの途中にある問い。cache ではないので pair を持ち越さない:
+    # 呼び出しが終われば空）。key は cache と同じ identity（bucket → 完全比較）。
+    _active_normalization_keys: Set[SolverQueryIdentity] = set()
     _active_reduction_keys: Set[Tuple[int, Tuple[int, ...]]] = set()
-    _active_implied_keys: Set[Tuple[Tuple[int, ...], Tuple[int, ...]]] = set()
-    _active_formula_implies_keys: Set[Tuple[object, ...]] = set()
-    _formula_implies_cache: Dict[Tuple[object, ...], Optional[bool]] = {}
-    _implied_cache: Dict[Tuple[Tuple[int, ...], int], Optional[bool]] = {}
+    _active_implied_keys: Set[ImplicationIdentity] = set()
+    _active_formula_implies_keys: Set[SolverQueryIdentity] = set()
+    # Issue #105 PR-105-A: 判定の cache は pair の store（`condition_cache`）の表。
+    # class 属性の process 寿命の cache は持たない。conjunction の充足不能性
+    # （`_formula_is_unsat` / `_formula_implies` の共通の問い）と含意の問いの 2 つだけ。
+    CONJUNCTION_UNSAT_TABLE: str = "simplifier.conjunction_unsat"
+    IMPLIED_TABLE: str = "simplifier.implied"
     _FORMULA_IMPLIES_CACHE_LIMIT: int = 8192
     _IMPLIED_CACHE_LIMIT: int = 8192
     _CONTEXTUAL_REDUCTION_MAX_ITERATIONS: int = 4
     _CONTEXTUAL_REDUCTION_MAX_CONDITIONS: int = 64
     
+    @classmethod
+    def reset_caches(cls) -> None:
+        """今の pair の store から、条件簡約の表を消す（pair 境界の scope とは別に使える）。"""
+
+        clear_condition_caches((cls.CONJUNCTION_UNSAT_TABLE, cls.IMPLIED_TABLE))
+        ConditionSMTOracle.reset_caches()
+
     @classmethod
     def _conditions_structurally_equal(cls, left: Condition, right: Condition) -> bool:
         if left.negated != right.negated:
@@ -343,95 +369,105 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         prefer_solver: bool = False,
     ) -> bool:
         context_list = list(context_conditions or [])
-        context_signature = tuple(cls._safe_condition_ids(context_list))
-        condition_signature = cls._safe_condition_id(condition)
-        cache_key = (context_signature, condition_signature)
+        if len(context_list) > cls._CONTEXTUAL_REDUCTION_MAX_CONDITIONS:
+            return False
+        cache_key = ImplicationIdentity.of(condition, context_list, implied_conditions)
         if cache_key in cls._active_implied_keys:
+            note_reentry_guard_hit()
             return False
-        if len(cache_key[0]) > cls._CONTEXTUAL_REDUCTION_MAX_CONDITIONS:
-            return False
-        if cache_key in cls._implied_cache:
-            return bool(cls._implied_cache[cache_key])
-
-        def _store_implied_cache(result: bool) -> bool:
-            if len(cls._implied_cache) >= cls._IMPLIED_CACHE_LIMIT:
-                cls._implied_cache.clear()
-            cls._implied_cache[cache_key] = result
-            return result
+        # 覚えてよい key か（比較できない graph を含まないか）は表が key の型で判定する
+        found, cached = cache_lookup(cls.IMPLIED_TABLE, cache_key, limit=cls._IMPLIED_CACHE_LIMIT)
+        if found:
+            return bool(cached)
 
         cls._active_implied_keys.add(cache_key)
         try:
-            formula_result: Optional[bool] = None
-            if context_list:
-                formula_result = cls._formula_implies(context_list, condition)
-                if formula_result is True:
-                    return _store_implied_cache(True)
-
-            implied_conditions = implied_conditions or set()
-            try:
-                normalized = ConditionNormalizer.normalize_for_contradiction(condition)
-            except _CONDITION_RECOVERABLE_ERRORS:
-                normalized = None
-            if normalized is not None and normalized in implied_conditions:
-                return _store_implied_cache(True)
-
-            scalar_fact = cls._extract_scalar_constraint(condition)
-            if scalar_fact is not None and context_list:
-                try:
-                    scalar_implied = cls._scalar_constraint_is_implied(
-                        scalar_fact,
-                        list(context_list or []),
-                    )
-                except _CONDITION_RECOVERABLE_ERRORS:
-                    scalar_implied = False
-                if scalar_implied:
-                    return _store_implied_cache(True)
-
-            expr = getattr(condition, "expression", None)
-            if (
-                getattr(condition, "negated", False) is False
-                and expr is not None
-                and getattr(expr, "expr_type", None) == ExpressionType.BINARY_OP
-                and getattr(expr, "operator", None) == "BOOL_AND"
-            ):
-                stack = [Condition(condition.expression.operands[0], False), Condition(condition.expression.operands[1], False)]
-                visited_ids: Set[int] = set()
-                while stack:
-                    current = stack.pop()
-                    if current is None:
-                        continue
-                    if id(current) in visited_ids:
-                        continue
-                    visited_ids.add(id(current))
-                    current_expr = getattr(current, "expression", None)
-                    if (
-                        getattr(current, "negated", False) is False
-                        and current_expr is not None
-                        and getattr(current_expr, "expr_type", None) == ExpressionType.BINARY_OP
-                        and getattr(current_expr, "operator", None) == "BOOL_AND"
-                    ):
-                        operands = list(getattr(current_expr, "operands", None) or [])
-                        if len(operands) >= 2:
-                            try:
-                                left = Condition(operands[0], False)
-                                right = Condition(operands[1], False)
-                            except _CONDITION_RECOVERABLE_ERRORS:
-                                return _store_implied_cache(False)
-                            stack.append(left)
-                            stack.append(right)
-                        continue
-
-                    try:
-                        if ConditionNormalizer.normalize_for_contradiction(current) not in implied_conditions:
-                            return _store_implied_cache(False)
-                    except _CONDITION_RECOVERABLE_ERRORS:
-                        return _store_implied_cache(False)
-                return _store_implied_cache(True)
-
-            implied_result = formula_result is True
-            return _store_implied_cache(implied_result)
+            with reentry_guard_scope() as guard:
+                result = cls._compute_condition_is_implied(
+                    condition, context_list, implied_conditions
+                )
         finally:
             cls._active_implied_keys.discard(cache_key)
+        # 再入 guard で打ち切った問いを材料にした答えは覚えない（`simplifier_support`）
+        if guard.clean:
+            cache_store(cls.IMPLIED_TABLE, cache_key, result, limit=cls._IMPLIED_CACHE_LIMIT)
+        return result
+
+    @classmethod
+    def _compute_condition_is_implied(
+        cls,
+        condition: Condition,
+        context_list: List[Condition],
+        implied_conditions: Optional[Set[Tuple[str, str, str, bool]]],
+    ) -> bool:
+        formula_result: Optional[bool] = None
+        if context_list:
+            formula_result = cls._formula_implies(context_list, condition)
+            if formula_result is True:
+                return True
+
+        implied_conditions = implied_conditions or set()
+        try:
+            normalized = ConditionNormalizer.normalize_for_contradiction(condition)
+        except _CONDITION_RECOVERABLE_ERRORS:
+            normalized = None
+        if normalized is not None and normalized in implied_conditions:
+            return True
+
+        scalar_fact = cls._extract_scalar_constraint(condition)
+        if scalar_fact is not None and context_list:
+            try:
+                scalar_implied = cls._scalar_constraint_is_implied(
+                    scalar_fact,
+                    list(context_list or []),
+                )
+            except _CONDITION_RECOVERABLE_ERRORS:
+                scalar_implied = False
+            if scalar_implied:
+                return True
+
+        expr = getattr(condition, "expression", None)
+        if (
+            getattr(condition, "negated", False) is False
+            and expr is not None
+            and getattr(expr, "expr_type", None) == ExpressionType.BINARY_OP
+            and getattr(expr, "operator", None) == "BOOL_AND"
+        ):
+            stack = [Condition(condition.expression.operands[0], False), Condition(condition.expression.operands[1], False)]
+            visited_ids: Set[int] = set()
+            while stack:
+                current = stack.pop()
+                if current is None:
+                    continue
+                if id(current) in visited_ids:
+                    continue
+                visited_ids.add(id(current))
+                current_expr = getattr(current, "expression", None)
+                if (
+                    getattr(current, "negated", False) is False
+                    and current_expr is not None
+                    and getattr(current_expr, "expr_type", None) == ExpressionType.BINARY_OP
+                    and getattr(current_expr, "operator", None) == "BOOL_AND"
+                ):
+                    operands = list(getattr(current_expr, "operands", None) or [])
+                    if len(operands) >= 2:
+                        try:
+                            left = Condition(operands[0], False)
+                            right = Condition(operands[1], False)
+                        except _CONDITION_RECOVERABLE_ERRORS:
+                            return False
+                        stack.append(left)
+                        stack.append(right)
+                    continue
+
+                try:
+                    if ConditionNormalizer.normalize_for_contradiction(current) not in implied_conditions:
+                        return False
+                except _CONDITION_RECOVERABLE_ERRORS:
+                    return False
+            return True
+
+        return formula_result is True
 
     @classmethod
     def _expression_can_collapse_to_boolean_constant(
@@ -498,6 +534,7 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         active_reduction_keys = set() if _active_reduction_keys is None else _active_reduction_keys
         reduction_key = cls._reduction_context_key(expr, conditions)
         if reduction_key in active_reduction_keys:
+            note_reentry_guard_hit()
             if cls._debug_available():
                 cls._debug_print(
                     "Detected circular reduction context; skip recursion for "
@@ -649,11 +686,11 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
                 "solver_backed": False,
             }
 
-        guard_key = cls._condition_object_cache_key(conditions)
-        use_nonrecursive = (
-            guard_key in cls._active_normalization_keys
-            or cls._should_skip_contextual_reduction(conditions)
-        )
+        guard_key = SolverQueryIdentity.from_conditions(conditions)
+        reentered = guard_key in cls._active_normalization_keys
+        if reentered:
+            note_reentry_guard_hit()
+        use_nonrecursive = reentered or cls._should_skip_contextual_reduction(conditions)
         if use_nonrecursive:
             return cls._normalize_condition_list_nonrecursive(conditions)
 
@@ -876,7 +913,8 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
     ) -> Dict[str, object]:
         flattened: List[Condition] = []
         contradiction_indices: Set[int] = set()
-        seen_keys: Set[Tuple[object, ...]] = set()
+        # 重複は条件の structural identity（bucket = candidate hash → `Condition.equals`）
+        seen_conditions: Set[Condition] = set()
         selected: List[Condition] = []
 
         for cond in conditions:
@@ -890,13 +928,9 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
                 flattened.append(flat)
 
         for cond in flattened:
-            try:
-                key = cls._safe_condition_cache_key([cond], budget=128)[0]
-            except _CONDITION_RECOVERABLE_ERRORS:
-                key = ("unsafe", cls._safe_condition_id(cond))
-            if key in seen_keys:
+            if cond in seen_conditions:
                 continue
-            seen_keys.add(key)
+            seen_conditions.add(cond)
             if cls.evaluate_condition_truth(cond) is False:
                 contradiction_indices.add(len(selected))
             for other_index, other in enumerate(selected):
@@ -919,15 +953,6 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         }
 
     @classmethod
-    def _condition_object_cache_key(
-        cls,
-        conditions: Iterable[Condition],
-    ) -> Tuple[Tuple[object, ...], ...]:
-        keys = [cls._safe_condition_id(cond) for cond in (conditions or []) if cond is not None]
-        keys.sort(key=repr)
-        return tuple(keys)
-
-    @classmethod
     def _should_skip_contextual_reduction(
         cls,
         conditions: Iterable[Condition],
@@ -938,7 +963,7 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
             try:
                 key = condition_key(cond, budget=96)
             except _CONDITION_RECOVERABLE_ERRORS:
-                key = ("unsafe", cls._safe_condition_id(cond))
+                key = ("unsafe",)
             if key_contains_placeholder(key):
                 return True
             metrics = cls._condition_metrics(cond)
@@ -1054,6 +1079,9 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         conditions: Iterable[Condition],
     ) -> List[Condition]:
         flattened: List[Condition] = []
+        # 重複の判定は bucket（candidate hash）→ `Condition.equals`（完全比較）。
+        # 条件どうしの総当たりにしない（Issue #105 の B3_B11 の kill 位置）。
+        seen: Set[Condition] = set()
         for condition in list(conditions or []):
             if condition is None:
                 continue
@@ -1061,8 +1089,9 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
                 truth_value = cls.evaluate_condition_truth(flat)
                 if truth_value is True:
                     continue
-                if any(flat.equals(existing) for existing in flattened):
+                if flat in seen:
                     continue
+                seen.add(flat)
                 flattened.append(flat)
 
         ranked_conditions = sorted(
@@ -1111,15 +1140,16 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
     def object_centric_conditions_signature(
         cls,
         conditions: Iterable[Condition],
-    ) -> Tuple[object, ...]:
-        signature = []
-        for condition in cls.build_object_centric_condition_basis(conditions):
-            try:
-                signature.append(condition.structural_key(budget=256))
-            except _CONDITION_RECOVERABLE_ERRORS:
-                signature.append(("unsafe", cls._safe_condition_id(condition)))
-        signature.sort(key=repr)
-        return tuple(signature)
+    ) -> ConditionsSignature:
+        """object-centric basis の条件の多重集合の structural identity（dedup / dict key 用）。
+
+        Issue #105 PR-105-A: 旧実装は `condition_key(budget=256)` の tuple を `repr` 順に
+        並べた値で、予算を超えた別々の条件が同じ placeholder になって一致していた。
+        `ConditionsSignature` は bucket（candidate hash）→ `Condition.equals`（完全比較）
+        で一致を決める（予算超過は不一致）。
+        """
+
+        return ConditionsSignature(cls.build_object_centric_condition_basis(conditions))
 
     @classmethod
     def object_centric_is_contradiction(
@@ -1130,14 +1160,7 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         if not basis:
             return False
 
-        try:
-            unsat_cache_key = ("raw-unsat", cls._safe_condition_cache_key(basis))
-        except _CONDITION_RECOVERABLE_ERRORS:
-            unsat_cache_key = ("raw-unsat",)
-        solver_unsat = ConditionSMTOracle.conjunction_is_unsat(
-            basis,
-            cache_key=unsat_cache_key,
-        )
+        solver_unsat = ConditionSMTOracle.conjunction_is_unsat(basis)
         if solver_unsat is not None:
             return solver_unsat
 

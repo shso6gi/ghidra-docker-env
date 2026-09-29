@@ -109,16 +109,11 @@ class _AuthorityConditionSMTOracle:
     """Cache-free facade used only inside authority-bearing proof namespaces."""
 
     @classmethod
-    def conjunction_is_unsat(
-        cls,
-        conditions: Any,
-        *,
-        cache_key: Optional[Tuple[object, ...]] = None,
-    ) -> Optional[bool]:
+    def conjunction_is_unsat(cls, conditions: Any) -> Optional[bool]:
+        # 記憶した判定も書き換えの使い回しも読まない（`use_cache=False`）。
         return _ORIGINAL_CONJUNCTION_IS_UNSAT(
             ConditionSMTOracle,
             conditions,
-            cache_key=cache_key,
             use_cache=False,
         )
 

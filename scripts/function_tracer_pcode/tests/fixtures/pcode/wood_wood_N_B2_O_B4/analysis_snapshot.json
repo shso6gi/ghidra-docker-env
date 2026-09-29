@@ -529,12 +529,12 @@
      {
       "acceptance_status": null,
       "address": "00100050",
-      "branch_index": 103000,
+      "branch_index": 104000,
       "conditions": [
        "((4617315517961601024 - param_1) FLOAT_EQUAL 0)",
+       "((4611686018427387904 - param_3) FLOAT_EQUAL 0)",
        "(((param_2 - (param_1 * param_1)) * 4621819117588971520) FLOAT_EQUAL 4621819117588971520)",
-       "(not ((4611686018427387904 - param_3) FLOAT_EQUAL 0))",
-       "(not FLOAT_NAN(((param_2 - (param_1 * param_1)) * 4621819117588971520)))"
+       "(not (((param_4 - (param_3 * param_3)) * 4620693217682128896) FLOAT_EQUAL 0))"
       ],
       "order_index": 1,
       "pcode_identity": "00100050:t114",
@@ -547,12 +547,11 @@
      {
       "acceptance_status": null,
       "address": "00100050",
-      "branch_index": 104000,
+      "branch_index": 103000,
       "conditions": [
        "((4617315517961601024 - param_1) FLOAT_EQUAL 0)",
-       "((4611686018427387904 - param_3) FLOAT_EQUAL 0)",
        "(((param_2 - (param_1 * param_1)) * 4621819117588971520) FLOAT_EQUAL 4621819117588971520)",
-       "(not (((param_4 - (param_3 * param_3)) * 4620693217682128896) FLOAT_EQUAL 0))"
+       "(not ((4611686018427387904 - param_3) FLOAT_EQUAL 0))"
       ],
       "order_index": 2,
       "pcode_identity": "00100050:t114",

@@ -269,7 +269,7 @@ def test_e0c_condition_oracle_does_not_swallow_a_limitation_from_the_solver():
     with patch.object(ConditionSMTOracle, "_z3", fake_z3):
         with patch.object(
             ConditionSMTOracle, "_build_script",
-            classmethod(lambda cls, conditions: (True, "(check-sat)")),
+            classmethod(lambda cls, conditions, **_kwargs: (True, "(check-sat)")),
         ):
             with pytest.raises(AnalysisLimitation):
                 ConditionSMTOracle.conjunction_is_unsat([], use_cache=False)

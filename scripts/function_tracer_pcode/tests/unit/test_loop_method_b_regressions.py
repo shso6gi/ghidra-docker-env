@@ -629,7 +629,7 @@ def test_object_centric_coverage_falls_back_to_legacy_query_on_solver_inconclusi
 
     monkeypatch.setattr(
         "scripts.function_tracer_pcode.analysis.condition.smt_oracle.ConditionSMTOracle.conjunction_is_unsat",
-        lambda conditions, cache_key=None: None,
+        lambda conditions, use_cache=True: None,
     )
 
     result = strategy._check_return_case_coverage_gap(

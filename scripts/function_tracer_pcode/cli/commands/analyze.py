@@ -56,6 +56,9 @@ def analyze_and_output(
 ):
     """関数を解析して結果を出力する。"""
     from scripts.function_tracer_pcode.core import Expression
+    from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
+        condition_cache_scope,
+    )
 
     Expression.set_constant_format(const_format)
 
@@ -71,7 +74,9 @@ def analyze_and_output(
 
         processed_count = 0
         for func_name in function_names:
-            analysis = analyzer.analyze_function_by_name(func_name, timeout)
+            # Issue #105 PR-105-A: 条件簡約の cache は解析 1 単位（関数 1 つ）の寿命
+            with condition_cache_scope():
+                analysis = analyzer.analyze_function_by_name(func_name, timeout)
             if analysis:
                 content = OutputFormatter.format(analysis, output_format)
                 output_result(content, output_file, quiet)
