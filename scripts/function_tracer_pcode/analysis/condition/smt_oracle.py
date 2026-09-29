@@ -13,7 +13,14 @@ from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
     clear_condition_caches,
     root_memo,
 )
+from scripts.function_tracer_pcode.core.budget_policy import (
+    FallbackBudgetKind,
+    pair_fallback_meter,
+)
 from scripts.function_tracer_pcode.core.condition_metrics import note, observe
+from scripts.function_tracer_pcode.analysis.condition.simplifier_support import (
+    note_budget_fallback,
+)
 from scripts.function_tracer_pcode.analysis.condition.query_identity import (
     QUERY_IDENTITY_SCHEMA,
     RewriteIdentity,
@@ -187,11 +194,18 @@ class ConditionSMTOracle:
        違い）は solver を呼ばずに `None`（覚えない）
     3. 判定の cache を identity で引く（bucket → 完全比較）。**記憶した `None` も hit**
        で、solver を呼び直さない（未判定のまま返す。`True` / `False` にはしない）
-    4. miss のときだけ script を組み（symbol は identity の canonical な割当）、solver を
+    4. miss のときだけ、pair の query 予算（Issue #105 PR-105-B、`oracle_queries`）が
+       残っていれば script を組み（symbol は identity の canonical な割当）、solver を
        呼び、判定（`True` / `False` / `None`）を覚える。例外・限界は覚えない
+    5. 予算が尽きていれば solver を呼ばずに `None`（oracle 無し相当）。覚えない
 
-    の順。cache の保存と寿命は `condition_cache`、計測は `condition_metrics` が持つ。
+    の順。cache の保存と寿命は `condition_cache`、計測は `condition_metrics`、予算の
+    上限と pair あたりの消費は `core/budget_policy` が持つ。予算を 1 つ使うのは solver へ
+    query を発行する地点だけ（`oracle.queries` と同じ単位。cache hit は使わない）。
     """
+
+    #: query 予算が尽きた記録の site
+    QUERY_BUDGET_SITE = "smt_oracle.conjunction_is_unsat"
 
     QUERY_TIMEOUT_MS = 250
     #: 判定の表の上限（件数。重みの上限と合わせて古い順に捨てる: `condition_cache`）
@@ -248,6 +262,15 @@ class ConditionSMTOracle:
                     note("oracle.unknown_hit")
                 return cached
 
+        budget = pair_fallback_meter(FallbackBudgetKind.ORACLE_QUERIES)
+        if budget.exhausted:
+            # 尽きた後は script も組まない（solver を呼ばない。`None` は覚えない）。尽きたままなので
+            # 答えは呼ばれ方に依らない（上位の答えは覚えてよい: `simplifier_support`）
+            note_budget_fallback(
+                budget, site=cls.QUERY_BUDGET_SITE, fallback_taken="oracle_none", history_dependent=False
+            )
+            return None
+
         usable, script = cls._build_script(conditions, query=query, use_cache=use_cache)
         if not usable or script is None:
             return None
@@ -260,6 +283,12 @@ class ConditionSMTOracle:
         try:
             # Issue #161: query ごとに専用の solver context（他の query の履歴を持ち込まない）
             solver = isolated_solver(z3, script, int(cls.QUERY_TIMEOUT_MS))
+            # 予算を 1 つ使うのは発行の直前（`oracle.queries` と同じ地点）
+            if not budget.take():
+                note_budget_fallback(
+                    budget, site=cls.QUERY_BUDGET_SITE, fallback_taken="oracle_none", history_dependent=False
+                )
+                return None
             note("oracle.queries")
             started = time.monotonic()
             result = solver.check()

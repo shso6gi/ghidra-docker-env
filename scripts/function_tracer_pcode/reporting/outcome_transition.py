@@ -6,7 +6,7 @@ Usage::
     python3 -m scripts.function_tracer_pcode.reporting.outcome_transition \
         --before logs/EqBench/subset_before --after logs/EqBench/subset_after \
         [--json transition.json] [--changed-only] [--fail-on-change] \
-        [--axes] [--reason-sets] [--manifest] [--runtime-metrics]
+        [--axes] [--reason-sets] [--manifest] [--runtime-metrics] [--budget-events]
 
 The table counts how many pairs moved from each outcome in ``--before`` to
 each outcome in ``--after``; pairs present in only one tree are reported as
@@ -46,6 +46,18 @@ of them can move ``--fail-on-change``:
     informational: it never changes an exit code, it reports how much of each
     tree it could actually see, and a pair without a receipt is never read as
     zero seconds.
+
+Issue #105 / PR-105-B adds one more opt-in section:
+
+``--budget-events``
+    The decision-gate table of the condition-simplification fallback budgets:
+    for every pair whose result payload records a budget fallback on either
+    side (``diagnostics.condition_simplify`` counters ``budget.<type>.exceeded``),
+    the fallback count per budget type next to the outcome and the final reason
+    set of both runs.  A budget fallback is never an UNKNOWN reason, so this is
+    the only place a budget hit and the transition it may explain are read
+    together.  A pair with no readable payload is counted as unreadable, never
+    as zero hits.  Informational only.
 """
 
 from __future__ import annotations
@@ -773,13 +785,8 @@ def _reason_ids(reasons: Any) -> Tuple[str, ...]:
     return tuple(sorted(found))
 
 
-def final_reason_set(record: Optional[PairOutcome]) -> Optional[Tuple[str, ...]]:
-    """The last result payload's reason-id set, or ``None`` when unreadable.
-
-    ``None`` means "this pair produced no readable result payload" (a
-    wall-clock kill before the result was emitted, a truncated log, ...).  It
-    is never the same thing as an empty reason set.
-    """
+def final_result_payload(record: Optional[PairOutcome]) -> Optional[Mapping[str, Any]]:
+    """The last result payload in the pair log, or ``None`` when unreadable."""
     from scripts.function_tracer_pcode.reporting.unknown_reason_summary import (
         extract_result_payloads_from_text,
     )
@@ -797,7 +804,21 @@ def final_reason_set(record: Optional[PairOutcome]) -> Optional[Tuple[str, ...]]
         return None
     if not payloads:
         return None
-    return _reason_ids(payloads[-1].get("unknown_reasons"))
+    payload = payloads[-1]
+    return payload if isinstance(payload, Mapping) else None
+
+
+def final_reason_set(record: Optional[PairOutcome]) -> Optional[Tuple[str, ...]]:
+    """The last result payload's reason-id set, or ``None`` when unreadable.
+
+    ``None`` means "this pair produced no readable result payload" (a
+    wall-clock kill before the result was emitted, a truncated log, ...).  It
+    is never the same thing as an empty reason set.
+    """
+    payload = final_result_payload(record)
+    if payload is None:
+        return None
+    return _reason_ids(payload.get("unknown_reasons"))
 
 
 @dataclass(frozen=True)
@@ -1248,6 +1269,167 @@ def build_runtime_metrics(
 
 
 # --------------------------------------------------------------------------
+# Issue #105 / PR-105-B: condition-simplification budget fallbacks next to the
+# transition they may explain (the decision-gate table).
+# --------------------------------------------------------------------------
+
+BUDGET_COUNTER_PREFIX = "budget."
+BUDGET_COUNTER_SUFFIX = ".exceeded"
+
+
+def budget_fallbacks(payload: Optional[Mapping[str, Any]]) -> Optional[Dict[str, int]]:
+    """Fallback count per budget type of one result payload (``None``: no payload).
+
+    Read from the ``budget.<type>.exceeded`` counters, which count every fallback
+    (the ``budget_events`` list itself keeps only the first rows).
+    """
+    if payload is None:
+        return None
+    block = ((payload.get("diagnostics") or {}).get("condition_simplify") or {})
+    counters = block.get("counters") or {}
+    hits: Dict[str, int] = {}
+    for name, value in counters.items():
+        if (
+            isinstance(name, str)
+            and name.startswith(BUDGET_COUNTER_PREFIX)
+            and name.endswith(BUDGET_COUNTER_SUFFIX)
+            and isinstance(value, int)
+            and value > 0
+        ):
+            hits[name[len(BUDGET_COUNTER_PREFIX):-len(BUDGET_COUNTER_SUFFIX)]] = value
+    return dict(sorted(hits.items()))
+
+
+@dataclass(frozen=True)
+class BudgetEventRow:
+    key: PairKey
+    before_outcome: str
+    after_outcome: str
+    before_hits: Optional[Dict[str, int]]
+    after_hits: Optional[Dict[str, int]]
+    before_reasons: Optional[Tuple[str, ...]]
+    after_reasons: Optional[Tuple[str, ...]]
+
+    @property
+    def outcome_changed(self) -> bool:
+        return self.before_outcome != self.after_outcome
+
+    @property
+    def reasons_changed(self) -> bool:
+        return (
+            self.before_reasons is not None
+            and self.after_reasons is not None
+            and self.before_reasons != self.after_reasons
+        )
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "sample_identity": self.key[0],
+            "function_name": self.key[1],
+            "pair_id": f"{self.key[2]}_{self.key[3]}",
+            "before_outcome": self.before_outcome,
+            "after_outcome": self.after_outcome,
+            "before_budget_fallbacks": self.before_hits,
+            "after_budget_fallbacks": self.after_hits,
+            "outcome_changed": self.outcome_changed,
+            "reasons_changed": self.reasons_changed,
+            "before_reasons": None if self.before_reasons is None else list(self.before_reasons),
+            "after_reasons": None if self.after_reasons is None else list(self.after_reasons),
+        }
+
+
+@dataclass(frozen=True)
+class BudgetEventReport:
+    """Pairs with a budget fallback on either side, and how much could be read."""
+
+    pairs: int
+    before_unreadable: int
+    after_unreadable: int
+    rows: Tuple[BudgetEventRow, ...]
+
+    def totals(self, side: str) -> Dict[str, int]:
+        found: Counter = Counter()
+        for row in self.rows:
+            for budget, count in (getattr(row, f"{side}_hits") or {}).items():
+                found[budget] += count
+        return dict(sorted(found.items()))
+
+    def pairs_with_hits(self, side: str) -> int:
+        return sum(1 for row in self.rows if getattr(row, f"{side}_hits"))
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "pairs": self.pairs,
+            "before_unreadable_payloads": self.before_unreadable,
+            "after_unreadable_payloads": self.after_unreadable,
+            "before_pairs_with_fallback": self.pairs_with_hits("before"),
+            "after_pairs_with_fallback": self.pairs_with_hits("after"),
+            "before_fallbacks_by_budget": self.totals("before"),
+            "after_fallbacks_by_budget": self.totals("after"),
+            "rows_with_outcome_change": sum(1 for row in self.rows if row.outcome_changed),
+            "informational_only": True,
+            "rows": [row.as_dict() for row in self.rows],
+        }
+
+
+def build_budget_events(
+    before: Mapping[PairKey, PairOutcome],
+    after: Mapping[PairKey, PairOutcome],
+) -> BudgetEventReport:
+    rows: List[BudgetEventRow] = []
+    unreadable = {"before": 0, "after": 0}
+    keys = sorted(set(before) | set(after))
+    for key in keys:
+        records = {"before": before.get(key), "after": after.get(key)}
+        payloads = {side: final_result_payload(record) for side, record in records.items()}
+        for side, record in records.items():
+            if record is not None and payloads[side] is None:
+                unreadable[side] += 1
+        hits = {side: budget_fallbacks(payload) for side, payload in payloads.items()}
+        if not (hits["before"] or hits["after"]):
+            continue
+        rows.append(BudgetEventRow(
+            key=key,
+            before_outcome=records["before"].outcome if records["before"] else OUTCOME_MISSING,
+            after_outcome=records["after"].outcome if records["after"] else OUTCOME_MISSING,
+            before_hits=hits["before"],
+            after_hits=hits["after"],
+            before_reasons=None if payloads["before"] is None else _reason_ids(payloads["before"].get("unknown_reasons")),
+            after_reasons=None if payloads["after"] is None else _reason_ids(payloads["after"].get("unknown_reasons")),
+        ))
+    return BudgetEventReport(
+        pairs=len(keys),
+        before_unreadable=unreadable["before"],
+        after_unreadable=unreadable["after"],
+        rows=tuple(rows),
+    )
+
+
+def format_budget_events(report: BudgetEventReport) -> List[str]:
+    def _hits(value: Optional[Dict[str, int]]) -> str:
+        if value is None:
+            return "unreadable"
+        return ",".join(f"{name}={count}" for name, count in value.items()) or "-"
+
+    lines = [
+        "",
+        "Condition-simplification budget fallbacks (informational only -- a fallback is never an UNKNOWN reason):",
+        f"  pairs: {report.pairs}; unreadable payloads: before {report.before_unreadable}, "
+        f"after {report.after_unreadable} (not counted as zero fallbacks)",
+        f"  pairs with a fallback: before {report.pairs_with_hits('before')}, after {report.pairs_with_hits('after')}",
+        f"  fallbacks by budget: before {report.totals('before') or '{}'}, after {report.totals('after') or '{}'}",
+    ]
+    for row in report.rows:
+        sample, function, left, right = row.key
+        lines.append(
+            f"  {sample} {function} {left}_{right}: {row.before_outcome} -> {row.after_outcome}"
+            f" | fallbacks {_hits(row.before_hits)} -> {_hits(row.after_hits)}"
+            f"{' | reasons changed' if row.reasons_changed else ''}"
+        )
+    return lines
+
+
+# --------------------------------------------------------------------------
 # Rendering of the opt-in sections.
 # --------------------------------------------------------------------------
 
@@ -1441,6 +1623,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--budget-events", action="store_true",
+        help=(
+            "list every pair whose result records a condition-simplification budget "
+            "fallback, next to its outcome and reason set on both sides; informational only"
+        ),
+    )
+    parser.add_argument(
         "--runtime-metrics", action="store_true",
         help=(
             "add the wall-clock delta from .runtime-metrics/<pair>.runtime.json; "
@@ -1459,6 +1648,7 @@ def build_report_sections(
     manifest: bool = False,
     runtime_metrics: bool = False,
     ground_truth_manifest: Optional[Path] = None,
+    budget_events: bool = False,
 ) -> Tuple[TransitionReport, Dict[str, Any]]:
     """The transition report plus whichever opt-in sections were asked for.
 
@@ -1497,6 +1687,8 @@ def build_report_sections(
         sections["runtime_metrics"] = build_runtime_metrics(
             before_root, after_root, sorted(set(before) | set(after)),
         )
+    if budget_events:
+        sections["budget_events"] = build_budget_events(before, after)
     return report, sections
 
 
@@ -1510,6 +1702,8 @@ def format_sections(sections: Mapping[str, Any]) -> str:
         lines.extend(format_completeness(*sections["completeness"]))
     if "runtime_metrics" in sections:
         lines.extend(format_runtime_metrics(sections["runtime_metrics"]))
+    if "budget_events" in sections:
+        lines.extend(format_budget_events(sections["budget_events"]))
     return "\n".join(lines) + "\n" if lines else ""
 
 
@@ -1528,6 +1722,8 @@ def sections_as_dict(sections: Mapping[str, Any]) -> Dict[str, Any]:
         }
     if "runtime_metrics" in sections:
         payload["runtime_metrics"] = sections["runtime_metrics"].as_dict()
+    if "budget_events" in sections:
+        payload["budget_events"] = sections["budget_events"].as_dict()
     return payload
 
 
@@ -1543,6 +1739,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             axes=args.axes, reason_sets=args.reason_sets,
             manifest=args.manifest, runtime_metrics=args.runtime_metrics,
             ground_truth_manifest=args.ground_truth_manifest,
+            budget_events=args.budget_events,
         )
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)

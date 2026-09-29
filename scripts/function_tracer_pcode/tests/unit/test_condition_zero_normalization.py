@@ -16,7 +16,9 @@ from scripts.function_tracer_pcode.analysis.condition.simplifier import (
     ConditionRecoverableSimplificationError,
     ConditionSimplifier,
 )
+from scripts.function_tracer_pcode.analysis.condition.simplifier_cnf import SatVerdict
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.budget_policy import FallbackBudgetKind, FallbackBudgetMeter
 
 
 def _param(name: str) -> Expression:
@@ -439,7 +441,7 @@ def test_formula_unsat_recovers_from_cnf_satisfiability_failure(monkeypatch):
         Expression.binary_op("INT_EQUAL", _param("param_1"), _const(0))
     )
 
-    def _raise_recoverable(_clause_literals, _assignments=None):
+    def _raise_recoverable(_clause_literals, _assignments=None, _budget=None):
         raise ConditionRecoverableSimplificationError("unstable CNF sort key")
 
     monkeypatch.setattr(
@@ -449,10 +451,11 @@ def test_formula_unsat_recovers_from_cnf_satisfiability_failure(monkeypatch):
     )
     monkeypatch.setattr(
         ConditionSimplifier,
-        "_clauses_are_satisfiable",
-        classmethod(lambda cls, clause_literals, assignments=None: _raise_recoverable(
+        "_clauses_satisfiability",
+        classmethod(lambda cls, clause_literals, assignments, budget: _raise_recoverable(
             clause_literals,
             assignments,
+            budget,
         )),
     )
 
@@ -627,7 +630,8 @@ def test_cnf_literal_sort_does_not_turn_unproved_region_into_contradiction(monke
     )
 
     assert merged is not None
-    assert ConditionSimplifier._clauses_are_satisfiable([merged]) is True
+    unlimited = FallbackBudgetMeter(FallbackBudgetKind.DPLL_DECISIONS, None)
+    assert ConditionSimplifier._clauses_satisfiability([merged], None, unlimited) is SatVerdict.SAT
 
 
 def test_condition_simplifier_debug_budget_suppresses_heavy_summaries(monkeypatch):

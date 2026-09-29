@@ -29,13 +29,20 @@ test など）の挙動は変わらない。
 stop state は `PAIR_TERMINAL_LIMITATION`（phase 再解析・conditional lane・新規
 solver query をしない）。#131 の切り捨て marker（`ExpansionBudgetTruncation`）とは
 別物で、あちらは「削って続けた」事実の記録。
+
+Issue #105 PR-105-B: **fallback の予算**（`FallbackBudgetKind`: 条件簡約の DPLL の決定回数・
+条件 oracle の query 数）は別の型で、超えても限界にならない（その問いに答えないだけ）。ここが
+持つのは値（`BudgetPolicy` の field）と、上限との比較（`FallbackBudgetMeter.take()`、唯一の
+実装）と、pair あたりの消費の寿命（`pair_fallback_meter()`: 予算の scope と同じ寿命）だけ。
+何を 1 単位と数えるか・尽きたら何を返すか・記録（`condition_metrics.budget_event`）は
+数える側（`analysis/condition/`）が持つ。
 """
 
 from __future__ import annotations
 
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from enum import Enum
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, NoReturn, Optional, Tuple
 
@@ -68,6 +75,30 @@ class BudgetKind(str, Enum):
     SERIALIZATION_NODES = "serialization_nodes"
 
 
+class FallbackBudgetKind(str, Enum):
+    """超えたら **その問いに答えない方向へ fallback する** 予算（Issue #105 PR-105-B）。
+
+    `BudgetKind`（超えたら pair terminal な限界）とは別の型にしてある: fallback の予算は
+    限界にも UNKNOWN の reason にもならず、`enforce_budget` へは渡せない（`BudgetKind(...)`
+    が値を拒む）。数える単位・いつ数えるか・尽きたら何を返すかは数える側
+    （`analysis/condition/`）の責務で、ここは値と上限との比較（`FallbackBudgetMeter`）だけを持つ。
+    値は `BudgetPolicy` の field 名と同じ（1 対 1）。
+    """
+
+    #: CNF の DPLL（`simplifier_cnf._clauses_satisfiability`）の決定（分岐）の数。最上位の
+    #: 充足可能性判定 1 回あたり（再帰の枝で共有し、枝ごとに戻さない）
+    DPLL_DECISIONS = "dpll_decisions"
+    #: 条件 oracle（`ConditionSMTOracle.conjunction_is_unsat`）が solver へ実際に発行した
+    #: query の数。pair あたり（cache hit は数えない）
+    ORACLE_QUERIES = "oracle_queries"
+
+
+def _kind_value(kind: Any) -> str:
+    if isinstance(kind, FallbackBudgetKind):
+        return kind.value
+    return BudgetKind(kind).value
+
+
 def _check_limit(name: str, value: Any) -> Optional[int]:
     if value is None:
         return None
@@ -97,9 +128,12 @@ class BudgetPolicy:
     #: finalization bundle は最終 JSON の予算の中で、headroom の残りに収まるかを出力時に
     #: 確かめる（大きさの上限は authority の event stream の契約 #110 が無いと導けない）。
     envelope_headroom_bytes: int = 0
+    #: fallback の予算（`FallbackBudgetKind`。`None` は無制限）
+    dpll_decisions: Optional[int] = None
+    oracle_queries: Optional[int] = None
 
     def __post_init__(self) -> None:
-        for kind in BudgetKind:
+        for kind in (*BudgetKind, *FallbackBudgetKind):
             _check_limit(kind.value, getattr(self, kind.value))
         headroom = self.envelope_headroom_bytes
         if type(headroom) is not int or headroom < 0:
@@ -117,8 +151,10 @@ class BudgetPolicy:
     def unlimited(cls) -> "BudgetPolicy":
         return cls()
 
-    def limit(self, kind: BudgetKind) -> Optional[int]:
-        return getattr(self, BudgetKind(kind).value)
+    def limit(self, kind: Any) -> Optional[int]:
+        """`BudgetKind` か `FallbackBudgetKind` の上限（`None` は無制限）。"""
+
+        return getattr(self, _kind_value(kind))
 
     def exceeds(self, kind: BudgetKind, observed: int) -> bool:
         limit = self.limit(kind)
@@ -186,10 +222,53 @@ class BudgetObservations:
             }
 
 
+# ---------------------------------------------------------------------------
+# fallback の予算の消費（Issue #105 PR-105-B）
+# ---------------------------------------------------------------------------
+
+
+class FallbackBudgetMeter:
+    """fallback の予算 1 つ分の消費（**上限との比較の唯一の実装**）。
+
+    `take()` は 1 単位を使ってよければ数えて `True`、上限まで使い切っていれば数えずに
+    `False` を返す（上限 `limit` 単位までは使える。`None` は無制限で、数えるだけ）。
+    何を 1 単位と数えるか・`False` のときに何を返すかは持たない（呼ぶ側の責務）。
+    """
+
+    __slots__ = ("kind", "limit", "consumed", "_lock")
+
+    def __init__(self, kind: FallbackBudgetKind, limit: Optional[int]) -> None:
+        self.kind = FallbackBudgetKind(kind)
+        self.limit = _check_limit(self.kind.value, limit)
+        self.consumed = 0
+        self._lock = threading.Lock()
+
+    @classmethod
+    def for_active_policy(cls, kind: FallbackBudgetKind) -> "FallbackBudgetMeter":
+        """今の pair の policy の上限で、新しい消費を数え始める（1 回の問い合わせの予算）。"""
+
+        return cls(kind, active_budget_policy().limit(FallbackBudgetKind(kind)))
+
+    def take(self, amount: int = 1) -> bool:
+        with self._lock:
+            if self.limit is not None and self.consumed + amount > self.limit:
+                return False
+            self.consumed += amount
+            return True
+
+    @property
+    def exhausted(self) -> bool:
+        with self._lock:
+            return self.limit is not None and self.consumed >= self.limit
+
+
 @dataclass(frozen=True)
 class _BudgetScope:
     policy: BudgetPolicy
     observations: BudgetObservations
+    #: pair あたりの fallback の予算の消費（種類ごとに 1 つ、最初に使うときに作る）
+    pair_meters: Dict[FallbackBudgetKind, FallbackBudgetMeter] = field(default_factory=dict)
+    pair_meters_lock: Any = field(default_factory=threading.Lock)
 
 
 _SCOPE_LOCK = threading.Lock()
@@ -253,6 +332,24 @@ def observe_budget_usage(kind: BudgetKind, value: int, *, site: str) -> None:
     if scope is not None:
         # 観測値は owner の API で基底型の整数にしてから渡す（`observe` の `int()` と同じ値）
         scope.observations.observe(kind, live_values.as_int(value), site=site)
+
+
+def pair_fallback_meter(kind: FallbackBudgetKind) -> FallbackBudgetMeter:
+    """今の pair の fallback の予算の消費（pair の scope に 1 つ。次の pair へ持ち越さない）。
+
+    scope の外（pair 境界を通らない部品単体の呼び出し）では、その場限りの無制限の消費を
+    返す（数えても残らない: 従来どおり制限しない）。
+    """
+
+    kind = FallbackBudgetKind(kind)
+    scope = _active_scope()
+    if scope is None:
+        return FallbackBudgetMeter(kind, None)
+    with scope.pair_meters_lock:
+        meter = scope.pair_meters.get(kind)
+        if meter is None:
+            meter = scope.pair_meters[kind] = FallbackBudgetMeter(kind, scope.policy.limit(kind))
+        return meter
 
 
 def budget_observations() -> Dict[str, Any]:
@@ -608,6 +705,8 @@ def exceeded_budget_bound(
     """観測値を残し、上限を超えていればその上限を、そうでなければ `None` を返す（checkpoint の比較の
     半分: 上限の内側の checkpoint は限界の target / evidence を作らない）。"""
 
+    # 限界になる予算だけ（fallback の予算 `FallbackBudgetKind` は値を拒む: 限界にしない）
+    kind = BudgetKind(kind)
     observe_budget_usage(kind, observed, site=site)
     bound = active_budget_policy().limit(kind) if limit is None else limit
     if bound is not None and live_values.as_int(observed) > bound:
@@ -646,6 +745,9 @@ def enforce_budget(
 __all__ = [
     "BudgetKind",
     "BudgetObservations",
+    "FallbackBudgetKind",
+    "FallbackBudgetMeter",
+    "pair_fallback_meter",
     "BudgetPolicy",
     "active_budget_policy",
     "budget_observations",

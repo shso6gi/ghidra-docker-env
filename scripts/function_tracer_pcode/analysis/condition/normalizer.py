@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.core import (
     key_is_comparable,
     expression_key_or_identity,
 )
+from scripts.function_tracer_pcode.analysis.condition.condition_cache import root_memo
 
 
 class ConditionNormalizer:
@@ -22,6 +23,8 @@ class ConditionNormalizer:
     Expression構造を直接解析することで、より正確な正規化を実現。
     """
 
+    #: 比べられない key の代わりの key の root 単位の memo（`condition_cache`）
+    FALLBACK_KEY_MEMO = "normalizer.fallback_key"
     _EXPR_KEY_MAX_NODES = 48
     _EXPR_KEY_CACHE_LIMIT = 4096
     _CONTRADICTION_CACHE_LIMIT = 8192
@@ -451,7 +454,12 @@ class ConditionNormalizer:
         )
         if key_is_comparable(key):
             return key
-        return expression_key_or_identity(expr)
+        # Issue #105 PR-105-B: 小さい予算の key で比べられない（大きい）式の key は、式 object
+        # だけで決まる値なので pair の中で式 object ごとに 1 回だけ作る（expander は組み合わせ
+        # ごとに同じ式の署名を求め、毎回 256 node 分の key を作り直していた）
+        return root_memo(
+            ConditionNormalizer.FALLBACK_KEY_MEMO, expr, expression_key_or_identity
+        )
     
     @staticmethod
     def _is_constant_expr(expr: Expression) -> bool:
