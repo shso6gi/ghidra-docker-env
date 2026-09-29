@@ -320,11 +320,11 @@ _PERSISTED_IDENTITY_FIELDS = frozenset({
     "required_proof_id_refs", "cause_ref", "case_pair_ref", "target_occurrence_id",
 })
 _PERSISTED_IDENTITY_READERS = {
-    ("reporting/root_blocker_summary.py", "summarize_root_blockers"),
-    ("reporting/root_blocker_summary.py", "_blocker_id"),
-    ("reporting/root_blocker_summary.py", "_case_pair_ref"),
-    ("reporting/root_blocker_summary.py", "_add_occurrence"),
-    ("reporting/root_blocker_summary.py", "_add_cause_group"),
+    ("function_tracer_pcode/reporting/root_blocker_summary.py", "summarize_root_blockers"),
+    ("function_tracer_pcode/reporting/root_blocker_summary.py", "_blocker_id"),
+    ("function_tracer_pcode/reporting/root_blocker_summary.py", "_case_pair_ref"),
+    ("function_tracer_pcode/reporting/root_blocker_summary.py", "_add_occurrence"),
+    ("function_tracer_pcode/reporting/root_blocker_summary.py", "_add_cause_group"),
 }
 
 
@@ -332,14 +332,18 @@ def test_only_registered_reporting_functions_read_persisted_identity_fields():
     """新しい cross-process consumer が、昇格点を通さずに永続化した key を比べ始めないこと。"""
 
     readers = set()
-    for path in sorted((PACKAGE_ROOT / "reporting").rglob("*.py")):
+    # 結果 JSON を読む側: package の reporting と、package 外の評価 tool（`scripts/eqbench`）
+    paths = sorted((PACKAGE_ROOT / "reporting").rglob("*.py")) + sorted(
+        (PACKAGE_ROOT.parent / "eqbench").rglob("*.py")
+    )
+    for path in paths:
         tree = ast.parse(path.read_text(encoding="utf-8"))
 
         def visit(node, function):
             for child in ast.iter_child_nodes(node):
                 name = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else function
                 if isinstance(child, ast.Constant) and child.value in _PERSISTED_IDENTITY_FIELDS:
-                    readers.add((str(path.relative_to(PACKAGE_ROOT)), function))
+                    readers.add((str(path.relative_to(PACKAGE_ROOT.parent)), function))
                 visit(child, name)
 
         visit(tree, "<module>")
