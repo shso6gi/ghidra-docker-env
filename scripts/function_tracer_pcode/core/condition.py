@@ -263,17 +263,15 @@ class Condition:
         if not conditions:
             return None
 
+        # 重複の判定は bucket（`__hash__` = candidate hash）→ 完全比較（`__eq__` =
+        # `equals`）。条件どうしの総当たりにしない（Issue #105）。先に出た条件を残す。
         unique: List[Condition] = []
+        seen: set = set()
         for cond in conditions:
-            if cond is None:
+            if cond is None or cond in seen:
                 continue
-            is_dup = False
-            for existing in unique:
-                if cond.equals(existing):
-                    is_dup = True
-                    break
-            if not is_dup:
-                unique.append(cond)
+            seen.add(cond)
+            unique.append(cond)
 
         if len(unique) == 0:
             return None

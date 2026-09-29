@@ -5,7 +5,17 @@ from __future__ import annotations
 from typing import Iterable, List, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core import Expression, Condition, ExpressionType
 from scripts.function_tracer_pcode.core.structural import expression_provenance_key
+from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
+    cache_lookup,
+    cache_store,
+    root_memo,
+)
+from scripts.function_tracer_pcode.core.condition_metrics import (
+    note_dpll_decision,
+    satisfiability_call,
+)
 from scripts.function_tracer_pcode.analysis.condition.normalizer import ConditionNormalizer
+from scripts.function_tracer_pcode.analysis.condition.query_identity import SolverQueryIdentity
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
 from scripts.function_tracer_pcode.analysis.condition.simplifier_support import (
     ConditionRecoverableSimplificationError,
@@ -13,6 +23,8 @@ from scripts.function_tracer_pcode.analysis.condition.simplifier_support import 
     BooleanAtom,
     BooleanLiteral,
     BooleanClause,
+    note_reentry_guard_hit,
+    reentry_guard_scope,
 )
 
 
@@ -45,15 +57,18 @@ class CnfReasoningMixin:
         merged.sort(key=cls._literal_sort_key)
         return tuple(merged)
 
+    #: literal の項 1 つの並べ替え key（項 object ごとの memo。値は項だけで決まる）
+    TERM_SORT_KEY_MEMO = "cnf.term_sort_key"
+
     @classmethod
     def _literal_sort_key(cls, literal: BooleanLiteral) -> Tuple[object, ...]:
         atom, polarity = literal
         try:
             left, op, right = atom
             return (
-                cls._total_sort_key(cls._atom_term_sort_key(left)),
+                cls._term_total_sort_key(left),
                 str(op),
-                cls._total_sort_key(cls._atom_term_sort_key(right)),
+                cls._term_total_sort_key(right),
                 bool(polarity),
             )
         except _CONDITION_RECOVERABLE_ERRORS as exc:
@@ -62,7 +77,37 @@ class CnfReasoningMixin:
             ) from exc
 
     @classmethod
-    def _atom_term_sort_key(cls, term: object) -> Tuple[object, ...]:
+    def _term_total_sort_key(cls, term: object) -> Tuple[object, ...]:
+        """項の全順序の key（`_total_sort_key(_atom_term_sort_key(term))`）。
+
+        Issue #105 PR-105-A: 項は正規化の構造 key（部分 key を共有する入れ子の tuple）で、
+        DPLL の 1 手ごとに節の literal を並べ直すたびに作り直していた。値は項 object だけで
+        決まる（tuple は不変、式は凍結済み）ので、pair の cache scope の中では項 object ごとに
+        1 回だけ作る（`root_memo`、object を保持するので `id()` の再利用で取り違えない）。
+        作るときも共有された部分 key を 1 回だけ辿る（木として展開しない）。値と順序は従来と同じ。
+        """
+
+        return root_memo(cls.TERM_SORT_KEY_MEMO, term, cls._build_term_total_sort_key)
+
+    @classmethod
+    def _build_term_total_sort_key(cls, term: object) -> Tuple[object, ...]:
+        return cls._total_sort_key(cls._atom_term_sort_key(term, {}), {})
+
+    @classmethod
+    def _atom_term_sort_key(cls, term: object, _memo: Optional[Dict[int, Tuple[object, ...]]] = None) -> Tuple[object, ...]:
+        if isinstance(term, (tuple, list, dict)) and _memo is not None:
+            cached = _memo.get(id(term))
+            if cached is not None:
+                return cached[1]
+            key = cls._atom_term_sort_key_uncached(term, _memo)
+            _memo[id(term)] = (term, key)
+            return key
+        return cls._atom_term_sort_key_uncached(term, _memo)
+
+    @classmethod
+    def _atom_term_sort_key_uncached(
+        cls, term: object, _memo: Optional[Dict[int, Tuple[object, ...]]]
+    ) -> Tuple[object, ...]:
         if isinstance(term, Expression):
             return ("expr", expression_provenance_key(term, safe_budget=256))
         if term is None:
@@ -70,14 +115,14 @@ class CnfReasoningMixin:
         if isinstance(term, (str, int, bool, float)):
             return (type(term).__name__, term)
         if isinstance(term, tuple):
-            return ("tuple", tuple(cls._atom_term_sort_key(item) for item in term))
+            return ("tuple", tuple(cls._atom_term_sort_key(item, _memo) for item in term))
         if isinstance(term, list):
-            return ("list", tuple(cls._atom_term_sort_key(item) for item in term))
+            return ("list", tuple(cls._atom_term_sort_key(item, _memo) for item in term))
         if isinstance(term, dict):
             entries = [
                 (
-                    cls._atom_term_sort_key(key),
-                    cls._atom_term_sort_key(value),
+                    cls._atom_term_sort_key(key, _memo),
+                    cls._atom_term_sort_key(value, _memo),
                 )
                 for key, value in term.items()
             ]
@@ -101,7 +146,20 @@ class CnfReasoningMixin:
         )
 
     @classmethod
-    def _total_sort_key(cls, value: object) -> Tuple[object, ...]:
+    def _total_sort_key(cls, value: object, _memo: Optional[Dict[int, Tuple[object, ...]]] = None) -> Tuple[object, ...]:
+        if isinstance(value, (tuple, list, dict)) and _memo is not None:
+            cached = _memo.get(id(value))
+            if cached is not None:
+                return cached[1]
+            key = cls._total_sort_key_uncached(value, _memo)
+            _memo[id(value)] = (value, key)
+            return key
+        return cls._total_sort_key_uncached(value, _memo)
+
+    @classmethod
+    def _total_sort_key_uncached(
+        cls, value: object, _memo: Optional[Dict[int, Tuple[object, ...]]]
+    ) -> Tuple[object, ...]:
         if value is None:
             return ("none",)
         if isinstance(value, bool):
@@ -113,17 +171,17 @@ class CnfReasoningMixin:
         if isinstance(value, str):
             return ("str", value)
         if isinstance(value, tuple):
-            return ("tuple", tuple(cls._total_sort_key(item) for item in value))
+            return ("tuple", tuple(cls._total_sort_key(item, _memo) for item in value))
         if isinstance(value, list):
-            return ("list", tuple(cls._total_sort_key(item) for item in value))
+            return ("list", tuple(cls._total_sort_key(item, _memo) for item in value))
         if isinstance(value, dict):
             return (
                 "dict",
                 tuple(
                     sorted(
                         (
-                            cls._total_sort_key(key),
-                            cls._total_sort_key(item),
+                            cls._total_sort_key(key, _memo),
+                            cls._total_sort_key(item, _memo),
                         )
                         for key, item in value.items()
                     )
@@ -371,6 +429,8 @@ class CnfReasoningMixin:
 
         branch_literal = min(current_clauses, key=len)[0]
         branch_atom, branch_polarity = branch_literal
+        # 計測だけ（PR-105-B の決定回数予算の分布）。判定には触れない。
+        note_dpll_decision()
 
         true_assignments = dict(current_assignments)
         true_assignments[branch_atom] = branch_polarity
@@ -382,33 +442,86 @@ class CnfReasoningMixin:
         return cls._clauses_are_satisfiable(current_clauses, false_assignments)
 
     @classmethod
-    def _formula_is_unsat(
-        cls,
-        conditions: Iterable[Condition],
-    ) -> Optional[bool]:
-        condition_list = list(conditions or [])
-        if cls._should_use_solver_reasoning(condition_list):
+    def _clause_set_is_unsat(cls, condition_list: List[Condition]) -> Optional[bool]:
+        """CNF + DPLL による判定（最上位の充足可能性判定 1 回 = 計測枠 1 つ）。
+
+        二値（`_clauses_are_satisfiable` の否定）: 予算の無い今の DPLL は完全なので
+        `not` は正確。三値の `SatVerdict` へ移して `not` を消すのは PR-105-B（D1-B）。
+        """
+
+        clauses = cls._conditions_to_cnf_clauses(condition_list)
+        if clauses is None:
+            return None
+        clause_literals = [clause.literals for clause in clauses]
+        with satisfiability_call():
+            return not cls._clauses_are_satisfiable(clause_literals)
+
+    @classmethod
+    def _conjunction_is_unsat(cls, condition_list: List[Condition]) -> Optional[bool]:
+        """条件の conjunction が充足不能か（`True` / `False` / 判定できない `None`）。
+
+        `_formula_is_unsat` と `_formula_implies`（文脈 ∧ ¬条件）の **唯一の実装**。どちらも
+        同じ問い（conjunction の充足不能性）なので、表も 1 つ（`CONJUNCTION_UNSAT_TABLE`）で
+        key は conjunction の `SolverQueryIdentity`（bucket → 完全比較）。
+
+        * solver を使ってよい conjunction なら条件 oracle、答えが無ければ CNF + DPLL
+        * `None`（判定できなかった）も覚えた値で、hit しても `True` / `False` には化けない
+        * 例外は覚えない。再入（同じ conjunction の判定の途中）は `None` で、**その途中で
+          作った答えは覚えない**（`reentry_guard_scope`: 再入で打ち切った答えは呼ばれ方に
+          依存するので、覚えると「いつ・どこから最初に聞かれたか」で答えが変わる）
+        """
+
+        try:
+            key = SolverQueryIdentity.from_conditions(condition_list)
+        except _CONDITION_RECOVERABLE_ERRORS:
+            return None
+        found, cached = cache_lookup(
+            cls.CONJUNCTION_UNSAT_TABLE, key, limit=cls._FORMULA_IMPLIES_CACHE_LIMIT
+        )
+        if found:
+            return cached
+        if key in cls._active_formula_implies_keys:
+            cls._debug_print("Skipping recursive formula guard hit", 0)
+            note_reentry_guard_hit()
+            return None
+        cls._active_formula_implies_keys.add(key)
+        try:
+            with reentry_guard_scope() as guard:
+                result = cls._compute_conjunction_is_unsat(condition_list)
+        finally:
+            cls._active_formula_implies_keys.discard(key)
+        if guard.clean:
+            cache_store(
+                cls.CONJUNCTION_UNSAT_TABLE, key, result, limit=cls._FORMULA_IMPLIES_CACHE_LIMIT
+            )
+        return result
+
+    @classmethod
+    def _compute_conjunction_is_unsat(cls, condition_list: List[Condition]) -> Optional[bool]:
+        try:
+            use_solver = cls._should_use_solver_reasoning(condition_list)
+        except _CONDITION_RECOVERABLE_ERRORS:
+            use_solver = False
+        if use_solver:
             try:
-                cache_key = ("unsat", cls._safe_condition_cache_key(condition_list))
-            except _CONDITION_RECOVERABLE_ERRORS:
-                cache_key = ("unsat",)
-            try:
-                solver_result = ConditionSMTOracle.conjunction_is_unsat(
-                    condition_list,
-                    cache_key=cache_key,
-                )
+                solver_result = ConditionSMTOracle.conjunction_is_unsat(condition_list)
             except _CONDITION_RECOVERABLE_ERRORS:
                 solver_result = None
             if solver_result is not None:
                 return solver_result
         try:
-            clauses = cls._conditions_to_cnf_clauses(condition_list)
-            if clauses is None:
-                return None
-            clause_literals = [clause.literals for clause in clauses]
-            return not cls._clauses_are_satisfiable(clause_literals)
+            return cls._clause_set_is_unsat(condition_list)
         except _CONDITION_RECOVERABLE_ERRORS:
             return None
+
+    @classmethod
+    def _formula_is_unsat(
+        cls,
+        conditions: Iterable[Condition],
+    ) -> Optional[bool]:
+        """条件の conjunction が充足不能か（`_conjunction_is_unsat`）。"""
+
+        return cls._conjunction_is_unsat(list(conditions or []))
 
     @classmethod
     def _formula_implies(
@@ -416,75 +529,11 @@ class CnfReasoningMixin:
         context_conditions: Iterable[Condition],
         condition: Condition,
     ) -> Optional[bool]:
+        """文脈が条件を含意するか = 文脈 ∧ ¬条件 が充足不能か（`_conjunction_is_unsat`）。"""
+
         try:
             context_list = list(context_conditions or [])
             negated_condition = condition.negate()
-            implication_conditions = context_list + [negated_condition]
-            cache_key = (
-                "implies",
-                cls._safe_condition_cache_key(context_list),
-                cls._safe_condition_cache_key([negated_condition]),
-            )
         except _CONDITION_RECOVERABLE_ERRORS:
             return None
-
-        if cache_key in cls._formula_implies_cache:
-            return cls._formula_implies_cache[cache_key]
-        if cache_key in cls._active_formula_implies_keys:
-            cls._debug_print(
-                "Skipping recursive _formula_implies guard hit",
-                0,
-            )
-            return None
-        cls._active_formula_implies_keys.add(cache_key)
-        result: Optional[bool]
-
-        try:
-            try:
-                use_solver = cls._should_use_solver_reasoning(implication_conditions)
-            except _CONDITION_RECOVERABLE_ERRORS:
-                use_solver = False
-
-            if use_solver:
-                try:
-                    solver_result = ConditionSMTOracle.conjunction_is_unsat(
-                        implication_conditions,
-                        cache_key=cache_key,
-                    )
-                except _CONDITION_RECOVERABLE_ERRORS:
-                    solver_result = None
-                if solver_result is not None:
-                    result = solver_result
-                else:
-                    try:
-                        clauses = cls._conditions_to_cnf_clauses(implication_conditions)
-                    except _CONDITION_RECOVERABLE_ERRORS:
-                        clauses = None
-                    if clauses is None:
-                        result = None
-                    else:
-                        try:
-                            clause_literals = [clause.literals for clause in clauses]
-                            result = not cls._clauses_are_satisfiable(clause_literals)
-                        except _CONDITION_RECOVERABLE_ERRORS:
-                            result = None
-            else:
-                try:
-                    clauses = cls._conditions_to_cnf_clauses(implication_conditions)
-                except _CONDITION_RECOVERABLE_ERRORS:
-                    clauses = None
-                if clauses is None:
-                    result = None
-                else:
-                    try:
-                        clause_literals = [clause.literals for clause in clauses]
-                        result = not cls._clauses_are_satisfiable(clause_literals)
-                    except _CONDITION_RECOVERABLE_ERRORS:
-                        result = None
-        finally:
-            cls._active_formula_implies_keys.discard(cache_key)
-
-        if len(cls._formula_implies_cache) >= cls._FORMULA_IMPLIES_CACHE_LIMIT:
-            cls._formula_implies_cache.clear()
-        cls._formula_implies_cache[cache_key] = result
-        return result
+        return cls._conjunction_is_unsat(context_list + [negated_condition])

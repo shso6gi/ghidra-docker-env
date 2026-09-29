@@ -815,6 +815,9 @@ class _ResultDiagnosticsView:
         # Issue #22 PR-22-D: 式サイズ予算の値・観測した最大値・出力準備の内訳。
         # 判定には効かない観測（既定値の根拠と headroom の使用量を読むため）。
         yield "expression_budget", _base_value(base, "expression_budget", None, falsy=True)
+        # Issue #105 PR-105-A: 条件簡約・条件 oracle の計測（DPLL の決定・oracle の query・
+        # cache の hit / miss）。PR-105-B の予算を決める分布で、判定には効かない観測。
+        yield "condition_simplify", _base_value(base, "condition_simplify", None, falsy=True)
         yield "pairs", _or_default(live_values.attribute(result, "pairwise_stats"), caches_empty)
         yield "solver_invocations", self._timing("solver_invocations")
         yield "stage_path", _or_default(live_values.attribute(result, "stage_path", ()), ())

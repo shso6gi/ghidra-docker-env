@@ -28,6 +28,12 @@ from scripts.function_tracer_pcode.core.errors import (
 # 出力準備（G4-b）。boundary は順序だけを持ち、予算の値・大きさの勘定・payload の
 # 変換は `core.budget_policy` / `checker.output_preparation` が持つ。
 from scripts.function_tracer_pcode.core.budget_policy import budget_policy_scope
+from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
+    condition_cache_scope,
+)
+from scripts.function_tracer_pcode.core.condition_metrics import (
+    condition_metrics_scope,
+)
 from scripts.function_tracer_pcode.checker.output_preparation import (
     prepare_pair_output,
 )
@@ -378,7 +384,7 @@ def run_check_from_binaries_with_v2_pilot(
         # できないので `limitation_unattributed` の ERROR になる = fail-closed）。
         with pair_failure_scope(pair_identity, None), budget_policy_scope(
             getattr(checker, "budget_policy", None)
-        ):
+        ), condition_cache_scope(), condition_metrics_scope():
             return _run_legacy_with_pair_gate(
                 checker, program1, program2,
                 function_name1, function_name2, kwargs,
@@ -491,6 +497,10 @@ def run_check_from_binaries_with_v2_pilot(
         pair_scope.enter_context(
             budget_policy_scope(getattr(checker, "budget_policy", None))
         )
+        # Issue #105 PR-105-A: 条件簡約・条件 oracle の cache と計測の寿命も pair 単位
+        # （次の pair へ意味の状態も数も持ち越さない）。
+        pair_scope.enter_context(condition_cache_scope())
+        pair_scope.enter_context(condition_metrics_scope())
         check_started = time.monotonic()
         with production_signal_scope(session):
             result = _run_legacy_with_pair_gate(

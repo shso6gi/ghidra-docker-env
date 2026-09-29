@@ -1074,6 +1074,8 @@ _PROPORTIONAL_WORK_OWNERS = {
     )},
     ("checker.output_preparation", "OutputPreparer._prepare_cause_evidence"): _B_PREPARED,
     ("checker.output_preparation", "_attach_budget_diagnostics"): _B_DIAGNOSTIC_KEYS,
+    ("checker.output_preparation", "_attach_condition_counters"): _B_DIAGNOSTIC_KEYS,
+    ("core.condition_metrics", "pairwise_debug_counters"): _A_FIXED,
     ("checker.output_preparation", "output_contract_policy"): _A_FIXED,
     ("checker.output_schema", "required_headroom_bytes"): _A_FIXED,
     ("checker.output_preparation", "_bounded_utf8_length"): _B_BOUND,
