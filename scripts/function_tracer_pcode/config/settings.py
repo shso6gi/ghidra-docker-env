@@ -308,6 +308,21 @@ EXPRESSION_BUDGET_DEFAULTS = (
     ("serialization_bytes", "FT_SERIALIZATION_BYTES_BUDGET", 1 << 26),  # 64 MiB
     ("serialization_nodes", "FT_SERIALIZATION_NODE_BUDGET", 1 << 16),  # 65,536
     ("envelope_headroom_bytes", "FT_ENVELOPE_HEADROOM_BYTES", 1 << 25),  # 32 MiB
+    # Issue #105 PR-105-B: 条件簡約の fallback の予算（超えても限界・UNKNOWN の reason に
+    # しない。その問いに答えない = 元の条件を残す / oracle 無し）。値の根拠（PR-105-A merge 後の
+    # main で固定 subset 146 pair + `ell/ellProgram` B12_B16 を予算無しで流した分布）:
+    #
+    # * DPLL の決定（最上位の判定 1 回あたり）: max 2・p99 1（subset）、ellpi 3、kill された
+    #   ell snippet の下限 4。時間の掛かる pair はどれも決定回数では止まっていない（kill 位置は
+    #   identity の構築・描画・凍結）ので、値は指数的な分岐に対する安全上限: 観測の最大の 16 倍。
+    # * 条件 oracle の query（pair あたり、solver へ発行した数）: median 22・p90 246・p99 660・
+    #   max 886（正しい EQ の pair）。TIMEOUT の ell CheckCond は 4096 以上。正しい pair の最大の
+    #   約 4.6 倍の 2 の冪。
+    #
+    # どちらも既定値で固定 subset・recorded corpus の予算の fallback は 0 件（PR 本文の表）。
+    # 値を変えるときはこの表だけを変え、根拠の実測を PR に残す。
+    ("dpll_decisions", "FT_CNF_DPLL_DECISION_BUDGET", 1 << 6),       # 64
+    ("oracle_queries", "FT_CONDITION_ORACLE_QUERY_BUDGET", 1 << 12),  # 4,096
 )
 
 _BUDGET_OFF_WORDS = frozenset({"off", "none", "unlimited", "0"})
