@@ -19,7 +19,7 @@ import ast
 import inspect
 import textwrap
 import types
-from typing import Any, Dict, List, Mapping, Set, Tuple
+from typing import Dict, List, Mapping, Set, Tuple
 
 _SELF_SAFE_BUILTINS = frozenset({"id", "type"})
 _DYNAMIC_READS = frozenset({"getattr", "vars", "hasattr", "setattr", "delattr"})
