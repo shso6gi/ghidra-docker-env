@@ -135,6 +135,10 @@ def test_the_trip_is_sticky_and_folds_into_one_ledger_record():
             clock.jump(-100)
             with pytest.raises(DeadlineExceeded) as raised:
                 checkpoint("obligation")
+            with pytest.raises(DeadlineExceeded):
+                admit("solver", 1, TimeUnit.MILLISECONDS)  # 新しい問いも始めない
+            with pytest.raises(DeadlineExceeded):
+                hot_checkpoint("trace_pcode")
         assert ledger.recorded_failure_count() == 1
         assert ledger.pending_failure().site == "decompile"
     assert raised.value.site == "decompile"

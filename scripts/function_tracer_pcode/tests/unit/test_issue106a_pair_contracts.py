@@ -117,6 +117,13 @@ def test_e0o_crossing_the_deadline_inside_finalization_keeps_the_decision():
 
         def _finish(*args, **kwargs):
             clock.jump(1000)  # finish の間に期限を過ぎる
+            # finish は authority の確定の中で solver を問うことがある（ABI / 幅の保留中の問い）。
+            # 期限を過ぎた後でも、打ち切っていなければ確定処理として問えて、限界にならない
+            from scripts.function_tracer_pcode.smt.parallel import ParallelSolverRunner
+
+            ParallelSolverRunner(timeout=1).run_sequential(
+                "(declare-const x (_ BitVec 8))\n(assert (= x #x01))\n(check-sat)"
+            )
             return original_finish(*args, **kwargs)
 
         connector.finish = _finish
