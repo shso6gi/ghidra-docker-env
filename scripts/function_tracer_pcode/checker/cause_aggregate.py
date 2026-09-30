@@ -49,6 +49,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -147,6 +149,30 @@ LEGACY_CAUSE_SCOPES = {
 # identity の正規化（reporting と共有）
 # ---------------------------------------------------------------------------
 
+#: 今の集計が、構造 key の token を作った process 自身の値だけを読んでいるか（Issue #215
+#: Gate A）。既定は偽（fail-closed: 結果 JSON など、別の process が書き得る値として扱う）。
+_MINTING_PROCESS_SCOPE: ContextVar[bool] = ContextVar("cause_aggregate_minting_process", default=False)
+
+
+@contextmanager
+def minting_process_identities():
+    """token を作った process 自身の結果を集計する間だけ、process 内の identity で比べる。
+
+    構造 key の token は作った process の中では identity として正しい（C-K1）。その process
+    の集計（`build_unknown_cause_aggregate`）がこの scope を張ると、`freeze_identity` は token
+    を置き換えず、`resolve_cause_identity` も token を含む key を解決する。scope の外（既定）
+    では、別の process が書いた値として扱い、token を何とも等しくならない印にする（過分割）。
+    書き出した集計を読む側（reporting）は scope を張らないので、process をまたいで token を
+    比べることは無い。
+    """
+
+    marker = _MINTING_PROCESS_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _MINTING_PROCESS_SCOPE.reset(marker)
+
+
 def freeze_identity(value: Any) -> Any:
     """dict / list / tuple を比較可能な frozen 表現へ正規化する。
 
@@ -160,9 +186,10 @@ def freeze_identity(value: Any) -> Any:
     と同じく object ごとに区別する）。JSON から読んだ値（reporting）は常に組み込みの値なので変わらない。
 
     Issue #215 Gate A: **結果 JSON から読んだ identity を process をまたいで比べる入口はこの関数**。
-    列の段ごとに `core.structural.cross_process_node` を通し、構造 key の tail token などの
+    既定では列の段ごとに `core.structural.cross_process_node` を通し、構造 key の tail token などの
     process の中でだけ意味を持つ値を、何とも等しくならない印に置き換える（過分割に倒す）。
-    reporting が identity を作るときは、生の値を比べずにこの写しを使うこと。
+    reporting が identity を作るときは、生の値を比べずにこの写しを使うこと。token を作った
+    process 自身の集計（`minting_process_identities()` の中）だけは置き換えない。
 
     容器は `live_values` の `items_of` / `elements_of` だけで辿り、写しは package が組む tuple と
     owner が作る葉（`builtin_str` の key・`value_token`）だけから成る（写しは組み込みの値）。
@@ -175,6 +202,7 @@ def freeze_identity(value: Any) -> Any:
     frames: List[List[Any]] = []
     active: set = set()
     _freeze_enter(value, root, frames, active)
+    promote = not _MINTING_PROCESS_SCOPE.get()
     while frames:
         frame = frames[-1]
         child = next(frame[0], _FROZEN_END)
@@ -184,7 +212,10 @@ def freeze_identity(value: Any) -> Any:
             keys = frame[2]
             # 列は構造 key の token であり得る: process をまたぐ比較で一致しないよう、
             # 構造 identity の owner の規則を通す（Issue #215 Gate A）
-            frozen = cross_process_node(tuple(frame[1])) if keys is None else tuple(zip(keys, frame[1]))
+            if keys is not None:
+                frozen = tuple(zip(keys, frame[1]))
+            else:
+                frozen = cross_process_node(tuple(frame[1])) if promote else tuple(frame[1])
             (frames[-1][1] if frames else root).append(frozen)
             continue
         _freeze_enter(child, frame[1], frames, active)
@@ -293,6 +324,7 @@ def resolve_cause_identity(
     の tail token は発行した process の中でだけ identity になるので、それを含む key
     （`core.structural.key_is_process_independent` が偽）は解決しない
     （`process_scoped_cause_identity`）。過分割はしても、別の原因を 1 つにまとめない。
+    token を作った process 自身の集計（`minting_process_identities()` の中）では解決する。
     """
 
     resolution = _resolve_cause_identity(
@@ -301,7 +333,11 @@ def resolve_cause_identity(
         left_binary_identity=left_binary_identity,
         right_binary_identity=right_binary_identity,
     )
-    if resolution.resolved and not key_is_process_independent(resolution.canonical_cause_key):
+    if (
+        resolution.resolved
+        and not _MINTING_PROCESS_SCOPE.get()
+        and not key_is_process_independent(resolution.canonical_cause_key)
+    ):
         return CauseIdentityResolution(diagnostic="process_scoped_cause_identity")
     return resolution
 
@@ -1040,9 +1076,11 @@ def build_unknown_cause_aggregate(
     if result is None:
         return None
     try:
-        if trace_evidence_for is not None:
-            return build_trace_cause_evidence(result, binary_identities=trace_evidence_for)
-        return _build_unknown_cause_aggregate(result)
+        # 集計するのは今の process が作った結果（token はこの process の identity）
+        with minting_process_identities():
+            if trace_evidence_for is not None:
+                return build_trace_cause_evidence(result, binary_identities=trace_evidence_for)
+            return _build_unknown_cause_aggregate(result)
     except Exception as exc:  # 診断は判定を壊さない
         return {
             "schema": (

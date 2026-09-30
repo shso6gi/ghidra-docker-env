@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import astuple, dataclass
 import hashlib
 import json
+import secrets
 import struct
 from typing import Any, Optional, Tuple
 
@@ -84,13 +85,25 @@ def _is_all_ones_mask_for_size(expr: Optional[Expression], size: int) -> bool:
 #   C-K8  token と打ち切りの無い key は共有の有無に依存しない。cycle は現在の path
 #         上の距離（back_ref）で表す
 #
-# **token は process の中でだけ identity になる**（Issue #215 Gate A）。index は
-# 「この process で同じ digest に何番目に来た record か」なので、別の process が
-# 同じ `(digest, index)` を別の record に割り当て得る（A: X→0, Y→1 / B: Y→0, X→1）。
-# 永続化した値を process をまたぐ identity にする規則は `cross_process_node` 1 つで、
-# それを適用する normalizer は `checker/cause_aggregate.freeze_identity` 1 つ（reporting は
-# 生の key を比べない。`test_sn3_cross_process_identity.py` の登録表が固定する）。
-# consumer が述語を呼び忘れても false match にならないよう、規則は normalizer の中にある。
+# **token は process の中でだけ identity になる**（Issue #215 Gate A）。3 種類ある:
+#
+#   * 識別済み tail token `("exact_tail", digest, index)`: 決定的（C-K6。index は digest が
+#     衝突したときだけ 0 以外）。ただし index は「この process で同じ digest に何番目に来た
+#     record か」なので、衝突があれば別の process は同じ値を別の record に割り当て得る
+#     （A: X→0, Y→1 / B: Y→0, X→1）。
+#   * 識別不能 token `("exact_tail_unidentified", reason, n, nonce)` と object identity
+#     `("process_object", serial, nonce)`: n / serial は process の中の通し番号、nonce は
+#     token ごとの 128 bit の乱数。通し番号が process の中の一意性を、nonce が別の process
+#     （fork した子を含む）の token と一致しないことを与える。したがって別の encoding の
+#     中（`canonical_atom` の包み・digest の preimage）に埋め込まれて昇格規則から見えなく
+#     なっても、別の process の token と等しくならない。
+#
+# 見える形の token を process をまたいで比べる規則は `cross_process_node` 1 つで、それを
+# 適用する normalizer は `checker/cause_aggregate.freeze_identity` 1 つ。既定で適用し
+# （fail-closed）、token を作った process 自身の集計だけが明示の scope で外す。reporting は
+# 生の key を比べない（`test_sn3_cross_process_identity.py` の登録表と static test が固定する）。
+# digest の中に見えなくなった識別済み token が process をまたいで一致するのは digest が一致
+# するときだけで、その digest 自身が置く衝突の仮定と同じ（それ以上の仮定を足さない）。
 
 #: tail token の domain separation（record の digest 専用）
 _EXACT_TAIL_DOMAIN = b"sn3-exact-structural-tail-v1\x00"
@@ -214,10 +227,10 @@ class _ExactTailIntern:
         return (EXACT_TAIL_TAG, digest, self._buckets.position(digest, record))
 
     def unidentified(self, reason: str) -> StructuralKey:
-        return (UNIDENTIFIED_TAG, str(reason), self._unidentified.next())
+        return (UNIDENTIFIED_TAG, str(reason), self._unidentified.next(), _token_nonce())
 
-    def process_object_serial(self) -> int:
-        return self._process_objects.next()
+    def process_object_serial(self) -> Tuple[int, str]:
+        return (self._process_objects.next(), _token_nonce())
 
     def statistics(self) -> dict:
         table = self._buckets.statistics(size=len)
@@ -228,6 +241,12 @@ class _ExactTailIntern:
             "collisions": table["items"] - table["buckets"],
             "unidentified_tokens": self._unidentified.issued(),
         }
+
+
+def _token_nonce() -> str:
+    """識別不能 token / object identity に付ける乱数（別の process の token と一致させない）。"""
+
+    return secrets.token_hex(16)
 
 
 _TAIL_INTERN = _ExactTailIntern()
@@ -491,7 +510,7 @@ def _exact_tail_token(
     path（root の祖先）で、閉路がそこへ戻るときの back_ref の距離に使う。
 
     返すのは `("exact_tail", digest, index)`、`("back_ref", k)`（root 自身が path 上に
-    いるとき）、`("exact_tail_unidentified", reason, n)` のどれか。
+    いるとき）、`("exact_tail_unidentified", reason, n, nonce)` のどれか。
     """
 
     if memo is None:
@@ -832,10 +851,42 @@ def _key_has_tag(key: Any, tags: frozenset) -> bool:
         if item_id in seen:
             continue
         seen.add(item_id)
-        if item and type(item[0]) is str and item[0] in tags:
+        if not tags.isdisjoint(_tags_of(item)):
             return True
         stack.extend(item)
     return False
+
+
+#: `canonical_atom`（`core/semantic_projection`）が列を包むときの tag
+_CANONICAL_SEQUENCE_TAGS = frozenset({"tuple", "list"})
+
+
+def _tags_of(item: Any) -> Tuple[str, ...]:
+    """列 `item` の tag（生の形の先頭と、`canonical_atom` が包んだ形の先頭）。
+
+    構造 key の token と placeholder は、別の値の atom として `canonical_atom` に包まれると
+    ``("tuple", (("str", tag), …))`` になる（runtime ref の `stable_key()` が構造 key を持つ
+    場合など）。包まれても検出（C-K3）と昇格規則（Gate A）から見えなくならないよう、
+    tag はこの 1 か所で両方の形から読む。組み込みの型の値だけを読む（`live_values`）。
+    """
+
+    if not item:
+        return ()
+    head = item[0]
+    if type(head) is not str:
+        head = live_values.plain_scalar(head)
+        if type(head) is not str:
+            return ()
+    if head in _CANONICAL_SEQUENCE_TAGS and len(item) == 2:
+        body = item[1]
+        if (type(body) is tuple or type(body) is list) and body:
+            first = body[0]
+            if (type(first) is tuple or type(first) is list) and len(first) == 2:
+                if live_values.plain_scalar(first[0]) == "str":
+                    inner = live_values.plain_scalar(first[1])
+                    if type(inner) is str:
+                        return (head, inner)
+    return (head,)
 
 
 def key_contains_placeholder(key: StructuralKey) -> bool:
@@ -876,11 +927,9 @@ def cross_process_node(node: Any) -> Any:
     （`checker/cause_aggregate.freeze_identity`）を通すこと。
     """
 
-    if (type(node) is tuple or type(node) is list) and node:
-        # 先頭が組み込みの文字列のときだけ tag として読む（`live_values` が owner の読み方）
-        tag = live_values.plain_scalar(node[0])
-        if type(tag) is str and tag in PROCESS_SCOPED_TAGS:
-            return unidentified_identity("process_scoped")
+    if (type(node) is tuple or type(node) is list) and not PROCESS_SCOPED_TAGS.isdisjoint(_tags_of(node)):
+        # 生の形でも `canonical_atom` に包まれた形でも同じ規則（`_tags_of`）
+        return unidentified_identity("process_scoped")
     return node
 
 
@@ -940,7 +989,7 @@ def _process_object_identity(expr: Any) -> StructuralKey:
         serial = _PROCESS_OBJECT_SERIALS.get_or_create(expr, "serial", _TAIL_INTERN.process_object_serial)
     except TypeError:
         return unidentified_identity("object_not_weakly_referenceable")
-    return (PROCESS_OBJECT_TAG, serial)
+    return (PROCESS_OBJECT_TAG, *serial)
 
 
 def expression_provenance_key(

@@ -180,8 +180,10 @@ def _colliding_intern():
 def test_unidentified_tokens_from_reversed_processes_never_become_an_identity():
     a = _run_child(["X", "Y"], collide=False)
     b = _run_child(["Y", "X"], collide=False)
-    # counter は process ごとなので、逆順だと別のものに同じ値が付く
-    assert a["unidentified"]["X"] == b["unidentified"]["Y"]
+    # 通し番号は process ごとなので逆順だと別のものに同じ番号が付くが、token は nonce で
+    # 別 process の token と一致しない（昇格規則から見えない形に埋め込まれても同じ）
+    assert a["unidentified"]["X"][2] == b["unidentified"]["Y"][2]
+    assert a["unidentified"]["X"] != b["unidentified"]["Y"]
     for token in (a["unidentified"]["X"], b["unidentified"]["Y"]):
         assert not key_is_process_independent(token)
         assert not _resolve(token).resolved
@@ -233,19 +235,146 @@ def _imports_of(path):
     return names
 
 
-def test_no_cross_process_consumer_mints_structural_tokens():
-    """結果 JSON を読む側（authority / reporting）は構造 key を作らない。
+#: 別の process が書いた結果を読む側の module（supervisor 側の `authority/process`、`reporting`、
+#: package 外の評価 tool）。`authority/domains` などの判定 authority は解析 worker の process の
+#: 中で動き、token を作った process の中で比べるので、ここには入れない。
+_READER_PROCESS_TREES = (
+    PACKAGE_ROOT / "authority" / "process",
+    PACKAGE_ROOT / "reporting",
+    PACKAGE_ROOT.parent / "eqbench",
+)
+#: 構造 key（token を持ち得る値）を作る API。import でなく method として呼ばれても数える
+_KEY_MINTING_NAMES = frozenset({
+    "structural_key", "expression_key", "condition_key", "expression_key_safe", "condition_key_safe",
+    "expression_key_status", "expression_key_or_identity", "exact_structural_identity",
+    "exact_tail_token", "unidentified_identity", "_safe_structural_key",
+})
 
-    作れるのは解析 worker の process だけなので、authority が worker の結果と自分で作った
-    token を比べる経路は存在しない。ここへ import が増えたら Gate A を見直す。
+
+def test_no_cross_process_consumer_mints_structural_tokens():
+    """結果 JSON を読む側（別の process）は構造 key を作らない（import でも method 呼び出しでも）。
+
+    読む側が自分で作った token と、worker が書いた token を比べる経路を作らないため。ここへ
+    増えたら Gate A を見直す（読む側の identity は `freeze_identity` の昇格を通った値だけ）。
     """
 
     offenders = []
-    for folder in ("authority", "reporting"):
-        for path in sorted((PACKAGE_ROOT / folder).rglob("*.py")):
+    for tree_root in _READER_PROCESS_TREES:
+        for path in sorted(tree_root.rglob("*.py")):
+            source = path.read_text(encoding="utf-8")
             if "scripts.function_tracer_pcode.core.structural" in _imports_of(path):
-                offenders.append(str(path.relative_to(PACKAGE_ROOT)))
+                offenders.append((str(path.relative_to(PACKAGE_ROOT.parent)), "import"))
+            for node in ast.walk(ast.parse(source)):
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+                    if name in _KEY_MINTING_NAMES:
+                        offenders.append((str(path.relative_to(PACKAGE_ROOT.parent)), name, node.lineno))
     assert offenders == []
+
+
+def test_readers_never_enter_the_minting_process_scope():
+    """昇格を外す scope（token を作った process 自身の集計）は、読む側の module から張れない。"""
+
+    offenders = []
+    for tree_root in _READER_PROCESS_TREES:
+        for path in sorted(tree_root.rglob("*.py")):
+            if "minting_process_identities" in path.read_text(encoding="utf-8"):
+                offenders.append(str(path.relative_to(PACKAGE_ROOT.parent)))
+    assert offenders == []
+
+
+def test_the_minting_process_compares_its_own_tokens_and_everyone_else_promotes_them():
+    from scripts.function_tracer_pcode.checker.cause_aggregate import IdentityPool, minting_process_identities
+
+    key = expression_key(build("X"), budget=BUDGET)
+    assert not key_is_process_independent(key)
+    with minting_process_identities():
+        # 作った process の中では token は identity（C-K1）: 同じ値は同じ、pool も 1 つにまとめる
+        assert freeze_identity(key) == freeze_identity(key)
+        assert _resolve(key).resolved
+        pool = IdentityPool()
+        assert pool.intern(key) == pool.intern(json.loads(json.dumps(key)))
+        assert freeze_identity(key) != freeze_identity(expression_key(build("Y"), budget=BUDGET))
+    # scope の外（既定: 別の process が書いた値として読む）では一致しない
+    assert freeze_identity(key) != freeze_identity(key)
+    assert _resolve(key).diagnostic == "process_scoped_cause_identity"
+
+
+def test_the_worker_aggregate_is_built_inside_the_minting_scope(monkeypatch):
+    from scripts.function_tracer_pcode.checker import cause_aggregate
+
+    seen = []
+    monkeypatch.setattr(
+        cause_aggregate, "_build_unknown_cause_aggregate",
+        lambda result: seen.append(cause_aggregate._MINTING_PROCESS_SCOPE.get()) or {"schema": "x"},
+    )
+    monkeypatch.setattr(
+        cause_aggregate, "build_trace_cause_evidence",
+        lambda result, **kwargs: seen.append(cause_aggregate._MINTING_PROCESS_SCOPE.get()) or {"schema": "y"},
+    )
+    cause_aggregate.build_unknown_cause_aggregate(object())
+    cause_aggregate.build_unknown_cause_aggregate(object(), trace_evidence_for=(None, None))
+    assert seen == [True, True]
+    assert cause_aggregate._MINTING_PROCESS_SCOPE.get() is False  # scope は抜けると戻る
+
+
+_NONCE_CHILD = r"""
+import json, sys
+sys.path.insert(0, {root!r})
+from scripts.function_tracer_pcode.core import structural
+from scripts.function_tracer_pcode.core.semantic_projection import canonical_atom
+from scripts.function_tracer_pcode.core.expression import Expression
+tokens = [structural.unidentified_identity("probe") for _ in range(3)]
+objects = [structural.expression_key_or_identity(Expression.parameter("a", 0, size=4), budget=0) for _ in range(3)]
+hidden = [structural._digest_structural_payload(canonical_atom(token)) for token in tokens]
+print(json.dumps({{"tokens": tokens, "objects": objects, "hidden": hidden}}))
+"""
+
+
+def _run_nonce_child():
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", _NONCE_CHILD.format(root=str(REPO_ROOT))],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, check=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def test_counter_tokens_of_two_processes_never_coincide_even_when_hidden_in_a_digest():
+    """識別不能 token / object identity は process の中の通し番号が同じでも別 process と一致しない。
+
+    `canonical_atom` の包みや digest の preimage の中では昇格規則（`cross_process_node`）が
+    token を見られないので、token 自身が別 process の token と等しくならない必要がある。
+    """
+
+    a, b = _run_nonce_child(), _run_nonce_child()
+    # 通し番号は両方の process で同じ（0, 1, 2 …）
+    assert [token[2] for token in a["tokens"]] == [token[2] for token in b["tokens"]]
+    assert set(map(json.dumps, a["tokens"])).isdisjoint(map(json.dumps, b["tokens"]))
+    assert set(map(json.dumps, a["objects"])).isdisjoint(map(json.dumps, b["objects"]))
+    # 見えない形（包んで digest にした値）でも一致しない
+    assert set(a["hidden"]).isdisjoint(b["hidden"])
+    # 同じ process の中でも、すべて別
+    assert len({json.dumps(token) for token in a["tokens"]}) == 3
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+def test_a_forked_child_does_not_repeat_the_parents_counter_tokens():
+    read_end, write_end = os.pipe()
+    structural.unidentified_identity("warm")
+    pid = os.fork()
+    if pid == 0:  # child: 親と同じ通し番号の状態から作る
+        try:
+            os.write(write_end, json.dumps(structural.unidentified_identity("probe")).encode())
+        finally:
+            os._exit(0)
+    os.close(write_end)
+    child = json.loads(os.read(read_end, 4096).decode())
+    os.close(read_end)
+    os.waitpid(pid, 0)
+    parent = structural.unidentified_identity("probe")
+    assert child[2] == parent[2]  # 通し番号は同じ
+    assert child != list(parent)  # それでも一致しない
 
 
 def test_the_root_blocker_summary_identity_goes_through_the_single_resolver():

@@ -761,3 +761,26 @@ def test_a_comparable_key_never_carries_a_process_scoped_token(options):
                 assert structural.key_is_process_independent(key), (budget, key)
             safe = expression_key_safe(expr, budget=budget, **options)
             assert safe is None or structural.key_is_process_independent(safe)
+
+
+def test_a_token_or_placeholder_wrapped_by_canonical_atom_is_still_seen():
+    """runtime ref の `stable_key()` などで `canonical_atom` に包まれても、検出と昇格から漏れない。"""
+
+    from scripts.function_tracer_pcode.core.semantic_projection import canonical_atom
+
+    truncated = expression_key(_chain(1, 100), budget=8)
+    unidentified = structural.unidentified_identity("probe")
+    for inner, placeholder in ((truncated, True), (unidentified, True)):
+        wrapped = ("runtime_ref", ("stable_runtime_ref", canonical_atom(inner)))
+        as_json = json.loads(json.dumps(wrapped))
+        for value in (wrapped, as_json):
+            assert key_contains_placeholder(value) is placeholder
+            assert not structural.key_is_process_independent(value)
+    # 包まれた token そのものも、昇格規則が識別不能 token に置き換える
+    wrapped_token = canonical_atom(unidentified)
+    replaced = structural.cross_process_node(wrapped_token)
+    assert replaced != wrapped_token and replaced[0] == structural.UNIDENTIFIED_TAG
+    # 包まれていない普通の値はそのまま
+    plain = canonical_atom(("a", 1))
+    assert structural.cross_process_node(plain) == plain
+    assert structural.key_is_process_independent(plain)
