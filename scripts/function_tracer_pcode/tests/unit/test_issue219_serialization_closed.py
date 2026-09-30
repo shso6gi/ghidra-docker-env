@@ -1257,8 +1257,19 @@ def test_a_read_bound_signal_while_capturing_leaves_the_ref_uncaptured(monkeypat
     from scripts.function_tracer_pcode.core.errors import pair_failure_scope
     from scripts.function_tracer_pcode.core.live_values import StorageBeyondReadBound
 
+    from scripts.function_tracer_pcode.core import live_values
+
+    class _Wide:
+        pass
+
+    wide = _Wide()
+    for index in range(live_values.SCAN_LIMIT + 10):
+        setattr(wide, f"a{index}", index)
+
     def _signal(_value):
-        raise StorageBeyondReadBound("a probe", 1 << 20)
+        # 表現を作る途中で、作業量の外の読みが固定の上限を超える（instance の `__dict__` が大きい）
+        live_values.instance_state(wide, "a0")
+        raise AssertionError("the read beyond the bound must signal")
 
     monkeypatch.setattr(semantic_freeze, "runtime_ref_source", _signal)
     expr = Expression.unknown("u", runtime_ref=_FrozenRef(("u",)))
