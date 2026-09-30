@@ -98,7 +98,6 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     JsonBudgetExhausted,
     JsonValueRejected,
 )
-from scripts.function_tracer_pcode.core.live_values import StorageBeyondReadBound, signalled_storage_reads
 
 
 FREEZE_SITE = "core.semantic_freeze.freeze_expression"
@@ -760,9 +759,9 @@ def _captured_runtime_ref(runtime_ref: Any, staging: _LifecycleStaging) -> Any:
     * 表現が組み込みの型そのもの以外（record・enum・scalar の subclass など、描いた後で owner が
       その型の規則で読む葉）を含むもの（`freeze_legacy_tree` が拒む）
     * 表現が上限（`CAPTURE_MAX_BYTES`）を超えるもの。写す 1 回は作業量の予算の外なので、固定の
-      上限の中でだけ作る（超えれば写さない。予算の owner の勘定には入らない）
-    * 表現を作ると失敗するもの（生の ref から描く経路が同じ失敗を従来どおり出す）。読みの量の
-      信号は、この場で捕まえて限界を記録しない（`signalled_storage_reads`）
+      上限の中でだけ作る（超えれば写さない。予算の owner の勘定には入らない。値の storage の読みも
+      walker がこの上限へ数えるので、固定の読みの上限を超えても限界は記録されない）
+    * 表現を作ると失敗するもの（生の ref から描く経路が同じ失敗を従来どおり出す）
     """
 
     if runtime_ref is None:
@@ -776,11 +775,12 @@ def _captured_runtime_ref(runtime_ref: Any, staging: _LifecycleStaging) -> Any:
     _walk_semantic_carriers(runtime_ref, carried.append, carried.append)
     if not carried:
         try:
-            with signalled_storage_reads():
-                legacy = RESULT_JSON_POLICY.materialize(
-                    runtime_ref_source(runtime_ref),
-                    budget=JsonBudget(CAPTURE_MAX_BYTES, detached=True),
-                )
+            # 表現の source の変換も walk の中で走るので、値の storage の読みは walker がこの予算へ
+            # 数える（固定の読みの上限を超えた分も、限界を記録せずにこの予算の超過になる）
+            legacy = RESULT_JSON_POLICY.materialize(
+                runtime_ref_source(runtime_ref),
+                budget=JsonBudget(CAPTURE_MAX_BYTES, detached=True),
+            )
         except _CAPTURE_FAILURES:
             legacy = _NOT_CAPTURED
         if legacy is not _NOT_CAPTURED:
@@ -790,9 +790,7 @@ def _captured_runtime_ref(runtime_ref: Any, staging: _LifecycleStaging) -> Any:
 
 
 #: 表現を作る 1 回が上げ得る失敗（生の ref から描く経路が同じものを従来どおり上げる）
-_CAPTURE_FAILURES = (
-    TypeError, ValueError, RecursionError, JsonValueRejected, JsonBudgetExhausted, StorageBeyondReadBound,
-)
+_CAPTURE_FAILURES = (TypeError, ValueError, RecursionError, JsonValueRejected, JsonBudgetExhausted)
 _NOT_CAPTURED = object()
 
 
