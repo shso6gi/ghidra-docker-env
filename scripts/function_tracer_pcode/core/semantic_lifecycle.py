@@ -59,12 +59,38 @@ copy 機構は置かない: 複製の作り方（何を deep に、何を共有�
     ---------------------     ------------------------------
     どの field を deep copy   状態と派生値を引き継がない
     どう再構築するか          （`NON_INHERITED_FIELDS`）
+    LEGACY 表現の schema      表現が読む field ごとの不変性の規則
+                              （`*_SERIALIZATION_INPUTS`）
+
+**直列化の不変性（Issue #219 C-RS2）**: VALIDATED な値のうち
+`serialization_closed(value)` が真のものは、LEGACY 表現（`to_dict()` / snapshot の
+木）が **不変な状態だけの関数** になる。PR-22-B の isolation 契約（凍結後に生 object が
+変わっても structural key・solver query identity・SMT・幅は動かない）を、LEGACY 表現へ
+広げたもの。cache のための特別規則ではなく、「検証済みの値の直列化が何に依存するか」
+という lifecycle の契約で、答えは凍結時に 1 回だけ決まる:
+
+.. code-block:: text
+
+    表現が読む field           closed の規則（凍結時に子から上へ畳む）
+    ------------------------   ---------------------------------------------
+    scalar の意味 field        不変な scalar（None / bool / int / float / str / bytes / enum）
+    value                      不変な scalar・その tuple、PHI なら PhiBranch の tuple
+                               （branch の条件と値がどちらも closed）
+    operands / 条件の式        子がすべて closed
+    storage_info               凍結時に写した payload から描く（写せなければ closed でない）
+    runtime_ref                深く不変（frozen dataclass・tuple・scalar・closed な式だけ）
+
+表（`EXPRESSION_SERIALIZATION_INPUTS` / `CONDITION_SERIALIZATION_INPUTS`）に無い field を
+表現が読むようになると、closed の判定がその field を見落とす。静的な監査
+（`tests/unit/test_issue219_serialization_closed.py` の T-A5）がそれを落とす。
+closed でない値について、この契約は何も約束しない（表現は従来どおり生 object を読み得る）。
 """
 
 from __future__ import annotations
 
-from enum import IntEnum
-from typing import Any, Dict
+from enum import Enum, IntEnum
+from types import MappingProxyType
+from typing import Any, Dict, Mapping
 
 from scripts.function_tracer_pcode.core import live_values
 
@@ -97,6 +123,10 @@ DERIVED_STATE_FIELDS = (
     "_equivalence_digest",
     "_tree_size",
     "_identity_complete",
+    # 直列化の不変性（Issue #219）: 凍結時に写した storage の LEGACY 表現と、
+    # 「LEGACY 表現が不変な状態だけの関数か」の答え
+    "_storage_payload",
+    "_serialization_closed",
 )
 
 #: **新しい値へ引き継いではいけない field**（状態 + 状態から導いた値）。
@@ -183,3 +213,66 @@ def is_published(value: Any) -> bool:
     """producer が完成を宣言済みか。solver consumer が要求するのはこれ。"""
 
     return lifecycle_of(value) is SemanticLifecycle.PUBLISHED
+
+
+# ---------------------------------------------------------------------------
+# 直列化の不変性（Issue #219 C-RS2）
+# ---------------------------------------------------------------------------
+
+
+class SerializationInput(Enum):
+    """LEGACY 表現が読む field の種類。種類ごとに closed の規則が 1 つある。
+
+    規則そのもの（どう確かめるか）は `core/semantic_freeze.SERIALIZATION_CLOSURE_RULES`
+    が種類ごとに 1 つ持つ。ここは「どの field がどの種類か」だけを決める。
+    """
+
+    #: 不変な scalar であること
+    SCALAR = "scalar"
+    #: 不変な scalar / その tuple。PHI なら `PhiBranch` の tuple で、条件と値が closed
+    VALUE = "value"
+    #: 子の列（tuple）。子がすべて closed
+    OPERANDS = "operands"
+    #: 子 1 つ（条件の式）。その子が closed
+    EXPRESSION = "expression"
+    #: 凍結時に写した payload から描く（写せたこと）
+    STORAGE = "storage"
+    #: 深く不変な runtime ref（中の式・条件も closed）
+    RUNTIME_REF = "runtime_ref"
+
+
+#: `Expression` の LEGACY 表現（`Expression._to_dict_active`）が読む field と、その種類。
+#: 表現が field を 1 つ読むようにしたら、ここへ 1 行足す（足さなければ T-A5 が落ちる）。
+EXPRESSION_SERIALIZATION_INPUTS: Mapping[str, SerializationInput] = MappingProxyType({
+    "expr_type": SerializationInput.SCALAR,
+    "value": SerializationInput.VALUE,
+    "operator": SerializationInput.SCALAR,
+    "name": SerializationInput.SCALAR,
+    "data_type": SerializationInput.SCALAR,
+    "size": SerializationInput.SCALAR,
+    "operands": SerializationInput.OPERANDS,
+    "storage_info": SerializationInput.STORAGE,
+    "read_order_key": SerializationInput.SCALAR,
+    "runtime_ref": SerializationInput.RUNTIME_REF,
+    "opcode": SerializationInput.SCALAR,
+})
+
+#: `Condition` の LEGACY 表現（`Condition.json_items` と、PHI の branch の描画）が読む field。
+CONDITION_SERIALIZATION_INPUTS: Mapping[str, SerializationInput] = MappingProxyType({
+    "expression": SerializationInput.EXPRESSION,
+    "negated": SerializationInput.SCALAR,
+})
+
+
+def serialization_closed(value: Any) -> bool:
+    """`value` の LEGACY 表現が、不変な状態だけの関数か（C-RS2 の読み口）。
+
+    VALIDATED 以上で、凍結時に `core/semantic_freeze` が closed と決めた値だけが真。
+    `Expression` / `Condition` にだけ使う（`lifecycle_of` と同じく instance の
+    `__dict__` だけを読み、`__getattr__` を呼ばない）。答えは凍結時に 1 回だけ決まり、
+    ここは読むだけで計算しない。
+    """
+
+    if lifecycle_of(value) < SemanticLifecycle.VALIDATED:
+        return False
+    return live_values.instance_state(value, "_serialization_closed", False) is True
