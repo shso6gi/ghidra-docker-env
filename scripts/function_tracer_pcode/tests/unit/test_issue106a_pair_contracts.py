@@ -400,3 +400,31 @@ def test_the_tracer_stops_before_tracing_an_operation():
     assert raised.value.site == tracer_module.TRACE_PCODE_STAGE
     tracer._trace_pcode_op_internal.assert_not_called()
     assert tracer._trace_stack == set()  # 途中の状態を残さない
+
+
+def test_failure_result_conversion_never_trips_the_deadline(monkeypatch):
+    """failure を結果に変える処理（`checker.pair_execution`）は確定処理: 途中の境界で止めない。"""
+    from scripts.function_tracer_pcode.checker import pair_execution
+    from scripts.function_tracer_pcode.core import deadline as deadline_module
+    from scripts.function_tracer_pcode.core.errors import pending_pair_failure
+
+    reached = []
+
+    def _build(kind, checker, failure, **common):
+        deadline_module.checkpoint("result_conversion")  # 変換の中から境界に触れても
+        reached.append(kind)
+        from types import SimpleNamespace
+
+        return SimpleNamespace()
+
+    monkeypatch.setattr(pair_execution, "_build_result_for", _build)
+    stack, _ledger = _expired("result_conversion")
+    with stack:
+        with pytest.raises(DeadlineExceeded):
+            deadline_module.checkpoint("solver")  # 打ち切り（台帳に 1 件）
+        failure = pending_pair_failure()
+        pair_execution.pair_failure_result(
+            Mock(), failure, function_name1="f", function_name2="f",
+            binary1_name="l", binary2_name="r", start_time=time.time(),
+        )
+    assert len(reached) == 1

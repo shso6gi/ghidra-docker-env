@@ -623,3 +623,43 @@ def test_workers_never_take_an_admission():
         if isinstance(node, ast.If) and any(call in list(ast.walk(node)) for call in admit_calls)
     )
     assert ast.unparse(guard.test) == "not orchestrated"
+
+
+def test_e12_an_oracle_answer_after_the_deadline_is_neither_used_nor_remembered(monkeypatch):
+    from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
+        cache_lookup,
+        condition_cache_scope,
+    )
+    from scripts.function_tracer_pcode.analysis.condition.query_identity import SolverQueryIdentity
+    from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
+    from scripts.function_tracer_pcode.core.condition_metrics import condition_metrics_scope
+    from scripts.function_tracer_pcode.tests.unit.test_issue105b_simplify_budgets import _FakeZ3, _slt
+
+    clock = ShiftedClock()
+
+    class _SlowZ3(_FakeZ3):
+        def Solver(self, ctx=None):
+            solver = super().Solver(ctx)
+            original = solver.check
+
+            def _check():
+                clock.jump(100)  # 答え（UNSAT）は返るが、その間に期限を過ぎる
+                return original()
+
+            solver.check = _check
+            return solver
+
+    fake = _SlowZ3()
+    monkeypatch.setattr(ConditionSMTOracle, "_z3", fake)
+    monkeypatch.setattr(ConditionSMTOracle, "_available", True)
+    monkeypatch.setattr(ConditionSMTOracle, "_availability_checked", True)
+    conditions = [_slt(7, 1)]
+    with condition_cache_scope(), condition_metrics_scope():
+        with pair_failure_scope(("pair",), None):
+            with deadline_scope(_policy(10.0, clock=clock)):
+                with pytest.raises(DeadlineExceeded) as raised:
+                    ConditionSMTOracle.conjunction_is_unsat(conditions)
+        key = SolverQueryIdentity.from_conditions(conditions)
+        assert cache_lookup(ConditionSMTOracle.VERDICT_TABLE, key, limit=4096) == (False, None)
+    assert fake.checks == 1
+    assert "boundary=after" in raised.value.evidence_refs
