@@ -771,12 +771,23 @@ class SharedZ3RegionSession:
             interrupted_result,
         )
         from scripts.function_tracer_pcode.smt.solvers.z3 import sat_result_with_witness
+        from scripts.function_tracer_pcode.core.deadline import TimeUnit, admit
+        from scripts.function_tracer_pcode.smt.interface import (
+            not_started_result,
+            result_was_answered,
+        )
+        from scripts.function_tracer_pcode.smt.parallel import SOLVER_STAGE
 
         started = time.time()
+        # Issue #106 PR-106-A: 問いを始める境界（runner の問い合わせと同じ規則）。期限を
+        # 過ぎていれば始めない。期限の absolute な終わりはこの実行の予算の上限になる
+        admission = admit(SOLVER_STAGE, max(1, int(timeout)), TimeUnit.MILLISECONDS)
+        if not admission.startable:
+            return ParallelResult.from_backend_results([not_started_result("Z3(shared-region)")])
         # Issue #161: 実行の状態（期限と中止）は 1 回の実行に 1 つの `ExecutionBudget`。
         # execute の入口で作り、初回の check と canonical witness の生成・SAT の確定がこれに
         # 問う（共有 session には中止の入力が無いので期限だけ）。
-        budget = ExecutionBudget.starting_now(max(1, int(timeout)))
+        budget = ExecutionBudget.starting_now(max(1, int(timeout)), not_after=admission.not_after)
         self._solver.push()
         try:
             self._solver.add(*self._specific[digest])
@@ -786,6 +797,7 @@ class SharedZ3RegionSession:
                     "Z3(shared-region)", stop, "the execution stopped before the check",
                     time.time() - started,
                 )
+                admission.settle(answered=False)
                 return ParallelResult.from_backend_results([item])
             self._solver.set(timeout=max(1, budget.remaining_ms()))
             verdict = self._solver.check()
@@ -811,9 +823,11 @@ class SharedZ3RegionSession:
                                         elapsed_time=elapsed, error_message=reason)
             # 1 query × 1 backend の結果: 契約を境界で検査し、backend 集約の規則で包む
             item = enforce_witness_contract(item, query, canonical=True)
-            return ParallelResult.from_backend_results([item])
         finally:
             self._solver.pop()
+        # 返った直後（共有 solver を元の assertion に戻した後）: 期限を過ぎていれば採らない
+        admission.settle(answered=result_was_answered(item))
+        return ParallelResult.from_backend_results([item])
 
 def create_shared_z3_region_session(
     query_set: ExpectedRegionQuerySet,

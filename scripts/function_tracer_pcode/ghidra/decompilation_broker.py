@@ -3,12 +3,23 @@
 With no active UNKNOWN-taxonomy pilot this is a transparent legacy call.  With
 an explicitly registered Phase 6.6 route it dual-writes typed operational
 authority while preserving the original result behavior.
+
+Production callers enter through ``decompile_within_deadline`` (Issue #106
+PR-106-A), which admits the call against the pair's analysis deadline, clamps
+Ghidra's whole-second timeout to it and checks the deadline again after the
+broker has finished its authority bookkeeping.  Without a deadline it is
+``decompile_function`` unchanged.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from scripts.function_tracer_pcode.core.deadline import TimeUnit, admit
+
+
+#: Issue #106 PR-106-A: decompile の checkpoint の stage（限界の site）
+DECOMPILE_STAGE = "decompile"
 
 TOP_LEVEL_SOURCE_CONTRACT = "return-analyzer-top-level-decompile-v2"
 LIFECYCLE_HELPER_SOURCE_CONTRACT = "return-analyzer-lifecycle-helper-decompile-v2"
@@ -433,6 +444,34 @@ def _subordinate_decompile(
     except Exception as exc:
         _record_shadow_error(exc)
     return result
+
+
+def decompile_within_deadline(
+    analyzer: Any,
+    function: Any,
+    timeout: int,
+    monitor: Any = None,
+    **kwargs: Any,
+) -> Any:
+    """解析の期限の中で 1 回 decompile する（Issue #106 PR-106-A。production の入口）。
+
+    始める前に期限の許可を取り（過ぎていれば限界を raise して decompile しない）、Ghidra の
+    秒単位の timeout を期限までに切る（丸めは `core.deadline.bounded_timeout`: 0 秒を渡さない）。
+    返った後（authority の記録を終えた後）に、期限で切られた・期限を過ぎたなら限界を raise
+    する。期限が無ければ `decompile_function` と同じ。
+    """
+
+    admission = admit(DECOMPILE_STAGE, timeout, TimeUnit.SECONDS)
+    granted = admission.timeout(TimeUnit.SECONDS)
+    if granted is None:
+        results = _AuthorityBlockedDecompileResults(
+            diagnostic=None, error_kind="analysis_deadline_not_started",
+        )
+    else:
+        results = decompile_function(analyzer, function, granted, monitor, **kwargs)
+    if admission.not_after is not None:
+        admission.settle(answered=bool(results.decompileCompleted()))
+    return results
 
 
 def decompile_function(

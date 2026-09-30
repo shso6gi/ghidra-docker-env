@@ -13,6 +13,8 @@ from scripts.function_tracer_pcode.core.render_smt import (
     UnsupportedSmtOperatorError,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
+from scripts.function_tracer_pcode.core.deadline import DeadlinePolicy, deadline_scope
+from scripts.function_tracer_pcode.checker.diagnostics import attach_analysis_deadline
 from scripts.function_tracer_pcode.core.stage_clock import open_stage_region, stage_region
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner, ParallelResult
 from scripts.function_tracer_pcode.proof.formula import FormulaBuilder
@@ -425,11 +427,17 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         binary2_id: Optional[str] = None,
         binary1_content_identity: Optional[Tuple[Any, ...]] = None,
         binary2_content_identity: Optional[Tuple[Any, ...]] = None,
+        analysis_deadline: Optional[DeadlinePolicy] = None,
     ) -> EquivalenceResult:
         """2つのバイナリから関数を解析して等価性を判定
 
         意味判定の入力は ``program1`` / ``program2`` の 2 バイナリだけで、
         バイナリ隣接のソース宣言を受け取る引数は持たない（Issue #122）。
+
+        ``analysis_deadline``（Issue #106 PR-106-A、既定 ``None`` = 期限なし）: 解析全体の
+        時間予算。期限の起点（absolute monotonic）は **ここ** で 1 回だけ決まる。期限を過ぎた
+        pair は新しい意味解析を始めず、登録済み reason（`analysis_budget_exceeded`）の
+        UNKNOWN になる（authority の確定・receipt・結果の組み立ては続ける）。
         """
         previous_context = getattr(self, "_active_binary_content_identities", None)
         self._active_binary_content_identities = (
@@ -437,18 +445,21 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
             binary2_content_identity,
         )
         try:
-            result = run_check_from_binaries(
-                self,
-                program1,
-                program2,
-                function_name1,
-                function_name2,
-                decompile_timeout=decompile_timeout,
-                save_formula=save_formula,
-                retry_with_type_fix=retry_with_type_fix,
-                binary1_id=binary1_id,
-                binary2_id=binary2_id,
-            )
+            with deadline_scope(analysis_deadline) as deadline:
+                result = run_check_from_binaries(
+                    self,
+                    program1,
+                    program2,
+                    function_name1,
+                    function_name2,
+                    decompile_timeout=decompile_timeout,
+                    save_formula=save_formula,
+                    retry_with_type_fix=retry_with_type_fix,
+                    binary1_id=binary1_id,
+                    binary2_id=binary2_id,
+                )
+                if analysis_deadline is not None and deadline is not None:
+                    attach_analysis_deadline(result, deadline)
             result.binary1_content_identity = binary1_content_identity
             result.binary2_content_identity = binary2_content_identity
             return result

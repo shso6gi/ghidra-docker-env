@@ -10,8 +10,10 @@ from contextvars import ContextVar
 from typing import Any, Dict, List, Optional, Type
 from dataclasses import dataclass, field
 
+from scripts.function_tracer_pcode.core.deadline import TimeUnit, admit
 from scripts.function_tracer_pcode.core.stage_journal import (
     journal_counter,
+    journal_note,
     journal_stage_end,
     journal_stage_start,
 )
@@ -21,10 +23,16 @@ from scripts.function_tracer_pcode.smt.aggregation import (
     aggregate_backend_results,
 )
 from scripts.function_tracer_pcode.smt.interface import (
+    BackendTermination,
     SMTSolver,
     SolverResult,
     SolverStatus,
+    backend_capabilities,
     enforce_witness_contract,
+    execute_on_backend,
+    not_started_result,
+    request_backend_interrupt,
+    result_was_answered,
 )
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 
@@ -49,6 +57,29 @@ from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 _IN_SOLVER_ORCHESTRATION: ContextVar[bool] = ContextVar(
     "in_solver_orchestration", default=False
 )
+
+# --------------------------------------------------------------------------
+# Issue #106 PR-106-A: 解析の期限と solver の実行
+#
+#   * 1 つの論理的な問い合わせ（run_parallel / run_sequential / 直接の run_single）の
+#     入口（owner の thread）で `core.deadline.admit` を 1 回だけ呼ぶ。期限を過ぎて
+#     いれば問い合わせを始めない（限界を raise）。worker へは許可の absolute な終わり
+#     （``not_after``）を引数で渡す（worker は contextvar の期限を読まない）
+#   * 返った直後に同じ許可で `settle` する（期限を過ぎていれば答えを採らない）
+#   * 待つのをやめること・pending を取り消すこと・走っている実行を止めること・process が
+#     終われることは別のこと（`BackendTermination`）。走っている実行は backend が
+#     ``interrupt`` を主張するときだけ中断を求め、`RUNNING_STOP_GRACE_SECONDS` 待っても
+#     返らなければ「止められない」と記録して、自分で返るまで待つ（その間 process は
+#     終われない: supervisor の TIMEOUT が最後の fallback。偽って UNKNOWN にしない）
+#   * backend ごとの違いは adapter（`SMTSolver.execute` / `capabilities` /
+#     `request_interrupt`）にだけあり、ここは backend 名で分岐しない
+# --------------------------------------------------------------------------
+
+#: solver の問い合わせの checkpoint の stage（限界の site）
+SOLVER_STAGE = "solver"
+
+#: 中断を求めた実行が返るのを待つ上限（z3 の実測は最大 0.12 s）
+RUNNING_STOP_GRACE_SECONDS = 1.0
 
 
 class _SolverCounters:
@@ -316,6 +347,7 @@ class ParallelSolverRunner:
         *,
         _orchestrated: Optional[bool] = None,
         _journal_query_id: Optional[int] = None,
+        not_after: Optional[float] = None,
     ) -> SolverResult:
         """単一ソルバーで実行
 
@@ -323,6 +355,11 @@ class ParallelSolverRunner:
         run_parallel が worker thread へ submit するとき（ContextVar も
         journal の対応 ID も伝わらない）にだけ明示で渡す。判定には一切
         関与しない。
+
+        ``not_after``（Issue #106 PR-106-A）は問い合わせの入口が求めた、この実行の
+        absolute monotonic の終わり。orchestration の内側（worker を含む）はこれを
+        引数でだけ受け取る。orchestration の外から直接呼ばれたときは、この呼び出し
+        自身が問い合わせの入口なので、ここで許可を取り、返った直後に確かめる。
         """
         import sys
 
@@ -349,7 +386,12 @@ class ParallelSolverRunner:
         try:
             # タイムアウトを動的に設定（重要：ここで反映される）
             runtime_timeout = self._resolve_timeout(timeout)
-            solver.set_timeout(runtime_timeout)
+            admission = None
+            if not orchestrated:
+                admission = admit(SOLVER_STAGE, runtime_timeout, TimeUnit.MILLISECONDS)
+                if not admission.startable:
+                    return not_started_result(solver.name)
+                not_after = admission.not_after
 
             # 即座にフラッシュして出力
             if self.debug:
@@ -357,12 +399,15 @@ class ParallelSolverRunner:
                 sys.stdout.flush()
 
             try:
-                result = solver.check_equivalence_direct(smt_script, cancellation_token)
+                result = execute_on_backend(
+                    solver, smt_script, timeout_seconds=runtime_timeout,
+                    not_after=not_after, cancellation_token=cancellation_token,
+                )
 
                 if self.debug:
                     print(f"[ParallelRunner] <<< {solver.name} completed: {result.status.name}", flush=True)
 
-                return enforce_witness_contract(
+                result = enforce_witness_contract(
                     result, smt_script,
                     canonical=bool(getattr(solver, "PROVIDES_CANONICAL_WITNESS", False)),
                 )
@@ -371,11 +416,17 @@ class ParallelSolverRunner:
                     import traceback
                     print(f"[ParallelRunner] {solver.name} exception: {e}", flush=True)
                     print(traceback.format_exc(), flush=True)
-                return SolverResult(
+                result = SolverResult(
                     solver_name=solver.name,
                     status=SolverStatus.ERROR,
                     error_message=str(e)
                 )
+            if admission is not None:
+                admission.settle(
+                    answered=result_was_answered(result),
+                    evidence=_termination_evidence([result]),
+                )
+            return result
         finally:
             elapsed = time.perf_counter() - backend_started
             _SOLVER_COUNTERS.add_backend_seconds(elapsed)
@@ -403,14 +454,18 @@ class ParallelSolverRunner:
                 return ParallelResult.from_backend_results([])
         
             runtime_timeout = self._resolve_timeout(timeout)
+            admission = admit(SOLVER_STAGE, runtime_timeout, TimeUnit.MILLISECONDS)
+            if not admission.startable:
+                return ParallelResult.from_backend_results(
+                    [not_started_result(solver.name) for solver in self._solvers]
+                )
             if self.debug:
                 print(f"[ParallelRunner] Starting parallel execution with {len(self._solvers)} solvers")
         
             cancellation_token = CancellationToken()
             results: List[SolverResult] = []
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=len(self._solvers)
-            ) as executor:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(self._solvers))
+            try:
                 futures = [
                     executor.submit(
                         self.run_single,
@@ -420,24 +475,29 @@ class ParallelSolverRunner:
                         runtime_timeout,
                         _orchestrated=True,
                         _journal_query_id=query_id,
+                        not_after=admission.not_after,
                     )
                     for solver in self._solvers
                 ]
+                # 待つのは従来どおり `timeout + 10` 秒、ただし解析の期限までに clamp する
                 _done, not_done = concurrent.futures.wait(
-                    futures, timeout=runtime_timeout + 10
+                    futures, timeout=admission.wait_timeout(runtime_timeout + 10)
                 )
+                stopped: Dict[Any, BackendTermination] = {}
                 if not_done:
                     if self.debug:
                         print("[ParallelRunner] Overall timeout reached")
-                    cancellation_token.cancel()
-                    for future in not_done:
-                        future.cancel()
+                    stopped = stop_unfinished(
+                        list(zip(self._solvers, futures)), not_done, cancellation_token,
+                        query_id=query_id,
+                    )
                 for solver, future in zip(self._solvers, futures):
-                    if future in not_done:
+                    if future in stopped:
                         results.append(SolverResult(
                             solver_name=solver.name,
                             status=SolverStatus.TIMEOUT,
-                            elapsed_time=runtime_timeout
+                            elapsed_time=runtime_timeout,
+                            termination=stopped[future],
                         ))
                         continue
                     try:
@@ -453,8 +513,15 @@ class ParallelSolverRunner:
                     if self.debug:
                         row = results[-1]
                         print(f"[ParallelRunner] {solver.name} completed: {row.status.name} ({row.elapsed_time:.3f}s)")
+            finally:
+                # 走っている実行は `stop_unfinished` が返るまで待ってある（ここで待つものは無い）
+                executor.shutdown(wait=True, cancel_futures=True)
 
             parallel = ParallelResult.from_backend_results(results)
+            admission.settle(
+                answered=all(result_was_answered(row) for row in results),
+                evidence=_termination_evidence(results),
+            )
             if self.debug:
                 print(f"[ParallelRunner] Final result: is_equivalent={parallel.is_equivalent}")
             return parallel
@@ -467,6 +534,11 @@ class ParallelSolverRunner:
         """全 backend を設定順に 1 つずつ実行し、結果を `smt.aggregation` でまとめる。"""
         with _solver_orchestration("run_sequential") as query_id:
             runtime_timeout = self._resolve_timeout(timeout)
+            admission = admit(SOLVER_STAGE, runtime_timeout, TimeUnit.MILLISECONDS)
+            if not admission.startable:
+                return ParallelResult.from_backend_results(
+                    [not_started_result(solver.name) for solver in self._solvers]
+                )
             if self.debug:
                 print(f"[ParallelRunner] Starting sequential execution with {len(self._solvers)} solvers")
         
@@ -483,14 +555,117 @@ class ParallelSolverRunner:
                     smt_script,
                     timeout=runtime_timeout,
                     _journal_query_id=query_id,
+                    not_after=admission.not_after,
                 )
                 results.append(result)
             
                 if self.debug:
                     print(f"[ParallelRunner] {solver.name}: {result.status.name} ({result.elapsed_time:.3f}s)")
 
-            return ParallelResult.from_backend_results(results)
+            parallel = ParallelResult.from_backend_results(results)
+            admission.settle(
+                answered=all(result_was_answered(row) for row in results),
+                evidence=_termination_evidence(results),
+            )
+            return parallel
 
     def _resolve_timeout(self, timeout: Optional[int]) -> int:
         """実行に使うタイムアウトを決定する。"""
         return timeout if timeout is not None else self.timeout
+
+
+def run_backend_query(
+    backend: SMTSolver,
+    smt_script: str,
+    *,
+    cancellation_token: Optional[CancellationToken] = None,
+) -> SolverResult:
+    """backend 1 つで 1 回だけ問う（runner を通さない直接の問い合わせの入口、Issue #106 PR-106-A）。
+
+    runner の問い合わせと同じ規則: 始める前に解析の期限の許可を取り（過ぎていれば限界を
+    raise）、期限の absolute な終わりを adapter へ引数で渡し、返った直後に確かめる。時間は
+    backend の設定（`backend.timeout` 秒）。counter / journal / witness の検査は従来どおり
+    行わない（status だけを読む呼び出し元のため）。
+    """
+
+    timeout_seconds = backend.timeout
+    admission = admit(SOLVER_STAGE, timeout_seconds, TimeUnit.MILLISECONDS)
+    if not admission.startable:
+        return not_started_result(backend.name)
+    result = execute_on_backend(
+        backend, smt_script, timeout_seconds=timeout_seconds,
+        not_after=admission.not_after, cancellation_token=cancellation_token,
+    )
+    admission.settle(
+        answered=result_was_answered(result), evidence=_termination_evidence([result]),
+    )
+    return result
+
+
+def stop_unfinished(
+    backends_and_futures: List[Any],
+    not_done: Any,
+    cancellation_token: CancellationToken,
+    *,
+    query_id: Optional[int] = None,
+    grace_seconds: float = RUNNING_STOP_GRACE_SECONDS,
+) -> Dict[Any, BackendTermination]:
+    """待つのをやめた実行を止める（Issue #106 PR-106-A）。返す値は future → 終わり方。
+
+    1. 中止を知らせる（cancellation token）
+    2. まだ始まっていない future は取り消す（`CANCELLED_PENDING`）
+    3. 走っている実行は、backend が ``interrupt`` を主張するときだけ中断を求める
+    4. `grace_seconds` 待って返ったものは `INTERRUPTED`
+    5. 返らないものは `NOT_STOPPABLE`。journal に記録してから、**自分で返るまで待つ**
+       （worker を残したまま結果を確定しない。process はそれまで終われず、supervisor の
+       TIMEOUT が最後の fallback になる）
+
+    どの手順も backend の能力（`SolverBackendCapabilities`）だけで決まり、backend 名を見ない。
+    """
+
+    cancellation_token.cancel()
+    terminations: Dict[Any, BackendTermination] = {}
+    running = []
+    for backend, future in backends_and_futures:
+        if future not in not_done:
+            continue
+        if future.cancel():
+            terminations[future] = BackendTermination.CANCELLED_PENDING
+            continue
+        running.append((backend, future))
+    for backend, _future in running:
+        request_backend_interrupt(backend)
+    if running:
+        returned, still_running = concurrent.futures.wait(
+            [future for _backend, future in running], timeout=grace_seconds,
+        )
+        for future in returned:
+            terminations[future] = BackendTermination.INTERRUPTED
+        if still_running:
+            stuck = [
+                (backend, future) for backend, future in running if future in still_running
+            ]
+            for _backend, future in stuck:
+                terminations[future] = BackendTermination.NOT_STOPPABLE
+            journal_note("solver_worker_not_stoppable", {
+                "query_id": query_id,
+                "backends": [str(getattr(backend, "name", type(backend).__name__)) for backend, _f in stuck],
+                "guarantee_classes": [backend_capabilities(backend).guarantee_class for backend, _f in stuck],
+                "action": "wait_for_worker_to_return",
+            })
+            concurrent.futures.wait(still_running)
+    return terminations
+
+
+def _termination_evidence(results: List[SolverResult]) -> tuple:
+    """解析の期限で打ち切ったときの限界に添える、backend 実行の終わり方（診断）。"""
+
+    rows = []
+    for row in results:
+        termination = getattr(row, "termination", BackendTermination.COMPLETED)
+        if termination is BackendTermination.COMPLETED:
+            continue
+        rows.append(f"backend={row.solver_name}:{termination.value}")
+        if termination is BackendTermination.NOT_STOPPABLE:
+            rows.append("worker_stop=not_stoppable")
+    return tuple(rows)

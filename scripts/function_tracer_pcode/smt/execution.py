@@ -14,6 +14,12 @@ backend の実行入口は、実行を始めるときに `ExecutionBudget` を 1
 両方が成り立つときは中止を優先する（中止は呼び出し側の意思で、期限切れより先に
 確かな事実）。中断の結果の status への写し方（`CANCELLED` → UNKNOWN、`BUDGET_EXHAUSTED`
 → TIMEOUT）は `smt.interface.interrupted_result` が持つ。
+
+**解析全体の期限との関係**（Issue #106 PR-106-A）: 解析全体の期限（pair の analysis
+deadline）の owner は `core.deadline.Deadline` で、この module は 1 回の solver 実行の
+残り時間だけを持つ。両者を突き合わせるのは `ExecutionBudget.starting_now(not_after=...)`
+の 1 箇所だけ（解析の期限の手前で実行の期限を切る）。実行を始めてよいか・返った答えを
+採ってよいかは `core.deadline`（`admit` / `settle`）が決める。
 """
 
 from __future__ import annotations
@@ -37,10 +43,26 @@ class ExecutionBudget:
         self._cancellation_token = cancellation_token
 
     @classmethod
-    def starting_now(cls, seconds: float, cancellation_token: Optional[Any] = None) -> "ExecutionBudget":
-        """今から `seconds` 秒の実行予算。"""
+    def starting_now(
+        cls,
+        seconds: float,
+        cancellation_token: Optional[Any] = None,
+        *,
+        not_after: Optional[float] = None,
+    ) -> "ExecutionBudget":
+        """今から `seconds` 秒の実行予算。
 
-        return cls(time.monotonic() + float(seconds), cancellation_token)
+        `not_after`（Issue #106 PR-106-A）は解析全体の期限から owner が求めた、この実行が
+        越えてはならない absolute monotonic の時刻（`core.deadline.Admission.not_after`）。
+        与えられたら実行の期限はその手前で切る。**解析の期限と 1 回の実行の期限を突き合わせる
+        のはここだけ**で、残り時間の計算（`remaining_ms` / `interruption`）はこの 1 つの期限
+        だけを見る。
+        """
+
+        deadline = time.monotonic() + float(seconds)
+        if not_after is not None:
+            deadline = min(deadline, float(not_after))
+        return cls(deadline, cancellation_token)
 
     def remaining_ms(self) -> int:
         """期限までの残り（ミリ秒、切り捨て）。0 以下なら期限切れ。"""

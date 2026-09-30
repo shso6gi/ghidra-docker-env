@@ -7,6 +7,7 @@ from functools import cmp_to_key
 from typing import Any, Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
+from scripts.function_tracer_pcode.core.deadline import checkpoint as deadline_checkpoint
 from scripts.function_tracer_pcode.core import (
     Condition,
     Expression,
@@ -569,6 +570,8 @@ def build_pair_query(
 ) -> str:
     """値不等式つきの pair query を構築する"""
     # Issue #124: pair query のレンダリングを計測する（全 renderer がここを通る）。
+    # Issue #106 PR-106-A: query を組み始める境界
+    deadline_checkpoint("query_build")
     with stage_region("query_build"):
         lines = _build_query_header(
             f"; Pairwise Query: Pair {pair_id}",

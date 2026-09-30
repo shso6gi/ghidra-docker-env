@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from enum import Enum, auto
-from typing import Callable, Optional, Dict, Any, Tuple
+from typing import Callable, ClassVar, Optional, Dict, Any, Tuple
 from dataclasses import dataclass
 import time
 
@@ -11,6 +11,7 @@ import time
 # Re-exports kept for callers that import these names from this module.
 from typing import List  # noqa: F401
 from scripts.function_tracer_pcode.core import live_values
+from scripts.function_tracer_pcode.core.deadline import TimeUnit, bounded_timeout
 from scripts.function_tracer_pcode.core.json_encoding import materialize
 from scripts.function_tracer_pcode.smt.execution import (
     BUDGET_EXHAUSTED,
@@ -32,6 +33,70 @@ class SolverStatus(Enum):
     UNKNOWN = auto()    # 判定不能
     TIMEOUT = auto()    # タイムアウト
     ERROR = auto()      # エラー発生
+
+
+class BackendTermination(Enum):
+    """1 つの backend 実行がどう終わったか（Issue #106 PR-106-A）。
+
+    status（何が分かったか）とは別の軸で、「待つのをやめた」「実行を止めた」「止められ
+    なかった」を 1 つの timeout に潰さないためにある。結果 JSON の schema には入れない。
+    """
+
+    #: backend が自分で返った（答え・自分の timeout・unknown のどれでも）
+    COMPLETED = "completed"
+    #: 期限までの時間が無いので始めなかった
+    NOT_STARTED = "not_started"
+    #: 始まる前に取り消した（pending の future）
+    CANCELLED_PENDING = "cancelled_pending"
+    #: 走っていた実行を中断の要求で止めた（待ちの上限の中で返った）
+    INTERRUPTED = "interrupted"
+    #: 走っていた実行を止められなかった（要求しても返らない・止める手段が無い）。runner は
+    #: その実行が自分で返るまで待つ（process はそれまで終われない: supervisor の TIMEOUT が
+    #: 最後の fallback）
+    NOT_STOPPABLE = "not_stoppable"
+
+
+@dataclass(frozen=True)
+class SolverBackendCapabilities:
+    """backend adapter が **実測の根拠をもって** 主張できる時間制御の能力（既定は主張なし）。
+
+    ``native_timeout``    backend 自身が timeout で実行を打ち切る（``timeout_unit`` の単位）
+    ``absolute_deadline`` `SMTSolver.execute` が ``not_after``（absolute monotonic）を守る
+    ``interrupt``         別 thread からの `request_interrupt()` で走っている実行が返る
+    ``cancel``            cancellation token を実行の段の間で確かめる
+    ``hard_stop``         実行を強制終了できる（外部 process の kill など）
+
+    主張しない能力は無いものとして扱う（runner はそれを前提に止め方を選ぶ）。
+    """
+
+    native_timeout: bool = False
+    timeout_unit: Optional[TimeUnit] = None
+    absolute_deadline: bool = False
+    interrupt: bool = False
+    cancel: bool = False
+    hard_stop: bool = False
+
+    @property
+    def cooperative(self) -> bool:
+        """期限の中で自分で止まることを保証できるか（Class A / B の区別）。"""
+
+        return self.native_timeout and self.absolute_deadline
+
+    @property
+    def stoppable_while_running(self) -> bool:
+        """走っている実行を外から止められるか。"""
+
+        return self.interrupt or self.hard_stop
+
+    @property
+    def guarantee_class(self) -> str:
+        """``"A"``: 期限の中で止まる。``"B"``: 保証しない（supervisor の TIMEOUT が fallback）。"""
+
+        return "A" if self.cooperative else "B"
+
+
+#: 何も主張しない backend（能力を宣言していない backend・duck-typed な test double）
+NO_CAPABILITIES = SolverBackendCapabilities()
 
 
 @dataclass
@@ -61,6 +126,8 @@ class SolverResult:
     #: status は ERROR になる。集約（`smt.aggregation`）は、この行がある query を判定しない
     #: （SAT を主張した backend がいたことを黙って捨てない）。結果 JSON の schema には入れない
     witness_contract_violation: Optional[str] = None
+    #: この実行がどう終わったか（`BackendTermination`。結果 JSON の schema には入れない）
+    termination: BackendTermination = BackendTermination.COMPLETED
     
     def is_equivalent(self) -> bool:
         """等価かどうか"""
@@ -86,6 +153,10 @@ class SMTSolver(ABC):
     #: backend の witness の無い・形の違う SAT は ERROR、宣言しない backend の model は落とす）。
     #: 宣言する backend は、SAT を `sat_with_canonical_witness` でだけ返す。
     PROVIDES_CANONICAL_WITNESS = False
+
+    #: この backend の時間制御の能力（Issue #106 PR-106-A）。既定は **主張なし**
+    #: （non-cooperative: Class B）。主張する backend は実測の根拠と backend の test を持つ。
+    CAPABILITIES: ClassVar[SolverBackendCapabilities] = NO_CAPABILITIES
 
     def __init__(self, timeout: int = 10):
         """
@@ -148,6 +219,39 @@ class SMTSolver(ABC):
         """
         pass
     
+    # -- adapter contract（Issue #106 PR-106-A） -------------------------------
+
+    def capabilities(self) -> SolverBackendCapabilities:
+        return type(self).CAPABILITIES
+
+    def execute(
+        self,
+        smt_script: str,
+        *,
+        timeout_seconds: float,
+        not_after: Optional[float] = None,
+        cancellation_token: Optional[Any] = None,
+    ) -> SolverResult:
+        """1 回の実行。``not_after`` は owner が求めた absolute monotonic の終わり（無ければ従来）。
+
+        既定の実装は ``absolute_deadline`` を主張しない backend 用: 期限を秒の timeout に
+        直して（`core.deadline.bounded_timeout`）`set_timeout` し、`check_equivalence_direct`
+        を呼ぶ。秒に直して 0 になるなら始めない。期限を自分で守る backend は override する。
+        """
+
+        return _default_execute(
+            self, smt_script, timeout_seconds=timeout_seconds, not_after=not_after,
+            cancellation_token=cancellation_token,
+        )
+
+    def request_interrupt(self) -> bool:
+        """走っている実行を止めるよう求める（別 thread から呼ぶ）。求められたら真。
+
+        既定は何もできない（``interrupt`` を主張しない）。
+        """
+
+        return False
+
     def _create_error_result(self, error_msg: str) -> SolverResult:
         """エラー結果を作成"""
         return SolverResult(
@@ -287,6 +391,82 @@ def sat_with_canonical_witness(
         elapsed_time=time.time() - started,
         model=model,
     )
+
+
+def not_started_result(solver_name: str, detail: str = "no time left before the analysis deadline") -> SolverResult:
+    """期限までの時間が無くて実行しなかった backend の行（TIMEOUT。判定の根拠にならない）。"""
+
+    return SolverResult(
+        solver_name=solver_name,
+        status=SolverStatus.TIMEOUT,
+        elapsed_time=0.0,
+        error_message=f"not_started: {detail}",
+        termination=BackendTermination.NOT_STARTED,
+    )
+
+
+def result_was_answered(result: SolverResult) -> bool:
+    """期限で切られていない行か（自分で返り、TIMEOUT ではない）。"""
+
+    return (
+        result.termination is BackendTermination.COMPLETED
+        and result.status != SolverStatus.TIMEOUT
+    )
+
+
+def _default_execute(
+    backend: Any,
+    smt_script: str,
+    *,
+    timeout_seconds: float,
+    not_after: Optional[float],
+    cancellation_token: Optional[Any],
+) -> SolverResult:
+    if not_after is None:
+        backend.set_timeout(timeout_seconds)
+        return backend.check_equivalence_direct(smt_script, cancellation_token)
+    seconds = bounded_timeout(
+        timeout_seconds, not_after, TimeUnit.SECONDS, now=time.monotonic(),
+    )
+    if seconds is None:
+        return not_started_result(backend.name)
+    backend.set_timeout(seconds)
+    return backend.check_equivalence_direct(smt_script, cancellation_token)
+
+
+def backend_capabilities(backend: Any) -> SolverBackendCapabilities:
+    """backend の能力（adapter でない duck-typed な object は主張なし）。"""
+
+    if isinstance(backend, SMTSolver):
+        return backend.capabilities()
+    return NO_CAPABILITIES
+
+
+def execute_on_backend(
+    backend: Any,
+    smt_script: str,
+    *,
+    timeout_seconds: float,
+    not_after: Optional[float] = None,
+    cancellation_token: Optional[Any] = None,
+) -> SolverResult:
+    """backend 1 つで 1 回実行する（adapter の `execute`。duck-typed な object は既定の手順）。"""
+
+    if isinstance(backend, SMTSolver):
+        return backend.execute(
+            smt_script, timeout_seconds=timeout_seconds, not_after=not_after,
+            cancellation_token=cancellation_token,
+        )
+    return _default_execute(
+        backend, smt_script, timeout_seconds=timeout_seconds, not_after=not_after,
+        cancellation_token=cancellation_token,
+    )
+
+
+def request_backend_interrupt(backend: Any) -> bool:
+    if isinstance(backend, SMTSolver) and backend.capabilities().interrupt:
+        return bool(backend.request_interrupt())
+    return False
 
 
 SolverInterface = SMTSolver  # 後方互換性のためのエイリアス

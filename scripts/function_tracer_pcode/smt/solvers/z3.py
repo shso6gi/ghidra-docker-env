@@ -6,9 +6,11 @@ import importlib
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, Tuple, cast
 
+from scripts.function_tracer_pcode.core.deadline import TimeUnit
 from scripts.function_tracer_pcode.smt.execution import CANCELLED, ExecutionBudget
 from scripts.function_tracer_pcode.smt.interface import (
     SMTSolver,
+    SolverBackendCapabilities,
     SolverResult,
     SolverStatus,
     interrupted_result,
@@ -229,12 +231,28 @@ class Z3Solver(SMTSolver):
     """Z3 SMTソルバー"""
 
     PROVIDES_CANONICAL_WITNESS = True
+
+    #: Issue #106 PR-106-A の実測（z3 4.x、20 並列の負荷下、`tmp/issue106a/z3_probe.py`）:
+    #: timeout（ミリ秒）越えの戻りは最大 0.11 s、別 thread からの `Context.interrupt()` 後の
+    #: 戻りは最大 0.12 s で全件返った。check の間 GIL は解放される。`execute` は
+    #: ``not_after`` を実行の予算（`ExecutionBudget`）へ入れ、初回の check と canonical witness
+    #: の探索がその残りだけを使う。強制終了（in-process なので不可）は主張しない。
+    CAPABILITIES = SolverBackendCapabilities(
+        native_timeout=True,
+        timeout_unit=TimeUnit.MILLISECONDS,
+        absolute_deadline=True,
+        interrupt=True,
+        cancel=True,
+        hard_stop=False,
+    )
     
     def __init__(self, timeout: int = 10, debug: bool = False):
         super().__init__(timeout)
         self._z3 = None
         self._solver = None
         self.debug = debug
+        #: 実行中の context（`request_interrupt` が別 thread から中断を求める先）
+        self._running_context: Any = None
     
     @property
     def name(self) -> str:
@@ -264,10 +282,32 @@ class Z3Solver(SMTSolver):
         except Exception as e:
             return False, f"Error: {e}"
     
+    def execute(
+        self,
+        smt_script: str,
+        *,
+        timeout_seconds: float,
+        not_after: Optional[float] = None,
+        cancellation_token: Optional[Any] = None,
+    ) -> SolverResult:
+        """adapter の実行（期限 ``not_after`` は実行の予算へ入れる。ここで待たない）。"""
+
+        self.set_timeout(timeout_seconds)
+        return self.check_equivalence_direct(smt_script, cancellation_token, not_after=not_after)
+
+    def request_interrupt(self) -> bool:
+        context = self._running_context
+        if context is None:
+            return False
+        context.interrupt()
+        return True
+
     def check_equivalence_direct(
         self,
         smt_script: str,
-        cancellation_token: Optional[Any] = None
+        cancellation_token: Optional[Any] = None,
+        *,
+        not_after: Optional[float] = None,
     ) -> SolverResult:
         self._debug_print("=== Z3 check_equivalence_direct START ===")
         self._debug_print(f"Current timeout: {self.timeout}s")
@@ -279,7 +319,10 @@ class Z3Solver(SMTSolver):
         # Issue #161: 実行の状態（期限と中止）は 1 回の実行に 1 つの `ExecutionBudget`。
         # 入口で作り、query の準備・初回の check・canonical witness の生成と SAT の確定の
         # すべてがこれに問う（初回の check には残りだけを与える）。
-        budget = ExecutionBudget.starting_now(self.timeout, cancellation_token)
+        # Issue #106 PR-106-A: 解析の期限（``not_after``）はこの実行の期限の上限になる
+        budget = ExecutionBudget.starting_now(
+            self.timeout, cancellation_token, not_after=not_after,
+        )
         
         try:
             z3 = self._z3
@@ -290,6 +333,7 @@ class Z3Solver(SMTSolver):
             # この 1 回だけで、witness の探索は script を読み直さない。
             try:
                 context = z3.Context()
+                self._running_context = context
                 prepared = prepare_witness_query(z3, smt_script, context)
                 self._solver = z3.Solver(ctx=context)
                 self._solver.add(*prepared.assertions)
@@ -372,6 +416,8 @@ class Z3Solver(SMTSolver):
             if stop is not None:
                 return interrupted_result(self.name, stop, f"the execution raised: {e}", elapsed)
             return self._create_error_result(str(e))
+        finally:
+            self._running_context = None
     
     def _is_timeout_reason(self, reason: str, elapsed: float) -> bool:
         """

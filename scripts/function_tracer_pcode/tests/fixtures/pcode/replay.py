@@ -129,6 +129,7 @@ def replay_recorded_pair(
     monkeypatch,
     identical_fast_path: Optional[bool] = None,
     configure_checker: Optional[Callable[[Any], None]] = None,
+    analysis_deadline: Any = None,
 ) -> ReplayOutcome:
     """記録と同じ production path を、記録済み object の上で 1 回走らせる。
 
@@ -194,6 +195,7 @@ def replay_recorded_pair(
             binary2_id=right_header["binary"]["binary_id"],
             binary1_content_identity=("sha256", left_header["binary"]["sha256"]),
             binary2_content_identity=("sha256", right_header["binary"]["sha256"]),
+            analysis_deadline=analysis_deadline,
         )
         payload = result.to_dict()
         finalization = getattr(result, "_canonical_finalization_context", None)

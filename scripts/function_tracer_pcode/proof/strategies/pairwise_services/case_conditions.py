@@ -7,6 +7,7 @@ from scripts.function_tracer_pcode.core import Condition, Expression, Expression
 from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
 from scripts.function_tracer_pcode.smt import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
+from scripts.function_tracer_pcode.smt.parallel import run_backend_query
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     ConditionSMTOracle,
     ConditionSimplifier,
@@ -167,7 +168,7 @@ def _impl__expression_is_provably_nonnegative_under_conditions(
     query = self._build_nonnegative_query(expr, conditions, parameters, width_bits)
     if not query:
         return False
-    result = Z3Solver(timeout=1, debug=False).check_equivalence_direct(query)
+    result = run_backend_query(Z3Solver(timeout=1, debug=False), query)
     return result.status == SolverStatus.UNSAT
 
 

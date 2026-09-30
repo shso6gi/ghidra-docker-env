@@ -6,6 +6,10 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
+from scripts.function_tracer_pcode.core.deadline import checkpoint as deadline_checkpoint
+
+#: Issue #106 PR-106-A: obligation の checkpoint の stage
+OBLIGATION_STAGE = "obligation"
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
     ComparisonAuthorityBinding,
     current_comparison,
@@ -692,6 +696,8 @@ class ObligationRuntimeSession:
         return tuple(outcomes)
 
     def run_next(self) -> Tuple[Optional[WorkItem], Any]:
+        # Issue #106 PR-106-A: obligation 1 つの producer を始める境界（worklist を動かす前）
+        deadline_checkpoint(OBLIGATION_STAGE)
         item = self.worklist.pop()
         if item is None:
             return None, None

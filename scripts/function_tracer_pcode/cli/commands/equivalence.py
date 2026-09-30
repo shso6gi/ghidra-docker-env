@@ -465,6 +465,21 @@ def _text_or_error_result(args, *, result, payload, **context):
         raise  # pragma: no cover - 上の関数は sys.exit する
 
 
+def _analysis_deadline_policy(args, pair_diagnostics):
+    """`--analysis-timeout` の期限（無ければ ``None``）。打ち切りの stack は pair の dump 先へ書く。"""
+
+    seconds = getattr(args, "analysis_timeout", None)
+    # 数でない値（未設定・test の Mock）は期限なし。CLI の値は argparse が正の秒数に限っている
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        return None
+    from scripts.function_tracer_pcode.core.deadline import DeadlinePolicy
+
+    return DeadlinePolicy(
+        budget_seconds=seconds,
+        snapshot_sink=getattr(pair_diagnostics, "dump_file", None),
+    )
+
+
 def _cli_budget_policy():
     """pair 境界を通らなかった結果（起動・import 失敗の ERROR）を準備するときの上限。"""
 
@@ -616,7 +631,7 @@ def run_equivalence_check(args):
         install_pair_diagnostics,
     )
 
-    install_pair_diagnostics(args, context=_journal_run_context(args))
+    pair_diagnostics = install_pair_diagnostics(args, context=_journal_run_context(args))
 
     def _get_bool_arg(name: str, default: bool = False) -> bool:
         value = getattr(args, name, default)
@@ -829,6 +844,9 @@ def run_equivalence_check(args):
                                 binary2_id=binary2_id,
                                 binary1_content_identity=binary1_content_identity,
                                 binary2_content_identity=binary2_content_identity,
+                                analysis_deadline=_analysis_deadline_policy(
+                                    args, pair_diagnostics,
+                                ),
                             )
                         stage_clock.mark("check", time.monotonic() - check_started)
                     finally:

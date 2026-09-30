@@ -77,12 +77,31 @@ class Envelope:
     #: 書き換えたあと ``envelope_digest`` を計算し直す（封は正しいまま、中身
     #: だけが食い違う envelope になる）。
     reseal: bool = False
+    #: その outcome を作る driver（``None`` なら ``OUTCOME_DRIVERS[outcome]``）。
+    #: Issue #106 PR-106-A: ``"deadline"`` は解析の期限の限界で UNKNOWN にする。
+    driver: Optional[str] = None
 
     def to_json(self) -> dict[str, Any]:
         return {
             "step": "envelope", "outcome": self.outcome,
-            "corrupt": self.corrupt, "reseal": self.reseal,
+            "corrupt": self.corrupt, "reseal": self.reseal, "driver": self.driver,
         }
+
+
+@dataclass(frozen=True)
+class StuckSolverWorker:
+    """Issue #106 PR-106-A（E14）: 止められない solver worker を解析の期限の中で走らせる。
+
+    production の `ParallelSolverRunner.run_parallel` が、中断に応じない backend（能力を
+    主張しない adapter）を ``budget`` 秒の期限つきで実行する。runner は止められないと
+    検出したら（その事実を child の記録へ書く）worker が自分で返るまで待つので、child は
+    結果を出さずに supervisor の deadline を迎える。
+    """
+
+    budget: float = 3.0
+
+    def to_json(self) -> dict[str, Any]:
+        return {"step": "stuck_solver_worker", "budget": self.budget}
 
 
 @dataclass(frozen=True)
@@ -343,11 +362,55 @@ def _drive_error(session: Any) -> bool:
     return False
 
 
+def _drive_deadline_limitation(session: Any) -> bool:
+    """解析の期限を production の `core.deadline` で切らせ、その限界を production の帰属で
+    authority の cause にする（Issue #106 PR-106-A、E6）。"""
+
+    import time
+
+    from scripts.function_tracer_pcode.authority.decision.limitation_attribution import (
+        attribute_analysis_limitation,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.core.deadline import (
+        DeadlinePolicy,
+        checkpoint,
+        deadline_scope,
+    )
+    from scripts.function_tracer_pcode.core.errors import DeadlineExceeded, pair_failure_scope
+
+    offset = [0.0]
+    policy = DeadlinePolicy(budget_seconds=1.0, clock=lambda: time.monotonic() + offset[0])
+    limitation = None
+    with production_signal_scope(session), pair_failure_scope(
+        ("supervisor-harness",), session.identity.result_occurrence_id,
+    ) as ledger:
+        with deadline_scope(policy):
+            offset[0] = 10.0
+            try:
+                checkpoint("solver")
+            except DeadlineExceeded as exc:
+                limitation = exc
+        if limitation is None or ledger.pending_failure() is None:
+            raise FixtureFailure("the deadline did not trip")
+        attribution = attribute_analysis_limitation(session, limitation)
+        if not attribution.is_attributed:
+            raise FixtureFailure(f"deadline limitation was not attributed: {attribution.detail}")
+    return False
+
+
 #: canonical outcome -> (session を駆動して legacy の is_timeout を返す関数)。
 OUTCOME_DRIVERS: dict[str, Callable[[Any], bool]] = {
     "TIMEOUT": _drive_solver_timeout,
     "UNKNOWN": _drive_open_requirement,
     "ERROR": _drive_error,
+}
+
+#: 名前つきの driver（``Envelope(driver=...)``）。outcome は ``Envelope.outcome`` で要求する。
+NAMED_OUTCOME_DRIVERS: dict[str, Callable[[Any], bool]] = {
+    "deadline": _drive_deadline_limitation,
 }
 
 
@@ -365,9 +428,10 @@ def _step_envelope(context: _ChildContext, step: Mapping[str, Any]) -> None:
     from scripts.function_tracer_pcode.smt.parallel import ParallelResult
 
     requested = step["outcome"]
-    driver = OUTCOME_DRIVERS.get(requested)
+    named = step.get("driver")
+    driver = NAMED_OUTCOME_DRIVERS.get(named) if named else OUTCOME_DRIVERS.get(requested)
     if driver is None:
-        raise FixtureFailure(f"no driver produces canonical {requested}")
+        raise FixtureFailure(f"no driver produces canonical {requested} ({named})")
     session = context.session
     is_timeout = driver(session)
     evidence = context.connector.finish(
@@ -445,11 +509,44 @@ def _step_stop(context: _ChildContext, step: Mapping[str, Any]) -> None:
     )
 
 
+def _step_stuck_solver_worker(context: _ChildContext, step: Mapping[str, Any]) -> None:
+    import threading
+
+    from scripts.function_tracer_pcode.core.deadline import DeadlinePolicy, deadline_scope
+    from scripts.function_tracer_pcode.smt import parallel
+    from scripts.function_tracer_pcode.smt.interface import SMTSolver
+
+    records = context.records.directory
+    never = threading.Event()
+
+    class _Blocking(SMTSolver):
+        @property
+        def name(self):
+            return "blocking"
+
+        def check_availability(self):
+            return True, "harness"
+
+        def check_equivalence_direct(self, smt_script, cancellation_token=None):
+            write_json(records / "stuck_worker_started.json", {"pid": os.getpid()})
+            never.wait()  # 中断にも timeout にも応じない
+
+    def _note(note, payload=None):
+        write_json(records / f"{note}.json", dict(payload or {}))
+
+    parallel.journal_note = _note
+    runner = parallel.ParallelSolverRunner(timeout=30, solver_classes=[_Blocking])
+    with deadline_scope(DeadlinePolicy(budget_seconds=float(step["budget"]), sub_operation_margin_seconds=0.0)):
+        runner.run_parallel("(check-sat)")
+    raise FixtureFailure("the runner returned while a worker could not be stopped")
+
+
 STEP_HANDLERS: dict[str, Callable[[_ChildContext, Mapping[str, Any]], None]] = {
     "checkpoint": _step_checkpoint,
     "envelope": _step_envelope,
     "exit": _step_exit,
     "stop": _step_stop,
+    "stuck_solver_worker": _step_stuck_solver_worker,
 }
 
 
