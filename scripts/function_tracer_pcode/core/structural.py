@@ -870,6 +870,8 @@ def _tags_of(item: Any) -> Tuple[str, ...]:
     tag はこの 1 か所で両方の形から読む。組み込みの型の値だけを読む（`live_values`）。
     """
 
+    if not (type(item) is tuple or type(item) is list):
+        return ()
     if not item:
         return ()
     head = item[0]
@@ -877,16 +879,20 @@ def _tags_of(item: Any) -> Tuple[str, ...]:
         head = live_values.plain_scalar(head)
         if type(head) is not str:
             return ()
-    if head in _CANONICAL_SEQUENCE_TAGS and len(item) == 2:
-        body = item[1]
-        if (type(body) is tuple or type(body) is list) and body:
-            first = body[0]
-            if (type(first) is tuple or type(first) is list) and len(first) == 2:
-                if live_values.plain_scalar(first[0]) == "str":
-                    inner = live_values.plain_scalar(first[1])
-                    if type(inner) is str:
-                        return (head, inner)
-    return (head,)
+    if head not in _CANONICAL_SEQUENCE_TAGS or len(item) != 2:
+        return (head,)
+    body = item[1]
+    if not (type(body) is tuple or type(body) is list):
+        return (head,)
+    if not body:
+        return (head,)
+    first = body[0]
+    if not (type(first) is tuple or type(first) is list):
+        return (head,)
+    if len(first) != 2 or live_values.plain_scalar(first[0]) != "str":
+        return (head,)
+    inner = live_values.plain_scalar(first[1])
+    return (head, inner) if type(inner) is str else (head,)
 
 
 def key_contains_placeholder(key: StructuralKey) -> bool:
