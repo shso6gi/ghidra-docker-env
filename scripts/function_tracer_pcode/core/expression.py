@@ -10,7 +10,7 @@ from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     inherited_by_a_new_value,
     state_of,
 )
-from scripts.function_tracer_pcode.core.storage import StorageInfo
+from scripts.function_tracer_pcode.core.storage import FrozenStorageRecord, StorageInfo
 from scripts.function_tracer_pcode.core.render_output import utf8_length
 from scripts.function_tracer_pcode.core import json_encoding
 from scripts.function_tracer_pcode.core.json_encoding import JsonEncodingPolicy, source_converter
@@ -158,6 +158,10 @@ class Expression:
     _equivalence_digest: Optional[bytes] = None
     _tree_size: Optional[int] = None
     _identity_complete: bool = False
+    #: 凍結時に写した storage の LEGACY 表現（`FrozenStorageRecord`）と、LEGACY 表現が
+    #: 不変な状態だけの関数か（Issue #219 C-RS2。意味は `core/semantic_lifecycle.py`）
+    _storage_payload: Any = None
+    _serialization_closed: bool = False
     _recurrence_semantic_key: Any = None
     
     def __init__(
@@ -938,11 +942,20 @@ class Expression:
             else:
                 collect.extend(elements_of(operands))
                 result["operands"] = [0] * size(operands)
-        storage_info = self.storage_info
-        if storage_info is not None:
-            if type(storage_info) is not StorageInfo:
-                raise TypeError("Expression storage_info must be a StorageInfo")
-            result["storage_info"] = storage_info.to_dict()
+        # 凍結済みの node は凍結時に写した storage を描く（Issue #219 C-RS2: 生の `StorageInfo`
+        # は可変なので、凍結後に書き換わっても表現を動かさない）。写しの無い node（未凍結・
+        # storage が無い・写せなかった）は従来どおり今の `StorageInfo` を読む
+        storage_payload = self._storage_payload
+        if storage_payload is not None:
+            if type(storage_payload) is not FrozenStorageRecord:
+                raise TypeError("Expression storage payload must be a FrozenStorageRecord")
+            result["storage_info"] = storage_payload.to_dict()
+        else:
+            storage_info = self.storage_info
+            if storage_info is not None:
+                if type(storage_info) is not StorageInfo:
+                    raise TypeError("Expression storage_info must be a StorageInfo")
+                result["storage_info"] = storage_info.to_dict()
         if self.read_order_key is not None:
             result["read_order_key"] = self.read_order_key
         if self.runtime_ref is not None:

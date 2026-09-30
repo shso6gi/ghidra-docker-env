@@ -74,6 +74,9 @@ class Condition:
 
     _frozen: bool = False
     _published: bool = False
+    #: LEGACY 表現が不変な状態だけの関数か（Issue #219 C-RS2。凍結時に式から決まる派生値で、
+    #: 複製・反転は引き継がずに自分の式から決め直す。意味は `core/semantic_lifecycle.py`）
+    _serialization_closed: bool = False
 
     def __init__(self, expression: Optional["Expression"], negated: bool = False):
         if expression is None:
