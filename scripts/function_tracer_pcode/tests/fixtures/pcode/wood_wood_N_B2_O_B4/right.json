@@ -1,6 +1,6 @@
 {
  "header": {
-  "analysis_source_digest": "a6848b4723e8febf78662836621b59e713d8cc0695f10f4441e6d5f6017c2c06",
+  "analysis_source_digest": "e93b37031549686f10edf2e5fbf477ccd6a03b28bd919adef51e998a2b5913b4",
   "binary": {
    "binary_id": "B4",
    "eqbench_relative_path": "optimization/wood/Neq/source/oldV-arm64-clang-O3",
@@ -15,9 +15,9 @@
   "fixture_id": "wood_wood_N_B2_O_B4",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-09-30T02:27:15+00:00",
+  "recorded_at_utc": "2026-09-30T05:23:34+00:00",
   "recorder_version": "2",
-  "recording_commit": "641e536a232b4b963c9c38ac000f79928d4fb944",
+  "recording_commit": "aee33c7f03c494488e919a87a39ae84a0dd7ede8",
   "recording_dirty": false,
   "recording_mode": {
    "connector": "production",
