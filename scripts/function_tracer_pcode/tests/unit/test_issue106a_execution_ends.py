@@ -656,16 +656,15 @@ def test_the_shared_session_stopped_at_the_deadline_limit_is_a_deadline():
 
 
 def test_the_shared_session_normal_timeout_is_not_a_deadline():
-    """incremental の z3 は timeout を "canceled" と報告する。status は期限なしと同じ UNKNOWN の
-    まま、観測された終了原因は TIME_LIMIT（期限が上限を決めていないので通常の timeout）。"""
+    """incremental の z3 は予算の終わりの直前に "canceled"（status UNKNOWN）、直後なら予算切れ
+    （TIMEOUT）で返る（どちらになるかは時刻次第: #213。status はこの PR で変えない）。どちらでも
+    観測された終了原因は TIME_LIMIT で、期限が上限を決めていないので通常の timeout。"""
     session = _session(HARD_QUERY)
-    without = _session(HARD_QUERY).execute(HARD_QUERY, 1).results[0]
     with pair_failure_scope(("pair",), None) as ledger:
         with deadline_scope(_policy(60.0)) as deadline:
             result = session.execute(HARD_QUERY, 1)
     item = result.results[0]
-    assert (item.status, item.error_message) == (without.status, without.error_message)
-    assert item.status is SolverStatus.UNKNOWN and "canceled" in item.error_message
+    assert item.status in (SolverStatus.UNKNOWN, SolverStatus.TIMEOUT)
     assert execution_end(item) is ExecutionEnd.TIME_LIMIT
     assert item.deadline_limited is False
     assert not deadline.tripped and ledger.pending_failure() is None
