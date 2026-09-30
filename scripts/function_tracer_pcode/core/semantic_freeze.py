@@ -45,17 +45,17 @@ freeze と公開は同じ到達規則に別の操作を載せるだけなので�
 意味の入れ物か」の答えが 2 つに割れない。
 
 **直列化の不変性**（Issue #219 C-RS2。契約は `core/semantic_lifecycle.py`）も検証の
-一部として決める: storage の LEGACY 表現を凍結時に写し（`_storage_payload`）、
-closure 全体を積み終えた後に「LEGACY 表現が不変な状態だけの関数か」を子から上へ
-1 回だけ畳む（`_serialization_closed`、`_derive_serialization_closure`）。どちらも
-派生値なので、ほかの派生値と一緒に commit でだけ書く。
+一部として決める: storage と runtime ref の LEGACY 表現を凍結時に写し（`_storage_payload` /
+`_runtime_ref_payload`。runtime ref は直列化の owner に 1 回だけ作らせた表現の不変な写しで、
+ref の型の code が何を読むかは調べない）、closure 全体を積み終えた後に「LEGACY 表現が不変な
+状態だけの関数か」を子から上へ 1 回だけ畳む（`_serialization_closed`、
+`_derive_serialization_closure`）。どれも派生値なので、ほかの派生値と一緒に commit でだけ書く。
 """
 
 from __future__ import annotations
 
 import dataclasses
 import enum
-from enum import Enum
 from types import MappingProxyType
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -71,18 +71,17 @@ from scripts.function_tracer_pcode.core.expression import (
     ExpressionType,
     PhiBranch,
     coerce_phi_branches,
+    runtime_ref_source,
 )
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     CONDITION_SERIALIZATION_INPUTS,
     EXPRESSION_SERIALIZATION_INPUTS,
-    FIELD_DETERMINED_SERIALIZATION_MARKER,
     NON_INHERITED_FIELDS,
     SerializationInput,
     is_published,
     is_validated,
     mark_published,
     mark_validated,
-    serialization_protocol_methods,
 )
 from scripts.function_tracer_pcode.core.semantic_projection import contains_unsupported_value
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
@@ -92,6 +91,14 @@ from scripts.function_tracer_pcode.core.semantic_snapshot import (
     traverse_semantic_graph,
 )
 from scripts.function_tracer_pcode.core.storage import StorageInfo
+from scripts.function_tracer_pcode.core.frozen_representation import CAPTURE_MAX_BYTES, freeze_legacy_tree
+from scripts.function_tracer_pcode.core.json_encoding import (
+    RESULT_JSON_POLICY,
+    JsonBudget,
+    JsonBudgetExhausted,
+    JsonValueRejected,
+)
+from scripts.function_tracer_pcode.core.live_values import StorageBeyondReadBound, signalled_storage_reads
 
 
 FREEZE_SITE = "core.semantic_freeze.freeze_expression"
@@ -119,7 +126,7 @@ class _LifecycleStaging:
     中の式が元の node を指す）も、同じ値を 2 度積むこともここで止まる。
     """
 
-    __slots__ = ("entered", "derived", "expressions", "conditions", "storage_records", "immutable_refs")
+    __slots__ = ("entered", "derived", "expressions", "conditions", "storage_records", "runtime_ref_records")
 
     def __init__(self) -> None:
         self.entered: Dict[int, bool] = {}
@@ -130,8 +137,8 @@ class _LifecycleStaging:
         self.conditions: List[Any] = []
         #: `id(StorageInfo)` → (その object, 写し)。同じ storage を共有する node は 1 つの写しを持つ
         self.storage_records: Dict[int, Tuple[Any, Any]] = {}
-        #: `id(runtime ref)` → (その object, 深く不変か, 中の意味値)。ref は多くの node が共有する
-        self.immutable_refs: Dict[int, Tuple[Any, bool, Tuple[Any, ...]]] = {}
+        #: `id(runtime ref)` → (その object, 表現の写し)。ref は多くの node が共有する
+        self.runtime_ref_records: Dict[int, Tuple[Any, Any]] = {}
 
     def enter(self, value: Any) -> bool:
         """この操作で初めて見た値なら真。2 度目は偽（再入・back-reference）。"""
@@ -665,6 +672,8 @@ def _derive_node_fields(node: Expression, staging: _LifecycleStaging) -> Dict[st
         "_identity_complete": identity_complete,
         # LEGACY 表現の storage は凍結時の写しから描く（生の `StorageInfo` は可変）。
         "_storage_payload": _captured_storage(fields.get("storage_info"), staging),
+        # runtime ref の表現も凍結時に 1 回だけ作って写す（ref の code が何を読んでも以後は走らない）
+        "_runtime_ref_payload": _captured_runtime_ref(fields.get("runtime_ref"), staging),
         # closed かは closure 全体を積んだ後に `_derive_serialization_closure` が決める
         # （runtime ref が抱える式は graph の後に積まれる）。決まるまでは closed でない
         "_serialization_closed": False,
@@ -736,54 +745,70 @@ def _captured_storage(storage: Any, staging: _LifecycleStaging) -> Any:
     return record
 
 
-def _immutable_leaf(value: Any) -> bool:
-    """書き換わる instance 状態を持たない葉の値か（直列化の owner が読む状態のすべてが不変）。
+def _captured_runtime_ref(runtime_ref: Any, staging: _LifecycleStaging) -> Any:
+    """runtime ref の LEGACY 表現を **直列化の owner に 1 回だけ作らせた** 不変な写し（無ければ `None`）。
 
-    直列化の owner（walker の JSON / LEGACY、snapshot codec、runtime ref の source）が葉を
-    どう読むかに合わせて、証明できる形だけを通す:
+    表現を作るのは、未凍結の値を描くときと同じ source と同じ walker（`Expression._serialize_runtime_ref`
+    と同じ `runtime_ref_source` を LEGACY で作る）なので、写しは凍結の時点の表現そのもの。ref の型が表現をどう作るか
+    （`json_items`・そこから dispatch される method・`repr` など）をこの module は調べない: 何を
+    読んでいても、読むのはこの 1 回だけになる。
 
-    * `None` / `bool` と、組み込みの `int` / `float` / `str` / `bytes` そのもの
-    * `int` / `float` / `str` の subclass は、instance の `__dict__` を持たないもの（owner は
-      基底型の slot を読み、subclass の method は class の定義 = code。`__dict__` を持つ
-      instance は、その状態を読む method を持ち得るので不変と言わない）
-    * enum の member は、member の instance 状態（`_value_` など）がすべて不変な値のもの
-      （codec は `_value_` を写す。`list` を値に持つ member は、その list が書き換わる）
+    写さないもの（その node は closed にならず、従来どおり生の ref から描く）:
 
-    class・関数・enum の member の **束縛そのもの**（`E.A._value_ = ...` や method の差し替え）
-    は code の書き換えで、状態ではない（この契約の外）。
+    * 意味値（式・条件）を抱える ref。表現は抱えた式の木を展開して含み、DAG を木に展開した大きさは
+      作業量の予算の外では抑えられない（予算の owner は直列化の作業量）
+    * 表現が組み込みの型そのもの以外（record・enum・scalar の subclass など、描いた後で owner が
+      その型の規則で読む葉）を含むもの（`freeze_legacy_tree` が拒む）
+    * 表現が上限（`CAPTURE_MAX_BYTES`）を超えるもの。写す 1 回は作業量の予算の外なので、固定の
+      上限の中でだけ作る（超えれば写さない。予算の owner の勘定には入らない）
+    * 表現を作ると失敗するもの（生の ref から描く経路が同じ失敗を従来どおり出す）。読みの量の
+      信号は、この場で捕まえて限界を記録しない（`signalled_storage_reads`）
     """
 
-    if value is None or value is True or value is False:
-        return True
+    if runtime_ref is None:
+        return None
+    memo = staging.runtime_ref_records
+    hit = memo.get(id(runtime_ref))
+    if hit is not None and hit[0] is runtime_ref:
+        return hit[1]
+    record = None
+    carried: List[Any] = []
+    _walk_semantic_carriers(runtime_ref, carried.append, carried.append)
+    if not carried:
+        try:
+            with signalled_storage_reads():
+                legacy = RESULT_JSON_POLICY.materialize(
+                    runtime_ref_source(runtime_ref),
+                    budget=JsonBudget(CAPTURE_MAX_BYTES, detached=True),
+                )
+        except _CAPTURE_FAILURES:
+            legacy = _NOT_CAPTURED
+        if legacy is not _NOT_CAPTURED:
+            record = freeze_legacy_tree(legacy)
+    memo[id(runtime_ref)] = (runtime_ref, record)
+    return record
+
+
+#: 表現を作る 1 回が上げ得る失敗（生の ref から描く経路が同じものを従来どおり上げる）
+_CAPTURE_FAILURES = (
+    TypeError, ValueError, RecursionError, JsonValueRejected, JsonBudgetExhausted, StorageBeyondReadBound,
+)
+_NOT_CAPTURED = object()
+
+
+def _immutable_leaf(value: Any) -> bool:
+    """表現にそのまま置かれる葉が、組み込みの不変な型 **そのもの** か。
+
+    subclass・enum・任意の object は通さない: 描いた後で JSON の writer・snapshot codec・比較が
+    その型の method（外の状態を読み得る code）へ dispatch し得るので、不変と証明できない。
+    """
+
     kind = type(value)
-    if kind is int or kind is float or kind is str or kind is bytes:
-        return True
-    if issubclass(kind, Enum):
-        return _immutable_enum_member(value)
-    if issubclass(kind, (int, float, str)):
-        return getattr(value, "__dict__", None) is None
-    return False
-
-
-def _immutable_enum_member(member: Any) -> bool:
-    state = getattr(member, "__dict__", None)
-    if type(state) is not dict:
-        return False
-    for name, item in state.items():
-        if name == "__objclass__":
-            # member が属する class（code）
-            continue
-        if not _immutable_plain(item):
-            return False
-    return True
+    return value is None or kind is bool or kind is int or kind is float or kind is str or kind is bytes
 
 
 def _immutable_plain(value: Any) -> bool:
-    """意味値を含まない、不変な葉とその tuple だけの値か（`value` の既定の形・enum の値）。
-
-    tuple は組み込みの `tuple` そのものだけ（subclass は record の protocol や上書きした
-    反復を持ち得て、owner ごとに読み方が変わる）。
-    """
+    """意味値を含まない、不変な葉とその組み込みの `tuple` だけの値か（`value` の既定の形）。"""
 
     pending = [value]
     while pending:
@@ -796,96 +821,13 @@ def _immutable_plain(value: Any) -> bool:
     return True
 
 
-def _value_object_fields(value: Any) -> Optional[Tuple[Any, ...]]:
-    """不変な値 object（frozen dataclass）の field の値。そうでなければ `None`。
-
-    * frozen dataclass で、instance の状態が field だけ（後から `object.__setattr__` で足した
-      cache などを持たない。表現が何を読むか言えなくなる）
-    * 直列化の protocol（`serialization_protocol_methods`）を持つ型は、その型自身が
-      `FIELD_DETERMINED_SERIALIZATION_MARKER` を宣言していること（protocol が field だけの
-      関数であることは、宣言した型ごとに静的な監査が確かめる）。宣言の無い型は、owner が
-      その protocol（任意の code）で表現を作るので不変と言わない
-
-    読み方は `_walk_semantic_carriers` と同じ（型の `__dataclass_fields__` と instance の
-    `__dict__` だけ。descriptor も `__getattr__` も呼ばない）。
-    """
-
-    kind = type(value)
-    if issubclass(kind, type) or not dataclasses.is_dataclass(kind):
-        return None
-    params = getattr(kind, "__dataclass_params__", None)
-    if params is None or getattr(params, "frozen", False) is not True:
-        return None
-    if _serialization_protocol(kind) and kind.__dict__.get(FIELD_DETERMINED_SERIALIZATION_MARKER) is not True:
-        return None
-    state = getattr(value, "__dict__", None)
-    if type(state) is not dict:
-        return None
-    names = tuple(field.name for field in dataclasses.fields(kind))
-    if len(state) != len(names) or not all(name in state for name in names):
-        return None
-    return tuple(state[name] for name in names)
-
-
-def _serialization_protocol(kind: type) -> tuple:
-    known = _PROTOCOL_TYPES.get(kind)
-    if known is None:
-        known = _PROTOCOL_TYPES[kind] = serialization_protocol_methods(kind)
-    return known
-
-
-#: 型 → 直列化の owner が使う method（class の定義で決まる）。
-_PROTOCOL_TYPES: Dict[type, tuple] = {}
-
-
-def _deeply_immutable(value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
-    """`value`（runtime ref）が深く不変か。中の式・条件は `dependencies` へ積む（closed かは呼ぶ側）。
-
-    不変と言えるのは不変な葉（`_immutable_leaf`）/ 組み込みの tuple / frozenset / 不変な値
-    object（`_value_object_fields`）と、式・条件そのもの（`Expression` / `Condition` の型そのもの。
-    closed かは依存として畳む）だけ。list / dict / set / 可変な object / opaque な object を
-    1 つでも含めば不変でない。答えは ref の object ごとに、この操作の中で 1 回だけ求める。
-    """
-
-    memo = staging.immutable_refs
-    hit = memo.get(id(value))
-    if hit is None or hit[0] is not value:
-        hit = memo[id(value)] = (value,) + _immutable_graph(value)
-    if hit[1]:
-        dependencies.extend(hit[2])
-    return hit[1]
-
-
-def _immutable_graph(root: Any) -> Tuple[bool, Tuple[Any, ...]]:
-    found: List[Any] = []
-    seen: Dict[int, bool] = {}
-    pending = [root]
-    while pending:
-        value = pending.pop()
-        if _immutable_leaf(value):
-            continue
-        kind = type(value)
-        if kind is Expression or kind is Condition:
-            found.append(value)
-            continue
-        if id(value) in seen:
-            continue
-        seen[id(value)] = True
-        if kind is tuple:
-            pending.extend(tuple.__iter__(value))
-            continue
-        if kind is frozenset:
-            pending.extend(frozenset.__iter__(value))
-            continue
-        fields = _value_object_fields(value)
-        if fields is None:
-            return False, ()
-        pending.extend(fields)
-    return True, tuple(found)
-
-
 def _scalar_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
     return _immutable_leaf(value)
+
+
+def _kind_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
+    # 表現は member の名前（`_name_`）を置く。member とその名前は class の定義
+    return type(value) is ExpressionType
 
 
 def _value_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
@@ -929,19 +871,17 @@ def _storage_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencie
     if value is None:
         return True
     payload = staging.derived_fields(node).get("_storage_payload")
-    # 写しの値も葉と同じ規則（写しは scalar の subclass をそのまま持つ）
+    # 写しの値も葉と同じ規則（写しは `StorageInfo` の値をそのまま持つ）
     return payload is not None and all(_immutable_leaf(item) for item in payload.values)
 
 
 def _runtime_ref_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
-    return value is None or _deeply_immutable(value, staging, dependencies)
+    return value is None or staging.derived_fields(node).get("_runtime_ref_payload") is not None
 
 
-#: `SerializationInput` の種類ごとの closed の規則（**唯一の実装**）。
-#: 規則は (node, field の値, staging, 依存の積み先) を受け、その field が局所的に不変なら真。
-#: 子（依存）が closed かは `_derive_serialization_closure` が畳む。
 SERIALIZATION_CLOSURE_RULES: Mapping[SerializationInput, Callable[..., bool]] = MappingProxyType({
     SerializationInput.SCALAR: _scalar_rule,
+    SerializationInput.KIND: _kind_rule,
     SerializationInput.VALUE: _value_rule,
     SerializationInput.OPERANDS: _operands_rule,
     SerializationInput.EXPRESSION: _expression_rule,

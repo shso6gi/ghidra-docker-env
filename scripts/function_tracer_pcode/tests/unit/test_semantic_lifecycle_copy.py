@@ -429,11 +429,11 @@ def test_a_condition_derivation_recomputes_serialization_closure(label, derive):
 
     from scripts.function_tracer_pcode.core.semantic_lifecycle import serialization_closed
 
-    class _MutableRef:
-        key = ("u",)
+    from scripts.function_tracer_pcode.core.expression import ExpressionType
 
+    # 表現にそのまま置かれる値が可変な容器の葉（closed にならない）
     unclosed = Expression.binary_op(
-        "INT_LESS", Expression.unknown("u", runtime_ref=_MutableRef()), Expression.constant(1, size=4)
+        "INT_LESS", Expression(ExpressionType.LITERAL, value=[1], size=4), Expression.constant(1, size=4)
     )
     condition = publish(Condition(unclosed))
     assert serialization_closed(condition) is False

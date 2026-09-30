@@ -126,9 +126,6 @@ def _local_op_ordinal_from_parent(pcode_op: Any) -> Optional[int]:
 class PcodeOpRef:
     """Stable identity for a concrete Ghidra P-code operation."""
 
-    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
-    __serialization_determined_by_fields__ = True
-
     address_offset: Optional[int] = None
     seq_time: Optional[int] = None
     seq_order: Optional[int] = None
@@ -374,9 +371,6 @@ class PcodeOpRef:
 @dataclass(frozen=True)
 class PcodeBlockRef:
     """Stable identity for a concrete Ghidra decompiler basic block."""
-
-    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
-    __serialization_determined_by_fields__ = True
 
     block_index: Optional[int] = None
     start_address_offset: Optional[int] = None

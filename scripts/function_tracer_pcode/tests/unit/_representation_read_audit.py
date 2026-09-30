@@ -9,6 +9,7 @@
   `self.__dict__`）→ violation。ただし `id(self)` / `type(self)` と、`escapes` に挙げた関数への受け渡しは許す
 * 局所の値（子・分岐の条件・直列化の作業量など）の属性の読み → `local_reads` に分類があるものだけ。
   分類の無い読み・`getattr(<局所>, ...)` は violation
+* 定数でない既定引数（呼び出しをまたいで共有される可変な状態になり得る）→ violation
 
 返す field の集合を、呼ぶ側が lifecycle の表（`*_SERIALIZATION_INPUTS`）と照合する。
 """
@@ -59,6 +60,10 @@ def audit_representation_reads(
         function = _method_tree(kind, name)
         self_name = function.args.args[0].arg
         where = f"{kind.__name__}.{name}"
+        # 既定引数は呼び出しをまたいで共有される状態: 不変な定数だけを許す
+        for default in (*function.args.defaults, *(d for d in function.args.kw_defaults if d is not None)):
+            if not isinstance(default, ast.Constant):
+                violations.append(f"{where}:{default.lineno}: a default argument that is not a constant")
         parents: Dict[int, ast.AST] = {}
         for node in ast.walk(function):
             for child in ast.iter_child_nodes(node):

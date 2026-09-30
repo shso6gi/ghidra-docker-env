@@ -131,9 +131,6 @@ def _safe_thunked_function(function: Any) -> Any:
 class CallTargetRef:
     """Stable call target identity for runtime analysis."""
 
-    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
-    __serialization_determined_by_fields__ = True
-
     kind: str
     function_name: Optional[str] = None
     program_id: Optional[int] = None
