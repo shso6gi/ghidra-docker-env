@@ -24,11 +24,16 @@ from scripts.function_tracer_pcode.core.deadline import (
     Deadline,
     DeadlinePolicy,
     TimeUnit,
+    NOT_STARTED_FACT,
+    UNBOUNDED_WINDOW,
+    ExecutionFact,
+    ExecutionWindow,
     active_deadline,
-    admit,
     bounded_timeout,
     checkpoint,
+    deadline_query,
     deadline_scope,
+    execution_window,
     finalization,
     hot_checkpoint,
     poller,
@@ -79,12 +84,14 @@ def test_e3_without_a_deadline_every_api_is_a_no_op():
         checkpoint("anything")
         hot_checkpoint("anything")
         poller("anything")()
-        admission = admit("solver", 3, TimeUnit.MILLISECONDS)
-        assert admission.not_after is None and admission.startable
-        assert admission.timeout(TimeUnit.MILLISECONDS) == 3000
-        assert admission.timeout(TimeUnit.SECONDS) == 3
-        assert admission.wait_timeout(13) == 13
-        admission.settle(answered=False)  # 期限の無い許可は何もしない
+        query = deadline_query("solver")
+        assert not query.bounded and query.begin(3)
+        assert query.bound.not_after is None
+        assert query.bound.window(3, TimeUnit.MILLISECONDS) is UNBOUNDED_WINDOW
+        assert UNBOUNDED_WINDOW.timeout(3, TimeUnit.MILLISECONDS, now=0.0) == 3000
+        assert UNBOUNDED_WINDOW.timeout(3, TimeUnit.SECONDS, now=0.0) == 3
+        assert query.wait_timeout(13) == (13.0, False)
+        query.settle([NOT_STARTED_FACT])  # 期限の無い handle は何もしない
         with finalization():
             checkpoint("anything")
 
@@ -136,7 +143,7 @@ def test_the_trip_is_sticky_and_folds_into_one_ledger_record():
             with pytest.raises(DeadlineExceeded) as raised:
                 checkpoint("obligation")
             with pytest.raises(DeadlineExceeded):
-                admit("solver", 1, TimeUnit.MILLISECONDS)  # 新しい問いも始めない
+                deadline_query("solver").begin(1)  # 新しい問いも始めない
             with pytest.raises(DeadlineExceeded):
                 hot_checkpoint("trace_pcode")
         assert ledger.recorded_failure_count() == 1
@@ -221,13 +228,15 @@ def test_e8_a_worker_thread_never_sees_the_owner_deadline():
             seen["active"] = active_deadline()
             checkpoint("solver")  # 何もしない（raise しない）
             hot_checkpoint("solver")
-            seen["admission"] = admit("solver", 3, TimeUnit.MILLISECONDS)
+            query = deadline_query("solver")
+            seen["bounded"] = query.bounded
+            seen["begin"] = query.begin(3)
 
         thread = threading.Thread(target=_worker)
         thread.start()
         thread.join()
     assert seen["active"] is None
-    assert seen["admission"].not_after is None  # 期限なしの許可（従来どおり）
+    assert seen["bounded"] is False and seen["begin"] is True  # 期限の無い handle（従来どおり）
 
 
 def test_e8_a_copied_context_does_not_hand_the_deadline_to_another_thread():
@@ -271,17 +280,18 @@ def test_e9_bounded_timeout_rounding_rules():
         assert bounded_timeout(10, now - 1, unit, now=now) is None
 
 
-def test_e9_admission_below_the_margin_is_a_deadline_before_the_query_starts():
+def test_e9_begin_below_the_margin_is_a_deadline_before_the_execution_starts():
     clock = ShiftedClock()
     with pair_failure_scope(("pair",), None) as ledger:
         with deadline_scope(_policy(budget=10, clock=clock, sub_operation_margin_seconds=0.5)):
-            admission = admit("solver", 30, TimeUnit.MILLISECONDS)
-            assert admission.deadline_bound  # 期限（< 30 s）が時間を決める
-            granted = admission.timeout(TimeUnit.MILLISECONDS)
-            assert 0 < granted <= 9500
+            query = deadline_query("solver")
+            assert query.begin(30)
+            window = query.bound.window(30, TimeUnit.MILLISECONDS)
+            assert window.limited  # 期限（< 30 s）が時間を決める
+            assert 0 < window.timeout(30, TimeUnit.MILLISECONDS, now=clock()) <= 9500
             clock.jump(9.6)  # 残り 0.4 s < 余裕 0.5 s
             with pytest.raises(DeadlineExceeded) as raised:
-                admit("solver", 30, TimeUnit.MILLISECONDS)
+                query.begin(30)
         assert "remaining_below_margin" in raised.value.evidence_refs
         assert ledger.stop_state() is PairStopState.PAIR_TERMINAL_DEADLINE
 
@@ -290,22 +300,63 @@ def test_e9_a_seconds_api_never_receives_zero():
     clock = ShiftedClock()
     with deadline_scope(_policy(budget=1.8, clock=clock, sub_operation_margin_seconds=0.5)):
         # 残り 1.3 s → 秒に直すと 1
-        admission = admit("decompile", 60, TimeUnit.SECONDS)
-        assert admission.timeout(TimeUnit.SECONDS) == 1
+        query = deadline_query("decompile")
+        assert query.begin(60, TimeUnit.SECONDS)
+        window = query.bound.window(60, TimeUnit.SECONDS)
+        assert window.timeout(60, TimeUnit.SECONDS, now=clock()) == 1
     clock = ShiftedClock()
     with deadline_scope(_policy(budget=1.2, clock=clock, sub_operation_margin_seconds=0.5)):
         # 残り 0.7 s → 秒に直すと 0: 始めない（0 を渡さない）
         with pytest.raises(DeadlineExceeded):
-            admit("decompile", 60, TimeUnit.SECONDS)
+            deadline_query("decompile").begin(60, TimeUnit.SECONDS)
 
 
-def test_e9_the_wait_is_clamped_to_the_deadline():
+def test_e9_the_wait_is_clamped_to_the_deadline_and_says_so():
     clock = ShiftedClock()
     with deadline_scope(_policy(budget=4, clock=clock)):
-        admission = admit("solver", 30, TimeUnit.MILLISECONDS)
-        assert admission.wait_timeout(40) <= 4.0
+        query = deadline_query("solver")
+        waited, limited = query.wait_timeout(40)
+        assert waited <= 4.0 and limited is True
+        assert query.wait_timeout(1) == (1.0, False)  # 設定値が短ければ期限は決めていない
         clock.jump(10)
-        assert admission.wait_timeout(40) == 0.0
+        assert query.wait_timeout(40) == (0.0, True)
+
+
+# ---------------------------------------------------------------------------
+# 実行 1 回の窓（実行を始める瞬間に求める。問いの入口で固定しない）
+# ---------------------------------------------------------------------------
+
+def test_the_execution_window_rule():
+    now = 100.0
+    assert execution_window(5, None, TimeUnit.MILLISECONDS, now=now) is UNBOUNDED_WINDOW
+    assert execution_window(5, 110.0, TimeUnit.MILLISECONDS, now=now) == ExecutionWindow(105.0, False)
+    assert execution_window(5, 103.0, TimeUnit.MILLISECONDS, now=now) == ExecutionWindow(103.0, True)
+    assert execution_window(5, 100.0, TimeUnit.MILLISECONDS, now=now) is None
+    assert execution_window(5, 100.7, TimeUnit.SECONDS, now=now) is None  # 秒に直すと 0
+    assert execution_window(5, 105.0, TimeUnit.MILLISECONDS, now=now) == ExecutionWindow(105.0, False)
+
+
+def test_a_later_execution_of_the_same_query_gets_its_own_window():
+    """指摘 2: 先の実行が時間を使えば、後の実行の窓は期限で決まる（入口で固定しない）。"""
+    clock = ShiftedClock()
+    with deadline_scope(_policy(budget=0.4, clock=clock, sub_operation_margin_seconds=0.05)):
+        query = deadline_query("solver")
+        assert query.begin(0.25)
+        first = query.bound.window(0.25, TimeUnit.MILLISECONDS)
+        assert first.limited is False  # 0.25 s < 残り 0.35 s
+        clock.jump(0.2)
+        assert query.begin(0.25)
+        second = query.bound.window(0.25, TimeUnit.MILLISECONDS)
+        assert second.limited is True  # 残り 0.15 s < 0.25 s
+        assert second.end == pytest.approx(first.end - 0.25 + 0.35)
+
+
+def test_the_cut_by_deadline_rule():
+    assert ExecutionFact(limited=True, definitive=False).cut_by_deadline
+    assert not ExecutionFact(limited=True, definitive=True).cut_by_deadline
+    # 期限が時間を決めなかった timeout / unknown は通常の結果（期限の限界にしない）
+    assert not ExecutionFact(limited=False, definitive=False).cut_by_deadline
+    assert NOT_STARTED_FACT.cut_by_deadline
 
 
 # ---------------------------------------------------------------------------
@@ -316,11 +367,11 @@ def test_e12_an_answer_that_returns_after_the_deadline_is_not_accepted():
     clock = ShiftedClock()
     with pair_failure_scope(("pair",), None) as ledger:
         with deadline_scope(_policy(budget=10, clock=clock)):
-            admission = admit("solver", 5, TimeUnit.MILLISECONDS)
-            assert not admission.deadline_bound
+            query = deadline_query("solver")
+            assert query.begin(5)
             clock.jump(11)  # 答え（SAT / UNSAT）は返ったが、その間に期限を過ぎた
             with pytest.raises(DeadlineExceeded) as raised:
-                admission.settle(answered=True)
+                query.settle([ExecutionFact(limited=False, definitive=True)])
     assert "boundary=after" in raised.value.evidence_refs
     assert ledger.pending_failure() is not None
 
@@ -328,21 +379,27 @@ def test_e12_an_answer_that_returns_after_the_deadline_is_not_accepted():
 def test_e12_a_timeout_cut_by_the_deadline_is_a_deadline_even_before_it_expires():
     clock = ShiftedClock()
     with deadline_scope(_policy(budget=3, clock=clock, sub_operation_margin_seconds=0.5)):
-        admission = admit("solver", 30, TimeUnit.MILLISECONDS)
-        assert admission.deadline_bound
-        clock.jump(2.6)  # not_after（2.5 s）で solver が止まり、期限（3 s）の手前で返った
+        query = deadline_query("solver")
+        assert query.begin(30)
+        window = query.bound.window(30, TimeUnit.MILLISECONDS)
+        clock.jump(2.6)  # 窓の終わり（2.5 s）で solver が止まり、期限（3 s）の手前で返った
         with pytest.raises(DeadlineExceeded) as raised:
-            admission.settle(answered=False)
+            query.settle([ExecutionFact(limited=window.limited, definitive=False)])
     assert "cut_by_deadline" in raised.value.evidence_refs
 
 
-def test_e12_an_answer_within_the_deadline_is_accepted():
+def test_e12_a_normal_solver_timeout_is_not_turned_into_a_deadline():
     clock = ShiftedClock()
-    with deadline_scope(_policy(budget=3, clock=clock)):
-        admission = admit("solver", 30, TimeUnit.MILLISECONDS)
-        admission.settle(answered=True)  # raise しない
-        unbound = admit("solver", 0.5, TimeUnit.MILLISECONDS)
-        unbound.settle(answered=False)  # 設定値の timeout（期限ではない）: 期限の限界にしない
+    with pair_failure_scope(("pair",), None) as ledger:
+        with deadline_scope(_policy(budget=3, clock=clock)):
+            query = deadline_query("solver")
+            assert query.begin(0.5)
+            window = query.bound.window(0.5, TimeUnit.MILLISECONDS)
+            assert window.limited is False
+            clock.jump(0.5)
+            query.settle([ExecutionFact(limited=window.limited, definitive=False)])  # raise しない
+            query.settle([ExecutionFact(limited=False, definitive=True)])
+        assert ledger.pending_failure() is None
 
 
 # ---------------------------------------------------------------------------
@@ -358,15 +415,14 @@ def test_finalization_never_raises_and_refuses_new_work_after_a_trip():
                 # 期限を過ぎても確定処理は止まらない（打ち切りはまだ無い）
                 checkpoint("authority_finalize")
                 hot_checkpoint("render")
-                admission = admit("solver", 5, TimeUnit.MILLISECONDS)
-                assert admission.startable and admission.not_after is None
+                query = deadline_query("solver")
+                assert query.begin(5) and not query.bounded and query.bound.not_after is None
             with pytest.raises(DeadlineExceeded):
                 checkpoint(ANALYSIS_COMPLETE_STAGE)
             with finalization():
-                refused = admit("solver", 5, TimeUnit.MILLISECONDS)
-                assert not refused.startable
-                assert refused.timeout(TimeUnit.MILLISECONDS) is None
-                refused.settle(answered=False)  # raise しない
+                refused = deadline_query("solver")
+                assert refused.begin(5) is False
+                refused.settle([NOT_STARTED_FACT])  # raise しない
         assert ledger.recorded_failure_count() == 1
 
 

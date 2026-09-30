@@ -19,7 +19,7 @@ backend の実行入口は、実行を始めるときに `ExecutionBudget` を 1
 deadline）の owner は `core.deadline.Deadline` で、この module は 1 回の solver 実行の
 残り時間だけを持つ。両者を突き合わせるのは `ExecutionBudget.starting_now(not_after=...)`
 の 1 箇所だけ（解析の期限の手前で実行の期限を切る）。実行を始めてよいか・返った答えを
-採ってよいかは `core.deadline`（`admit` / `settle`）が決める。
+採ってよいかは `core.deadline`（`DeadlineQuery.begin` / `settle`）が決める。
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
-from scripts.function_tracer_pcode.core.deadline import TimeUnit, bounded_timeout
+from scripts.function_tracer_pcode.core.deadline import TimeUnit, bounded_timeout, execution_window
 
 
 #: 中断の種類
@@ -54,17 +54,18 @@ class ExecutionBudget:
     ) -> "ExecutionBudget":
         """今から `seconds` 秒の実行予算。
 
-        `not_after`（Issue #106 PR-106-A）は解析全体の期限から owner が求めた、この実行が
-        越えてはならない absolute monotonic の時刻（`core.deadline.Admission.not_after`）。
-        与えられたら実行の期限はその手前で切る。**解析の期限と 1 回の実行の期限を突き合わせる
-        のはここだけ**で、残り時間の計算（`remaining_ms` / `interruption`）はこの 1 つの期限
-        だけを見る。
+        `not_after`（Issue #106 PR-106-A）はこの実行が越えてはならない absolute monotonic の
+        時刻（runner が `core.deadline.execution_window` で求めた終わり）。終わりの決め方は
+        `execution_window`（解析の期限と 1 回の実行の期限を突き合わせる唯一の規則）に従い、
+        残り時間の計算（`remaining_ms` / `interruption`）はこの 1 つの期限だけを見る。
         """
 
-        deadline = time.monotonic() + float(seconds)
-        if not_after is not None:
-            deadline = min(deadline, float(not_after))
-        return cls(deadline, cancellation_token)
+        now = time.monotonic()
+        window = execution_window(seconds, not_after, TimeUnit.MILLISECONDS, now=now)
+        if window is None:
+            # 始める時間が無い: 期限切れの予算（最初の `interruption()` で止まる）
+            return cls(now, cancellation_token)
+        return cls(now + float(seconds) if window.end is None else window.end, cancellation_token)
 
     def remaining_ms(self) -> int:
         """期限までの残り（ミリ秒、切り捨て）。0 以下なら期限切れ。"""

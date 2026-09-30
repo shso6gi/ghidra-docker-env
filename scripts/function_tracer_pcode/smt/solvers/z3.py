@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.smt.interface import (
     SMTSolver,
     SolverBackendCapabilities,
     SolverResult,
+    StopMethod,
     SolverStatus,
     interrupted_result,
     sat_with_canonical_witness,
@@ -236,14 +237,13 @@ class Z3Solver(SMTSolver):
     #: timeout（ミリ秒）越えの戻りは最大 0.11 s、別 thread からの `Context.interrupt()` 後の
     #: 戻りは最大 0.12 s で全件返った。check の間 GIL は解放される。`execute` は
     #: ``not_after`` を実行の予算（`ExecutionBudget`）へ入れ、初回の check と canonical witness
-    #: の探索がその残りだけを使う。強制終了（in-process なので不可）は主張しない。
+    #: の探索がその残りだけを使う。走っている実行は `request_stop` = `Context.interrupt()` で止める
+    #: （強制終了は in-process なので不可）。
     CAPABILITIES = SolverBackendCapabilities(
         native_timeout=True,
         timeout_unit=TimeUnit.MILLISECONDS,
         absolute_deadline=True,
-        interrupt=True,
-        cancel=True,
-        hard_stop=False,
+        running_stop=StopMethod.INTERRUPT,
     )
     
     def __init__(self, timeout: int = 10, debug: bool = False):
@@ -251,7 +251,7 @@ class Z3Solver(SMTSolver):
         self._z3 = None
         self._solver = None
         self.debug = debug
-        #: 実行中の context（`request_interrupt` が別 thread から中断を求める先）
+        #: 実行中の context（`request_stop` が別 thread から中断を求める先）
         self._running_context: Any = None
     
     @property
@@ -290,12 +290,12 @@ class Z3Solver(SMTSolver):
         not_after: Optional[float] = None,
         cancellation_token: Optional[Any] = None,
     ) -> SolverResult:
-        """adapter の実行（期限 ``not_after`` は実行の予算へ入れる。ここで待たない）。"""
+        """adapter の実行（この実行の終わり ``not_after`` は実行の予算へ入れる。ここで待たない）。"""
 
         self.set_timeout(timeout_seconds)
         return self.check_equivalence_direct(smt_script, cancellation_token, not_after=not_after)
 
-    def request_interrupt(self) -> bool:
+    def request_stop(self) -> bool:
         context = self._running_context
         if context is None:
             return False

@@ -15,7 +15,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from scripts.function_tracer_pcode.core.deadline import TimeUnit, admit
+from scripts.function_tracer_pcode.core.deadline import (
+    NOT_STARTED_FACT,
+    ExecutionFact,
+    TimeUnit,
+    deadline_query,
+)
 
 
 #: Issue #106 PR-106-A: decompile の checkpoint の stage（限界の site）
@@ -455,22 +460,27 @@ def decompile_within_deadline(
 ) -> Any:
     """解析の期限の中で 1 回 decompile する（Issue #106 PR-106-A。production の入口）。
 
-    始める前に期限の許可を取り（過ぎていれば限界を raise して decompile しない）、Ghidra の
-    秒単位の timeout を期限までに切る（丸めは `core.deadline.bounded_timeout`: 0 秒を渡さない）。
-    返った後（authority の記録を終えた後）に、期限で切られた・期限を過ぎたなら限界を raise
-    する。期限が無ければ `decompile_function` と同じ。
+    始める前に owner の thread で `begin`（過ぎていれば限界を raise して decompile しない）、
+    この実行の窓を始める瞬間に求め、Ghidra の秒単位の timeout を窓までに切る（規則と丸めは
+    `core.deadline`: 0 秒を渡さない）。返った後（authority の記録を終えた後）に `settle`
+    （期限を過ぎた・期限で切られたなら限界を raise）。期限が無ければ `decompile_function` と同じ。
     """
 
-    admission = admit(DECOMPILE_STAGE, timeout, TimeUnit.SECONDS)
-    granted = admission.timeout(TimeUnit.SECONDS)
+    query = deadline_query(DECOMPILE_STAGE)
+    window = (
+        query.bound.window(timeout, TimeUnit.SECONDS)
+        if query.begin(timeout, TimeUnit.SECONDS) else None
+    )
+    granted = None if window is None else window.timeout(timeout, TimeUnit.SECONDS, now=query.bound.now())
     if granted is None:
         results = _AuthorityBlockedDecompileResults(
             diagnostic=None, error_kind="analysis_deadline_not_started",
         )
-    else:
-        results = decompile_function(analyzer, function, granted, monitor, **kwargs)
-    if admission.not_after is not None:
-        admission.settle(answered=bool(results.decompileCompleted()))
+        query.settle([NOT_STARTED_FACT])
+        return results
+    results = decompile_function(analyzer, function, granted, monitor, **kwargs)
+    if query.bounded:
+        query.settle([ExecutionFact(limited=window.limited, definitive=bool(results.decompileCompleted()))])
     return results
 
 

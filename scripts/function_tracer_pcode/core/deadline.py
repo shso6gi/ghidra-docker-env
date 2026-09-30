@@ -8,15 +8,27 @@
 =============================== ================================================
 期限（absolute monotonic）        `Deadline`（`deadline_scope` を開いた時点で 1 回だけ
                                   決める。各層は相対時間を計算し直さない）
-新しい仕事を始めてよいか          `Deadline.checkpoint` / `Deadline.admit`
-sub-operation に渡す時間と丸め    `bounded_timeout`（純関数。worker でも同じ規則）
-返ってきた答えを採ってよいか      `Deadline.settle`（query 開始時に期限内だったことは
-                                  理由にならない）
+新しい仕事を始めてよいか          `Deadline.checkpoint`、sub-operation の 1 回ごとに
+                                  `DeadlineQuery.begin`（owner の thread）
+sub-operation 1 回の実効の終わり  `execution_window`（純関数。**実行を始める瞬間に**
+と「期限で時間が決まったか」      実行ごとに求める。worker でも同じ規則）
+単位への丸め                      `bounded_timeout`（ms は 1 以上、秒は 0 なら始めない）
+期限で切られた実行か              `ExecutionFact.cut_by_deadline`（期限で時間が決まり、
+                                  かつ SAT / UNSAT の答えが無い）
+返ってきた答えを採ってよいか      `DeadlineQuery.settle`（始めたときに期限内だった
+                                  ことは理由にならない）
 時計を読む頻度                    `DeadlinePolicy.poll_interval`（`poller` が使う）
 打ち切りの記録                    `Deadline._trip` → `core.errors.raise_limitation`
                                   （台帳へ記録してから raise。stop state は型で決まり
                                   `PAIR_TERMINAL_DEADLINE`）
 =============================== ================================================
+
+**論理的な問いと実行の境界**: `DeadlineQuery` は 1 つの論理的な問い（solver の問い合わせ 1 つ・
+decompile 1 回）の owner 側の handle で、開始の確認（`begin`）と結果の採用（`settle`）を持つ。
+その問いの中の **実行 1 回ごと**（逐次の backend の 1 つずつ、並列の worker 1 つずつ）は、始める
+瞬間に `ExecutionBound.window` で自分の実効の終わりと `limited` を求める。実行は時刻をずらして
+始まり得る（逐次なら先の backend が時間を使う、並列なら worker の起動が遅れる）ので、「期限で
+時間が決まった」かどうかを問いの入口で固定しない。
 
 ここが持たないもの: UNKNOWN / ERROR の判断と receipt（authority）、失敗を結果へ変える
 こと（`checker.pair_execution`）、backend ごとの時間の単位・中断の方法（`smt` の adapter）、
@@ -25,14 +37,13 @@ runner の既定値（PR-106-B）。
 **thread の契約**: 期限は scope を開いた thread（owner）だけが暗黙に読める。scope は
 `contextvars` に置くので solver の worker thread からは見えず、context を複製して渡され
 ても owner の thread でなければ checkpoint は何もしない（台帳は同期的な入れ子実行だけを
-前提にしている: `core.errors`）。worker が期限を使うときは、owner が `admit` で求めた
-absolute 値（`Admission.not_after`）を **引数で** 受け取り、`bounded_timeout` で自分の
-単位へ直す。worker は限界を上げない（結果の中断の種類を返すだけで、限界の確定は owner
-の `settle`）。
+前提にしている: `core.errors`）。worker が期限を使うときは、owner の `DeadlineQuery.bound`
+（`ExecutionBound`: absolute な `not_after` と時計だけを持つ値）を **引数で** 受け取る。
+worker は限界を上げない（実行の事実を結果で返すだけで、限界の確定は owner の `settle`）。
 
 **finalization**: `finalization()` の中（authority の確定・receipt・結果の組み立て）では
 checkpoint は何もしない。期限を過ぎても確定した判定を捨てない。打ち切った後の
-finalization で solver を呼ぼうとしたら `Admission.startable` が偽になる（新しい
+finalization で sub-operation を始めようとしたら `DeadlineQuery.begin` が偽を返す（新しい
 意味の問いを始めない。呼び出し側は「実行しなかった」行を返す）。
 
 dependency rule: 標準ライブラリと `core.errors` / `core.stage_journal` / `core.stage_clock`
@@ -155,55 +166,138 @@ class DeadlinePolicy:
 
 
 @dataclass(frozen=True)
-class Admission:
-    """sub-operation 1 回を始めてよいという許可と、その終わりの時刻。
+class ExecutionWindow:
+    """sub-operation の実行 1 回の実効の終わり（`execution_window` が作る）。
 
-    ``not_after`` は owner が `admit` で 1 回だけ求めた absolute 値（``None`` は期限なし）。
-    worker へはこの値を引数で渡し、worker は `timeout` で自分の単位へ直す。
-    ``startable`` が偽なのは、打ち切った後の finalization で呼ばれたときだけ（呼び出し側は
-    実行せずに「実行しなかった」行を返す）。``deadline_bound`` は設定値ではなく期限が時間を
-    決めている（期限で切られ得る）こと。
+    ``end`` は absolute monotonic（``None`` は期限なし: 設定値の timeout をそのまま使う）。
+    ``limited`` は設定値の timeout ではなく **解析の期限** が終わりを決めたこと。
     """
 
-    stage: str
-    configured_seconds: float
+    end: Optional[float]
+    limited: bool
+
+    def timeout(self, configured_seconds: float, unit: TimeUnit, *, now: float) -> Optional[int]:
+        """この実行に渡す timeout（``None`` なら始めない）。"""
+
+        if self.end is None:
+            return unbounded_timeout(configured_seconds, unit)
+        return bounded_timeout(configured_seconds, self.end, unit, now=now)
+
+
+#: 期限の無い実行の窓
+UNBOUNDED_WINDOW = ExecutionWindow(end=None, limited=False)
+
+
+def execution_window(
+    configured_seconds: float, not_after: Optional[float], unit: TimeUnit, *, now: float,
+) -> Optional[ExecutionWindow]:
+    """**実行 1 回の窓の唯一の規則**: 始める瞬間 ``now`` の、実効の終わりと ``limited``。
+
+    * 期限なし（``not_after is None``）: 設定値のまま（`UNBOUNDED_WINDOW`）
+    * ``unit`` に直すと 0 になる・残りが無い: ``None``（始めない）
+    * 設定値で ``not_after`` までに終わる: 終わり = ``now + 設定値``、``limited=False``
+    * それ以外: 終わり = ``not_after``、``limited=True``（解析の期限が時間を決めた）
+    """
+
+    if not_after is None:
+        return UNBOUNDED_WINDOW
+    if bounded_timeout(configured_seconds, not_after, unit, now=now) is None:
+        return None
+    configured_end = float(now) + float(configured_seconds)
+    if configured_end <= float(not_after):
+        return ExecutionWindow(end=configured_end, limited=False)
+    return ExecutionWindow(end=float(not_after), limited=True)
+
+
+@dataclass(frozen=True)
+class ExecutionFact:
+    """実行 1 回について `settle` が読む事実（呼び出し側は自分の結果をこれに写すだけ）。"""
+
+    #: その実行の時間を解析の期限が決めた（`ExecutionWindow.limited`、または待つのを期限でやめた）
+    limited: bool
+    #: 期限に関係なく採れる答えが出た（solver なら SAT / UNSAT、decompile なら完了）
+    definitive: bool
+
+    @property
+    def cut_by_deadline(self) -> bool:
+        """**期限で切られた実行の唯一の規則**: 期限が時間を決め、答えが出なかった。
+
+        期限が時間を決めなかった実行の timeout / unknown は通常の結果（期限の限界にしない）。
+        """
+
+        return self.limited and not self.definitive
+
+
+#: 始められなかった実行（期限までの時間が無い）の事実
+NOT_STARTED_FACT = ExecutionFact(limited=True, definitive=False)
+
+
+@dataclass(frozen=True)
+class ExecutionBound:
+    """worker に **引数で** 渡す、実行の窓を求めるのに要るものだけ（期限の object は渡さない）。"""
+
     not_after: Optional[float] = None
-    startable: bool = True
-    deadline_bound: bool = False
-    #: 呼び出し側が結果を待ってよい最後の時刻（= 解析の期限。``None`` は期限なし）
-    wait_until: Optional[float] = None
-    _deadline: Optional["Deadline"] = field(default=None, compare=False, repr=False)
+    clock: Callable[[], float] = field(default=time.monotonic, compare=False, repr=False)
 
-    def wait_timeout(self, configured_wait_seconds: float) -> float:
-        """結果を待つ時間の上限（期限があれば期限までに clamp する。0 以上）。"""
+    def window(self, configured_seconds: float, unit: TimeUnit) -> Optional[ExecutionWindow]:
+        """今この thread で実行を始めるときの窓（``None`` なら始めない）。"""
 
-        if self.wait_until is None:
-            return float(configured_wait_seconds)
-        clock = self._deadline.now if self._deadline is not None else time.monotonic
-        return max(0.0, min(float(configured_wait_seconds), self.wait_until - clock()))
+        return execution_window(configured_seconds, self.not_after, unit, now=self.clock())
 
-    def timeout(self, unit: TimeUnit, *, now: Optional[float] = None) -> Optional[int]:
-        """この sub-operation に渡す timeout（``None`` なら始めない）。"""
+    def now(self) -> float:
+        return float(self.clock())
 
-        if not self.startable:
-            return None
-        if self.not_after is None:
-            return unbounded_timeout(self.configured_seconds, unit)
-        clock = self._deadline.now if self._deadline is not None else time.monotonic
-        return bounded_timeout(
-            self.configured_seconds, self.not_after, unit,
-            now=clock() if now is None else now,
-        )
 
-    def settle(self, *, answered: bool, evidence: Tuple[str, ...] = ()) -> None:
-        """sub-operation が返った直後の確認（`Deadline.settle`）。期限の無い許可では何もしない。"""
+#: 期限の無い実行の bound
+UNBOUNDED = ExecutionBound()
 
+
+class DeadlineQuery:
+    """1 つの論理的な問いの owner 側の handle（`deadline_query` が作る）。
+
+    * `begin(...)`: 実行を 1 回始める前に owner の thread で呼ぶ（逐次なら backend ごと）。
+      解析中に期限を過ぎていれば限界を raise する。打ち切った後の finalization では偽を返す
+    * `bound`: worker へ渡す `ExecutionBound`
+    * `wait_timeout(...)`: 結果を待つ上限と、それを期限が決めたか
+    * `settle(facts)`: 実行が返った直後に owner の thread で呼ぶ
+    """
+
+    __slots__ = ("stage", "_deadline", "_startable", "bound")
+
+    def __init__(
+        self, stage: str, *, deadline: Optional["Deadline"] = None, startable: bool = True,
+        bound: ExecutionBound = UNBOUNDED,
+    ) -> None:
+        self.stage = stage
+        self._deadline = deadline
+        self._startable = startable
+        self.bound = bound
+
+    @property
+    def bounded(self) -> bool:
+        return self._deadline is not None
+
+    def begin(self, configured_seconds: float, unit: TimeUnit = TimeUnit.MILLISECONDS) -> bool:
+        if not self._startable:
+            return False
         if self._deadline is not None:
-            self._deadline.settle(self, answered=answered, evidence=evidence)
+            self._deadline.begin_execution(self, configured_seconds, unit)
+        return True
 
+    def wait_timeout(self, configured_wait_seconds: float) -> Tuple[float, bool]:
+        """(待つ秒数, 期限がそれを決めたか)。期限なしなら設定値のまま。"""
 
-def unbounded_admission(stage: str, configured_seconds: float) -> Admission:
-    return Admission(stage=stage, configured_seconds=float(configured_seconds))
+        configured = float(configured_wait_seconds)
+        if self.bound.not_after is None or self._deadline is None:
+            return configured, False
+        remaining = max(0.0, self._deadline.absolute - self.bound.now())
+        if remaining < configured:
+            return remaining, True
+        return configured, False
+
+    def settle(self, facts: Any, *, evidence: Tuple[str, ...] = ()) -> None:
+        if self._deadline is not None:
+            self._deadline.settle(self, tuple(facts), evidence=evidence)
 
 
 class Deadline:
@@ -263,54 +357,58 @@ class Deadline:
         if self._trip is not None or now >= self.absolute:
             self._raise(stage, now, boundary="before")
 
-    def admit(self, stage: str, configured_seconds: float, unit: TimeUnit) -> Admission:
-        """sub-operation（solver / decompile の 1 回）を始める境界。
+    def query(self, stage: str) -> DeadlineQuery:
+        """1 つの論理的な問いの handle。
 
-        解析中: 期限を過ぎている・残りが余裕以下・単位へ直すと 0 になるなら raise。始めて
-        よければ「期限 − 余裕」を ``not_after`` にした許可を返す。
-        finalization 中: raise しない。打ち切った後なら ``startable=False``（始めない）、
-        そうでなければ期限の無い許可（確定処理の時間は PR-106-B の余裕が見る）。
-        owner 以外の thread: 期限の無い許可（従来どおり）。
+        解析中: ``not_after`` = 期限 − 余裕 の bound を持つ（実行ごとの窓はそこから求める）。
+        finalization 中: 打ち切った後なら始めない handle、そうでなければ期限の無い handle
+        （確定処理の時間は PR-106-B の余裕が見る）。owner 以外の thread: 期限の無い handle。
         """
 
-        configured = float(configured_seconds)
         if not self.owned_by_current_thread():
-            return unbounded_admission(stage, configured)
+            return DeadlineQuery(stage)
         if self._finalizing:
-            if self._trip is not None:
-                return Admission(stage=stage, configured_seconds=configured, startable=False)
-            return unbounded_admission(stage, configured)
-        now = self._read(stage)
-        if self._trip is not None or now >= self.absolute:
-            self._raise(stage, now, boundary="before")
-        not_after = self.absolute - self.policy.sub_operation_margin_seconds
-        if bounded_timeout(configured, not_after, unit, now=now) is None:
-            self._raise(stage, now, boundary="before", evidence=("remaining_below_margin",))
-        return Admission(
-            stage=stage,
-            configured_seconds=configured,
-            not_after=not_after,
-            deadline_bound=(not_after - now) < configured,
-            wait_until=self.absolute,
-            _deadline=self,
+            return DeadlineQuery(stage, startable=self._trip is None)
+        return DeadlineQuery(
+            stage,
+            deadline=self,
+            bound=ExecutionBound(
+                not_after=self.absolute - self.policy.sub_operation_margin_seconds,
+                clock=self._clock,
+            ),
         )
 
-    def settle(self, admission: Admission, *, answered: bool, evidence: Tuple[str, ...] = ()) -> None:
-        """sub-operation が返った直後。答えを採ってよいかを決める。
+    def begin_execution(self, query: DeadlineQuery, configured_seconds: float, unit: TimeUnit) -> None:
+        """実行を 1 回始める前（owner）。期限を過ぎている・残りが余裕以下・単位へ直すと 0 なら raise。"""
+
+        if not self._active_here():
+            return
+        now = self._read(query.stage)
+        if self._trip is not None or now >= self.absolute:
+            self._raise(query.stage, now, boundary="before")
+        if bounded_timeout(configured_seconds, query.bound.not_after, unit, now=now) is None:
+            self._raise(query.stage, now, boundary="before", evidence=("remaining_below_margin",))
+
+    def settle(
+        self, query: DeadlineQuery, facts: Tuple[ExecutionFact, ...], *,
+        evidence: Tuple[str, ...] = (),
+    ) -> None:
+        """実行が返った直後（owner）。答えを採ってよいかを決める。
 
         期限を過ぎていれば、答え（SAT / UNSAT を含む）があっても raise する（始めたときに
-        期限内だったことは採る理由にならない）。期限がこの sub-operation の時間を決めていて
-        答えが無い（timeout・中断・実行しなかった）なら、それは期限で切られたので raise。
+        期限内だったことは採る理由にならない）。どれかの実行が期限で切られていれば
+        （`ExecutionFact.cut_by_deadline`）raise する。期限が時間を決めなかった実行の timeout は
+        通常の結果のまま。
         """
 
-        if admission._deadline is not self or not self._active_here():
+        if not self._active_here():
             return
-        now = self._read(admission.stage)
+        now = self._read(query.stage)
         if self._trip is not None or now >= self.absolute:
-            self._raise(admission.stage, now, boundary="after", evidence=evidence)
-        if admission.deadline_bound and not answered:
+            self._raise(query.stage, now, boundary="after", evidence=evidence)
+        if any(fact.cut_by_deadline for fact in facts):
             self._raise(
-                admission.stage, now, boundary="after", evidence=("cut_by_deadline", *evidence),
+                query.stage, now, boundary="after", evidence=("cut_by_deadline", *evidence),
             )
 
     def poll(self, stage: str, counter: "_PollCounter") -> None:
@@ -472,13 +570,13 @@ def checkpoint(stage: str) -> None:
         deadline.checkpoint(stage)
 
 
-def admit(stage: str, configured_seconds: float, unit: TimeUnit) -> Admission:
-    """sub-operation を始める境界（期限が無ければ従来どおりの許可）。"""
+def deadline_query(stage: str) -> DeadlineQuery:
+    """1 つの論理的な問いの handle（owner の thread で作る。期限が無ければ何もしない handle）。"""
 
     deadline = active_deadline()
     if deadline is None:
-        return unbounded_admission(stage, configured_seconds)
-    return deadline.admit(stage, configured_seconds, unit)
+        return DeadlineQuery(stage)
+    return deadline.query(stage)
 
 
 def hot_checkpoint(stage: str) -> None:
@@ -521,21 +619,27 @@ def finalization() -> Iterator[None]:
 
 __all__ = [
     "ANALYSIS_COMPLETE_STAGE",
-    "Admission",
     "DEADLINE_TARGET",
     "DEFAULT_POLL_INTERVAL",
     "DEFAULT_SUB_OPERATION_MARGIN_SECONDS",
     "Deadline",
     "DeadlinePolicy",
     "TimeUnit",
+    "DeadlineQuery",
+    "ExecutionBound",
+    "ExecutionFact",
+    "ExecutionWindow",
+    "NOT_STARTED_FACT",
+    "UNBOUNDED",
+    "UNBOUNDED_WINDOW",
     "active_deadline",
-    "admit",
     "bounded_timeout",
     "checkpoint",
+    "deadline_query",
     "deadline_scope",
+    "execution_window",
     "finalization",
     "hot_checkpoint",
     "poller",
-    "unbounded_admission",
     "unbounded_timeout",
 ]

@@ -11,7 +11,7 @@ import time
 # Re-exports kept for callers that import these names from this module.
 from typing import List  # noqa: F401
 from scripts.function_tracer_pcode.core import live_values
-from scripts.function_tracer_pcode.core.deadline import TimeUnit, bounded_timeout
+from scripts.function_tracer_pcode.core.deadline import ExecutionFact, TimeUnit, bounded_timeout
 from scripts.function_tracer_pcode.core.json_encoding import materialize
 from scripts.function_tracer_pcode.smt.execution import (
     BUDGET_EXHAUSTED,
@@ -48,12 +48,25 @@ class BackendTermination(Enum):
     NOT_STARTED = "not_started"
     #: 始まる前に取り消した（pending の future）
     CANCELLED_PENDING = "cancelled_pending"
-    #: 走っていた実行を中断の要求で止めた（待ちの上限の中で返った）
-    INTERRUPTED = "interrupted"
-    #: 走っていた実行を止められなかった（要求しても返らない・止める手段が無い）。runner は
+    #: 走っていた実行を adapter の停止操作（`SMTSolver.request_stop`）で止めた（待ちの上限の中で返った）
+    STOPPED = "stopped"
+    #: 待つのをやめた後、止めるよう求めずに（止め方が無いのに）自分で返った。答えは採らない
+    RETURNED_LATE = "returned_late"
+    #: 走っていた実行を止められなかった（止める手段が無い・求めても返らない）。runner は
     #: その実行が自分で返るまで待つ（process はそれまで終われない: supervisor の TIMEOUT が
     #: 最後の fallback）
     NOT_STOPPABLE = "not_stoppable"
+
+
+class StopMethod(Enum):
+    """走っている実行を外から止める方法（adapter の `request_stop` が実装する）。"""
+
+    #: 止められない（自分で返るのを待つしかない）
+    NONE = "none"
+    #: in-process の中断要求（z3 の `Context.interrupt` など）。実行は unknown で返る
+    INTERRUPT = "interrupt"
+    #: 実行の強制終了（外部 process の kill など）
+    HARD_STOP = "hard_stop"
 
 
 @dataclass(frozen=True)
@@ -61,20 +74,19 @@ class SolverBackendCapabilities:
     """backend adapter が **実測の根拠をもって** 主張できる時間制御の能力（既定は主張なし）。
 
     ``native_timeout``    backend 自身が timeout で実行を打ち切る（``timeout_unit`` の単位）
-    ``absolute_deadline`` `SMTSolver.execute` が ``not_after``（absolute monotonic）を守る
-    ``interrupt``         別 thread からの `request_interrupt()` で走っている実行が返る
-    ``cancel``            cancellation token を実行の段の間で確かめる
-    ``hard_stop``         実行を強制終了できる（外部 process の kill など）
+    ``absolute_deadline`` `SMTSolver.execute` が ``not_after``（その実行の absolute monotonic の
+                          終わり）を守る
+    ``running_stop``      走っている実行を `SMTSolver.request_stop()` で止める方法
 
-    主張しない能力は無いものとして扱う（runner はそれを前提に止め方を選ぶ）。
+    主張しない能力は無いものとして扱う（runner はそれを前提に止め方を選ぶ）。宣言と実装の
+    食い違い（止め方を主張して `request_stop` を実装しない等）は class を定義した時点で拒む
+    （`SMTSolver.__init_subclass__` → `validate_backend_contract`）。
     """
 
     native_timeout: bool = False
     timeout_unit: Optional[TimeUnit] = None
     absolute_deadline: bool = False
-    interrupt: bool = False
-    cancel: bool = False
-    hard_stop: bool = False
+    running_stop: StopMethod = StopMethod.NONE
 
     @property
     def cooperative(self) -> bool:
@@ -84,9 +96,15 @@ class SolverBackendCapabilities:
 
     @property
     def stoppable_while_running(self) -> bool:
-        """走っている実行を外から止められるか。"""
+        """走っている実行を外から止められるか（runner はこのときだけ `request_stop` を呼ぶ）。"""
 
-        return self.interrupt or self.hard_stop
+        return self.running_stop is not StopMethod.NONE
+
+    @property
+    def execution_unit(self) -> TimeUnit:
+        """実行の窓を求める単位（主張が無ければ既定の実行の手順と同じ秒）。"""
+
+        return self.timeout_unit or TimeUnit.SECONDS
 
     @property
     def guarantee_class(self) -> str:
@@ -128,6 +146,9 @@ class SolverResult:
     witness_contract_violation: Optional[str] = None
     #: この実行がどう終わったか（`BackendTermination`。結果 JSON の schema には入れない）
     termination: BackendTermination = BackendTermination.COMPLETED
+    #: この実行の時間を解析の期限が決めたか（`core.deadline.ExecutionWindow.limited`。runner が
+    #: 実行を始める瞬間に求めて付ける。結果 JSON の schema には入れない）
+    deadline_limited: bool = False
     
     def is_equivalent(self) -> bool:
         """等価かどうか"""
@@ -157,6 +178,10 @@ class SMTSolver(ABC):
     #: この backend の時間制御の能力（Issue #106 PR-106-A）。既定は **主張なし**
     #: （non-cooperative: Class B）。主張する backend は実測の根拠と backend の test を持つ。
     CAPABILITIES: ClassVar[SolverBackendCapabilities] = NO_CAPABILITIES
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        validate_backend_contract(cls)
 
     def __init__(self, timeout: int = 10):
         """
@@ -232,11 +257,12 @@ class SMTSolver(ABC):
         not_after: Optional[float] = None,
         cancellation_token: Optional[Any] = None,
     ) -> SolverResult:
-        """1 回の実行。``not_after`` は owner が求めた absolute monotonic の終わり（無ければ従来）。
+        """1 回の実行。``not_after`` は **この実行の** absolute monotonic の終わり（runner が実行を
+        始める瞬間に `core.deadline.execution_window` で求めた値。無ければ従来）。
 
-        既定の実装は ``absolute_deadline`` を主張しない backend 用: 期限を秒の timeout に
-        直して（`core.deadline.bounded_timeout`）`set_timeout` し、`check_equivalence_direct`
-        を呼ぶ。秒に直して 0 になるなら始めない。期限を自分で守る backend は override する。
+        既定の実装は秒の native timeout の backend 用: 終わりまでを秒の timeout に直して
+        （`core.deadline.bounded_timeout`）`set_timeout` し、`check_equivalence_direct` を呼ぶ。
+        秒に直して 0 になるなら始めない。別の単位・方法で終わりを守る backend は override する。
         """
 
         return _default_execute(
@@ -244,10 +270,11 @@ class SMTSolver(ABC):
             cancellation_token=cancellation_token,
         )
 
-    def request_interrupt(self) -> bool:
-        """走っている実行を止めるよう求める（別 thread から呼ぶ）。求められたら真。
+    def request_stop(self) -> bool:
+        """走っている実行を止めるよう求める（別 thread から呼ぶ）。求めたら真。
 
-        既定は何もできない（``interrupt`` を主張しない）。
+        ``CAPABILITIES.running_stop`` が `StopMethod.NONE` 以外の backend は必ず実装する
+        （実装しないと class の定義が拒まれる）。既定は何もできない。
         """
 
         return False
@@ -402,16 +429,49 @@ def not_started_result(solver_name: str, detail: str = "no time left before the 
         elapsed_time=0.0,
         error_message=f"not_started: {detail}",
         termination=BackendTermination.NOT_STARTED,
+        deadline_limited=True,
     )
 
 
-def result_was_answered(result: SolverResult) -> bool:
-    """期限で切られていない行か（自分で返り、TIMEOUT ではない）。"""
+def execution_fact(result: SolverResult) -> ExecutionFact:
+    """solver の行を `settle` が読む事実へ写す（答え = SAT / UNSAT。規則は `core.deadline`）。"""
 
-    return (
-        result.termination is BackendTermination.COMPLETED
-        and result.status != SolverStatus.TIMEOUT
+    return ExecutionFact(
+        limited=bool(getattr(result, "deadline_limited", False)),
+        definitive=result.status in (SolverStatus.SAT, SolverStatus.UNSAT),
     )
+
+
+def validate_backend_contract(backend_class: type) -> None:
+    """能力の宣言と adapter の実装が食い違っていないか（class の定義時に 1 回）。
+
+    * 止め方を主張するなら `request_stop` を実装する
+    * ``absolute_deadline`` を主張するなら ``native_timeout`` と単位を主張する
+    * 既定の実行の手順（秒）のまま秒以外の単位を主張しない
+    """
+
+    capabilities = getattr(backend_class, "CAPABILITIES", NO_CAPABILITIES)
+    if type(capabilities) is not SolverBackendCapabilities:
+        raise TypeError(f"{backend_class.__name__}.CAPABILITIES must be SolverBackendCapabilities")
+    if capabilities.stoppable_while_running and backend_class.request_stop is SMTSolver.request_stop:
+        raise TypeError(
+            f"{backend_class.__name__} claims {capabilities.running_stop.value} but does not "
+            "implement request_stop"
+        )
+    if capabilities.absolute_deadline and not (capabilities.native_timeout and capabilities.timeout_unit):
+        raise TypeError(
+            f"{backend_class.__name__} claims absolute_deadline without a native timeout and its unit"
+        )
+    if capabilities.native_timeout and capabilities.timeout_unit is None:
+        raise TypeError(f"{backend_class.__name__} claims native_timeout without its unit")
+    if (
+        capabilities.timeout_unit not in (None, TimeUnit.SECONDS)
+        and backend_class.execute is SMTSolver.execute
+    ):
+        raise TypeError(
+            f"{backend_class.__name__} claims {capabilities.timeout_unit.value} but uses the "
+            "default whole-second execute"
+        )
 
 
 def _default_execute(
@@ -463,9 +523,11 @@ def execute_on_backend(
     )
 
 
-def request_backend_interrupt(backend: Any) -> bool:
-    if isinstance(backend, SMTSolver) and backend.capabilities().interrupt:
-        return bool(backend.request_interrupt())
+def request_backend_stop(backend: Any) -> bool:
+    """走っている実行を止めるよう adapter に求める（止め方を主張する backend だけ）。"""
+
+    if isinstance(backend, SMTSolver) and backend.capabilities().stoppable_while_running:
+        return bool(backend.request_stop())
     return False
 
 

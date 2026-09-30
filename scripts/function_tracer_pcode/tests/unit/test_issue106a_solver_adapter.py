@@ -41,6 +41,7 @@ from scripts.function_tracer_pcode.smt.interface import (
     SolverBackendCapabilities,
     SolverResult,
     SolverStatus,
+    StopMethod,
 )
 from scripts.function_tracer_pcode.smt.parallel import (
     CancellationToken,
@@ -101,7 +102,7 @@ def _cooperative_backend(recorder, *, honour_not_after=True, status_when_done=So
     class _Cooperative(SMTSolver):
         CAPABILITIES = SolverBackendCapabilities(
             native_timeout=True, timeout_unit=TimeUnit.MILLISECONDS,
-            absolute_deadline=True, interrupt=True, cancel=True,
+            absolute_deadline=True, running_stop=StopMethod.INTERRUPT,
         )
 
         def __init__(self, timeout=10, debug=False):
@@ -133,7 +134,7 @@ def _cooperative_backend(recorder, *, honour_not_after=True, status_when_done=So
                 return SolverResult(self.name, SolverStatus.UNKNOWN, error_message="cancelled: interrupt")
             return SolverResult(self.name, status_when_done)
 
-        def request_interrupt(self):
+        def request_stop(self):
             self._interrupted.set()
             return True
 
@@ -228,7 +229,7 @@ def test_e11_a_cooperative_backend_that_overruns_is_interrupted_within_the_deadl
     elapsed = time.monotonic() - started
     assert recorder.returned.is_set()
     assert elapsed < 1.0 + parallel_module.RUNNING_STOP_GRACE_SECONDS
-    assert "backend=cooperative:interrupted" in raised.value.evidence_refs
+    assert "backend=cooperative:stopped" in raised.value.evidence_refs
     assert "solver_worker_not_stoppable" not in notes
 
 
@@ -472,8 +473,8 @@ def test_e9_the_z3_adapter_stops_a_hard_query_at_the_absolute_end():
     assert elapsed < 0.5 + 0.5  # 実測の越え（最大 0.12 s）より十分大きい余裕
 
 
-def test_the_z3_adapter_honours_an_interrupt_from_another_thread():
-    """z3 の ``interrupt`` の主張の根拠（別 thread からの中断で走っている check が返る）。"""
+def test_the_z3_adapter_honours_a_stop_request_from_another_thread():
+    """z3 の ``running_stop=INTERRUPT`` の主張の根拠（別 thread からの中断で走っている check が返る）。"""
     solver = Z3Solver(timeout=30)
     box = {}
 
@@ -485,12 +486,12 @@ def test_the_z3_adapter_honours_an_interrupt_from_another_thread():
     thread.start()
     time.sleep(0.5)
     requested = time.monotonic()
-    assert solver.request_interrupt() is True
+    assert solver.request_stop() is True
     thread.join(5)
     assert not thread.is_alive()
     assert box["returned"] - requested < 1.0
     assert box["result"].status in (SolverStatus.UNKNOWN, SolverStatus.TIMEOUT)
-    assert solver.request_interrupt() is False  # 実行していなければ何もしない
+    assert solver.request_stop() is False  # 実行していなければ何もしない
 
 
 # ---------------------------------------------------------------------------
@@ -529,10 +530,13 @@ def test_m2_a_registered_dummy_backend_gets_the_deadline_through_the_adapter_onl
     runner = ParallelSolverRunner(timeout=5)
     assert "dummy" in runner.get_available_solvers()
     with deadline_scope(_policy(30.0)) as deadline:
+        started = time.monotonic()
         result = runner.run_sequential(QUERY)
-    assert DummyDeadlineBackend.received == [
-        pytest.approx(deadline.absolute - deadline.policy.sub_operation_margin_seconds)
-    ]
+    # 設定値（5 s）が期限（30 s − 余裕）より先に終わる: 窓の終わりは設定値で決まり、期限ではない
+    [received] = DummyDeadlineBackend.received
+    assert started + 5 <= received + 0.5 and received < deadline.absolute - 0.2
+    rows = {row.solver_name: row for row in result.results}
+    assert rows["dummy"].deadline_limited is False
     assert any(row.solver_name == "dummy" for row in result.results)
 
 
@@ -593,8 +597,11 @@ def test_m2_no_backend_name_branch_outside_the_adapters():
 
 
 def test_adapters_receive_the_deadline_only_by_argument():
-    """adapter（`smt/solvers/*`・`smt/interface.py`）は期限の scope を読まない（引数だけ）。"""
-    allowed = {"TimeUnit", "bounded_timeout"}
+    """adapter（`smt/solvers/*`・`smt/interface.py`）は期限の scope を読まない（引数と純関数だけ）。"""
+    allowed = {
+        "TimeUnit", "bounded_timeout", "execution_window", "ExecutionFact", "ExecutionWindow",
+        "ExecutionBound", "UNBOUNDED", "UNBOUNDED_WINDOW", "NOT_STARTED_FACT",
+    }
     offenders = []
     for path in [PACKAGE_ROOT / "smt" / "interface.py", *sorted((PACKAGE_ROOT / "smt" / "solvers").glob("*.py"))]:
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -606,60 +613,20 @@ def test_adapters_receive_the_deadline_only_by_argument():
     assert offenders == []
 
 
-def test_workers_never_take_an_admission():
-    """worker で走る `run_single`（orchestration の内側）は許可を取らない（owner だけが取る）。"""
+def test_workers_never_open_a_query():
+    """worker で走る `run_single`（orchestration の内側）は問いの handle を作らない（owner だけが作る）。"""
     source = (PACKAGE_ROOT / "smt" / "parallel.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     run_single = next(
         node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "run_single"
     )
-    admit_calls = [
+    query_calls = [
         node for node in ast.walk(run_single)
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "admit"
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "deadline_query"
     ]
-    assert len(admit_calls) == 1
+    assert len(query_calls) == 1
     guard = next(
         node for node in ast.walk(run_single)
-        if isinstance(node, ast.If) and any(call in list(ast.walk(node)) for call in admit_calls)
+        if isinstance(node, ast.If) and any(call in list(ast.walk(node)) for call in query_calls)
     )
     assert ast.unparse(guard.test) == "not orchestrated"
-
-
-def test_e12_an_oracle_answer_after_the_deadline_is_neither_used_nor_remembered(monkeypatch):
-    from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
-        cache_lookup,
-        condition_cache_scope,
-    )
-    from scripts.function_tracer_pcode.analysis.condition.query_identity import SolverQueryIdentity
-    from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
-    from scripts.function_tracer_pcode.core.condition_metrics import condition_metrics_scope
-    from scripts.function_tracer_pcode.tests.unit.test_issue105b_simplify_budgets import _FakeZ3, _slt
-
-    clock = ShiftedClock()
-
-    class _SlowZ3(_FakeZ3):
-        def Solver(self, ctx=None):
-            solver = super().Solver(ctx)
-            original = solver.check
-
-            def _check():
-                clock.jump(100)  # 答え（UNSAT）は返るが、その間に期限を過ぎる
-                return original()
-
-            solver.check = _check
-            return solver
-
-    fake = _SlowZ3()
-    monkeypatch.setattr(ConditionSMTOracle, "_z3", fake)
-    monkeypatch.setattr(ConditionSMTOracle, "_available", True)
-    monkeypatch.setattr(ConditionSMTOracle, "_availability_checked", True)
-    conditions = [_slt(7, 1)]
-    with condition_cache_scope(), condition_metrics_scope():
-        with pair_failure_scope(("pair",), None):
-            with deadline_scope(_policy(10.0, clock=clock)):
-                with pytest.raises(DeadlineExceeded) as raised:
-                    ConditionSMTOracle.conjunction_is_unsat(conditions)
-        key = SolverQueryIdentity.from_conditions(conditions)
-        assert cache_lookup(ConditionSMTOracle.VERDICT_TABLE, key, limit=4096) == (False, None)
-    assert fake.checks == 1
-    assert "boundary=after" in raised.value.evidence_refs

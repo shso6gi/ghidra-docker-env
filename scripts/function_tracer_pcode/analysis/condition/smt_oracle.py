@@ -46,7 +46,12 @@ from scripts.function_tracer_pcode.core.render_smt import (
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.smt.solvers.z3 import isolated_solver
-from scripts.function_tracer_pcode.core.deadline import TimeUnit, admit
+from scripts.function_tracer_pcode.core.deadline import (
+    NOT_STARTED_FACT,
+    ExecutionFact,
+    TimeUnit,
+    deadline_query,
+)
 
 #: Issue #106 PR-106-A: 条件 oracle の問いの checkpoint の stage
 CONDITION_ORACLE_STAGE = "condition_oracle"
@@ -286,13 +291,19 @@ class ConditionSMTOracle:
 
         try:
             # Issue #106 PR-106-A: 問いを始める境界。期限を過ぎていれば発行しない（限界を
-            # raise）。z3 の timeout（ミリ秒）は期限までに切る（丸めは `core.deadline`）
-            admission = admit(
-                CONDITION_ORACLE_STAGE, cls.QUERY_TIMEOUT_MS / 1000.0, TimeUnit.MILLISECONDS,
+            # raise）。実行の窓（終わりと、期限が時間を決めたか）はこの実行を始める瞬間に求め、
+            # z3 の timeout（ミリ秒）はその窓までに切る（規則と丸めは `core.deadline`）
+            configured = cls.QUERY_TIMEOUT_MS / 1000.0
+            query_deadline = deadline_query(CONDITION_ORACLE_STAGE)
+            if not query_deadline.begin(configured, TimeUnit.MILLISECONDS):
+                return None
+            window = query_deadline.bound.window(configured, TimeUnit.MILLISECONDS)
+            timeout_ms = (
+                None if window is None
+                else window.timeout(configured, TimeUnit.MILLISECONDS, now=query_deadline.bound.now())
             )
-            timeout_ms = admission.timeout(TimeUnit.MILLISECONDS)
-            if timeout_ms is None:
-                admission.settle(answered=False)
+            if window is None or timeout_ms is None:
+                query_deadline.settle([NOT_STARTED_FACT])
                 return None
             # Issue #161: query ごとに専用の solver context（他の query の履歴を持ち込まない）
             solver = isolated_solver(z3, script, timeout_ms)
@@ -306,8 +317,10 @@ class ConditionSMTOracle:
             started = time.monotonic()
             result = solver.check()
             observe("oracle.check_ms", int((time.monotonic() - started) * 1000))
-            # 返った直後: 期限を過ぎていれば答えを採らない（覚えもしない）
-            admission.settle(answered=result == z3.unsat or result == z3.sat)
+            # 返った直後: 期限を過ぎていれば・期限で切られていれば答えを採らない（覚えもしない）
+            query_deadline.settle([
+                ExecutionFact(limited=window.limited, definitive=result == z3.unsat or result == z3.sat)
+            ])
             if result == z3.unsat:
                 verdict: Optional[bool] = True
             elif result == z3.sat:

@@ -9,15 +9,24 @@ before（期限なし）と after（期限あり）の run を pair ごとに突
 
 ========== ==================================================================
 Class A    期限の中で止まることを backend / path が保証する。accepted は ground truth と
-           矛盾しない EQ / NOT_EQ、または reason 付きの UNKNOWN。process TIMEOUT・ERROR・
-           矛盾する判定・reason の無い UNKNOWN は not accepted
-Class B    保証しない。safe は supervisor の TIMEOUT（fallback）、または止められなかった
-           worker が自分で返った後の結果（`worker_stop=not_stoppable` の証拠付き）。ERROR・
-           矛盾する判定は unsafe。どちらも **改善には数えない**
+           **整合が確認された** EQ / NOT_EQ、または reason 付きの UNKNOWN。ground truth で
+           確かめられない EQ / NOT_EQ は ``unconfirmed``（accepted ではない）。process
+           TIMEOUT・ERROR・矛盾する判定・reason の無い UNKNOWN は not accepted
+Class B    保証しない。safe は supervisor の TIMEOUT（fallback）、止められなかった worker が
+           自分で返った後の結果（`worker_stop=not_stoppable` の証拠付き）、整合が確認された
+           判定、reason 付きの UNKNOWN。確かめられない判定は ``unconfirmed``（safe ではない）。
+           ERROR・矛盾する判定は unsafe。どれも **改善には数えない**
 ========== ==================================================================
+
+ground truth との関係は `outcome_transition.correctness_axis` の値（``confirmed_consistent`` /
+``confirmed_contradicted`` / ``unconfirmed`` / ``not_applicable``）をそのまま受け取り、ここで
+読み替えない。判定（EQ / NOT_EQ）に値が無い（``None``）ときは ``unconfirmed`` と同じ扱い
+（整合を主張できない）。未知の値は拒む。
 
 改善（improvement）は before が TIMEOUT で、after が Class A の accepted な結果のときだけ。
 soundness violation は after の EQ / NOT_EQ が ground truth と矛盾するとき（Class に依らない）。
+完了は、Class A が全件 accepted・Class B が全件 safe・改善が 1 件以上・violation 0（``unconfirmed``
+が 1 件でもあれば完了にしない）。
 
 ここは報告だけを作る（判定 authority にも runner の policy にも入力を渡さない）。
 """
@@ -41,18 +50,37 @@ OUTCOME_TIMEOUT = "TIMEOUT"
 OUTCOME_ERROR = "ERROR"
 DECISIVE = frozenset({OUTCOME_EQ, OUTCOME_NOT_EQ})
 
-DEADLINE_REASON = "analysis_budget_exceeded"
-WORKER_NOT_STOPPABLE_EVIDENCE = "worker_stop=not_stoppable"
+from scripts.function_tracer_pcode.core.errors import (  # noqa: E402
+    DeadlineExceeded as _DeadlineExceeded,
+    PairStopState as _PairStopState,
+)
+
+#: 語彙の正本は `core.errors`（ここで綴りを持たない）
+DEADLINE_REASON = _DeadlineExceeded.REASON_ID
+DEADLINE_STOP_STATE = _PairStopState.PAIR_TERMINAL_DEADLINE.value
+from scripts.function_tracer_pcode.smt.parallel import (  # noqa: E402
+    WORKER_NOT_STOPPABLE_EVIDENCE,
+)
 SNAPSHOT_HEADER = "=== deadline_tripped"
 
 VERDICT_ACCEPTED = "accepted"
 VERDICT_NOT_ACCEPTED = "not_accepted"
 VERDICT_FALLBACK_SAFE = "fallback_safe"
 VERDICT_UNSAFE = "unsafe"
+#: 判定が出たが ground truth で確かめられない（accepted でも safe でもない）
+VERDICT_UNCONFIRMED = "unconfirmed"
 
-#: ground truth との関係（`outcome_transition.correctness_axis` の値と同じ語彙）
-TRUTH_CONSISTENT = "confirmed_consistent"
-TRUTH_CONTRADICTED = "confirmed_contradicted"
+#: ground truth との関係（`outcome_transition.correctness_axis` の値。語彙の正本はそちら）
+from scripts.function_tracer_pcode.reporting.outcome_transition import (  # noqa: E402
+    CORRECTNESS_CONSISTENT as TRUTH_CONSISTENT,
+    CORRECTNESS_CONTRADICTED as TRUTH_CONTRADICTED,
+    CORRECTNESS_NOT_APPLICABLE as TRUTH_NOT_APPLICABLE,
+    CORRECTNESS_UNCONFIRMED as TRUTH_UNCONFIRMED,
+)
+
+_KNOWN_TRUTHS = frozenset({
+    None, TRUTH_CONSISTENT, TRUTH_CONTRADICTED, TRUTH_UNCONFIRMED, TRUTH_NOT_APPLICABLE,
+})
 
 
 @dataclass(frozen=True)
@@ -100,10 +128,23 @@ def _deadline_result(observation: TargetObservation) -> str:
     if observation.after_outcome != OUTCOME_UNKNOWN:
         return "none"
     if DEADLINE_REASON in observation.after_reasons and (
-        observation.pair_stop_state == "PAIR_TERMINAL_DEADLINE"
+        observation.pair_stop_state == DEADLINE_STOP_STATE
     ):
         return f"deadline_unknown@{observation.limitation_site}"
     return "unknown_other_reason"
+
+
+def _decision_truth(observation: TargetObservation) -> Optional[str]:
+    """EQ / NOT_EQ の ground truth との関係（判定でなければ ``None``）。"""
+
+    if observation.after_truth not in _KNOWN_TRUTHS:
+        raise ValueError(f"unknown ground-truth relation: {observation.after_truth!r}")
+    if observation.after_outcome not in DECISIVE:
+        return None
+    if observation.after_truth in (TRUTH_CONSISTENT, TRUTH_CONTRADICTED):
+        return observation.after_truth
+    # 値が無い・未確認・対象外: 整合を主張できない
+    return TRUTH_UNCONFIRMED
 
 
 def classify_target(observation: TargetObservation) -> TargetVerdict:
@@ -112,13 +153,16 @@ def classify_target(observation: TargetObservation) -> TargetVerdict:
     if observation.guarantee_class not in (CLASS_A, CLASS_B):
         raise ValueError(f"unknown guarantee class: {observation.guarantee_class!r}")
     outcome = observation.after_outcome
-    contradicted = outcome in DECISIVE and observation.after_truth == TRUTH_CONTRADICTED
+    truth = _decision_truth(observation)
+    contradicted = truth == TRUTH_CONTRADICTED
     worker = _worker_termination(observation)
     deadline_result = _deadline_result(observation)
     if observation.guarantee_class == CLASS_A:
         if contradicted:
             verdict, detail = VERDICT_NOT_ACCEPTED, "decision contradicts the ground truth"
-        elif outcome in DECISIVE:
+        elif truth == TRUTH_UNCONFIRMED:
+            verdict, detail = VERDICT_UNCONFIRMED, "decision the ground truth does not confirm"
+        elif truth == TRUTH_CONSISTENT:
             verdict, detail = VERDICT_ACCEPTED, "decision consistent with the ground truth"
         elif outcome == OUTCOME_UNKNOWN and observation.after_reasons and worker != "not_stoppable":
             verdict, detail = VERDICT_ACCEPTED, "UNKNOWN with registered reasons"
@@ -131,11 +175,13 @@ def classify_target(observation: TargetObservation) -> TargetVerdict:
     else:
         if contradicted or outcome == OUTCOME_ERROR:
             verdict, detail = VERDICT_UNSAFE, f"{outcome} is not a safe fallback"
+        elif truth == TRUTH_UNCONFIRMED:
+            verdict, detail = VERDICT_UNCONFIRMED, "decision the ground truth does not confirm"
         elif outcome == OUTCOME_TIMEOUT:
             verdict, detail = VERDICT_FALLBACK_SAFE, "supervisor TIMEOUT fallback"
         elif worker == "not_stoppable":
             verdict, detail = VERDICT_FALLBACK_SAFE, "result after a non-stoppable worker returned by itself"
-        elif outcome in DECISIVE or (outcome == OUTCOME_UNKNOWN and observation.after_reasons):
+        elif truth == TRUTH_CONSISTENT or (outcome == OUTCOME_UNKNOWN and observation.after_reasons):
             verdict, detail = VERDICT_FALLBACK_SAFE, "terminal result (not counted as a guarantee)"
         else:
             verdict, detail = VERDICT_UNSAFE, f"{outcome} without a reason"
@@ -166,11 +212,13 @@ class AcceptanceSummary:
     class_b_safe: bool
     improvements: int
     soundness_violations: int
+    unconfirmed: int
     complete: bool
 
 
 def summarize(verdicts: Sequence[TargetVerdict]) -> AcceptanceSummary:
-    """完了条件（計画 §7.E）: Class A は全件 accepted、Class B は全件 safe、改善 ≥ 1、violation 0。"""
+    """完了条件（計画 §7.E）: Class A は全件 accepted、Class B は全件 safe、改善 ≥ 1、violation 0、
+    ground truth で確かめられない判定 0。"""
 
     class_a = [row for row in verdicts if row.guarantee_class == CLASS_A]
     class_b = [row for row in verdicts if row.guarantee_class == CLASS_B]
@@ -178,13 +226,18 @@ def summarize(verdicts: Sequence[TargetVerdict]) -> AcceptanceSummary:
     b_ok = all(row.verdict == VERDICT_FALLBACK_SAFE for row in class_b)
     improvements = sum(1 for row in verdicts if row.improvement)
     violations = sum(1 for row in verdicts if row.soundness_violation)
+    unconfirmed = sum(1 for row in verdicts if row.verdict == VERDICT_UNCONFIRMED)
     return AcceptanceSummary(
         targets=len(verdicts),
         class_a_accepted=a_ok,
         class_b_safe=b_ok,
         improvements=improvements,
         soundness_violations=violations,
-        complete=bool(verdicts) and a_ok and b_ok and improvements >= 1 and violations == 0,
+        unconfirmed=unconfirmed,
+        complete=(
+            bool(verdicts) and a_ok and b_ok and improvements >= 1 and violations == 0
+            and unconfirmed == 0
+        ),
     )
 
 
