@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING, Mapping
 
 from scripts.function_tracer_pcode.core.json_encoding import materialize
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
+    DERIVED_STATE_FIELDS,
     SemanticLifecycle,
     state_of,
 )
@@ -96,7 +97,7 @@ class Condition:
         _freeze(self)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if name in SEMANTIC_FIELDS and self.__dict__.get("_frozen", False):
+        if (name in SEMANTIC_FIELDS or name in DERIVED_STATE_FIELDS) and self.__dict__.get("_frozen", False):
             from scripts.function_tracer_pcode.core.semantic_freeze import (
                 frozen_mutation_error,
             )

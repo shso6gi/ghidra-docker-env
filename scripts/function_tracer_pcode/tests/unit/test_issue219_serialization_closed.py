@@ -404,6 +404,23 @@ def test_closed_values_keep_their_representation_under_raw_mutation():
     assert expr.to_dict() == before
 
 
+@pytest.mark.parametrize("name", ["_storage_payload", "_serialization_closed", "_snapshot"])
+def test_derived_state_of_a_validated_value_cannot_be_reassigned(name):
+    """派生値も検証済みの状態の一部: 凍結後の代入は（意味 field と同じく）内部バグとして拒む。"""
+
+    from scripts.function_tracer_pcode.core.errors import FrozenExpressionError
+
+    expr = freeze_expression(_parameter("a"))
+    condition = Condition(Expression.binary_op("INT_LESS", _parameter("b"), Expression.constant(1, 4)))
+    before = expr.to_dict()
+
+    for value in (expr, condition):
+        with pytest.raises(FrozenExpressionError):
+            setattr(value, name, None)
+    assert expr.to_dict() == before
+    assert serialization_closed(expr) is True and serialization_closed(condition) is True
+
+
 def test_unclosed_values_may_still_follow_the_live_object():
     """closed でない値について C-RS2 は何も約束しない（従来どおり生 object を描く）。
 
@@ -524,15 +541,19 @@ def test_every_serialization_input_kind_has_exactly_one_closure_rule():
 def test_the_closure_derivation_lives_only_in_the_lifecycle_owner():
     """closed の規則を consumer 側で再実装しない（owner は semantic_freeze / semantic_lifecycle）。"""
 
+    names = {"_serialization_closed", "_storage_payload"}
     root = pathlib.Path(expression_module.__file__).resolve().parents[1]
     owners = {root / "core" / "semantic_freeze.py", root / "core" / "semantic_lifecycle.py"}
     writers = []
     for path in sorted(root.rglob("*.py")):
         if path in owners or "tests" in path.relative_to(root).parts:
             continue
-        text = path.read_text(encoding="utf-8")
-        if '"_serialization_closed"' in text or "'_serialization_closed'" in text or '"_storage_payload"' in text:
-            writers.append(str(path.relative_to(root)))
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            # 名前を文字列で持つ（`__dict__[...]`・`getattr`・表）か、属性へ代入する
+            if isinstance(node, ast.Constant) and node.value in names:
+                writers.append(f"{path.relative_to(root)}:{node.lineno}")
+            if isinstance(node, ast.Attribute) and node.attr in names and not isinstance(node.ctx, ast.Load):
+                writers.append(f"{path.relative_to(root)}:{node.lineno}")
     assert writers == []
 
 

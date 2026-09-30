@@ -6,6 +6,7 @@ from enum import Enum, auto
 from typing import List, NamedTuple, Optional, Any, Dict, Set, Mapping
 
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
+    DERIVED_STATE_FIELDS,
     SemanticLifecycle,
     inherited_by_a_new_value,
     state_of,
@@ -207,14 +208,18 @@ class Expression:
             self.__dict__["_recurrence_semantic_key"] = recurrence_semantic_key
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """凍結後の意味 field 書き換えを内部バグとして拒否する。
+        """凍結後の意味 field・派生値の書き換えを内部バグとして拒否する。
+
+        派生値（`DERIVED_STATE_FIELDS`。snapshot・digest・凍結時の storage の写し・
+        serialization-closed の bit）も検証済みの状態の一部で、書き換わると LEGACY 表現や
+        identity が凍結後に動く（Issue #219 C-RS2）。書くのは凍結の commit（`__dict__`）だけ。
 
         `TypeError` / `AttributeError` 派生ではない専用の型を投げるのは、
         「回復可能」な例外 tuple に吸収されて UNKNOWN や `None` に化けるのを
         防ぐため（`core/errors.py` の `FrozenExpressionError` を参照）。
         """
 
-        if name in SEMANTIC_FIELDS and self.__dict__.get("_frozen", False):
+        if (name in SEMANTIC_FIELDS or name in DERIVED_STATE_FIELDS) and self.__dict__.get("_frozen", False):
             from scripts.function_tracer_pcode.core.semantic_freeze import (
                 frozen_mutation_error,
             )
