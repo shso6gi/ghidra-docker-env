@@ -84,6 +84,12 @@ copy 機構は置かない: 複製の作り方（何を deep に、何を共有�
 表現が読むようになると、closed の判定がその field を見落とす。静的な監査
 （`tests/unit/test_issue219_serialization_closed.py` の T-A5）がそれを落とす。
 closed でない値について、この契約は何も約束しない（表現は従来どおり生 object を読み得る）。
+
+前提（明示する）: frozen dataclass の LEGACY 表現（record なら `json_items`）は、その
+field の値だけの関数であること。runtime ref の値 object の契約で、package の runtime ref
+が frozen であることは `tests/unit/test_architecture_boundaries.py` が固定している
+（`display_name()` のような field からの導出はこの前提の内側）。field 以外の instance
+状態を持つ object は、凍結時の判定が closed にしない。
 """
 
 from __future__ import annotations
