@@ -1255,7 +1255,6 @@ def test_a_read_bound_signal_while_capturing_leaves_the_ref_uncaptured(monkeypat
 
     from scripts.function_tracer_pcode.core import semantic_freeze
     from scripts.function_tracer_pcode.core.errors import pair_failure_scope
-    from scripts.function_tracer_pcode.core.live_values import StorageBeyondReadBound
 
     from scripts.function_tracer_pcode.core import live_values
 
