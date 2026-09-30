@@ -1064,3 +1064,264 @@ def test_the_purity_audit_accepts_a_field_only_protocol():
     from scripts.function_tracer_pcode.tests.unit._serialization_purity_audit import PurityAudit
 
     assert PurityAudit().audit_type(_DeclaredRecord, ("json_items",)) == []
+
+
+# ---------------------------------------------------------------------------
+# round 3: 直列化の code が外部の状態を読む runtime ref（暗黙の dispatch・別名・既定引数など）
+#
+# どの ref も package の型（walker が `json_items` で表現を作る record）で、表現を作る code が
+# field の外の可変な状態（`_EXTERNAL`）を読む。契約は「closed なら、その状態を書き換えても
+# `to_dict()` と snapshot fingerprint は動かない」（closed でないなら何も約束しない）。
+# ---------------------------------------------------------------------------
+
+_EXTERNAL = {"value": 1, "items": [1]}
+
+
+class _StateRepr(int):
+    """`repr` / `str` / `format` が外部の状態を読む int（`__dict__` は持たない）。"""
+
+    __slots__ = ()
+
+    def __repr__(self):
+        return f"state{_EXTERNAL['value']}"
+
+    __str__ = __repr__
+
+    def __format__(self, spec):
+        return f"state{_EXTERNAL['value']}"
+
+    def __add__(self, other):
+        return int(self) + _EXTERNAL["value"]
+
+    def __len__(self):
+        return _EXTERNAL["value"]
+
+    def __iter__(self):
+        return iter(range(_EXTERNAL["value"]))
+
+    def __eq__(self, other):
+        return _EXTERNAL["value"] == 1 and int(self) == other
+
+    __hash__ = int.__hash__
+
+
+@dataclasses.dataclass(frozen=True)
+class _ReprOfField:
+    __serialization_determined_by_fields__ = True
+    key: Any
+
+    def json_items(self):
+        yield "key", repr(self.key)
+
+
+@dataclasses.dataclass(frozen=True)
+class _StrOfField:
+    __serialization_determined_by_fields__ = True
+    key: Any
+
+    def json_items(self):
+        yield "key", str(self.key)
+
+
+@dataclasses.dataclass(frozen=True)
+class _FormatOfField:
+    __serialization_determined_by_fields__ = True
+    key: Any
+
+    def json_items(self):
+        yield "key", f"{self.key}"
+
+
+@dataclasses.dataclass(frozen=True)
+class _OperatorOnField:
+    __serialization_determined_by_fields__ = True
+    key: Any
+
+    def json_items(self):
+        yield "key", self.key + 1
+
+
+@dataclasses.dataclass(frozen=True)
+class _LenOfField:
+    __serialization_determined_by_fields__ = True
+    key: Any
+
+    def json_items(self):
+        yield "key", len(self.key)
+
+
+@dataclasses.dataclass(frozen=True)
+class _IterationOverField:
+    __serialization_determined_by_fields__ = True
+    key: Any
+
+    def json_items(self):
+        yield "key", tuple(item for item in self.key)
+
+
+@dataclasses.dataclass(frozen=True)
+class _GetattributeRead:
+    __serialization_determined_by_fields__ = True
+    key: int
+
+    def __getattribute__(self, name):
+        if name == "key":
+            return _EXTERNAL["value"]
+        return object.__getattribute__(self, name)
+
+    def json_items(self):
+        yield "key", self.key
+
+
+@dataclasses.dataclass(frozen=True)
+class _GetattrFallback:
+    __serialization_determined_by_fields__ = True
+    key: int
+
+    def __getattr__(self, name):
+        return _EXTERNAL["value"]
+
+    def json_items(self):
+        yield "key", self.missing
+
+
+@dataclasses.dataclass(frozen=True)
+class _NameBase:
+    __serialization_determined_by_fields__ = True
+    tag: int = 0
+
+    def label(self):
+        return "base"
+
+
+@dataclasses.dataclass(frozen=True)
+class _NameSub(_NameBase):
+    def label(self):
+        return f"sub{_EXTERNAL['value']}"
+
+
+@dataclasses.dataclass(frozen=True)
+class _SubclassDispatch:
+    __serialization_determined_by_fields__ = True
+    key: Any
+
+    def json_items(self):
+        key = self.key
+        if isinstance(key, _NameBase):
+            yield "key", key.label()
+
+
+@dataclasses.dataclass(frozen=True)
+class _RecordWithStableKey:
+    __serialization_determined_by_fields__ = True
+    tag: int = 0
+
+    def json_items(self):
+        yield "tag", self.tag
+
+    def stable_key(self):
+        return ("inner", _EXTERNAL["value"])
+
+
+@dataclasses.dataclass(frozen=True)
+class _RawThroughModuleAttribute:
+    __serialization_determined_by_fields__ = True
+    key: Any
+
+    def json_items(self):
+        from scripts.function_tracer_pcode.core import json_encoding
+
+        yield "key", json_encoding.raw(self.key)
+
+
+@dataclasses.dataclass(frozen=True)
+class _RawThroughAlias:
+    __serialization_determined_by_fields__ = True
+    key: Any
+
+    def json_items(self):
+        from scripts.function_tracer_pcode.core.json_encoding import raw as keep_as_is
+
+        yield "key", keep_as_is(self.key)
+
+
+@dataclasses.dataclass(frozen=True)
+class _MutableDefaultArgument:
+    __serialization_determined_by_fields__ = True
+    key: int
+
+    def json_items(self, scratch=_EXTERNAL["items"]):
+        yield "key", tuple(scratch)
+
+
+@dataclasses.dataclass(frozen=True)
+class _ClassRegistry:
+    __serialization_determined_by_fields__ = True
+    registry = _EXTERNAL
+    key: int = 0
+
+    def json_items(self):
+        yield "key", type(self).registry["value"]
+
+
+def _external_state_refs():
+    return {
+        "repr_of_field": _ReprOfField(_StateRepr(3)),
+        "str_of_field": _StrOfField(_StateRepr(3)),
+        "format_of_field": _FormatOfField(_StateRepr(3)),
+        "operator_on_field": _OperatorOnField(_StateRepr(3)),
+        "len_of_field": _LenOfField(_StateRepr(3)),
+        "iteration_over_field": _IterationOverField(_StateRepr(3)),
+        "getattribute_read": _GetattributeRead(0),
+        "getattr_fallback": _GetattrFallback(0),
+        "subclass_dispatch": _SubclassDispatch(_NameSub()),
+        "raw_through_module_attribute": _RawThroughModuleAttribute(_RecordWithStableKey()),
+        "raw_through_alias": _RawThroughAlias(_RecordWithStableKey()),
+        "mutable_default_argument": _MutableDefaultArgument(0),
+        "class_registry": _ClassRegistry(),
+    }
+
+
+@pytest.fixture
+def _external_state():
+    saved = dict(_EXTERNAL, items=list(_EXTERNAL["items"]))
+    yield _EXTERNAL
+    _EXTERNAL["value"] = saved["value"]
+    _EXTERNAL["items"][:] = saved["items"]
+
+
+@pytest.mark.parametrize("label", sorted(_external_state_refs()))
+def test_a_closed_value_ignores_state_its_serialization_code_reads(label, _external_state):
+    """closed なら、表現を作る code が読む外部の状態を書き換えても表現と fingerprint は動かない。
+
+    `67d7f74` では宣言の監査が 13 の型すべてを通し（closed）、書き換えで fingerprint が動いた。
+    """
+
+    expr = Expression.unknown("u", runtime_ref=_external_state_refs()[label])
+    fingerprint = _snapshot_fingerprint_of(expr)
+    before = expr.to_dict()
+    closed = serialization_closed(expr)
+
+    _external_state["value"] = 2
+    _external_state["items"].append(2)
+
+    if closed:
+        assert expr.to_dict() == before, label
+        assert _snapshot_fingerprint_of(expr) == fingerprint, label
+
+
+def test_the_external_state_counterexamples_do_move_a_live_representation(_external_state):
+    """対照: 同じ ref を **未凍結** の式で描くと、外部の状態の書き換えで表現が動く（反例が効いている）。"""
+
+    moved = []
+    for label, ref in sorted(_external_state_refs().items()):
+        _external_state["value"] = 1
+        del _external_state["items"][1:]
+        expr = Expression.unknown("u", runtime_ref=ref)
+        before = expr.to_dict()
+        _external_state["value"] = 2
+        _external_state["items"].append(2)
+        if expr.to_dict() != before:
+            moved.append(label)
+    # 表現が code の実行結果に依存する反例（`__eq__` を上書きした葉も含めて比べ方に依らず動くもの）
+    assert {"getattribute_read", "getattr_fallback", "subclass_dispatch", "mutable_default_argument", "class_registry"} <= set(moved)
