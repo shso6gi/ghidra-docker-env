@@ -75,12 +75,15 @@ from scripts.function_tracer_pcode.core.expression import (
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     CONDITION_SERIALIZATION_INPUTS,
     EXPRESSION_SERIALIZATION_INPUTS,
+    FIELD_DETERMINED_SERIALIZATION_MARKER,
+    NON_INHERITED_FIELDS,
     SerializationInput,
     is_published,
     is_validated,
     mark_published,
     mark_validated,
     serialization_closed,
+    serialization_protocol_methods,
 )
 from scripts.function_tracer_pcode.core.semantic_projection import contains_unsupported_value
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
@@ -689,14 +692,17 @@ def _projection_has_unsupported_value(snapshot: Any) -> bool:
 
 
 def frozen_mutation_error(node: Any, field: str) -> FrozenExpressionError:
-    """凍結後の意味 field 書き換えを内部バグとして記録し、例外を作る。
+    """凍結後の意味 field の書き換え・lifecycle が所有する field の書き換えを内部バグとして
+    記録し、例外を作る（規則は `core/semantic_lifecycle.attribute_mutation_allowed`）。
 
     記録してから raise するので、途中の `except Exception` に握り潰されても
     pair 境界が台帳から拾い直して `internal_exception` の ERROR にできる。
     """
 
+    owned = field in NON_INHERITED_FIELDS
     exc = FrozenExpressionError(
-        f"{type(node).__name__}.{field} is frozen "
+        f"{type(node).__name__}.{field} is "
+        f"{'owned by the semantic lifecycle' if owned else 'frozen'} "
         f"({getattr(getattr(node, 'expr_type', None), 'name', None)}); "
         "derive a new value with clone_with(...) instead of mutating"
     )
@@ -731,36 +737,78 @@ def _captured_storage(storage: Any, staging: _LifecycleStaging) -> Any:
     return record
 
 
-def _immutable_scalar(value: Any) -> bool:
-    """値そのものが書き換わらない scalar か（subclass も値は基底型の不変な値）。"""
+def _immutable_leaf(value: Any) -> bool:
+    """書き換わる instance 状態を持たない葉の値か（直列化の owner が読む状態のすべてが不変）。
 
-    return value is None or issubclass(type(value), _IMMUTABLE_SCALAR_TYPES) or issubclass(type(value), Enum)
+    直列化の owner（walker の JSON / LEGACY、snapshot codec、runtime ref の source）が葉を
+    どう読むかに合わせて、証明できる形だけを通す:
+
+    * `None` / `bool` と、組み込みの `int` / `float` / `str` / `bytes` そのもの
+    * `int` / `float` / `str` の subclass は、instance の `__dict__` を持たないもの（owner は
+      基底型の slot を読み、subclass の method は class の定義 = code。`__dict__` を持つ
+      instance は、その状態を読む method を持ち得るので不変と言わない）
+    * enum の member は、member の instance 状態（`_value_` など）がすべて不変な値のもの
+      （codec は `_value_` を写す。`list` を値に持つ member は、その list が書き換わる）
+
+    class・関数・enum の member の **束縛そのもの**（`E.A._value_ = ...` や method の差し替え）
+    は code の書き換えで、状態ではない（この契約の外）。
+    """
+
+    if value is None or value is True or value is False:
+        return True
+    kind = type(value)
+    if kind is int or kind is float or kind is str or kind is bytes:
+        return True
+    if issubclass(kind, Enum):
+        return _immutable_enum_member(value)
+    if issubclass(kind, (int, float, str)):
+        return getattr(value, "__dict__", None) is None
+    return False
 
 
-_IMMUTABLE_SCALAR_TYPES = (bool, int, float, str, bytes)
+def _immutable_enum_member(member: Any) -> bool:
+    state = getattr(member, "__dict__", None)
+    if type(state) is not dict:
+        return False
+    for name, item in state.items():
+        if name == "__objclass__":
+            # member が属する class（code）
+            continue
+        if not _immutable_plain(item):
+            return False
+    return True
 
 
 def _immutable_plain(value: Any) -> bool:
-    """意味値を含まない、不変な scalar とその tuple だけの値か（`value` の既定の形）。"""
+    """意味値を含まない、不変な葉とその tuple だけの値か（`value` の既定の形・enum の値）。
+
+    tuple は組み込みの `tuple` そのものだけ（subclass は record の protocol や上書きした
+    反復を持ち得て、owner ごとに読み方が変わる）。
+    """
 
     pending = [value]
     while pending:
         item = pending.pop()
-        if _immutable_scalar(item):
+        if _immutable_leaf(item):
             continue
-        if not issubclass(type(item), tuple):
+        if type(item) is not tuple:
             return False
         pending.extend(tuple.__iter__(item))
     return True
 
 
-def _frozen_dataclass_values(value: Any) -> Optional[Tuple[Any, ...]]:
-    """frozen dataclass の field の値（表現が読む状態のすべて）。そうでなければ `None`。
+def _value_object_fields(value: Any) -> Optional[Tuple[Any, ...]]:
+    """不変な値 object（frozen dataclass）の field の値。そうでなければ `None`。
+
+    * frozen dataclass で、instance の状態が field だけ（後から `object.__setattr__` で足した
+      cache などを持たない。表現が何を読むか言えなくなる）
+    * 直列化の protocol（`serialization_protocol_methods`）を持つ型は、その型自身が
+      `FIELD_DETERMINED_SERIALIZATION_MARKER` を宣言していること（protocol が field だけの
+      関数であることは、宣言した型ごとに静的な監査が確かめる）。宣言の無い型は、owner が
+      その protocol（任意の code）で表現を作るので不変と言わない
 
     読み方は `_walk_semantic_carriers` と同じ（型の `__dataclass_fields__` と instance の
-    `__dict__` だけ。descriptor も `__getattr__` も呼ばない）。field 以外の instance 状態
-    （後から `object.__setattr__` で足した cache など）を持つ object、field が instance に
-    無い object は、表現（`json_items`）が何を読むか言えないので不変と言わない。
+    `__dict__` だけ。descriptor も `__getattr__` も呼ばない）。
     """
 
     kind = type(value)
@@ -768,6 +816,8 @@ def _frozen_dataclass_values(value: Any) -> Optional[Tuple[Any, ...]]:
         return None
     params = getattr(kind, "__dataclass_params__", None)
     if params is None or getattr(params, "frozen", False) is not True:
+        return None
+    if _serialization_protocol(kind) and kind.__dict__.get(FIELD_DETERMINED_SERIALIZATION_MARKER) is not True:
         return None
     state = getattr(value, "__dict__", None)
     if type(state) is not dict:
@@ -778,11 +828,23 @@ def _frozen_dataclass_values(value: Any) -> Optional[Tuple[Any, ...]]:
     return tuple(state[name] for name in names)
 
 
+def _serialization_protocol(kind: type) -> tuple:
+    known = _PROTOCOL_TYPES.get(kind)
+    if known is None:
+        known = _PROTOCOL_TYPES[kind] = serialization_protocol_methods(kind)
+    return known
+
+
+#: 型 → 直列化の owner が使う method（class の定義で決まる）。
+_PROTOCOL_TYPES: Dict[type, tuple] = {}
+
+
 def _deeply_immutable(value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
     """`value`（runtime ref）が深く不変か。中の式・条件は `dependencies` へ積む（closed かは呼ぶ側）。
 
-    不変と言えるのは scalar / enum / bytes / tuple / frozenset / frozen dataclass と、
-    closed な式・条件だけ。list / dict / set / 可変な object / opaque な object を
+    不変と言えるのは不変な葉（`_immutable_leaf`）/ 組み込みの tuple / frozenset / 不変な値
+    object（`_value_object_fields`）と、式・条件そのもの（`Expression` / `Condition` の型そのもの。
+    closed かは依存として畳む）だけ。list / dict / set / 可変な object / opaque な object を
     1 つでも含めば不変でない。答えは ref の object ごとに、この操作の中で 1 回だけ求める。
     """
 
@@ -801,22 +863,22 @@ def _immutable_graph(root: Any) -> Tuple[bool, Tuple[Any, ...]]:
     pending = [root]
     while pending:
         value = pending.pop()
-        if _immutable_scalar(value):
+        if _immutable_leaf(value):
             continue
-        if isinstance(value, (Expression, Condition)):
+        kind = type(value)
+        if kind is Expression or kind is Condition:
             found.append(value)
             continue
         if id(value) in seen:
             continue
         seen[id(value)] = True
-        kind = type(value)
-        if issubclass(kind, tuple):
+        if kind is tuple:
             pending.extend(tuple.__iter__(value))
             continue
-        if issubclass(kind, frozenset):
+        if kind is frozenset:
             pending.extend(frozenset.__iter__(value))
             continue
-        fields = _frozen_dataclass_values(value)
+        fields = _value_object_fields(value)
         if fields is None:
             return False, ()
         pending.extend(fields)
@@ -824,7 +886,7 @@ def _immutable_graph(root: Any) -> Tuple[bool, Tuple[Any, ...]]:
 
 
 def _scalar_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
-    return _immutable_scalar(value)
+    return _immutable_leaf(value)
 
 
 def _value_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
@@ -865,7 +927,11 @@ def _expression_rule(node: Any, value: Any, staging: _LifecycleStaging, dependen
 
 
 def _storage_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
-    return value is None or staging.derived_fields(node).get("_storage_payload") is not None
+    if value is None:
+        return True
+    payload = staging.derived_fields(node).get("_storage_payload")
+    # 写しの値も葉と同じ規則（写しは scalar の subclass をそのまま持つ）
+    return payload is not None and all(_immutable_leaf(item) for item in payload.values)
 
 
 def _runtime_ref_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
@@ -891,11 +957,22 @@ def _serialization_dependencies(value: Any, staging: _LifecycleStaging) -> Optio
     どれか 1 つでも不変でなければ `None`。読む field は lifecycle の表から取る（ここで列挙しない）。
     """
 
-    table = CONDITION_SERIALIZATION_INPUTS if isinstance(value, Condition) else EXPRESSION_SERIALIZATION_INPUTS
+    # 表と規則が述べているのは `Expression` / `Condition` の表現（その型の method）だけ。subclass は
+    # 表現を作る method を上書きし得るので closed にしない
+    kind = type(value)
+    if kind is Condition:
+        table = CONDITION_SERIALIZATION_INPUTS
+    elif kind is Expression:
+        table = EXPRESSION_SERIALIZATION_INPUTS
+    else:
+        return None
     fields = value.__dict__
     dependencies: List[Any] = []
-    for name, kind in table.items():
-        if not SERIALIZATION_CLOSURE_RULES[kind](value, fields.get(name), staging, dependencies):
+    for name, input_kind in table.items():
+        if name not in fields:
+            # instance に無い field は class の値（共有の状態）を読むことになる
+            return None
+        if not SERIALIZATION_CLOSURE_RULES[input_kind](value, fields[name], staging, dependencies):
             return None
     return dependencies
 
