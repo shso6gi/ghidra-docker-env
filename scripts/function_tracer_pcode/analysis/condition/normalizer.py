@@ -430,8 +430,7 @@ class ConditionNormalizer:
         rendered = expression_key_status(
             expr,
             budget=cls._EXPR_KEY_MAX_NODES,
-            normalize_commutative=True,
-            include_memory_read_order=include_memory_read_order,
+            **cls._key_options(include_memory_read_order),
         )
         if len(cls._expr_key_cache) >= cls._EXPR_KEY_CACHE_LIMIT:
             cls._expr_key_cache.clear()
@@ -440,6 +439,12 @@ class ConditionNormalizer:
             cls._expr_key_cache[expr] = cached_by_mode
         cached_by_mode[cache_mode] = rendered
         return rendered
+
+    @staticmethod
+    def _key_options(include_memory_read_order: bool) -> Dict[str, bool]:
+        """署名の key と、その代わりの厳密な identity が共有する option（同じ同値関係で比べる）。"""
+
+        return {"normalize_commutative": True, "include_memory_read_order": bool(include_memory_read_order)}
 
     @staticmethod
     def _condition_expr_key(
@@ -459,9 +464,12 @@ class ConditionNormalizer:
         # だけで決まる値なので pair の中で式 object ごとに 1 回だけ作る（expander は組み合わせ
         # ごとに同じ式の署名を求め、毎回 256 node 分の key を作り直していた）
         # Issue #215: その key は予算の無い厳密な identity（O(1) の大きさ、構造が等しい式どうし
-        # だけが一致）。予算 256 の key や object identity を持ち回らない
+        # だけが一致）。予算付き key と同じ option で作り、memo も option ごとに分ける
+        options = ConditionNormalizer._key_options(include_memory_read_order)
         return root_memo(
-            ConditionNormalizer.FALLBACK_KEY_MEMO, expr, exact_structural_identity
+            f"{ConditionNormalizer.FALLBACK_KEY_MEMO}.read_order={options['include_memory_read_order']}",
+            expr,
+            lambda root: exact_structural_identity(root, **options),
         )
     
     @staticmethod

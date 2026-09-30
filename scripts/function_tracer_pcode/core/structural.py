@@ -7,7 +7,7 @@ side instead of round-tripping through rendered strings.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import astuple, dataclass
 import hashlib
 import json
 import struct
@@ -117,7 +117,7 @@ class ExactTailOptions:
     """tail の展開 T_o を決める option（budget は含めない: tail の入力ではない）。
 
     option を足すときはここと `_key_view` だけを変える。memo の分割（C-K4）は
-    この値そのもので行うので、足し忘れて memo が混線することは無い。
+    この値の全 field（`memo_key`）で行うので、足し忘れて memo が混線することは無い。
     """
 
     normalize_commutative: bool = True
@@ -131,6 +131,12 @@ class ExactTailOptions:
         """key の option（未知の名前は TypeError）。値は真偽に正規化する（`1` と `True` を分けない）。"""
 
         return cls(**{name: bool(value) for name, value in options.items()})
+
+    @property
+    def memo_key(self) -> tuple:
+        """memo の分割に使う plain な値（全 field を宣言順に。`core.atomic_tables` の subkey）。"""
+
+        return astuple(self)
 
 
 class _NotCanonical(Exception):
@@ -506,7 +512,7 @@ def _exact_tail_token(
             if cached is not None:
                 return cached, None
             if is_validated(node):
-                token = _VALIDATED_TAIL_MEMO.get(node, options)
+                token = _VALIDATED_TAIL_MEMO.get(node, options.memo_key)
                 if token is not None:
                     memo[node_id] = (token, None)
                     return (token, None), None
@@ -583,7 +589,7 @@ def _exact_tail_token(
         if path_independent:
             memo[node_id] = (token, None)
             if frame.min_ref is None and is_validated(frame.node):
-                _VALIDATED_TAIL_MEMO.put(frame.node, options, token)
+                _VALIDATED_TAIL_MEMO.put(frame.node, options.memo_key, token)
         result = (token, frame.min_ref if not path_independent else None)
         if not stack:
             final = token

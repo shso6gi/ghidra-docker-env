@@ -187,3 +187,43 @@ def test_recurrence_summary_keys_do_not_collapse_on_failure():
         guard_proof._impl__summary_return_conditions_key(None, [_Unkeyable()])
     assert object_identity._impl__summary_return_expression_key(None, _Unkeyable()) != \
         object_identity._impl__summary_return_expression_key(None, _Unkeyable())
+
+
+# --------------------------------------------------------------------------
+# expander の dedup 署名（normalizer）: 大きい式は厳密な identity で、key と同じ option
+# --------------------------------------------------------------------------
+
+def _load(read_order, tail=7):
+    from scripts.function_tracer_pcode.core.expression import ExpressionType
+
+    memory = Expression(ExpressionType.MEMORY, operands=[_param()], size=4)
+    memory.read_order_key = read_order
+    return Expression.binary_op("INT_ADD", Expression.binary_op("INT_ADD", _chain(80), memory), _const(tail))
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_the_signature_of_a_large_expression_follows_the_same_options_as_its_key(scoped):
+    from scripts.function_tracer_pcode.analysis.condition.condition_cache import condition_cache_scope
+    from scripts.function_tracer_pcode.analysis.condition.normalizer import ConditionNormalizer
+
+    def signature(expr, read_order):
+        return ConditionNormalizer._condition_expr_key(expr, include_memory_read_order=read_order)
+
+    def run():
+        first, second, other_tail = _load(1), _load(2), _load(1, tail=8)
+        assert not ConditionNormalizer._expr_key(first)[1]  # 小さい予算では比べられない
+        # read order を見ない署名では read order だけが違う式は同じ、見る署名では違う
+        assert signature(first, False) == signature(second, False)
+        assert signature(first, True) != signature(second, True)
+        # どちらの署名でも、末尾が違う式は違う（C-K1）
+        assert signature(first, False) != signature(other_tail, False)
+        assert signature(first, True) != signature(other_tail, True)
+        # 同じ式・同じ option は同じ（memo が option で混線しない: 順に両方を問う）
+        assert signature(first, True) == signature(_load(1), True)
+        assert signature(first, False) == signature(_load(1), False)
+
+    if scoped:
+        with condition_cache_scope():
+            run()
+    else:
+        run()

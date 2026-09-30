@@ -741,3 +741,23 @@ def test_an_unidentified_expression_has_no_equal_exact_identity():
     expr = _chain(1, 10, base=leaf)
     assert structural.exact_structural_identity(expr) != structural.exact_structural_identity(expr)
     assert not structural.key_is_process_independent(structural.exact_structural_identity(expr))
+
+
+@pytest.mark.parametrize("options", [
+    dict(zip(OPTION_NAMES, bits)) for bits in itertools.product((False, True), repeat=5)
+])
+def test_a_comparable_key_never_carries_a_process_scoped_token(options):
+    """比較可能な key は process をまたいでも同じ意味（token は placeholder の中にしか無い）。
+
+    authority / proof の identity（readonly の guard など）は比較可能な key だけを埋める。
+    比較可能 ⇒ process 非依存が崩れると、Gate A の昇格点を通らずに process 固有の値が
+    外へ出る。
+    """
+
+    for expr in _status_corpus():
+        for budget in (4, 32, 256):
+            key, comparable = structural.expression_key_status(expr, budget=budget, **options)
+            if comparable:
+                assert structural.key_is_process_independent(key), (budget, key)
+            safe = expression_key_safe(expr, budget=budget, **options)
+            assert safe is None or structural.key_is_process_independent(safe)
