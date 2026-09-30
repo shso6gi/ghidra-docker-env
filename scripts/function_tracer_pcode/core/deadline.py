@@ -177,11 +177,22 @@ class ExecutionWindow:
     limited: bool
 
     def timeout(self, configured_seconds: float, unit: TimeUnit, *, now: float) -> Optional[int]:
-        """この実行に渡す timeout（``None`` なら始めない）。"""
+        """この実行に渡す timeout（``None`` なら始めない）。
 
-        if self.end is None:
+        期限が時間を決めていない窓は設定値をそのまま渡す（開始時刻からの丸め直しで設定値より
+        短くしない: 期限なしのときと同じ値）。期限が決めた窓だけ、終わりまでを `bounded_timeout`
+        で直す。
+        """
+
+        if not self.limited:
             return unbounded_timeout(configured_seconds, unit)
         return bounded_timeout(configured_seconds, self.end, unit, now=now)
+
+    @property
+    def adapter_end(self) -> Optional[float]:
+        """adapter に渡す終わり（期限が時間を決めた窓だけ。そうでなければ設定値の timeout に任せる）。"""
+
+        return self.end if self.limited else None
 
 
 #: 期限の無い実行の窓

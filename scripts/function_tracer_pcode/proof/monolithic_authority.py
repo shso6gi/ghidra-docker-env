@@ -794,7 +794,7 @@ class SharedZ3RegionSession:
         # Issue #161: 実行の状態（期限と中止）は 1 回の実行に 1 つの `ExecutionBudget`。
         # execute の入口で作り、初回の check と canonical witness の生成・SAT の確定がこれに
         # 問う（共有 session には中止の入力が無いので期限だけ）。
-        budget = ExecutionBudget.starting_now(configured, not_after=window.end)
+        budget = ExecutionBudget.starting_now(configured, not_after=window.adapter_end)
         self._solver.push()
         try:
             self._solver.add(*self._specific[digest])

@@ -175,7 +175,7 @@ def test_review1_the_later_backend_window_is_decided_when_it_starts():
             with pytest.raises(DeadlineExceeded) as raised:
                 runner.run_sequential(QUERY, timeout=0.25)
     first, second = log.calls
-    assert first["not_after"] < not_after  # 先は設定値の 250 ms で終わる窓（期限は決めていない）
+    assert first["not_after"] is None  # 先は設定値の 250 ms で終わる窓（期限は決めていない）
     assert second["not_after"] == pytest.approx(not_after)  # 後は期限が終わりを決めた
     assert "cut_by_deadline" in raised.value.evidence_refs
     assert deadline.tripped
@@ -193,7 +193,36 @@ def test_review1_a_worker_started_late_gets_its_own_window():
     late = parallel_module._execute_within(backend, QUERY, 0.8, bound, None)
     assert early.deadline_limited is False
     assert late.deadline_limited is True
+    assert log.calls[0]["not_after"] is None
     assert log.calls[1]["not_after"] == pytest.approx(bound.not_after)
+
+
+def test_review1_an_execution_the_deadline_does_not_shape_gets_exactly_the_configured_timeout():
+    """期限があっても、期限が時間を決めない実行には設定値をそのまま渡す（開始時刻から丸め直さない）。
+
+    丸め直すと秒の API に 60 → 59 が渡り、期限なしの実行と値が変わる（記録済み replay が検出した）。
+    """
+    from scripts.function_tracer_pcode.core.deadline import execution_window
+    from scripts.function_tracer_pcode.ghidra.decompilation_broker import (
+        TOP_LEVEL_SOURCE_CONTRACT,
+        decompile_within_deadline,
+    )
+    from scripts.function_tracer_pcode.tests.unit.test_issue106a_solver_adapter import (
+        _fake_decompile_analyzer,
+    )
+
+    window = execution_window(60, 1000.0, TimeUnit.SECONDS, now=100.0)
+    assert window.limited is False and window.adapter_end is None
+    for later in (100.0, 100.3, 100.999):
+        assert window.timeout(60, TimeUnit.SECONDS, now=later) == 60
+        assert window.timeout(0.25, TimeUnit.MILLISECONDS, now=later) == 250
+    recorded = []
+    with deadline_scope(_policy(1.0e6, ShiftedClock(), 0.5)):
+        decompile_within_deadline(
+            _fake_decompile_analyzer(recorded), object(), 60, None,
+            source_contract_id=TOP_LEVEL_SOURCE_CONTRACT, semantic_owner="slice6",
+        )
+    assert recorded == [60]
 
 
 @pytest.mark.parametrize("mode", ["run_sequential", "run_parallel"])

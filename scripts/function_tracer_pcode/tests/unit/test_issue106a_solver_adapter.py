@@ -215,7 +215,7 @@ def test_e11_a_cooperative_worker_gets_the_absolute_deadline_as_an_argument_and_
 
 
 def test_e11_a_cooperative_backend_that_overruns_is_interrupted_within_the_deadline(monkeypatch):
-    """期限を守らない（壊れた）adapter でも、interrupt を主張していれば期限で止める。"""
+    """期限を守らない（壊れた）adapter でも、止め方を主張していれば期限で止める。"""
     recorder = _Recorder()
     notes = []
     monkeypatch.setattr(parallel_module, "journal_note", lambda note, payload=None: notes.append(note))
@@ -530,11 +530,10 @@ def test_m2_a_registered_dummy_backend_gets_the_deadline_through_the_adapter_onl
     runner = ParallelSolverRunner(timeout=5)
     assert "dummy" in runner.get_available_solvers()
     with deadline_scope(_policy(30.0)) as deadline:
-        started = time.monotonic()
         result = runner.run_sequential(QUERY)
-    # 設定値（5 s）が期限（30 s − 余裕）より先に終わる: 窓の終わりは設定値で決まり、期限ではない
-    [received] = DummyDeadlineBackend.received
-    assert started + 5 <= received + 0.5 and received < deadline.absolute - 0.2
+    # 設定値（5 s）が期限（30 s − 余裕）より先に終わる: 期限は時間を決めていないので adapter には
+    # 設定値の timeout だけを渡す（終わりを渡さない。期限なしと同じ値）
+    assert DummyDeadlineBackend.received == [None]
     rows = {row.solver_name: row for row in result.results}
     assert rows["dummy"].deadline_limited is False
     assert any(row.solver_name == "dummy" for row in result.results)
@@ -630,3 +629,43 @@ def test_workers_never_open_a_query():
         if isinstance(node, ast.If) and any(call in list(ast.walk(node)) for call in query_calls)
     )
     assert ast.unparse(guard.test) == "not orchestrated"
+
+
+def test_e12_an_oracle_answer_after_the_deadline_is_neither_used_nor_remembered(monkeypatch):
+    from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
+        cache_lookup,
+        condition_cache_scope,
+    )
+    from scripts.function_tracer_pcode.analysis.condition.query_identity import SolverQueryIdentity
+    from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
+    from scripts.function_tracer_pcode.core.condition_metrics import condition_metrics_scope
+    from scripts.function_tracer_pcode.tests.unit.test_issue105b_simplify_budgets import _FakeZ3, _slt
+
+    clock = ShiftedClock()
+
+    class _SlowZ3(_FakeZ3):
+        def Solver(self, ctx=None):
+            solver = super().Solver(ctx)
+            original = solver.check
+
+            def _check():
+                clock.jump(100)  # 答え（UNSAT）は返るが、その間に期限を過ぎる
+                return original()
+
+            solver.check = _check
+            return solver
+
+    fake = _SlowZ3()
+    monkeypatch.setattr(ConditionSMTOracle, "_z3", fake)
+    monkeypatch.setattr(ConditionSMTOracle, "_available", True)
+    monkeypatch.setattr(ConditionSMTOracle, "_availability_checked", True)
+    conditions = [_slt(7, 1)]
+    with condition_cache_scope(), condition_metrics_scope():
+        with pair_failure_scope(("pair",), None):
+            with deadline_scope(_policy(10.0, clock=clock)):
+                with pytest.raises(DeadlineExceeded) as raised:
+                    ConditionSMTOracle.conjunction_is_unsat(conditions)
+        key = SolverQueryIdentity.from_conditions(conditions)
+        assert cache_lookup(ConditionSMTOracle.VERDICT_TABLE, key, limit=4096) == (False, None)
+    assert fake.checks == 1
+    assert "boundary=after" in raised.value.evidence_refs

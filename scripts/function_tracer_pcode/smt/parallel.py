@@ -597,8 +597,8 @@ def run_backend_query(
 ) -> SolverResult:
     """backend 1 つで 1 回だけ問う（runner を通さない直接の問い合わせの入口、Issue #106 PR-106-A）。
 
-    runner の問い合わせと同じ規則: 始める前に解析の期限の許可を取り（過ぎていれば限界を
-    raise）、期限の absolute な終わりを adapter へ引数で渡し、返った直後に確かめる。時間は
+    runner の問い合わせと同じ規則: 始める前に owner の thread で `begin`（過ぎていれば限界を
+    raise）、実行の窓を始める瞬間に求めて終わりを adapter へ引数で渡し、返った直後に `settle`。時間は
     backend の設定（`backend.timeout` 秒）。counter / journal / witness の検査は従来どおり
     行わない（status だけを読む呼び出し元のため）。
     """
@@ -633,7 +633,7 @@ def _execute_within(
         return not_started_result(getattr(backend, "name", type(backend).__name__))
     result = execute_on_backend(
         backend, smt_script, timeout_seconds=timeout_seconds,
-        not_after=window.end, cancellation_token=cancellation_token,
+        not_after=window.adapter_end, cancellation_token=cancellation_token,
     )
     result.deadline_limited = window.limited or result.deadline_limited
     return result
