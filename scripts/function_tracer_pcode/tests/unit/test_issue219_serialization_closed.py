@@ -252,6 +252,14 @@ def _frozen_ref_holding_an_unclosed_expression():
     return Expression.unknown("u", runtime_ref=_FrozenRef(("u",), inner=_mutable_runtime_ref()))
 
 
+def _frozen_ref_with_hidden_state():
+    """frozen dataclass だが field 以外の状態（後から足した cache）を持つ ref。"""
+
+    ref = _FrozenRef(("u",))
+    object.__setattr__(ref, "_cache", [])
+    return Expression.unknown("u", runtime_ref=ref)
+
+
 def _opaque_value():
     return Expression(ExpressionType.LITERAL, value=object(), size=4)
 
@@ -300,6 +308,7 @@ _NOT_CLOSED = {
     "frozen_ref_holding_a_list": _frozen_ref_holding_a_list,
     "frozen_ref_holding_a_dict": _frozen_ref_holding_a_dict,
     "frozen_ref_holding_an_unclosed_expression": _frozen_ref_holding_an_unclosed_expression,
+    "frozen_ref_with_hidden_state": _frozen_ref_with_hidden_state,
     "opaque_value": _opaque_value,
     "mutable_container_value": _mutable_container_value,
     "mutable_scalar_field": _mutable_scalar_field,
