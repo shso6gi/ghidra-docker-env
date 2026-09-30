@@ -533,3 +533,127 @@ def test_bit_width_of_a_frozen_expression_is_stable():
     before = expression_smt_bit_width(expr)
     data_type.signed = False
     assert expression_smt_bit_width(expr) == before
+
+
+# ---------------------------------------------------------------------------
+# Issue #219 T-A2: LEGACY 表現（`to_dict()` / snapshot の木）も生 `StorageInfo` から切り離す
+# ---------------------------------------------------------------------------
+
+
+def _register_storage():
+    from scripts.function_tracer_pcode.core.storage import StorageInfo
+
+    return StorageInfo(
+        is_register=True,
+        space_name="register",
+        offset=8,
+        size=4,
+        register_name="x0",
+        base_register_name="x0",
+    )
+
+
+def _storage_rooted_expression(storage):
+    parameter = Expression.parameter("a", 0, size=4, storage_info=storage)
+    return Expression.binary_op("INT_ADD", parameter, Expression.constant(1, size=4))
+
+
+def _mutate_every_storage_field(storage):
+    """`StorageInfo` の LEGACY 表現が読む field をすべて別の値へ書き換える。"""
+
+    storage.is_register = False
+    storage.space_name = "stack"
+    storage.space_id = 77
+    storage.offset = 4096
+    storage.size = 8
+    storage.size_bits = 64
+    storage.register_offset = 12
+    storage.register_size = 8
+    storage.register_size_bits = 64
+    storage.register_name = "x9"
+    storage.base_register_name = "x9"
+    storage.base_register_offset = 99
+    storage.base_register_size = 8
+    storage.base_register_size_bits = 64
+    storage.bit_offset_in_base = 32
+    storage.is_stack_pointer = True
+    storage.is_frame_pointer = True
+
+
+def test_legacy_representation_ignores_storage_mutation_after_freeze():
+    """凍結後に生の `StorageInfo` を書き換えても、検証済みの式の `to_dict()` は動かない。
+
+    main（`d398073`）では `_to_dict_active` が live な `storage_info.to_dict()` を読むので、
+    structural key・SMT は動かないのに LEGACY 表現だけが動いた（isolation 契約の穴）。
+    """
+
+    storage = _register_storage()
+    expr = _storage_rooted_expression(storage)
+    expr.freeze()
+    before = expr.to_dict()
+
+    _mutate_every_storage_field(storage)
+
+    assert expr.to_dict() == before
+
+
+def test_legacy_size_estimate_matches_the_output_after_storage_mutation():
+    """凍結済み node の大きさの cache（`_FROZEN_TREE_BYTES`）と実出力が食い違わない。"""
+
+    from scripts.function_tracer_pcode.core.expression import estimate_legacy_dict_bytes
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, JsonEncodingPolicy
+    from scripts.function_tracer_pcode.core.render_output import utf8_length
+
+    storage = _register_storage()
+    expr = _storage_rooted_expression(storage)
+    expr.freeze()
+    estimate_legacy_dict_bytes(expr, work=None)  # 凍結済み node の大きさを cache させる
+
+    _mutate_every_storage_field(storage)
+
+    written = utf8_length(JsonEncodingPolicy.dumps(RESULT_JSON_POLICY, expr.to_dict()))
+    assert estimate_legacy_dict_bytes(expr, work=None) == written
+
+
+def test_analysis_snapshot_fingerprint_ignores_storage_mutation_after_publication():
+    """解析の snapshot fingerprint（authority の束縛 identity）も凍結時の storage で固定される。"""
+
+    from scripts.function_tracer_pcode.core.analysis import ReturnInfo
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
+    from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
+    from scripts.function_tracer_pcode.tests.unit._publication import published_raw_analysis
+
+    storage = _register_storage()
+    analysis = published_raw_analysis(
+        create_mock_analysis(
+            "f",
+            returns=[
+                ReturnInfo(
+                    address="0x00401000",
+                    conditions=[],
+                    value=_storage_rooted_expression(storage),
+                )
+            ],
+        )
+    )
+    before = AnalysisSnapshot.from_function_analysis(analysis)
+
+    _mutate_every_storage_field(storage)
+
+    after = AnalysisSnapshot.from_function_analysis(analysis)
+    assert after.semantic_fingerprint == before.semantic_fingerprint
+    assert after.semantic_fields == before.semantic_fields
+
+
+def test_unfrozen_expressions_still_serialize_the_live_storage():
+    """CONSTRUCTION の式は従来どおり、その時点の `StorageInfo` を描く。"""
+
+    storage = _register_storage()
+    expr = _storage_rooted_expression(storage)
+    before = expr.to_dict()
+
+    storage.register_name = "x9"
+
+    after = expr.to_dict()
+    assert after != before
+    assert after["operands"][0]["storage_info"]["register_name"] == "x9"
