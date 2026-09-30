@@ -161,6 +161,8 @@ class ObligationRuntimeSession:
 
     @classmethod
     def create(cls, analysis1: Any, analysis2: Any) -> "ObligationRuntimeSession":
+        # Issue #106 PR-106-A: obligation runtime を組み始める境界（解析の snapshot を作る前）
+        deadline_checkpoint(OBLIGATION_STAGE)
         # Issue #124: pair obligation runtime の構築を計測する。
         with stage_region("obligation_build"):
             left = cls._snapshot(analysis1, "left")
@@ -198,6 +200,7 @@ class ObligationRuntimeSession:
         domain_contract: Any,
         normalization_policy_digest: str,
     ) -> "ObligationRuntimeSession":
+        deadline_checkpoint(OBLIGATION_STAGE)
         # Issue #124: unary obligation runtime の構築を計測する。
         with stage_region("obligation_build"):
             normalized_domain = UnaryArtifactDomain.normalize(domain)

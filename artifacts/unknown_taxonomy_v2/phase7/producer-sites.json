@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "de31f0d977303a9dd54f43a7cdf102a7d447b404a855afa77764b3f6552f73a0",
+  "manifest_digest": "4a4c95e27774cd893bdae97bcee04070bdb9dc770e3c020d2e05ab93864fe236",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 32,
   "sites": [
@@ -290,10 +290,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 61,
+      "line": 67,
       "path": "scripts/function_tracer_pcode/ghidra/decompilation_broker.py",
       "producer_site_manifest_id": "decompilation-broker-operational-signal",
-      "source_sha256": "2d6ec5095ac5b99346f890c65e57180ca0af8aa4c61d14e06144163086f28669"
+      "source_sha256": "de507fe4e650f3fdae595b1b19442f93d528214ec2fbfb7ff817caf2576cbca6"
     },
     {
       "allowed_dispositions": [
