@@ -39,10 +39,24 @@ from scripts.function_tracer_pcode.core.deadline import (
 CANCELLED = "cancelled"
 BUDGET_EXHAUSTED = "budget_exhausted"
 
-#: solver の unknown の理由のうち、時間の上限で止まったことを表すもの（z3: 単発の solver は
-#: timeout で "timeout"、push した incremental の solver は timeout でも "canceled" と報告する。
-#: 実行の予算の終わりより 1 ms 以内に早く返ることがあるので、時計だけでは見分けられない）
-TIME_LIMIT_UNKNOWN_REASONS = ("timeout", "canceled")
+#: backend に渡す timeout は ms に切り捨てる（`timeout_ms` → `core.deadline.bounded_timeout`）
+#: ので、backend は与えた終わりの最大 1 ms 手前で止まる
+TIMEOUT_ROUNDING_SECONDS = 0.001
+
+
+def unknown_end(reason: str, *, remaining_seconds: float) -> ExecutionEnd:
+    """**中断としなかった unknown の観測された終了原因の唯一の規則**（Issue #106 PR-106-A）。
+
+    backend が timeout と報告した（z3 の reason ``"timeout"``）か、**与えた時間を使い切った**
+    （残り ``remaining_seconds`` が ms の丸め以下）なら TIME_LIMIT、それ以外は INCONCLUSIVE。
+    z3 は push した incremental の solver の timeout を ``"canceled"`` と報告し、しかも丸めの分だけ
+    早く返るので、reason の文字列ではなく「使い切ったか」で見る（時間に余裕のある "canceled" は
+    z3 側の打ち切りで、判定不能のまま: #213）。行の status は変えない（期限なしの互換）。
+    """
+
+    if reason == "timeout" or remaining_seconds <= TIMEOUT_ROUNDING_SECONDS:
+        return ExecutionEnd.TIME_LIMIT
+    return ExecutionEnd.INCONCLUSIVE
 
 
 class ExecutionBudget:
@@ -120,18 +134,10 @@ class ExecutionBudget:
         return None
 
     def unknown_end(self, reason: str) -> ExecutionEnd:
-        """`interruption_after_unknown` が中断としなかった unknown の、観測された終了原因
-        （Issue #106 PR-106-A）。
+        """この実行の問いが返した、中断ではない unknown の終了原因（規則は module の `unknown_end`。
+        問いには期限までの残りを与えるので、使い切ったかは期限までの残りで見る）。"""
 
-        理由が時間の上限を表す（`TIME_LIMIT_UNKNOWN_REASONS`: 中止の token は中止されていない
-        ので、incremental の solver の "canceled" は timeout）なら TIME_LIMIT、それ以外は
-        INCONCLUSIVE。行の status（UNKNOWN）は変えない（期限なしの結果・reason の互換）。
-        解析の期限はこの終了原因で「期限で切られた」かを判定する（`core.deadline`）。
-        """
-
-        if any(marker in str(reason) for marker in TIME_LIMIT_UNKNOWN_REASONS):
-            return ExecutionEnd.TIME_LIMIT
-        return ExecutionEnd.INCONCLUSIVE
+        return unknown_end(str(reason), remaining_seconds=self.deadline - time.monotonic())
 
 
-__all__ = ["BUDGET_EXHAUSTED", "CANCELLED", "TIME_LIMIT_UNKNOWN_REASONS", "ExecutionBudget"]
+__all__ = ["BUDGET_EXHAUSTED", "CANCELLED", "TIMEOUT_ROUNDING_SECONDS", "ExecutionBudget", "unknown_end"]

@@ -132,7 +132,11 @@ _CAUSES_BY_STATUS = {
     SolverStatus.UNKNOWN: frozenset({
         ExecutionEnd.INCONCLUSIVE, ExecutionEnd.CANCELLED, ExecutionEnd.TIME_LIMIT,
     }),
-    SolverStatus.TIMEOUT: frozenset({ExecutionEnd.TIME_LIMIT, ExecutionEnd.NOT_STARTED}),
+    # TIMEOUT の INCONCLUSIVE: z3 の adapter の「経過が設定の 90% 以上なら TIMEOUT」の規則（#209）で
+    # TIMEOUT と報告したが、与えた時間は使い切っていない unknown
+    SolverStatus.TIMEOUT: frozenset({
+        ExecutionEnd.TIME_LIMIT, ExecutionEnd.NOT_STARTED, ExecutionEnd.INCONCLUSIVE,
+    }),
     SolverStatus.ERROR: frozenset({ExecutionEnd.FAILED, ExecutionEnd.CONTRACT_VIOLATION}),
 }
 

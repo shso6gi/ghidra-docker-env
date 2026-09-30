@@ -524,42 +524,68 @@ class _FakeZ3:
     unknown = "unknown"
 
 
-@pytest.mark.parametrize("verdict,reason,end", [
-    ("sat", "", ExecutionEnd.ANSWERED),
-    ("unsat", "", ExecutionEnd.ANSWERED),
-    ("unknown", "timeout", ExecutionEnd.TIME_LIMIT),
-    ("unknown", "canceled", ExecutionEnd.TIME_LIMIT),
-    ("unknown", "(incomplete quantifiers)", ExecutionEnd.INCONCLUSIVE),
-    ("unknown", "smt tactic failed to show goal to be sat/unsat", ExecutionEnd.INCONCLUSIVE),
+@pytest.mark.parametrize("verdict,reason,remaining,end", [
+    ("sat", "", 0.0, ExecutionEnd.ANSWERED),
+    ("unsat", "", 0.0, ExecutionEnd.ANSWERED),
+    ("unknown", "timeout", 0.05, ExecutionEnd.TIME_LIMIT),       # timeout と報告した
+    ("unknown", "canceled", 0.0004, ExecutionEnd.TIME_LIMIT),    # 与えた時間を使い切った（丸めの内）
+    ("unknown", "canceled", 0.05, ExecutionEnd.INCONCLUSIVE),    # 時間に余裕のある打ち切り（#213）
+    ("unknown", "(incomplete quantifiers)", 0.05, ExecutionEnd.INCONCLUSIVE),
+    ("unknown", "(incomplete quantifiers)", 0.0, ExecutionEnd.TIME_LIMIT),  # 使い切ってから返った
+    ("unknown", "smt tactic failed to show goal to be sat/unsat", 0.2, ExecutionEnd.INCONCLUSIVE),
 ])
-def test_the_condition_oracle_check_maps_to_its_observed_end(verdict, reason, end):
+def test_the_condition_oracle_check_maps_to_its_observed_end(verdict, reason, remaining, end):
     solver = SimpleNamespace(reason_unknown=lambda: reason)
-    assert isolated_check_end(_FakeZ3, verdict, solver) is end
+    assert isolated_check_end(_FakeZ3, verdict, solver, remaining_seconds=remaining) is end
 
 
-def test_the_condition_oracle_keeps_a_normal_unknown_under_a_shortened_limit(monkeypatch):
-    """oracle の 250 ms が期限で短くなっていても、上限の前の unknown は通常の unknown（覚えもする）。"""
-    from scripts.function_tracer_pcode.analysis.condition import smt_oracle
+@pytest.mark.parametrize("reason,trips", [
+    ("(incomplete quantifiers)", False),  # 上限の前に返った通常の unknown
+    ("timeout", True),                    # 期限が決めた上限で止まった
+])
+def test_the_condition_oracle_under_a_shortened_limit_trips_only_on_a_time_stop(monkeypatch, reason, trips):
+    """production の oracle の経路（250 ms が期限で ~100 ms に短くなる）。"""
+    from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
+        cache_lookup,
+        condition_cache_scope,
+    )
+    from scripts.function_tracer_pcode.analysis.condition.query_identity import SolverQueryIdentity
+    from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
+    from scripts.function_tracer_pcode.core.condition_metrics import condition_metrics_scope
+    from scripts.function_tracer_pcode.tests.unit.test_issue105b_simplify_budgets import _FakeZ3, _slt
 
-    class _Solver:
-        def check(self):
-            return "unknown"
+    class _UnknownZ3(_FakeZ3):
+        unknown = object()
 
-        def reason_unknown(self):
-            return "incomplete quantifiers"
+        def Solver(self, ctx=None):
+            solver = super().Solver(ctx)
+            fake = self
+            solver.check = lambda: (setattr(fake, "checks", fake.checks + 1), fake.unknown)[1]
+            solver.reason_unknown = lambda: reason
+            return solver
 
-    monkeypatch.setattr(smt_oracle, "isolated_solver", lambda z3, script, timeout_ms: _Solver())
-    query = deadline_query("condition_oracle")
-    assert query.begin(0.25, TimeUnit.MILLISECONDS)  # 期限の無い handle（owner の scope 外）
-    with pair_failure_scope(("pair",), None) as ledger:
-        with deadline_scope(_policy(0.6, margin=0.5)) as deadline:
-            q = deadline_query("condition_oracle")
-            window = q.bound.window(0.25, TimeUnit.MILLISECONDS)
-            assert window.limited is True
-            q.begin(0.25, TimeUnit.MILLISECONDS)
-            end = isolated_check_end(_FakeZ3, "unknown", _Solver())
-            assert q.settle([ExecutionFact(end, window.limited)]) is Settlement.ACCEPT
-    assert not deadline.tripped and ledger.pending_failure() is None
+    fake = _UnknownZ3()
+    monkeypatch.setattr(ConditionSMTOracle, "_z3", fake)
+    monkeypatch.setattr(ConditionSMTOracle, "_available", True)
+    monkeypatch.setattr(ConditionSMTOracle, "_availability_checked", True)
+    conditions = [_slt(5, 1)]
+    with condition_cache_scope(), condition_metrics_scope():
+        with pair_failure_scope(("pair",), None) as ledger:
+            with deadline_scope(_policy(0.6, margin=0.5)) as deadline:
+                if trips:
+                    with pytest.raises(DeadlineExceeded) as raised:
+                        ConditionSMTOracle.conjunction_is_unsat(conditions)
+                    assert "cut_by_deadline" in raised.value.evidence_refs
+                else:
+                    assert ConditionSMTOracle.conjunction_is_unsat(conditions) is None  # 判定不能
+        remembered = cache_lookup(
+            ConditionSMTOracle.VERDICT_TABLE, SolverQueryIdentity.from_conditions(conditions), limit=4096,
+        )
+    assert fake.checks == 1
+    assert deadline.tripped is trips
+    assert (ledger.pending_failure() is not None) is trips
+    # 通常の unknown は期限の無いときと同じく覚える（verdict None）。期限の限界は覚えない
+    assert remembered == ((False, None) if trips else (True, None))
 
 
 # ---------------------------------------------------------------------------
@@ -651,11 +677,15 @@ def test_a_witness_question_stopped_by_time_is_observed_as_a_time_limit():
     from scripts.function_tracer_pcode.smt.interface import witness_failure_result
     from scripts.function_tracer_pcode.smt.witness import WitnessUnavailable
 
-    budget = ExecutionBudget.starting_now(10)
-    assert budget.unknown_end("canceled") is ExecutionEnd.TIME_LIMIT
-    assert budget.unknown_end("timeout") is ExecutionEnd.TIME_LIMIT
-    assert budget.unknown_end("(incomplete quantifiers)") is ExecutionEnd.INCONCLUSIVE
-    failure = WitnessUnavailable(INCONCLUSIVE, "canceled", end=budget.unknown_end("canceled"))
+    import time as _time
+
+    roomy = ExecutionBudget.starting_now(10)
+    assert roomy.unknown_end("canceled") is ExecutionEnd.INCONCLUSIVE  # 余裕のある打ち切り（#213）
+    assert roomy.unknown_end("timeout") is ExecutionEnd.TIME_LIMIT
+    assert roomy.unknown_end("(incomplete quantifiers)") is ExecutionEnd.INCONCLUSIVE
+    used_up = ExecutionBudget(_time.monotonic() + 0.0005)  # 丸め（1 ms）の内で使い切った
+    assert used_up.unknown_end("canceled") is ExecutionEnd.TIME_LIMIT
+    failure = WitnessUnavailable(INCONCLUSIVE, "canceled", end=used_up.unknown_end("canceled"))
     row = witness_failure_result("z3", failure, 0.1)
     assert row.status is SolverStatus.UNKNOWN  # status は期限なしと同じ
     assert execution_end(row) is ExecutionEnd.TIME_LIMIT
@@ -740,3 +770,44 @@ def test_a_kept_failure_records_the_deadline_with_its_evidence():
     assert failure is not None and failure.stop_state is PairStopState.PAIR_TERMINAL_DEADLINE
     assert "failure_kept" in failure.exception.evidence_refs
     assert "boundary=after" in failure.exception.evidence_refs
+
+
+def test_a_later_backend_is_not_started_within_the_margin():
+    """先の backend が期限前に答えを返しても、残りが余裕以下なら後の backend は始めない（開始前の確認）。"""
+    clock = ShiftedClock()
+    calls = []
+
+    def _unsat_near_the_end(_t, _n):
+        clock.jump(4.7)  # 期限 5 s・余裕 0.5 s: 残り 0.3 s で返る
+        return SolverResult("first", SolverStatus.UNSAT)
+
+    runner = ParallelSolverRunner(timeout=10, solver_classes=[
+        _backend("first", calls, _unsat_near_the_end),
+        _backend("second", calls, lambda _t, _n: SolverResult("second", SolverStatus.UNSAT)),
+    ])
+    with pair_failure_scope(("pair",), None):
+        with deadline_scope(_policy(5.0, clock)):
+            with pytest.raises(DeadlineExceeded) as raised:
+                runner.run_sequential(QUERY)
+    assert calls == ["first"]
+    assert "boundary=before" in raised.value.evidence_refs
+    assert "remaining_below_margin" in raised.value.evidence_refs
+
+
+@pytest.mark.parametrize("reason,elapsed,remaining,status,end", [
+    # 90% の規則（#209）で TIMEOUT と報告するが、与えた時間は使い切っていない: 期限の切断にしない
+    ("(incomplete quantifiers)", 9.5, 5.0, SolverStatus.TIMEOUT, ExecutionEnd.INCONCLUSIVE),
+    # 90% に届かない判定不能
+    ("(incomplete quantifiers)", 1.0, 5.0, SolverStatus.UNKNOWN, ExecutionEnd.INCONCLUSIVE),
+    # incremental の timeout（使い切って "canceled"）: status は UNKNOWN のまま（期限なしの互換）
+    ("canceled", 1.0, 0.0004, SolverStatus.UNKNOWN, ExecutionEnd.TIME_LIMIT),
+])
+def test_the_z3_adapter_separates_the_reported_status_from_the_observed_end(reason, elapsed, remaining, status, end):
+    import time as _time
+
+    from scripts.function_tracer_pcode.smt.execution import ExecutionBudget
+
+    backend = Z3Solver(timeout=10)
+    row = backend._unknown_result(reason, elapsed, ExecutionBudget(_time.monotonic() + remaining))
+    assert row.status is status
+    assert execution_end(row) is end

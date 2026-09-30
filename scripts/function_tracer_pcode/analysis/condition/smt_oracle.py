@@ -316,11 +316,17 @@ class ConditionSMTOracle:
             note("oracle.queries")
             started = time.monotonic()
             result = solver.check()
-            observe("oracle.check_ms", int((time.monotonic() - started) * 1000))
+            elapsed = time.monotonic() - started
+            observe("oracle.check_ms", int(elapsed * 1000))
             # 返った直後: 期限を過ぎていれば・期限が決めた上限で止まったなら答えを採らない
             # （覚えもしない）。上限の前に返った unknown は通常の unknown のまま
             query_deadline.settle([
-                ExecutionFact(end=isolated_check_end(z3, result, solver), limited=window.limited)
+                ExecutionFact(
+                    end=isolated_check_end(
+                        z3, result, solver, remaining_seconds=timeout_ms / 1000.0 - elapsed,
+                    ),
+                    limited=window.limited,
+                )
             ])
             if result == z3.unsat:
                 verdict: Optional[bool] = True

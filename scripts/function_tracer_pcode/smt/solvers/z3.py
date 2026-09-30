@@ -9,8 +9,8 @@ from typing import Optional, Dict, Any, Tuple, cast
 from scripts.function_tracer_pcode.core.deadline import ExecutionEnd, TimeUnit
 from scripts.function_tracer_pcode.smt.execution import (
     CANCELLED,
-    TIME_LIMIT_UNKNOWN_REASONS,
     ExecutionBudget,
+    unknown_end,
 )
 from scripts.function_tracer_pcode.smt.interface import (
     SMTSolver,
@@ -235,12 +235,14 @@ def isolated_solver(z3: Any, smt_script: str, timeout_ms: int) -> Any:
     return solver
 
 
-def isolated_check_end(z3: Any, verdict: Any, solver: Any) -> ExecutionEnd:
+def isolated_check_end(
+    z3: Any, verdict: Any, solver: Any, *, remaining_seconds: float,
+) -> ExecutionEnd:
     """`isolated_solver` の 1 回の check の、観測された終了原因（Issue #106 PR-106-A）。
 
-    SAT / UNSAT は答え、unknown は reason で時間の上限か（`smt.execution.TIME_LIMIT_UNKNOWN_REASONS`
-    の 1 つの規則）それ以外の判定不能かを分ける。この問い合わせは中止の入力を持たないので
-    CANCELLED は無い。
+    SAT / UNSAT は答え、unknown は `smt.execution.unknown_end`（timeout と報告した・与えた時間
+    ``remaining_seconds`` = 与えた timeout − 経過 を使い切った）で時間の上限か判定不能かを分ける。
+    この問い合わせは中止の入力を持たないので CANCELLED は無い。
     """
 
     if verdict == z3.sat or verdict == z3.unsat:
@@ -248,10 +250,8 @@ def isolated_check_end(z3: Any, verdict: Any, solver: Any) -> ExecutionEnd:
     try:
         reason = str(solver.reason_unknown())
     except (AttributeError, TypeError, ValueError, RuntimeError):
-        return ExecutionEnd.INCONCLUSIVE
-    if any(marker in reason for marker in TIME_LIMIT_UNKNOWN_REASONS):
-        return ExecutionEnd.TIME_LIMIT
-    return ExecutionEnd.INCONCLUSIVE
+        reason = ""
+    return unknown_end(reason, remaining_seconds=remaining_seconds)
 
 
 class Z3Solver(SMTSolver):
@@ -407,32 +407,9 @@ class Z3Solver(SMTSolver):
                     elapsed_time=elapsed
                 )
             else:
-                # unknown: 中断（中止・期限切れ）かどうかは実行の予算に問う（全経路で同じ
-                # 規則）。中断でなければ従来の判定（経過が予算の 90% 以上なら TIMEOUT）
                 reason = str(self._solver.reason_unknown())
                 self._debug_print(f"Reason for unknown: {reason}")
-                stop = budget.interruption_after_unknown(reason)
-                if stop is not None:
-                    return interrupted_result(self.name, stop, reason, elapsed)
-                
-                is_timeout = self._is_timeout_reason(reason, elapsed)
-                
-                if is_timeout:
-                    self._debug_print("Detected as TIMEOUT")
-                    return SolverResult(
-                        solver_name=self.name,
-                        status=SolverStatus.TIMEOUT,
-                        elapsed_time=elapsed,
-                        error_message=f"Timeout: {reason}"
-                    )
-                else:
-                    return SolverResult(
-                        solver_name=self.name,
-                        status=SolverStatus.UNKNOWN,
-                        elapsed_time=elapsed,
-                        error_message=reason,
-                        cause=budget.unknown_end(reason),
-                    )
+                return self._unknown_result(reason, elapsed, budget)
         
         except Exception as e:
             elapsed = time.time() - start_time
@@ -446,6 +423,37 @@ class Z3Solver(SMTSolver):
         finally:
             self._running_context = None
     
+    def _unknown_result(self, reason: str, elapsed: float, budget: ExecutionBudget) -> SolverResult:
+        """check が unknown を返した実行の行。
+
+        中断（中止・期限切れ）かどうかは実行の予算に問う（全経路で同じ規則）。中断でなければ
+        従来の status（経過が設定の 90% 以上なら TIMEOUT: #209）。status は期限なしの結果の互換の
+        ため変えず、観測された終了原因（`ExecutionBudget.unknown_end`: 与えた時間を使い切ったか）
+        を別に付ける（Issue #106 PR-106-A。90% の規則で TIMEOUT と報告しても、使い切っていない
+        unknown は期限で切られたことにしない）。
+        """
+
+        stop = budget.interruption_after_unknown(reason)
+        if stop is not None:
+            return interrupted_result(self.name, stop, reason, elapsed)
+        cause = budget.unknown_end(reason)
+        if self._is_timeout_reason(reason, elapsed):
+            self._debug_print("Detected as TIMEOUT")
+            return SolverResult(
+                solver_name=self.name,
+                status=SolverStatus.TIMEOUT,
+                elapsed_time=elapsed,
+                error_message=f"Timeout: {reason}",
+                cause=cause,
+            )
+        return SolverResult(
+            solver_name=self.name,
+            status=SolverStatus.UNKNOWN,
+            elapsed_time=elapsed,
+            error_message=reason,
+            cause=cause,
+        )
+
     def _is_timeout_reason(self, reason: str, elapsed: float) -> bool:
         """
         Z3のunknown理由がタイムアウトかどうかを判定
