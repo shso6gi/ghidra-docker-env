@@ -1250,30 +1250,23 @@ def test_capturing_a_large_ref_records_no_limitation_and_keeps_the_output():
     assert expr.to_dict() == live.to_dict()
 
 
-def test_a_read_bound_signal_while_capturing_leaves_the_ref_uncaptured(monkeypatch):
-    """読みの量の信号（`StorageBeyondReadBound`）は写さない理由になるだけで、凍結は成功し記録も残らない。"""
+@dataclasses.dataclass(frozen=True)
+class _WideRef:
+    key: int = 0
 
-    from scripts.function_tracer_pcode.core import semantic_freeze
+
+def test_a_ref_read_beyond_the_fixed_read_bound_is_counted_by_the_capture_budget():
+    """表現を作る途中の値の storage の読みは walker が写す予算へ数える: 固定の読みの上限を超えても、
+    凍結は限界を台帳へ記録しない（作業量の外の読みの owner へ届かない）。"""
+
     from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+    from scripts.function_tracer_pcode.core.live_values import SCAN_LIMIT
 
-    from scripts.function_tracer_pcode.core import live_values
-
-    class _Wide:
-        pass
-
-    wide = _Wide()
-    for index in range(live_values.SCAN_LIMIT + 10):
-        setattr(wide, f"a{index}", index)
-
-    def _signal(_value):
-        # 表現を作る途中で、作業量の外の読みが固定の上限を超える（instance の `__dict__` が大きい）
-        live_values.instance_state(wide, "a0")
-        raise AssertionError("the read beyond the bound must signal")
-
-    monkeypatch.setattr(semantic_freeze, "runtime_ref_source", _signal)
-    expr = Expression.unknown("u", runtime_ref=_FrozenRef(("u",)))
+    ref = _WideRef(1)
+    for index in range(SCAN_LIMIT + 10):
+        object.__setattr__(ref, f"extra{index}", index)
+    expr = Expression.unknown("u", runtime_ref=ref)
     with pair_failure_scope(("bin1", "bin2"), None) as ledger:
         freeze_expression(expr)
         assert ledger._records == []
     assert expr.is_frozen
-    assert serialization_closed(expr) is False
