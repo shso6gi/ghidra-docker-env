@@ -58,6 +58,9 @@ class AbiArgumentSlotRef:
     claim about the values held in those slots.
     """
 
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
+
     ordinal: int
     storage_class: Optional[str] = None
     width_bits: Optional[int] = None
@@ -137,6 +140,9 @@ class FreshCallArgumentRef:
     symbols by construction; nothing downstream has to remember to keep them
     apart, and nothing may fall back to a shared placeholder.
     """
+
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
 
     binary_id: str
     slot: AbiArgumentSlotRef

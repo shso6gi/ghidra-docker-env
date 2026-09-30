@@ -18,6 +18,9 @@ LoopSummarySolverProver = Callable[["LoopSummaryProofObligation"], "LoopSummaryC
 class LoopVariableIdentityRef:
     """Object-derived identity for a synthetic loop placeholder variable."""
 
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
+
     role: str
     varnode_key: Tuple[Any, ...]
     binder_ordinal: int = 0
@@ -465,6 +468,9 @@ def _loop_object_to_dict(value: Any) -> Any:
 class LoopBodyEffectRef:
     """Object-centric descriptor for one loop-body effect or guard."""
 
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
+
     kind: str
     source: str = "loop_body"
     scope: str = "loop"
@@ -589,6 +595,9 @@ class LoopBodyEffectRef:
 class LoopSideEffectProfileRef:
     """Object-centric side-effect profile for a loop summary."""
 
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
+
     profile: str = "pure"
     memory_reads: bool = False
     memory_writes: bool = False
@@ -699,6 +708,9 @@ class LoopSideEffectProfileRef:
 @dataclass(frozen=True)
 class LoopTermDescriptorRef:
     """Object-centric descriptor for the per-iteration term of a loop summary."""
+
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
 
     kind: str
     reduction_kind: str = "sum"
@@ -813,6 +825,9 @@ class LoopTermDescriptorRef:
 class LoopCaseRef:
     """Path-sensitive loop-body case used by Method-B loop summaries."""
 
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
+
     path_conditions: Tuple[Any, ...] = ()
     body_effect: Any = None
     term_expr: Any = None
@@ -920,6 +935,9 @@ class LoopSummaryRef:
     ``guard_constraints``; consumers must check guard reachability before using
     witnesses to prove equivalence.
     """
+
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
 
     start_expr: Any
     limit_expr: Any
@@ -1212,6 +1230,9 @@ class ComposedLoopSummaryRef:
 class LoopSummaryProofObligation:
     """Proof obligation emitted when loop-summary equality needs a solver context."""
 
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
+
     proof_kind: str
     left_summary_key: Optional[Tuple[Any, ...]]
     right_summary_key: Optional[Tuple[Any, ...]]
@@ -1273,6 +1294,9 @@ def _loop_summary_comparison_key(summary: Optional["LoopSummaryRef"]) -> Optiona
 @dataclass(frozen=True)
 class LoopSummaryComparisonResult:
     """Tri-state result for the future Method-B loop-summary comparator."""
+
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
 
     status: str
     reason: Optional[str] = None
@@ -1713,6 +1737,9 @@ def _loop_int_expr(value: int, like_expr: Any) -> Any:
 class CountedLoopSummaryRef:
     """Structured identity for a counted scalar loop summary."""
 
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
+
     induction_step: int
     result_size: int
     signed_loop: bool
@@ -1851,6 +1878,9 @@ class StateTransitionLoopSummaryRef:
     and side-effect profile are structurally/semantically identical.
     """
 
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
+
     state_guard: Any
     transition_expr: Any
     result_size: int
@@ -1987,6 +2017,9 @@ class StateTransitionLoopSummaryRef:
 @dataclass(frozen=True)
 class CountedStateTransitionLoopSummaryRef:
     """Summary for counted loops whose scalar state is updated by a transition."""
+
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
 
     initial_state: Any
     start_expr: Any

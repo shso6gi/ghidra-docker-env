@@ -30,6 +30,9 @@ from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
 class DeferredCallRef:
     """Structured identity for a deferred call site."""
 
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
+
     caller_program_id: Optional[int] = None
     caller_entry_offset: Optional[int] = None
     pcode_op_ref: Optional[PcodeOpRef] = None
@@ -116,6 +119,9 @@ def _runtime_ref_origin_source(value: Any) -> Tuple[Any, ...]:
 @dataclass(frozen=True)
 class UnknownValueRef:
     """Structured identity for UNKNOWN expressions used at runtime."""
+
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
 
     kind: str
     reason: Optional[str] = None

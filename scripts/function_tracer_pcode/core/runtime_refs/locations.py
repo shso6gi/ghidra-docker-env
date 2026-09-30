@@ -15,6 +15,9 @@ from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
 class AddressValueRef:
     """Structured constant-address identity for runtime analysis."""
 
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
+
     address_offset: int
     source: str = "ghidra_object"
     display_hint: Optional[str] = None
@@ -132,6 +135,9 @@ def _int_or_zero(value: Any) -> int:
 @dataclass(frozen=True)
 class LocationBaseRef:
     """Structured identity for the root of a canonical memory location."""
+
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
 
     kind: str
     parameter_name: Optional[str] = None
@@ -404,6 +410,9 @@ class LocationBaseRef:
 
 @dataclass(frozen=True)
 class LocationStep:
+
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
     kind: str
     value: int
 
@@ -424,6 +433,9 @@ class LocationStep:
 
 @dataclass(frozen=True, init=False)
 class CanonicalLocation:
+
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
     base_ref: LocationBaseRef
     offset: int
     size: int
@@ -474,6 +486,9 @@ class CanonicalLocation:
 class PostStateValueRef:
     """Structured identity for a fully materialized final object-state value."""
 
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
+
     location: CanonicalLocation
     snapshot_ref: Optional["PostStateSnapshotRef"] = None
     source: str = "effect_summary"
@@ -502,6 +517,9 @@ class PostStateValueRef:
 @dataclass(frozen=True)
 class PostStateSnapshotRef:
     """Structured identity for a shared post-state memory snapshot."""
+
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
 
     scope: str = "function_return"
     source: str = "effect_summary"
@@ -534,6 +552,9 @@ class PostStateSnapshotRef:
 @dataclass(frozen=True)
 class PostStateReadRef:
     """Structured identity for a symbolic read from a shared post-state snapshot."""
+
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
 
     location: CanonicalLocation
     snapshot_ref: Optional[PostStateSnapshotRef] = None
@@ -579,6 +600,9 @@ class PostStateReadRef:
 @dataclass(frozen=True)
 class ObservedMemoryReadRef:
     """Structured provenance for an observed LOAD-derived memory read."""
+
+    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
+    __serialization_determined_by_fields__ = True
 
     order_key: Optional[int] = None
     location: Optional[CanonicalLocation] = None

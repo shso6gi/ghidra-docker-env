@@ -73,23 +73,32 @@ copy 機構は置かない: 複製の作り方（何を deep に、何を共有�
 
     表現が読む field           closed の規則（凍結時に子から上へ畳む）
     ------------------------   ---------------------------------------------
-    scalar の意味 field        不変な scalar（None / bool / int / float / str / bytes / enum）
-    value                      不変な scalar・その tuple、PHI なら PhiBranch の tuple
+    scalar の意味 field        不変な葉: None / bool / 組み込みの int・float・str・bytes、
+                               `__dict__` を持たない int・float・str の subclass、
+                               instance 状態（`_value_` など）がすべて不変な enum の member
+    value                      不変な葉とその組み込みの tuple。PHI なら PhiBranch の tuple
                                （branch の条件と値がどちらも closed）
     operands / 条件の式        子がすべて closed
-    storage_info               凍結時に写した payload から描く（写せなければ closed でない）
-    runtime_ref                深く不変（frozen dataclass・tuple・scalar・closed な式だけ）
+    storage_info               凍結時に写した payload から描き、写しの値が不変な葉
+    runtime_ref                深く不変: 不変な葉・組み込みの tuple / frozenset・closed な式と
+                               条件・不変な値 object（下）だけ
 
-表（`EXPRESSION_SERIALIZATION_INPUTS` / `CONDITION_SERIALIZATION_INPUTS`）に無い field を
-表現が読むようになると、closed の判定がその field を見落とす。静的な監査
-（`tests/unit/test_issue219_serialization_closed.py` の T-A5）がそれを落とす。
-closed でない値について、この契約は何も約束しない（表現は従来どおり生 object を読み得る）。
+不変な値 object: frozen dataclass で instance の状態が field だけのもの。直列化の owner が
+その型の method で表現を作る型（`serialization_protocol_methods`。record の `json_items`、
+record でない値の `stable_key` / `to_key`）は、その型自身が
+`FIELD_DETERMINED_SERIALIZATION_MARKER` を宣言していること。宣言は「protocol の結果は field
+の値だけの関数」という主張で、宣言した型ごとに静的な監査
+（`tests/unit/_serialization_purity_audit.py`）が確かめる。
 
-前提（明示する）: frozen dataclass の LEGACY 表現（record なら `json_items`）は、その
-field の値だけの関数であること。runtime ref の値 object の契約で、package の runtime ref
-が frozen であることは `tests/unit/test_architecture_boundaries.py` が固定している
-（`display_name()` のような field からの導出はこの前提の内側）。field 以外の instance
-状態を持つ object は、凍結時の判定が closed にしない。
+closed と言えるのは `Expression` / `Condition` の型そのもの（subclass は表現の method を上書き
+し得る）で、表の field をすべて instance に持つ値だけ。表（`EXPRESSION_SERIALIZATION_INPUTS` /
+`CONDITION_SERIALIZATION_INPUTS`）に無い field を表現が読むようになると、closed の判定がその
+field を見落とす。表現が読むものを列挙する静的な監査（T-A5、列挙できない記法は拒否）がそれを
+落とす。closed でない値について、この契約は何も約束しない（表現は従来どおり生 object を読み得る）。
+
+**書き換えの境界**: 状態（意味 field・派生値・lifecycle の bit）は `attribute_mutation_allowed`
+の規則でしか書き換わらない（代入も削除も同じ規則）。`__dict__` を直接書き換える code と、
+class・関数・enum の member の **束縛** の差し替え（code の書き換え）はこの契約の外。
 """
 
 from __future__ import annotations
@@ -149,6 +158,34 @@ def inherited_by_a_new_value(name: str) -> bool:
     """
 
     return name not in NON_INHERITED_FIELDS
+
+
+def attribute_mutation_allowed(fields: Dict[str, Any], name: str, semantic_fields: Any) -> bool:
+    """属性の protocol（代入 `x.name = v`・削除 `del x.name`）で `name` を書き換えてよいか。
+
+    意味値の型（`Expression` / `Condition` の `__setattr__` / `__delattr__`）が **唯一参照する
+    規則**。代入と削除を同じ規則で裁く（片方だけ守ると、削除して class の既定値へ戻すことで
+    凍結後の値が動く）:
+
+    * 状態と派生値（`NON_INHERITED_FIELDS`）は **どの状態でも** 属性の protocol では書かない。
+      書くのは lifecycle の commit（`mark_*` と凍結の commit。どちらも `__dict__` へ直接）
+      だけ。`x._frozen = False` で検証済みの値を CONSTRUCTION へ戻す・派生値を消して生
+      object の読みへ戻す、という逆行を作らせない
+    * 意味 field（`semantic_fields`。値の型が渡す）と `__class__` は、VALIDATED 以上では書かない
+      （`__class__` を差し替えると表現を作る method が変わる）
+    * それ以外（診断用の補助 flag など、意味にも表現にも入らない属性）は自由
+
+    `__dict__` を直接書き換える code はこの規則の外（契約違反）。
+    """
+
+    if name in NON_INHERITED_FIELDS:
+        return False
+    # 呼ぶのは値の型の `__setattr__` / `__delattr__` だけで、`fields` は instance の `__dict__`
+    # （構築中の代入ごとに通るので、組み込みの dict は owner の API を経ずに引く）
+    frozen = fields.get("_frozen", False) if type(fields) is dict else live_values.lookup(fields, "_frozen", False)
+    if not _flag(frozen):
+        return True
+    return name not in semantic_fields and name != "__class__"
 
 
 def state_of(fields: Dict[str, Any]) -> SemanticLifecycle:
@@ -268,6 +305,50 @@ CONDITION_SERIALIZATION_INPUTS: Mapping[str, SerializationInput] = MappingProxyT
     "expression": SerializationInput.EXPRESSION,
     "negated": SerializationInput.SCALAR,
 })
+
+
+#: walker（LEGACY / JSON の直列化）が record・sized leaf から表現を作る method。
+RECORD_PROTOCOL_METHODS = (
+    "json_items",
+    "__json_tree__",
+    "__json_tree_bytes__",
+    "__json_tree_metered__",
+    "__json_identity__",
+)
+#: record でない値を snapshot codec が写すときに型から引く identity の method。
+IDENTITY_PROTOCOL_METHODS = ("stable_key", "to_key")
+
+
+def serialization_protocol_methods(kind: type) -> tuple:
+    """`kind` の値を直列化の owner が **どの method で** 表現にするか（無ければ空）。
+
+    * record（`RECORD_PROTOCOL_METHODS` のどれかを持つ型）: walker がその method で作る。
+      snapshot codec も record を LEGACY 表現（同じ method）で写すので、identity の method は
+      読まない
+    * record でない値: snapshot codec が identity の method（`stable_key` / `to_key`）で写し、
+      無ければ dataclass の field で写す
+
+    freeze（closed の判定）と静的な監査（宣言の検証）が **同じこの関数** で「監査すべき
+    method」を決める（2 つに分けると片方だけ直る）。
+    """
+
+    record = tuple(name for name in RECORD_PROTOCOL_METHODS if _defined_on(kind, name))
+    if record:
+        return record
+    return tuple(name for name in IDENTITY_PROTOCOL_METHODS if _defined_on(kind, name))
+
+
+def _defined_on(kind: type, name: str) -> bool:
+    return any(name in base.__dict__ for base in kind.__mro__ if base is not object)
+
+
+#: 直列化の protocol を持つ値 object（frozen dataclass）が「protocol の結果は自分の field の
+#: 値だけの関数」と **宣言** する class 属性（その class 自身の `__dict__` に `True`）。宣言は
+#: 継承しない（subclass が protocol を上書きし得るため）。宣言した型は、protocol と、そこから
+#: 辿る package の関数・method が field・引数・不変な定数だけを読むことを静的な監査
+#: （`tests/unit/test_issue219_serialization_closed.py`）が確かめる。宣言の無い型の値を
+#: 抱える意味値は closed にならない（遅くなるだけで、誤りにはならない）。
+FIELD_DETERMINED_SERIALIZATION_MARKER = "__serialization_determined_by_fields__"
 
 
 def serialization_closed(value: Any) -> bool:
