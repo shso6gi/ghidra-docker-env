@@ -414,6 +414,7 @@ _NOT_CLOSED = {
     "mutable_container_value": _unclosed_leaf,
     "mutable_scalar_field": _mutable_scalar_field,
     # 値の型・形
+    "foreign_kind": lambda: Expression(_TupleValuedEnum.MEMBER, value=1, size=4),
     "expression_subclass": lambda: _ExpressionSubclass(ExpressionType.CONSTANT, value=1, size=4),
     "node_missing_a_represented_field": _node_missing_a_represented_field,
     # 子・PHI
