@@ -111,7 +111,7 @@ class _Z3WitnessSession:
             raise WitnessUnavailable(stop, "the execution stopped during the witness search")
         self._solver.push()
         try:
-            self._solver.set("timeout", max(1, self._budget.remaining_ms()))
+            self._solver.set("timeout", self._budget.timeout_ms())
             self._solver.add(self._term(constraint))
             verdict = self._solver.check()
             if verdict == self._z3.sat:
@@ -348,7 +348,7 @@ class Z3Solver(SMTSolver):
                     self.name, stop, "the execution stopped before the check",
                     time.time() - start_time,
                 )
-            remaining_ms = max(1, budget.remaining_ms())
+            remaining_ms = budget.timeout_ms()
             self._solver.set("timeout", remaining_ms)
             self._debug_print(f"Z3 timeout set to {remaining_ms}ms")
             

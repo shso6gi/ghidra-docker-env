@@ -27,6 +27,8 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
+from scripts.function_tracer_pcode.core.deadline import TimeUnit, bounded_timeout
+
 
 #: 中断の種類
 CANCELLED = "cancelled"
@@ -68,6 +70,19 @@ class ExecutionBudget:
         """期限までの残り（ミリ秒、切り捨て）。0 以下なら期限切れ。"""
 
         return int((self.deadline - time.monotonic()) * 1000)
+
+    def timeout_ms(self) -> int:
+        """solver の問い 1 回に渡すミリ秒の timeout（期限まで。0 を「timeout 無し」として渡さない）。
+
+        丸めは `core.deadline.bounded_timeout`（解析の期限と同じ 1 つの規則）。呼ぶ前に
+        `interruption()` で期限切れを確かめておくこと（ここで期限を過ぎていたら 1 ms を返し、
+        solver はすぐ timeout で返る: その unknown は `interruption_after_unknown` が期限切れに数える）。
+        """
+
+        granted = bounded_timeout(
+            float("inf"), self.deadline, TimeUnit.MILLISECONDS, now=time.monotonic(),
+        )
+        return 1 if granted is None else granted
 
     def interruption(self) -> Optional[str]:
         """今この実行が中断されているならその種類（中止を優先）。されていなければ None。"""

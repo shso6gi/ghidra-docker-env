@@ -702,8 +702,10 @@ class PairFailureLedger(PairExecutionControl):
 #     いる最中** に外側 pair の worker thread が記録すると内側の台帳へ入る。
 #   * したがって **arbitrary worker thread からの producer は一般の extension
 #     point として保証しない**。solver worker のような非同期 producer から
-#     failure を上げたくなったら、先にこの契約を決め直すこと（PR-106-A は
-#     checkpoint を worker 内に置かない方針なので、現状この経路は存在しない）。
+#     failure を上げたくなったら、先にこの契約を決め直すこと（PR-106-A の
+#     `core.deadline` は owner thread 以外では checkpoint も許可も何もしない。
+#     worker は期限を引数で受け取り、中断の種類を結果で返すだけで、限界を確定する
+#     のは owner thread の `settle`。現状この経路は存在しない）。
 _PAIR_LEDGER_LOCK = threading.Lock()
 _PAIR_LEDGERS: List[PairFailureLedger] = []
 

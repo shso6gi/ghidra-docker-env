@@ -799,7 +799,7 @@ class SharedZ3RegionSession:
                 )
                 admission.settle(answered=False)
                 return ParallelResult.from_backend_results([item])
-            self._solver.set(timeout=max(1, budget.remaining_ms()))
+            self._solver.set(timeout=budget.timeout_ms())
             verdict = self._solver.check()
             elapsed = time.time() - started
             self.check_count += 1
