@@ -11,7 +11,12 @@ import time
 # Re-exports kept for callers that import these names from this module.
 from typing import List  # noqa: F401
 from scripts.function_tracer_pcode.core import live_values
-from scripts.function_tracer_pcode.core.deadline import ExecutionFact, TimeUnit, bounded_timeout
+from scripts.function_tracer_pcode.core.deadline import (
+    ExecutionEnd,
+    ExecutionFact,
+    TimeUnit,
+    bounded_timeout,
+)
 from scripts.function_tracer_pcode.core.json_encoding import materialize
 from scripts.function_tracer_pcode.smt.execution import (
     BUDGET_EXHAUSTED,
@@ -117,6 +122,21 @@ class SolverBackendCapabilities:
 NO_CAPABILITIES = SolverBackendCapabilities()
 
 
+#: status ごとに取り得る終了原因（`SolverResult.cause` の検査と `execution_end` の表）
+_CAUSES_BY_STATUS = {
+    SolverStatus.SAT: frozenset({ExecutionEnd.ANSWERED}),
+    SolverStatus.UNSAT: frozenset({ExecutionEnd.ANSWERED}),
+    # UNKNOWN の TIME_LIMIT: 時間の上限で止まったが backend が timeout と報告しなかった
+    # （z3 の incremental の "canceled"。`ExecutionBudget.unknown_end`）。status は期限なしの
+    # 結果の互換のため UNKNOWN のまま
+    SolverStatus.UNKNOWN: frozenset({
+        ExecutionEnd.INCONCLUSIVE, ExecutionEnd.CANCELLED, ExecutionEnd.TIME_LIMIT,
+    }),
+    SolverStatus.TIMEOUT: frozenset({ExecutionEnd.TIME_LIMIT, ExecutionEnd.NOT_STARTED}),
+    SolverStatus.ERROR: frozenset({ExecutionEnd.FAILED, ExecutionEnd.CONTRACT_VIOLATION}),
+}
+
+
 @dataclass
 class SolverResult:
     """ソルバーの実行結果"""
@@ -149,6 +169,21 @@ class SolverResult:
     #: この実行の時間を解析の期限が決めたか（`core.deadline.ExecutionWindow.limited`。runner が
     #: 実行を始める瞬間に求めて付ける。結果 JSON の schema には入れない）
     deadline_limited: bool = False
+    #: 観測された終了原因（`core.deadline.ExecutionEnd`）を **status だけでは決まらないときに**
+    #: 明示する（中止の UNKNOWN など）。``None`` なら status から決まる（`execution_end` の表）。
+    #: status と両立しない値は作った時点で拒む。結果 JSON の schema には入れない
+    cause: Optional[ExecutionEnd] = None
+
+    def __post_init__(self) -> None:
+        if self.cause is not None:
+            if type(self.cause) is not ExecutionEnd:
+                raise TypeError("SolverResult.cause must be an ExecutionEnd")
+            allowed = _CAUSES_BY_STATUS.get(self.status, frozenset())
+            if self.cause not in allowed:
+                raise ValueError(
+                    f"SolverResult.cause {self.cause.value} contradicts status "
+                    f"{live_values.enum_name(self.status)}"
+                )
     
     def is_equivalent(self) -> bool:
         """等価かどうか"""
@@ -324,6 +359,7 @@ def enforce_witness_contract(
             error_message=f"canonical witness contract violated: {violation}",
             raw_output=result.raw_output,
             witness_contract_violation=violation,
+            cause=ExecutionEnd.CONTRACT_VIOLATION,
         )
     if result.model is None:
         return result
@@ -337,16 +373,17 @@ def enforce_witness_contract(
     )
 
 
-#: 中断・witness 失敗の種類 → 結果の status（全経路で同じ写し方）
+#: 中断・witness 失敗の種類 → 結果の status と終了原因（全経路で同じ写し方）
 _INTERRUPTION_STATUS = {
-    CANCELLED: SolverStatus.UNKNOWN,
-    BUDGET_EXHAUSTED: SolverStatus.TIMEOUT,
-    INCONCLUSIVE: SolverStatus.UNKNOWN,
+    CANCELLED: (SolverStatus.UNKNOWN, ExecutionEnd.CANCELLED),
+    BUDGET_EXHAUSTED: (SolverStatus.TIMEOUT, ExecutionEnd.TIME_LIMIT),
+    INCONCLUSIVE: (SolverStatus.UNKNOWN, ExecutionEnd.INCONCLUSIVE),
 }
 
 
 def interrupted_result(
     solver_name: str, kind: str, detail: str, elapsed_time: float,
+    *, cause: Optional[ExecutionEnd] = None,
 ) -> SolverResult:
     """実行が中断された（または canonical witness を決められなかった）ときの結果。
 
@@ -355,12 +392,13 @@ def interrupted_result(
     できなかった」経路（登録済みの理由付きの不明）へ流れ、反例にも証明にもならない。
     """
 
-    status = _INTERRUPTION_STATUS[kind]
+    status, default_cause = _INTERRUPTION_STATUS[kind]
     return SolverResult(
         solver_name=solver_name,
         status=status,
         elapsed_time=elapsed_time,
         error_message=f"{kind}: {detail}",
+        cause=default_cause if cause is None else cause,
     )
 
 
@@ -371,6 +409,7 @@ def witness_failure_result(
 
     return interrupted_result(
         solver_name, failure.kind, f"SAT without canonical witness: {failure.detail}", elapsed_time,
+        cause=failure.end,
     )
 
 
@@ -430,15 +469,43 @@ def not_started_result(solver_name: str, detail: str = "no time left before the 
         error_message=f"not_started: {detail}",
         termination=BackendTermination.NOT_STARTED,
         deadline_limited=True,
+        cause=ExecutionEnd.NOT_STARTED,
     )
 
 
+def execution_end(result: SolverResult) -> ExecutionEnd:
+    """**solver の行 → 観測された終了原因の唯一の写像**（backend に依らない語彙へ）。
+
+    明示の `SolverResult.cause` があればそれ（status との両立は作った時点で検査済み）。無ければ
+    status から: SAT / UNSAT → ANSWERED、UNKNOWN → INCONCLUSIVE、TIMEOUT → TIME_LIMIT
+    （始めなかった行は NOT_STARTED）、ERROR → FAILED（witness の契約違反は
+    CONTRACT_VIOLATION）。中止の UNKNOWN は status では区別できないので、作る側
+    （`interrupted_result`）が明示する。error_message の文字列は読まない。
+    """
+
+    cause = getattr(result, "cause", None)
+    if cause is not None:
+        return cause
+    status = result.status
+    if status in (SolverStatus.SAT, SolverStatus.UNSAT):
+        return ExecutionEnd.ANSWERED
+    if status == SolverStatus.UNKNOWN:
+        return ExecutionEnd.INCONCLUSIVE
+    if status == SolverStatus.TIMEOUT:
+        if getattr(result, "termination", None) is BackendTermination.NOT_STARTED:
+            return ExecutionEnd.NOT_STARTED
+        return ExecutionEnd.TIME_LIMIT
+    if getattr(result, "witness_contract_violation", None) is not None:
+        return ExecutionEnd.CONTRACT_VIOLATION
+    return ExecutionEnd.FAILED
+
+
 def execution_fact(result: SolverResult) -> ExecutionFact:
-    """solver の行を `settle` が読む事実へ写す（答え = SAT / UNSAT。規則は `core.deadline`）。"""
+    """solver の行を `settle` が読む事実へ写す（終了原因 + 期限が上限を決めたか）。"""
 
     return ExecutionFact(
+        end=execution_end(result),
         limited=bool(getattr(result, "deadline_limited", False)),
-        definitive=result.status in (SolverStatus.SAT, SolverStatus.UNSAT),
     )
 
 

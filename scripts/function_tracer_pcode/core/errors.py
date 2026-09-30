@@ -799,10 +799,24 @@ def raise_limitation(
     """
     if not isinstance(exc, AnalysisLimitation):
         raise TypeError("raise_limitation needs an exact analysis limitation")
+    record_limitation(exc, stop=stop)
+    raise exc
+
+
+def record_limitation(
+    exc: AnalysisLimitation, *, stop: Optional[PairStopState] = None,
+) -> None:
+    """限界を台帳へ記録する（raise はしない。`raise_limitation` の記録の部分）。
+
+    限界より先に結果として表に出すべき失敗（solver backend の ERROR・結果の契約違反）が
+    ある所で、限界の事実だけを先に残し、raise を次の境界へ任せるときに使う
+    （Issue #106 PR-106-A: `core.deadline` の settle）。
+    """
+    if not isinstance(exc, AnalysisLimitation):
+        raise TypeError("record_limitation needs an exact analysis limitation")
     ledger = current_pair_ledger()
     if ledger is not None:
         ledger.record_limitation(exc, stop=stop)
-    raise exc
 
 
 def record_internal_bug(exc: BaseException, *, site: str) -> None:

@@ -6,8 +6,12 @@ import importlib
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, Tuple, cast
 
-from scripts.function_tracer_pcode.core.deadline import TimeUnit
-from scripts.function_tracer_pcode.smt.execution import CANCELLED, ExecutionBudget
+from scripts.function_tracer_pcode.core.deadline import ExecutionEnd, TimeUnit
+from scripts.function_tracer_pcode.smt.execution import (
+    CANCELLED,
+    TIME_LIMIT_UNKNOWN_REASONS,
+    ExecutionBudget,
+)
 from scripts.function_tracer_pcode.smt.interface import (
     SMTSolver,
     SolverBackendCapabilities,
@@ -127,7 +131,10 @@ class _Z3WitnessSession:
                 raise WitnessUnavailable(
                     stop, f"the execution stopped during the witness search ({reason})"
                 )
-            raise WitnessUnavailable(INCONCLUSIVE, f"a witness question was inconclusive: {reason}")
+            raise WitnessUnavailable(
+                INCONCLUSIVE, f"a witness question was inconclusive: {reason}",
+                end=self._budget.unknown_end(reason),
+            )
         finally:
             self._solver.pop()
 
@@ -226,6 +233,25 @@ def isolated_solver(z3: Any, smt_script: str, timeout_ms: int) -> Any:
     solver.set("timeout", int(timeout_ms))
     solver.add(z3.parse_smt2_string(smt_script, ctx=context))
     return solver
+
+
+def isolated_check_end(z3: Any, verdict: Any, solver: Any) -> ExecutionEnd:
+    """`isolated_solver` の 1 回の check の、観測された終了原因（Issue #106 PR-106-A）。
+
+    SAT / UNSAT は答え、unknown は reason で時間の上限か（`smt.execution.TIME_LIMIT_UNKNOWN_REASONS`
+    の 1 つの規則）それ以外の判定不能かを分ける。この問い合わせは中止の入力を持たないので
+    CANCELLED は無い。
+    """
+
+    if verdict == z3.sat or verdict == z3.unsat:
+        return ExecutionEnd.ANSWERED
+    try:
+        reason = str(solver.reason_unknown())
+    except (AttributeError, TypeError, ValueError, RuntimeError):
+        return ExecutionEnd.INCONCLUSIVE
+    if any(marker in reason for marker in TIME_LIMIT_UNKNOWN_REASONS):
+        return ExecutionEnd.TIME_LIMIT
+    return ExecutionEnd.INCONCLUSIVE
 
 
 class Z3Solver(SMTSolver):
@@ -404,7 +430,8 @@ class Z3Solver(SMTSolver):
                         solver_name=self.name,
                         status=SolverStatus.UNKNOWN,
                         elapsed_time=elapsed,
-                        error_message=reason
+                        error_message=reason,
+                        cause=budget.unknown_end(reason),
                     )
         
         except Exception as e:

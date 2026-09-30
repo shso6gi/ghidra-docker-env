@@ -13,10 +13,15 @@
 sub-operation 1 回の実効の終わり  `execution_window`（純関数。**実行を始める瞬間に**
 と「期限で時間が決まったか」      実行ごとに求める。worker でも同じ規則）
 単位への丸め                      `bounded_timeout`（ms は 1 以上、秒は 0 なら始めない）
-期限で切られた実行か              `ExecutionFact.cut_by_deadline`（期限で時間が決まり、
-                                  かつ SAT / UNSAT の答えが無い）
-返ってきた答えを採ってよいか      `DeadlineQuery.settle`（始めたときに期限内だった
-                                  ことは理由にならない）
+実行がどう終わったか（語彙）      `ExecutionEnd`（**観測された終了原因**。backend 固有の
+                                  結果からこの語彙へ写すのは各 layer の写像: solver の行は
+                                  `smt.interface.execution_end`、decompile は
+                                  `ghidra.decompilation_broker`）
+期限で切られた実行か              `ExecutionFact.cut_by_deadline`（期限が時間を決め、かつ
+                                  **時間の上限で止まった**。始めなかった実行を含む）
+返ってきた結果をどうするか        `settlement`（純関数。下の表）→ `DeadlineQuery.settle`
+                                  （実行が返った **直後ごとに**。始めたときに期限内だった
+                                  ことは答えを採る理由にならない）
 時計を読む頻度                    `DeadlinePolicy.poll_interval`（`poller` が使う）
 打ち切りの記録                    `Deadline._trip` → `core.errors.raise_limitation`
                                   （台帳へ記録してから raise。stop state は型で決まり
@@ -29,6 +34,23 @@ decompile 1 回）の owner 側の handle で、開始の確認（`begin`）と�
 瞬間に `ExecutionBound.window` で自分の実効の終わりと `limited` を求める。実行は時刻をずらして
 始まり得る（逐次なら先の backend が時間を使う、並列なら worker の起動が遅れる）ので、「期限で
 時間が決まった」かどうかを問いの入口で固定しない。
+
+**settle の表**（`settlement`。問い 1 つの、それまでに返った実行の事実すべてに対して）:
+
+========================================= =============================================
+事実                                      結果
+========================================= =============================================
+期限後でも期限で切られた実行も無い         ACCEPT（答え・通常の unknown・通常の timeout・明示
+                                          の中止・失敗は、期限の無いときと同じ結果のまま）
+失敗（FAILED / CONTRACT_VIOLATION）がある  KEEP_FAILURE（失敗を結果に残し、期限の限界は記録
+                                          だけして raise は次の境界）。ただし期限後で、契約
+                                          違反が無く答えがある（集約でその答えが採られて
+                                          しまう）なら DEADLINE
+それ以外（期限後・期限で切られた実行）     DEADLINE（答えがあっても採らない）
+========================================= =============================================
+
+失敗を限界より先に置くのは、台帳の優先順位（内部バグ > 限界、`core.errors`）と同じ向き:
+期限は「失敗が起きた」事実を隠す理由にならない。
 
 ここが持たないもの: UNKNOWN / ERROR の判断と receipt（authority）、失敗を結果へ変える
 こと（`checker.pair_execution`）、backend ごとの時間の単位・中断の方法（`smt` の adapter）、
@@ -62,7 +84,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Iterator, NoReturn, Optional, Tuple
 
-from scripts.function_tracer_pcode.core.errors import DeadlineExceeded, raise_limitation
+from scripts.function_tracer_pcode.core.errors import (
+    DeadlineExceeded,
+    raise_limitation,
+    record_limitation,
+)
 from scripts.function_tracer_pcode.core.stage_clock import active_region_path
 from scripts.function_tracer_pcode.core.stage_journal import journal_note
 
@@ -220,27 +246,98 @@ def execution_window(
     return ExecutionWindow(end=float(not_after), limited=True)
 
 
+class ExecutionEnd(Enum):
+    """実行 1 回が **実際にどう終わったか**（観測された終了原因。backend に依らない語彙）。
+
+    「解析の期限が上限を短くした」（`ExecutionWindow.limited`）とは別の軸: 上限を短くした
+    実行でも、parse error で即座に返れば `FAILED`、上限に届く前に unknown を返せば
+    `INCONCLUSIVE` で、期限で切られてはいない。
+    """
+
+    #: 期限に関係なく採れる答え（solver の SAT / UNSAT、decompile の完了）
+    ANSWERED = "answered"
+    #: 自分で返ったが答えが無い（時間の上限でも中止でもない unknown）
+    INCONCLUSIVE = "inconclusive"
+    #: 時間の上限で止まった（backend 自身の timeout・実行の予算切れ・待つのを上限でやめた）
+    TIME_LIMIT = "time_limit"
+    #: 呼び出し側の明示の中止（cancellation token）で止まった
+    CANCELLED = "cancelled"
+    #: backend の失敗（例外・parse error・始められなかった・decompiler の異常終了）
+    FAILED = "failed"
+    #: backend が結果の契約を破った（canonical witness の無い SAT など）
+    CONTRACT_VIOLATION = "contract_violation"
+    #: 期限までの時間が無いので始めなかった
+    NOT_STARTED = "not_started"
+
+
+#: 結果として表に出すべき失敗（期限で隠さない）
+FAILURE_ENDS = frozenset({ExecutionEnd.FAILED, ExecutionEnd.CONTRACT_VIOLATION})
+
+
 @dataclass(frozen=True)
 class ExecutionFact:
     """実行 1 回について `settle` が読む事実（呼び出し側は自分の結果をこれに写すだけ）。"""
 
-    #: その実行の時間を解析の期限が決めた（`ExecutionWindow.limited`、または待つのを期限でやめた）
+    #: 観測された終了原因
+    end: ExecutionEnd
+    #: その実行の時間の上限を解析の期限が決めた（`ExecutionWindow.limited`、または待つのを
+    #: 期限でやめた）
     limited: bool
-    #: 期限に関係なく採れる答えが出た（solver なら SAT / UNSAT、decompile なら完了）
-    definitive: bool
+
+    def __post_init__(self) -> None:
+        if type(self.end) is not ExecutionEnd:
+            raise TypeError("execution fact needs an ExecutionEnd")
+        if type(self.limited) is not bool:
+            raise TypeError("execution fact needs a bool limited")
 
     @property
     def cut_by_deadline(self) -> bool:
-        """**期限で切られた実行の唯一の規則**: 期限が時間を決め、答えが出なかった。
+        """**期限で切られた実行の唯一の規則**: 期限が上限を決め、その上限で止まった
+        （または期限までの時間が無くて始めなかった）。
 
-        期限が時間を決めなかった実行の timeout / unknown は通常の結果（期限の限界にしない）。
+        上限を期限が決めていても、それ以外の終わり方（答え・通常の unknown・中止・失敗）は
+        期限で切られたのではない。期限が上限を決めなかった実行の timeout は通常の timeout。
         """
 
-        return self.limited and not self.definitive
+        if self.end is ExecutionEnd.NOT_STARTED:
+            return True
+        return self.limited and self.end is ExecutionEnd.TIME_LIMIT
 
 
 #: 始められなかった実行（期限までの時間が無い）の事実
-NOT_STARTED_FACT = ExecutionFact(limited=True, definitive=False)
+NOT_STARTED_FACT = ExecutionFact(end=ExecutionEnd.NOT_STARTED, limited=True)
+
+
+class Settlement(Enum):
+    """`settlement` の結論。"""
+
+    #: 結果をそのまま使う（期限は関係しなかった）
+    ACCEPT = "accept"
+    #: 期限の限界（raise。答えがあっても採らない）
+    DEADLINE = "deadline"
+    #: 期限の事実（期限後・期限で切られた実行）はあるが、失敗を結果に残す。限界は記録だけして
+    #: 次の境界で raise（この問いの後の実行は始めない）
+    KEEP_FAILURE = "keep_failure"
+
+
+def settlement(facts: Tuple[ExecutionFact, ...], *, expired: bool) -> Settlement:
+    """**返ってきた結果をどうするかの唯一の規則**（module docstring の表。純関数）。
+
+    ``facts`` は 1 つの問いのそれまでに返った実行すべて、``expired`` は今が期限以後か。
+    """
+
+    ends = {fact.end for fact in facts}
+    deadline_fact = expired or any(fact.cut_by_deadline for fact in facts)
+    if not deadline_fact:
+        return Settlement.ACCEPT
+    if ends & FAILURE_ENDS:
+        adoptable_answer = (
+            ExecutionEnd.ANSWERED in ends and ExecutionEnd.CONTRACT_VIOLATION not in ends
+        )
+        if expired and adoptable_answer:
+            return Settlement.DEADLINE
+        return Settlement.KEEP_FAILURE
+    return Settlement.DEADLINE
 
 
 @dataclass(frozen=True)
@@ -267,13 +364,15 @@ class DeadlineQuery:
     """1 つの論理的な問いの owner 側の handle（`deadline_query` が作る）。
 
     * `begin(...)`: 実行を 1 回始める前に owner の thread で呼ぶ（逐次なら backend ごと）。
-      解析中に期限を過ぎていれば限界を raise する。打ち切った後の finalization では偽を返す
+      解析中に期限を過ぎていれば限界を raise する。偽なら始めない（打ち切った後の
+      finalization、またはこの問いが失敗を結果に残すと決めた後: 限界は記録済み）
     * `bound`: worker へ渡す `ExecutionBound`
     * `wait_timeout(...)`: 結果を待つ上限と、それを期限が決めたか
-    * `settle(facts)`: 実行が返った直後に owner の thread で呼ぶ
+    * `settle(facts)`: 実行が返った直後に owner の thread で呼ぶ（逐次なら **実行ごと**。次の
+      実行を始める前）。事実はこの問いの中で積み上がり、`settlement` はそれまでの全部を見る
     """
 
-    __slots__ = ("stage", "_deadline", "_startable", "bound")
+    __slots__ = ("stage", "_deadline", "_startable", "bound", "facts", "kept_failure")
 
     def __init__(
         self, stage: str, *, deadline: Optional["Deadline"] = None, startable: bool = True,
@@ -283,13 +382,17 @@ class DeadlineQuery:
         self._deadline = deadline
         self._startable = startable
         self.bound = bound
+        #: この問いのそれまでに返った実行の事実
+        self.facts: Tuple[ExecutionFact, ...] = ()
+        #: 失敗を結果に残すと決めた（`Settlement.KEEP_FAILURE` で期限の限界を記録した）
+        self.kept_failure = False
 
     @property
     def bounded(self) -> bool:
         return self._deadline is not None
 
     def begin(self, configured_seconds: float, unit: TimeUnit = TimeUnit.MILLISECONDS) -> bool:
-        if not self._startable:
+        if not self._startable or self.kept_failure:
             return False
         if self._deadline is not None:
             self._deadline.begin_execution(self, configured_seconds, unit)
@@ -306,9 +409,13 @@ class DeadlineQuery:
             return remaining, True
         return configured, False
 
-    def settle(self, facts: Any, *, evidence: Tuple[str, ...] = ()) -> None:
-        if self._deadline is not None:
-            self._deadline.settle(self, tuple(facts), evidence=evidence)
+    def settle(self, facts: Any, *, evidence: Tuple[str, ...] = ()) -> Settlement:
+        """返った実行の事実を積み、`settlement` の結論を適用する（DEADLINE なら raise）。"""
+
+        self.facts = self.facts + tuple(facts)
+        if self._deadline is None:
+            return Settlement.ACCEPT
+        return self._deadline.settle(self, evidence=evidence)
 
 
 class Deadline:
@@ -400,27 +507,30 @@ class Deadline:
         if bounded_timeout(configured_seconds, query.bound.not_after, unit, now=now) is None:
             self._raise(query.stage, now, boundary="before", evidence=("remaining_below_margin",))
 
-    def settle(
-        self, query: DeadlineQuery, facts: Tuple[ExecutionFact, ...], *,
-        evidence: Tuple[str, ...] = (),
-    ) -> None:
-        """実行が返った直後（owner）。答えを採ってよいかを決める。
+    def settle(self, query: DeadlineQuery, *, evidence: Tuple[str, ...] = ()) -> Settlement:
+        """実行が返った直後（owner）。`settlement` の結論を適用する。
 
-        期限を過ぎていれば、答え（SAT / UNSAT を含む）があっても raise する（始めたときに
-        期限内だったことは採る理由にならない）。どれかの実行が期限で切られていれば
-        （`ExecutionFact.cut_by_deadline`）raise する。期限が時間を決めなかった実行の timeout は
-        通常の結果のまま。
+        DEADLINE は限界を raise する（始めたときに期限内だったことは答えを採る理由にならない）。
+        KEEP_FAILURE は結果を返す: 期限を過ぎた・期限で切られた実行があれば限界を記録だけして
+        （打ち切りは sticky なので次の境界で raise）、この問いの後の実行は始めない。
         """
 
         if not self._active_here():
-            return
+            return Settlement.ACCEPT
         now = self._read(query.stage)
-        if self._trip is not None or now >= self.absolute:
-            self._raise(query.stage, now, boundary="after", evidence=evidence)
-        if any(fact.cut_by_deadline for fact in facts):
-            self._raise(
-                query.stage, now, boundary="after", evidence=("cut_by_deadline", *evidence),
+        expired = self._trip is not None or now >= self.absolute
+        verdict = settlement(query.facts, expired=expired)
+        cut = any(fact.cut_by_deadline for fact in query.facts)
+        detail = ("cut_by_deadline",) if cut else ()
+        if verdict is Settlement.DEADLINE:
+            self._raise(query.stage, now, boundary="after", evidence=(*detail, *evidence))
+        if verdict is Settlement.KEEP_FAILURE:
+            query.kept_failure = True
+            self._mark(
+                query.stage, now, boundary="after",
+                evidence=("failure_kept", *detail, *evidence),
             )
+        return verdict
 
     def poll(self, stage: str, counter: "_PollCounter") -> None:
         """hot loop の checkpoint。`poll_interval` 回に 1 回だけ時計を読む。"""
@@ -464,14 +574,10 @@ class Deadline:
 
     # -- 打ち切り ------------------------------------------------------------
 
-    def _raise(
+    def _trip_now(
         self, stage: str, now: float, *, boundary: str, evidence: Tuple[str, ...] = (),
-    ) -> NoReturn:
-        """打ち切りを記録して raise する（最初の 1 回だけ snapshot を残す）。
-
-        2 回目以降は最初の打ち切りと同じ site / target の限界を上げ直す（台帳は同じ 1 件に
-        畳む）。途中の `except Exception` に握り潰されても、次の境界でまた止まる。
-        """
+    ) -> DeadlineExceeded:
+        """打ち切りの記録（最初の 1 回だけ作って snapshot を残す）。以後の限界はこれの写し。"""
 
         first = self._trip
         if first is None:
@@ -493,12 +599,30 @@ class Deadline:
             )
             self._trip = first
             self._snapshot(first, stage, elapsed, boundary, path)
-        raise_limitation(DeadlineExceeded(
+        return DeadlineExceeded(
             first.detail,
             site=first.site,
             target_key=first.target_key,
             evidence_refs=first.evidence_refs,
-        ))
+        )
+
+    def _raise(
+        self, stage: str, now: float, *, boundary: str, evidence: Tuple[str, ...] = (),
+    ) -> NoReturn:
+        """打ち切りを記録して raise する。
+
+        2 回目以降は最初の打ち切りと同じ site / target の限界を上げ直す（台帳は同じ 1 件に
+        畳む）。途中の `except Exception` に握り潰されても、次の境界でまた止まる。
+        """
+
+        raise_limitation(self._trip_now(stage, now, boundary=boundary, evidence=evidence))
+
+    def _mark(
+        self, stage: str, now: float, *, boundary: str, evidence: Tuple[str, ...] = (),
+    ) -> None:
+        """打ち切りを記録するが raise しない（失敗を結果に残すとき。次の境界が raise する）。"""
+
+        record_limitation(self._trip_now(stage, now, boundary=boundary, evidence=evidence))
 
     def _snapshot(
         self, trip: DeadlineExceeded, stage: str, elapsed: float, boundary: str, path: str,
@@ -638,9 +762,12 @@ __all__ = [
     "TimeUnit",
     "DeadlineQuery",
     "ExecutionBound",
+    "ExecutionEnd",
     "ExecutionFact",
     "ExecutionWindow",
+    "FAILURE_ENDS",
     "NOT_STARTED_FACT",
+    "Settlement",
     "UNBOUNDED",
     "UNBOUNDED_WINDOW",
     "active_deadline",
@@ -652,5 +779,6 @@ __all__ = [
     "finalization",
     "hot_checkpoint",
     "poller",
+    "settlement",
     "unbounded_timeout",
 ]

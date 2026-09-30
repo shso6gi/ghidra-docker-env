@@ -143,7 +143,8 @@ def test_review1_a_later_backend_does_not_start_after_an_earlier_one_crossed_the
             with pytest.raises(DeadlineExceeded) as raised:
                 runner.run_sequential(QUERY)
     assert [call["name"] for call in log.calls] == ["first"]  # second は始まっていない
-    assert "boundary=before" in raised.value.evidence_refs
+    # 先の backend が返った直後の確認（次の backend の開始前）で止まる（レビュー 2 巡目）
+    assert "boundary=after" in raised.value.evidence_refs
     assert ledger.stop_state() is PairStopState.PAIR_TERMINAL_DEADLINE
 
 

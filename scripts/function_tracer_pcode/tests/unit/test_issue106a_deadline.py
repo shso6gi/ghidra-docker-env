@@ -26,6 +26,7 @@ from scripts.function_tracer_pcode.core.deadline import (
     TimeUnit,
     NOT_STARTED_FACT,
     UNBOUNDED_WINDOW,
+    ExecutionEnd,
     ExecutionFact,
     ExecutionWindow,
     active_deadline,
@@ -351,11 +352,39 @@ def test_a_later_execution_of_the_same_query_gets_its_own_window():
         assert second.end == pytest.approx(first.end - 0.25 + 0.35)
 
 
-def test_the_cut_by_deadline_rule():
-    assert ExecutionFact(limited=True, definitive=False).cut_by_deadline
-    assert not ExecutionFact(limited=True, definitive=True).cut_by_deadline
-    # 期限が時間を決めなかった timeout / unknown は通常の結果（期限の限界にしない）
-    assert not ExecutionFact(limited=False, definitive=False).cut_by_deadline
+# 終了原因 × 期限が上限を決めたか → 期限で切られたか（期待値は表で固定。実装の式を繰り返さない）
+_CUT_TABLE = [
+    (ExecutionEnd.ANSWERED, False, False),
+    (ExecutionEnd.ANSWERED, True, False),
+    (ExecutionEnd.INCONCLUSIVE, False, False),
+    (ExecutionEnd.INCONCLUSIVE, True, False),       # 上限の前に返った通常の unknown
+    (ExecutionEnd.TIME_LIMIT, False, False),        # 通常の solver timeout
+    (ExecutionEnd.TIME_LIMIT, True, True),          # 期限が決めた上限で止まった
+    (ExecutionEnd.CANCELLED, False, False),
+    (ExecutionEnd.CANCELLED, True, False),          # 明示の中止は期限ではない
+    (ExecutionEnd.FAILED, False, False),
+    (ExecutionEnd.FAILED, True, False),             # parse error など
+    (ExecutionEnd.CONTRACT_VIOLATION, False, False),
+    (ExecutionEnd.CONTRACT_VIOLATION, True, False),
+    (ExecutionEnd.NOT_STARTED, True, True),
+    (ExecutionEnd.NOT_STARTED, False, True),        # 始めなかったのは期限のためだけ
+]
+
+
+def test_the_cut_table_covers_every_execution_end():
+    assert {end for end, _limited, _cut in _CUT_TABLE} == set(ExecutionEnd)
+
+
+@pytest.mark.parametrize("end,limited,cut", _CUT_TABLE)
+def test_the_cut_by_deadline_rule(end, limited, cut):
+    assert ExecutionFact(end=end, limited=limited).cut_by_deadline is cut
+
+
+def test_an_execution_fact_refuses_untyped_values():
+    with pytest.raises(TypeError):
+        ExecutionFact(end="time_limit", limited=True)
+    with pytest.raises(TypeError):
+        ExecutionFact(end=ExecutionEnd.TIME_LIMIT, limited=1)
     assert NOT_STARTED_FACT.cut_by_deadline
 
 
@@ -371,7 +400,7 @@ def test_e12_an_answer_that_returns_after_the_deadline_is_not_accepted():
             assert query.begin(5)
             clock.jump(11)  # 答え（SAT / UNSAT）は返ったが、その間に期限を過ぎた
             with pytest.raises(DeadlineExceeded) as raised:
-                query.settle([ExecutionFact(limited=False, definitive=True)])
+                query.settle([ExecutionFact(end=ExecutionEnd.ANSWERED, limited=False)])
     assert "boundary=after" in raised.value.evidence_refs
     assert ledger.pending_failure() is not None
 
@@ -384,7 +413,7 @@ def test_e12_a_timeout_cut_by_the_deadline_is_a_deadline_even_before_it_expires(
         window = query.bound.window(30, TimeUnit.MILLISECONDS)
         clock.jump(2.6)  # 窓の終わり（2.5 s）で solver が止まり、期限（3 s）の手前で返った
         with pytest.raises(DeadlineExceeded) as raised:
-            query.settle([ExecutionFact(limited=window.limited, definitive=False)])
+            query.settle([ExecutionFact(end=ExecutionEnd.TIME_LIMIT, limited=window.limited)])
     assert "cut_by_deadline" in raised.value.evidence_refs
 
 
@@ -397,8 +426,8 @@ def test_e12_a_normal_solver_timeout_is_not_turned_into_a_deadline():
             window = query.bound.window(0.5, TimeUnit.MILLISECONDS)
             assert window.limited is False
             clock.jump(0.5)
-            query.settle([ExecutionFact(limited=window.limited, definitive=False)])  # raise しない
-            query.settle([ExecutionFact(limited=False, definitive=True)])
+            query.settle([ExecutionFact(end=ExecutionEnd.TIME_LIMIT, limited=window.limited)])  # raise しない
+            query.settle([ExecutionFact(end=ExecutionEnd.ANSWERED, limited=False)])
         assert ledger.pending_failure() is None
 
 

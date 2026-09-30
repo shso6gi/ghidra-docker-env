@@ -27,12 +27,22 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
-from scripts.function_tracer_pcode.core.deadline import TimeUnit, bounded_timeout, execution_window
+from scripts.function_tracer_pcode.core.deadline import (
+    ExecutionEnd,
+    TimeUnit,
+    bounded_timeout,
+    execution_window,
+)
 
 
 #: 中断の種類
 CANCELLED = "cancelled"
 BUDGET_EXHAUSTED = "budget_exhausted"
+
+#: solver の unknown の理由のうち、時間の上限で止まったことを表すもの（z3: 単発の solver は
+#: timeout で "timeout"、push した incremental の solver は timeout でも "canceled" と報告する。
+#: 実行の予算の終わりより 1 ms 以内に早く返ることがあるので、時計だけでは見分けられない）
+TIME_LIMIT_UNKNOWN_REASONS = ("timeout", "canceled")
 
 
 class ExecutionBudget:
@@ -109,5 +119,19 @@ class ExecutionBudget:
             return BUDGET_EXHAUSTED
         return None
 
+    def unknown_end(self, reason: str) -> ExecutionEnd:
+        """`interruption_after_unknown` が中断としなかった unknown の、観測された終了原因
+        （Issue #106 PR-106-A）。
 
-__all__ = ["BUDGET_EXHAUSTED", "CANCELLED", "ExecutionBudget"]
+        理由が時間の上限を表す（`TIME_LIMIT_UNKNOWN_REASONS`: 中止の token は中止されていない
+        ので、incremental の solver の "canceled" は timeout）なら TIME_LIMIT、それ以外は
+        INCONCLUSIVE。行の status（UNKNOWN）は変えない（期限なしの結果・reason の互換）。
+        解析の期限はこの終了原因で「期限で切られた」かを判定する（`core.deadline`）。
+        """
+
+        if any(marker in str(reason) for marker in TIME_LIMIT_UNKNOWN_REASONS):
+            return ExecutionEnd.TIME_LIMIT
+        return ExecutionEnd.INCONCLUSIVE
+
+
+__all__ = ["BUDGET_EXHAUSTED", "CANCELLED", "TIME_LIMIT_UNKNOWN_REASONS", "ExecutionBudget"]

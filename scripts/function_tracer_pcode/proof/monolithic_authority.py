@@ -828,7 +828,8 @@ class SharedZ3RegionSession:
                     item = interrupted_result("Z3(shared-region)", stop, reason, elapsed)
                 else:
                     item = SolverResult("Z3(shared-region)", SolverStatus.UNKNOWN,
-                                        elapsed_time=elapsed, error_message=reason)
+                                        elapsed_time=elapsed, error_message=reason,
+                                        cause=budget.unknown_end(reason))
             # 1 query × 1 backend の結果: 契約を境界で検査し、backend 集約の規則で包む
             item = enforce_witness_contract(item, query, canonical=True)
         finally:

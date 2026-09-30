@@ -74,9 +74,12 @@ _IN_SOLVER_ORCHESTRATION: ContextVar[bool] = ContextVar(
 #     瞬間に `_execute_within` が `ExecutionBound.window` で求める（worker でも同じ。worker へは
 #     `ExecutionBound` を引数で渡す: 期限の object も contextvar も読まない）。窓の終わりを
 #     adapter の ``not_after`` に渡し、行に `deadline_limited` を付ける
-#   * 返った直後に owner の thread で `settle`（行 → `interface.execution_fact`）。期限を
-#     過ぎていれば答えを採らない。期限で時間が決まって答えが無い行は期限の限界。期限が
-#     時間を決めなかった行の timeout は通常の solver timeout のまま
+#   * 返った直後に owner の thread で `settle`（行 → `interface.execution_fact`: 観測された
+#     終了原因と、期限が上限を決めたか）。逐次なら **実行ごと・次の backend を始める前**。
+#     結論の規則は `core.deadline.settlement` の 1 つだけ: 期限を過ぎていれば答えを採らない、
+#     期限が決めた上限で止まった行は期限の限界、それ以外の終わり方（答え・通常の unknown・
+#     通常の timeout・中止）は期限の無いときと同じ行のまま、backend の失敗・契約違反は期限で
+#     隠さない
 #   * 待つのをやめること・pending を取り消すこと・走っている実行を止めること・process が
 #     終われることは別のこと（`BackendTermination`）。走っている実行は backend が止め方を
 #     主張するときだけ `request_stop` を求め、`RUNNING_STOP_GRACE_SECONDS` 待っても
@@ -404,7 +407,7 @@ class ParallelSolverRunner:
             query = None
             if not orchestrated:
                 query = deadline_query(SOLVER_STAGE)
-                if not query.begin(runtime_timeout):
+                if not query.begin(runtime_timeout, backend_capabilities(solver).execution_unit):
                     return not_started_result(solver.name)
                 bound = query.bound
 
@@ -531,11 +534,12 @@ class ParallelSolverRunner:
                 # 走っている実行は `stop_unfinished` が返るまで待ってある（ここで待つものは無い）
                 executor.shutdown(wait=True, cancel_futures=True)
 
-            parallel = ParallelResult.from_backend_results(results)
+            # 停止 → 回収（止められない worker は返るまで待った）→ 確認 → 集約
             query.settle(
                 [execution_fact(row) for row in results],
                 evidence=_termination_evidence(results),
             )
+            parallel = ParallelResult.from_backend_results(results)
             if self.debug:
                 print(f"[ParallelRunner] Final result: is_equivalent={parallel.is_equivalent}")
             return parallel
@@ -560,9 +564,9 @@ class ParallelSolverRunner:
                 if self.debug:
                     print(f"[ParallelRunner] Running {solver.name}...")
             
-                # backend の実行を 1 回始める前ごとに確かめる（先の backend が時間を使ったら、
-                # 期限を過ぎた後に後の backend を始めない）
-                if not query.begin(runtime_timeout):
+                # 開始前 → 実行 → 返却直後の確認 → 次の実行（期限で切られた backend の後の
+                # backend は呼ばない: `settle` が raise する）。単位はこの backend の単位
+                if not query.begin(runtime_timeout, backend_capabilities(solver).execution_unit):
                     results.append(not_started_result(solver.name))
                     continue
                 result = self.run_single(
@@ -576,13 +580,9 @@ class ParallelSolverRunner:
             
                 if self.debug:
                     print(f"[ParallelRunner] {solver.name}: {result.status.name} ({result.elapsed_time:.3f}s)")
+                query.settle([execution_fact(result)], evidence=_termination_evidence(results))
 
-            parallel = ParallelResult.from_backend_results(results)
-            query.settle(
-                [execution_fact(row) for row in results],
-                evidence=_termination_evidence(results),
-            )
-            return parallel
+            return ParallelResult.from_backend_results(results)
 
     def _resolve_timeout(self, timeout: Optional[int]) -> int:
         """実行に使うタイムアウトを決定する。"""
@@ -605,7 +605,7 @@ def run_backend_query(
 
     timeout_seconds = backend.timeout
     query = deadline_query(SOLVER_STAGE)
-    if not query.begin(timeout_seconds):
+    if not query.begin(timeout_seconds, backend_capabilities(backend).execution_unit):
         return not_started_result(backend.name)
     result = _execute_within(backend, smt_script, timeout_seconds, query.bound, cancellation_token)
     query.settle([execution_fact(result)], evidence=_termination_evidence([result]))

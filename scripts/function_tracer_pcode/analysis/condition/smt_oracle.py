@@ -45,7 +45,7 @@ from scripts.function_tracer_pcode.core.render_smt import (
     smt_logic_name,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
-from scripts.function_tracer_pcode.smt.solvers.z3 import isolated_solver
+from scripts.function_tracer_pcode.smt.solvers.z3 import isolated_check_end, isolated_solver
 from scripts.function_tracer_pcode.core.deadline import (
     NOT_STARTED_FACT,
     ExecutionFact,
@@ -317,9 +317,10 @@ class ConditionSMTOracle:
             started = time.monotonic()
             result = solver.check()
             observe("oracle.check_ms", int((time.monotonic() - started) * 1000))
-            # 返った直後: 期限を過ぎていれば・期限で切られていれば答えを採らない（覚えもしない）
+            # 返った直後: 期限を過ぎていれば・期限が決めた上限で止まったなら答えを採らない
+            # （覚えもしない）。上限の前に返った unknown は通常の unknown のまま
             query_deadline.settle([
-                ExecutionFact(limited=window.limited, definitive=result == z3.unsat or result == z3.sat)
+                ExecutionFact(end=isolated_check_end(z3, result, solver), limited=window.limited)
             ])
             if result == z3.unsat:
                 verdict: Optional[bool] = True

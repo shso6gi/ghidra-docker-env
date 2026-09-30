@@ -599,7 +599,7 @@ def test_adapters_receive_the_deadline_only_by_argument():
     """adapter（`smt/solvers/*`・`smt/interface.py`）は期限の scope を読まない（引数と純関数だけ）。"""
     allowed = {
         "TimeUnit", "bounded_timeout", "execution_window", "ExecutionFact", "ExecutionWindow",
-        "ExecutionBound", "UNBOUNDED", "UNBOUNDED_WINDOW", "NOT_STARTED_FACT",
+        "ExecutionBound", "UNBOUNDED", "UNBOUNDED_WINDOW", "NOT_STARTED_FACT", "ExecutionEnd",
     }
     offenders = []
     for path in [PACKAGE_ROOT / "smt" / "interface.py", *sorted((PACKAGE_ROOT / "smt" / "solvers").glob("*.py"))]:
