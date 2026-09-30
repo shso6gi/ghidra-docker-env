@@ -81,7 +81,6 @@ from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     is_validated,
     mark_published,
     mark_validated,
-    serialization_closed,
     serialization_protocol_methods,
 )
 from scripts.function_tracer_pcode.core.semantic_projection import contains_unsupported_value
@@ -926,6 +925,13 @@ SERIALIZATION_CLOSURE_RULES: Mapping[SerializationInput, Callable[..., bool]] = 
     SerializationInput.RUNTIME_REF: _runtime_ref_rule,
 })
 
+#: 型 → (field, 規則) の列。表（lifecycle）と規則（上）から組み立てるだけで、field を列挙しない。
+#: 表と規則はどちらも module の読み込み時に決まる（凍結は node ごとに通るので、ここで 1 度引く）。
+_CLOSURE_PLANS: Mapping[type, Tuple[Tuple[str, Callable[..., bool]], ...]] = MappingProxyType({
+    Expression: tuple((name, SERIALIZATION_CLOSURE_RULES[kind]) for name, kind in EXPRESSION_SERIALIZATION_INPUTS.items()),
+    Condition: tuple((name, SERIALIZATION_CLOSURE_RULES[kind]) for name, kind in CONDITION_SERIALIZATION_INPUTS.items()),
+})
+
 
 def _serialization_dependencies(value: Any, staging: _LifecycleStaging) -> Optional[List[Any]]:
     """`value` の LEGACY 表現が読む field がすべて局所的に不変なら、closed であるべき依存の列。
@@ -935,22 +941,50 @@ def _serialization_dependencies(value: Any, staging: _LifecycleStaging) -> Optio
 
     # 表と規則が述べているのは `Expression` / `Condition` の表現（その型の method）だけ。subclass は
     # 表現を作る method を上書きし得るので closed にしない
-    kind = type(value)
-    if kind is Condition:
-        table = CONDITION_SERIALIZATION_INPUTS
-    elif kind is Expression:
-        table = EXPRESSION_SERIALIZATION_INPUTS
-    else:
+    plan = _CLOSURE_PLANS.get(type(value))
+    if plan is None:
         return None
     fields = value.__dict__
     dependencies: List[Any] = []
-    for name, input_kind in table.items():
+    for name, rule in plan:
         if name not in fields:
             # instance に無い field は class の値（共有の状態）を読むことになる
             return None
-        if not SERIALIZATION_CLOSURE_RULES[input_kind](value, fields[name], staging, dependencies):
+        if not rule(value, fields[name], staging, dependencies):
             return None
     return dependencies
+
+
+def _committed_closed(value: Any) -> bool:
+    """前の操作で確定した値の bit（`serialization_closed` と同じ答え）。
+
+    ここで出会う値は `Expression` / `Condition` の型そのもの（依存に積むのはそれだけ）なので、
+    状態の owner の module として instance の `__dict__` を直接読む（凍結は node ごとに通るので
+    読み口の汎用の型の確かめを繰り返さない）。
+    """
+
+    fields = value.__dict__
+    return fields.get("_frozen") is True and fields.get("_serialization_closed") is True
+
+
+def _verdict_from_known_dependencies(
+    value: Any, staging: _LifecycleStaging, verdicts: Dict[int, Optional[bool]],
+) -> Optional[bool]:
+    """依存の答えがすべて出ているなら `value` の答え、出ていない依存があれば `None`。"""
+
+    dependencies = _serialization_dependencies(value, staging)
+    if dependencies is None:
+        return False
+    staged = staging.derived
+    for dependency in dependencies:
+        known = verdicts.get(id(dependency))
+        if known is None:
+            if id(dependency) in staged:
+                return None
+            known = verdicts[id(dependency)] = _committed_closed(dependency)
+        if known is not True:
+            return False
+    return True
 
 
 def _derive_serialization_closure(staging: _LifecycleStaging) -> None:
@@ -968,6 +1002,15 @@ def _derive_serialization_closure(staging: _LifecycleStaging) -> None:
     pending_inputs: Dict[int, Optional[List[Any]]] = {}
     staged = staging.derived
     for root in (*staging.expressions, *staging.conditions):
+        if id(root) in verdicts:
+            continue
+        # 速い経路: graph の子は post-order で先に積まれているので、たいていの値は依存の答えが
+        # もう出ている（前の操作で確定済みか、この操作で先に決めた）。出ていない依存（runtime ref
+        # が抱える式など、後で積まれる値）があるときだけ、下の走査で畳む
+        verdict = _verdict_from_known_dependencies(root, staging, verdicts)
+        if verdict is not None:
+            verdicts[id(root)] = verdict
+            continue
         stack: List[Tuple[Any, bool]] = [(root, False)]
         while stack:
             value, leaving = stack.pop()
@@ -983,7 +1026,7 @@ def _derive_serialization_closure(staging: _LifecycleStaging) -> None:
                 continue
             if key not in staged:
                 # この操作で積んでいない値: 前の操作で確定した bit を読む（未検証なら closed でない）
-                verdicts[key] = serialization_closed(value)
+                verdicts[key] = _committed_closed(value)
                 continue
             verdicts[key] = None
             dependencies = _serialization_dependencies(value, staging)
