@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     state_of,
 )
 from scripts.function_tracer_pcode.core.storage import FrozenStorageRecord, StorageInfo
+from scripts.function_tracer_pcode.core.frozen_representation import FrozenLegacyTree
 from scripts.function_tracer_pcode.core.render_output import utf8_length
 from scripts.function_tracer_pcode.core import json_encoding
 from scripts.function_tracer_pcode.core.json_encoding import JsonEncodingPolicy, source_converter
@@ -162,6 +163,7 @@ class Expression:
     #: 凍結時に写した storage の LEGACY 表現（`FrozenStorageRecord`）と、LEGACY 表現が
     #: 不変な状態だけの関数か（Issue #219 C-RS2。意味は `core/semantic_lifecycle.py`）
     _storage_payload: Any = None
+    _runtime_ref_payload: Any = None
     _serialization_closed: bool = False
     _recurrence_semantic_key: Any = None
     
@@ -975,7 +977,18 @@ class Expression:
                 result["storage_info"] = storage_info.to_dict()
         if self.read_order_key is not None:
             result["read_order_key"] = self.read_order_key
-        if self.runtime_ref is not None:
+        # 凍結済みの node は凍結時に作った表現の写しから描く（Issue #219 C-RS2: ref の表現を作る
+        # code は field の外を読み得るので、凍結後は走らせない）。写しの無い node は生の ref を描く
+        ref_payload = self._runtime_ref_payload
+        if ref_payload is not None:
+            if type(ref_payload) is not FrozenLegacyTree:
+                raise TypeError("Expression runtime ref payload must be a FrozenLegacyTree")
+            if collect is None:
+                result["runtime_ref"] = ref_payload.thaw()
+            else:
+                collect.append(_RuntimeRefChild(ref_payload.thaw()))
+                result["runtime_ref"] = 0
+        elif self.runtime_ref is not None:
             if collect is None:
                 result["runtime_ref"] = self._serialize_runtime_ref(self.runtime_ref)
             else:

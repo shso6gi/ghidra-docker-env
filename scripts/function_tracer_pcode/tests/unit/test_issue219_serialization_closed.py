@@ -127,8 +127,12 @@ def _written_bytes(value: Any) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _random_expression(rng: random.Random, depth: int, pool: list) -> Expression:
-    """storage / PHI / runtime ref を含む式をランダムに組む（共有 DAG になるよう pool から再利用する）。"""
+def _random_expression(rng: random.Random, depth: int, pool: list, carriers: Optional[list] = None) -> Expression:
+    """storage / PHI / runtime ref を含む式をランダムに組む（共有 DAG になるよう pool から再利用する）。
+
+    `carriers` に list を渡すと、式を抱える runtime ref（凍結時に表現を写さない ref）も作り、作った
+    node をそこへ積む。渡さなければ作らない（生成した式は必ず closed になる）。
+    """
 
     if pool and rng.random() < 0.25:
         return rng.choice(pool)
@@ -164,28 +168,36 @@ def _random_expression(rng: random.Random, depth: int, pool: list) -> Expression
         if choice == 0:
             node = Expression.binary_op(
                 rng.choice(("INT_ADD", "INT_SUB", "INT_AND")),
-                _random_expression(rng, depth - 1, pool),
-                _random_expression(rng, depth - 1, pool),
+                _random_expression(rng, depth - 1, pool, carriers),
+                _random_expression(rng, depth - 1, pool, carriers),
             )
         elif choice == 1:
-            node = Expression.unary_op("INT_NEGATE", _random_expression(rng, depth - 1, pool))
+            node = Expression.unary_op("INT_NEGATE", _random_expression(rng, depth - 1, pool, carriers))
         elif choice == 2:
             guard = Condition(
                 Expression.binary_op(
-                    "INT_LESS", _random_expression(rng, depth - 1, pool), Expression.constant(3, size=4)
+                    "INT_LESS", _random_expression(rng, depth - 1, pool, carriers), Expression.constant(3, size=4)
                 ),
                 negated=rng.random() < 0.5,
             )
             node = Expression.phi(
-                [(guard, _random_expression(rng, depth - 1, pool)), (None, _random_expression(rng, depth - 1, pool))]
+                [(guard, _random_expression(rng, depth - 1, pool, carriers)), (None, _random_expression(rng, depth - 1, pool, carriers))]
             )
         elif choice == 3:
-            node = Expression.memory(
-                _random_expression(rng, depth - 1, pool), size=4, read_order_key=rng.randrange(8),
-                runtime_ref=_FrozenRef(("mem", rng.randrange(4)), inner=_random_expression(rng, 0, pool)),
+            carrying = carriers is not None and rng.random() < 0.5
+            ref = (
+                _FrozenRef(("mem", rng.randrange(4)), inner=_random_expression(rng, 0, pool, carriers))
+                if carrying
+                else _FrozenRef(("mem", rng.randrange(4)), kind=ExpressionType.MEMORY)
             )
+            node = Expression.memory(
+                _random_expression(rng, depth - 1, pool, carriers), size=4, read_order_key=rng.randrange(8),
+                runtime_ref=ref,
+            )
+            if carrying:
+                carriers.append(node)
         else:
-            node = Expression.call("f%d" % rng.randrange(3), [_random_expression(rng, depth - 1, pool)])
+            node = Expression.call("f%d" % rng.randrange(3), [_random_expression(rng, depth - 1, pool, carriers)])
     pool.append(node)
     return node
 
@@ -193,7 +205,8 @@ def _random_expression(rng: random.Random, depth: int, pool: list) -> Expression
 @pytest.mark.parametrize("seed", range(40))
 def test_freezing_does_not_change_the_legacy_representation(seed):
     rng = random.Random(seed)
-    expr = _random_expression(rng, 4, [])
+    carriers: list = []
+    expr = _random_expression(rng, 4, [], carriers)
     before = expr.to_dict()
 
     freeze_expression(expr)
@@ -202,8 +215,8 @@ def test_freezing_does_not_change_the_legacy_representation(seed):
     assert expr.to_dict() == before
     # 見積もり（凍結済み node は写しから測る）と実出力も食い違わない
     assert estimate_legacy_dict_bytes(expr, work=None) == _written_bytes(before)
-    # 生成した式はどれも不変な材料だけで出来ているので closed になる
-    assert serialization_closed(expr) is True
+    # 不変な材料だけの式は closed。式を抱える ref（表現を写さない）を含む式だけが closed でない
+    assert serialization_closed(expr) is (not carriers)
 
 
 def test_publishing_a_mock_analysis_does_not_change_its_representation():
@@ -235,36 +248,20 @@ def test_publishing_a_mock_analysis_does_not_change_its_representation():
 # ---------------------------------------------------------------------------
 
 
-def _mutable_runtime_ref():
-    return Expression.unknown("u", runtime_ref=_MutableRef(("u", 1)))
+def _unclosed_leaf():
+    """closed でない葉（表現にそのまま置かれる値が可変な容器）。"""
+
+    return Expression(ExpressionType.LITERAL, value=[1, 2], size=4)
 
 
-def _frozen_ref_holding_a_list():
-    return Expression.unknown("u", runtime_ref=_FrozenRefWithList(items=[1, 2]))
+def _ref_carrying_an_expression():
+    """式を抱える runtime ref（表現は式の木を展開して含むので、凍結時に写さない）。"""
 
-
-def _frozen_ref_holding_a_dict():
-    return Expression.unknown("u", runtime_ref=_FrozenRefWithDict(table={"k": 1}))
-
-
-def _frozen_ref_holding_an_unclosed_expression():
-    return Expression.unknown("u", runtime_ref=_FrozenRef(("u",), inner=_mutable_runtime_ref()))
-
-
-def _frozen_ref_with_hidden_state():
-    """frozen dataclass だが field 以外の状態（後から足した cache）を持つ ref。"""
-
-    ref = _FrozenRef(("u",))
-    object.__setattr__(ref, "_cache", [])
-    return Expression.unknown("u", runtime_ref=ref)
+    return Expression.unknown("u", runtime_ref=_FrozenRef(("u",), inner=_parameter("a")))
 
 
 def _opaque_value():
     return Expression(ExpressionType.LITERAL, value=object(), size=4)
-
-
-def _mutable_container_value():
-    return Expression(ExpressionType.LITERAL, value=[1, 2], size=4)
 
 
 def _mutable_scalar_field():
@@ -272,11 +269,11 @@ def _mutable_scalar_field():
 
 
 def _unclosed_child():
-    return Expression.binary_op("INT_ADD", _mutable_runtime_ref(), Expression.constant(1, 4))
+    return Expression.binary_op("INT_ADD", _unclosed_leaf(), Expression.constant(1, 4))
 
 
 def _unclosed_phi_condition():
-    guard = Condition(Expression.binary_op("INT_LESS", _mutable_runtime_ref(), Expression.constant(1, 4)))
+    guard = Condition(Expression.binary_op("INT_LESS", _unclosed_leaf(), Expression.constant(1, 4)))
     return Expression.phi([(guard, Expression.constant(1, 4)), (None, Expression.constant(2, 4))])
 
 
@@ -329,8 +326,8 @@ class _TupleSubclass(tuple):
 
 
 @dataclasses.dataclass(frozen=True)
-class _UndeclaredRecord:
-    """直列化の protocol（`json_items`）を持つが、field だけの関数だと宣言していない ref。"""
+class _RecordReadingARegistry:
+    """表現（`json_items`）が field の外の可変な registry を読む ref。"""
 
     key: Tuple[Any, ...]
 
@@ -342,31 +339,41 @@ _MUTABLE_REGISTRY: dict = {}
 
 
 @dataclasses.dataclass(frozen=True)
-class _DeclaredRecord:
-    """protocol を持ち、field だけの関数だと宣言した ref（宣言は静的な監査の対象）。"""
+class _RecordWithAnOpaqueLeaf:
+    """表現に組み込みでない葉（任意の object）をそのまま置く ref（描いた後で owner がその型で読む）。"""
 
-    __serialization_determined_by_fields__ = True
-
-    key: Tuple[Any, ...]
+    key: int = 0
 
     def json_items(self):
-        yield "key", self.key
+        from scripts.function_tracer_pcode.core.json_encoding import raw
+
+        yield "key", raw(_OPAQUE)
+
+
+_OPAQUE = object()
 
 
 @dataclasses.dataclass(frozen=True)
-class _SubclassOfDeclaredRecord(_DeclaredRecord):
-    """宣言した型の subclass（宣言は継承しない: protocol を上書きし得る）。"""
+class _RecordWithAnEnumLeaf:
+    key: int = 0
 
     def json_items(self):
-        yield "key", _MUTABLE_REGISTRY.get(self.key, self.key)
+        from scripts.function_tracer_pcode.core.json_encoding import raw
+
+        yield "key", raw(_TupleValuedEnum.MEMBER)
+
+
+@dataclasses.dataclass(frozen=True)
+class _RecordThatFailsToSerialize:
+    key: int = 0
+
+    def json_items(self):
+        raise TypeError("this ref cannot be serialized")
+        yield  # pragma: no cover
 
 
 class _ExpressionSubclass(Expression):
     """表現を作る method を上書きし得る式の型（表と規則が述べるのは `Expression` の表現だけ）。"""
-
-
-def _list_valued_enum_value():
-    return Expression(ExpressionType.LITERAL, value=_ListValuedEnum.MEMBER, size=4)
 
 
 class _AttachedStateEnum(enum.Enum):
@@ -375,36 +382,6 @@ class _AttachedStateEnum(enum.Enum):
 
 #: member の instance に後から載せた可変な状態（enum の method が読み得る）
 _AttachedStateEnum.MEMBER.attached = []
-
-
-def _enum_member_with_attached_state():
-    return Expression(ExpressionType.LITERAL, value=_AttachedStateEnum.MEMBER, size=4)
-
-
-def _stateful_int_value():
-    return Expression(ExpressionType.CONSTANT, value=_StatefulInt(3), size=4)
-
-
-def _tuple_subclass_value():
-    return Expression(ExpressionType.LITERAL, value=_TupleSubclass((1, 2)), size=4)
-
-
-def _undeclared_record_ref():
-    return Expression.unknown("u", runtime_ref=_UndeclaredRecord(("k",)))
-
-
-def _subclass_of_declared_record_ref():
-    return Expression.unknown("u", runtime_ref=_SubclassOfDeclaredRecord(("k",)))
-
-
-def _expression_subclass():
-    return _ExpressionSubclass(ExpressionType.CONSTANT, value=1, size=4)
-
-
-def _storage_with_a_stateful_scalar():
-    storage = _storage("x0")
-    storage.offset = _StatefulInt(8)
-    return _parameter("a", storage=storage)
 
 
 def _node_missing_a_represented_field():
@@ -418,30 +395,41 @@ def _node_missing_a_represented_field():
     return partial
 
 
+def _storage_with_a_scalar_subclass():
+    storage = _storage("x0")
+    storage.offset = _SlottedInt(8)
+    return _parameter("a", storage=storage)
+
+
 _NOT_CLOSED = {
-    "node_missing_a_represented_field": _node_missing_a_represented_field,
-    "list_valued_enum_value": _list_valued_enum_value,
-    "enum_member_with_attached_state": _enum_member_with_attached_state,
-    "stateful_int_value": _stateful_int_value,
-    "tuple_subclass_value": _tuple_subclass_value,
-    "undeclared_record_ref": _undeclared_record_ref,
-    "subclass_of_declared_record_ref": _subclass_of_declared_record_ref,
-    "expression_subclass": _expression_subclass,
-    "storage_with_a_stateful_scalar": _storage_with_a_stateful_scalar,
-    "mutable_runtime_ref": _mutable_runtime_ref,
-    "frozen_ref_holding_a_list": _frozen_ref_holding_a_list,
-    "frozen_ref_holding_a_dict": _frozen_ref_holding_a_dict,
-    "frozen_ref_holding_an_unclosed_expression": _frozen_ref_holding_an_unclosed_expression,
-    "frozen_ref_with_hidden_state": _frozen_ref_with_hidden_state,
+    # 表現にそのまま置かれる葉: 組み込みの型そのもの以外
+    "list_valued_enum_value": lambda: Expression(ExpressionType.LITERAL, value=_ListValuedEnum.MEMBER, size=4),
+    "tuple_valued_enum_value": lambda: Expression(ExpressionType.LITERAL, value=_TupleValuedEnum.MEMBER, size=4),
+    "enum_member_with_attached_state": lambda: Expression(ExpressionType.LITERAL, value=_AttachedStateEnum.MEMBER, size=4),
+    "int_enum_value": lambda: Expression(ExpressionType.LITERAL, value=_Flavor.SWEET, size=4),
+    "stateful_int_value": lambda: Expression(ExpressionType.CONSTANT, value=_StatefulInt(3), size=4),
+    "slotted_int_value": lambda: Expression(ExpressionType.CONSTANT, value=_SlottedInt(3), size=4),
+    "tuple_subclass_value": lambda: Expression(ExpressionType.LITERAL, value=_TupleSubclass((1, 2)), size=4),
     "opaque_value": _opaque_value,
-    "mutable_container_value": _mutable_container_value,
+    "mutable_container_value": _unclosed_leaf,
     "mutable_scalar_field": _mutable_scalar_field,
+    # 値の型・形
+    "expression_subclass": lambda: _ExpressionSubclass(ExpressionType.CONSTANT, value=1, size=4),
+    "node_missing_a_represented_field": _node_missing_a_represented_field,
+    # 子・PHI
     "unclosed_child": _unclosed_child,
     "unclosed_phi_condition": _unclosed_phi_condition,
     "non_condition_phi_guard": _non_condition_phi_guard,
+    # storage
     "uncapturable_storage": _uncapturable_storage,
     "storage_of_another_type": _storage_of_another_type,
+    "storage_with_a_scalar_subclass": _storage_with_a_scalar_subclass,
+    # runtime ref: 表現を写せない
+    "ref_carrying_an_expression": _ref_carrying_an_expression,
     "runtime_ref_that_reaches_back": _runtime_ref_that_reaches_back,
+    "ref_with_an_opaque_leaf": lambda: Expression.unknown("u", runtime_ref=_RecordWithAnOpaqueLeaf()),
+    "ref_with_an_enum_leaf": lambda: Expression.unknown("u", runtime_ref=_RecordWithAnEnumLeaf()),
+    "ref_that_fails_to_serialize": lambda: Expression.unknown("u", runtime_ref=_RecordThatFailsToSerialize()),
 }
 
 
@@ -455,7 +443,7 @@ def test_values_whose_representation_reads_mutable_state_are_not_closed(build):
 
 
 def test_a_parent_of_an_unclosed_value_is_not_closed_either():
-    leaf = _mutable_runtime_ref()
+    leaf = _unclosed_leaf()
     parent = Expression.unary_op("INT_NEGATE", Expression.binary_op("INT_ADD", leaf, Expression.constant(1, 4)))
     freeze_expression(parent)
 
@@ -468,16 +456,14 @@ _CLOSED = {
     "parameter_with_storage": lambda: _parameter("a"),
     "variable_without_storage": lambda: Expression.variable("v", size=8),
     "tuple_value": lambda: Expression(ExpressionType.LITERAL, value=("a", 1, (2, 3)), size=4),
+    "phi_with_closed_conditions": _closed_expression,
+    # runtime ref: 表現を凍結時に写せるもの（ref の型が表現をどう作るかに依らない）
     "frozen_runtime_ref": lambda: Expression.unknown("u", runtime_ref=_FrozenRef(("u", 1))),
     "pcode_op_ref": lambda: Expression.unknown("op", runtime_ref=PcodeOpRef(address_offset=16, mnemonic="COPY")),
-    "frozen_ref_holding_a_closed_expression": lambda: Expression.unknown(
-        "u", runtime_ref=_FrozenRef(("u",), inner=_parameter("a"))
-    ),
-    "phi_with_closed_conditions": _closed_expression,
-    "tuple_valued_enum": lambda: Expression(ExpressionType.LITERAL, value=_TupleValuedEnum.MEMBER, size=4),
-    "int_enum_value": lambda: Expression(ExpressionType.LITERAL, value=_Flavor.SWEET, size=4),
-    "slotted_int_value": lambda: Expression(ExpressionType.CONSTANT, value=_SlottedInt(3), size=4),
-    "declared_record_ref": lambda: Expression.unknown("u", runtime_ref=_DeclaredRecord(("k", 1))),
+    "mutable_runtime_ref": lambda: Expression.unknown("u", runtime_ref=_MutableRef(("u", 1))),
+    "frozen_ref_holding_a_list": lambda: Expression.unknown("u", runtime_ref=_FrozenRefWithList(items=[1, 2])),
+    "frozen_ref_holding_a_dict": lambda: Expression.unknown("u", runtime_ref=_FrozenRefWithDict(table={"k": 1})),
+    "record_reading_a_registry": lambda: Expression.unknown("u", runtime_ref=_RecordReadingARegistry(("k", 1))),
 }
 
 
@@ -501,7 +487,7 @@ def test_closed_needs_validation():
 
 def test_a_condition_is_closed_exactly_when_its_expression_is():
     closed = Condition(Expression.binary_op("INT_LESS", _parameter("a"), Expression.constant(1, 4)))
-    unclosed = Condition(Expression.binary_op("INT_LESS", _mutable_runtime_ref(), Expression.constant(1, 4)))
+    unclosed = Condition(Expression.binary_op("INT_LESS", _unclosed_leaf(), Expression.constant(1, 4)))
 
     assert serialization_closed(closed) is True
     assert serialization_closed(unclosed) is False
@@ -514,25 +500,27 @@ def test_closed_values_keep_their_representation_under_raw_mutation():
     """closed の意味: 表現が読む生の状態を書き換えても表現は動かない（C-RS2 の本文）。"""
 
     storage = _storage("x0")
-    inner_storage = _storage("x1")
+    ref_items = [1, 2]
     expr = Expression.binary_op(
         "INT_ADD",
         _parameter("a", storage=storage),
-        Expression.unknown("u", runtime_ref=_FrozenRef(("u",), inner=_parameter("b", storage=inner_storage))),
+        Expression.unknown("u", runtime_ref=_FrozenRefWithList(items=ref_items)),
     )
     freeze_expression(expr)
     assert serialization_closed(expr) is True
     before = expr.to_dict()
+    fingerprint = _snapshot_fingerprint_of(expr)
 
-    for victim in (storage, inner_storage):
-        victim.register_name = "zz"
-        victim.offset = 1024
-        victim.is_register = False
+    storage.register_name = "zz"
+    storage.offset = 1024
+    storage.is_register = False
+    ref_items.append(3)
 
     assert expr.to_dict() == before
+    assert _snapshot_fingerprint_of(expr) == fingerprint
 
 
-@pytest.mark.parametrize("name", ["_storage_payload", "_serialization_closed", "_snapshot"])
+@pytest.mark.parametrize("name", ["_storage_payload", "_runtime_ref_payload", "_serialization_closed", "_snapshot"])
 def test_derived_state_of_a_validated_value_cannot_be_reassigned(name):
     """派生値も検証済みの状態の一部: 凍結後の代入は（意味 field と同じく）内部バグとして拒む。"""
 
@@ -555,19 +543,16 @@ def test_unclosed_values_may_still_follow_the_live_object():
     closed の判定が「表現が本当に動き得る値」を closed と呼ばないことの対照。
     """
 
-    @dataclasses.dataclass
-    class _Record:
-        key: Any
-
-    record = _Record(key=1)
-    expr = Expression.unknown("u", runtime_ref=record)
+    items = [1, 2]
+    expr = Expression(ExpressionType.LITERAL, value=items, size=4)
     freeze_expression(expr)
-    before = expr.to_dict()
+    # 表現は生の list をそのまま置くので、比べる前の値は写しにしておく
+    before = _written_bytes(expr.to_dict())
 
-    record.key = 2
+    items.append(3)
 
     assert serialization_closed(expr) is False
-    assert expr.to_dict() != before
+    assert _written_bytes(expr.to_dict()) != before
 
 
 # ---------------------------------------------------------------------------
@@ -593,6 +578,7 @@ _EXPRESSION_LOCAL_READS = {
     ("condition", "negated"): _CONDITION_FIELD,
     ("expr_type", "_name_"): "enum の member の名前（class の定義 = code。SCALAR の規則が型を固定する）",
     ("storage_payload", "to_dict"): "凍結時の写し（`FrozenStorageRecord`、STORAGE の規則）",
+    ("ref_payload", "thaw"): "凍結時に作った runtime ref の表現の写し（`FrozenLegacyTree`、RUNTIME_REF の規則）",
     ("storage_info", "to_dict"): "未凍結の node だけが読む生の storage（closed にならない経路）",
     ("work", "charge"): _MACHINERY,
     ("work", "remaining"): _MACHINERY,
@@ -696,6 +682,9 @@ class _AuditProbe:
     def via_local_read(self, child):
         return child.hidden
 
+    def via_mutable_default(self, scratch=[]):  # noqa: B006 - 監査の反例
+        return scratch
+
 
 def _read_hidden(value):
     return value.hidden
@@ -712,6 +701,7 @@ def _read_hidden(value):
         ("via_escape", None, True),
         ("via_alias", None, True),
         ("via_local_read", None, True),
+        ("via_mutable_default", None, True),
     ],
 )
 def test_the_read_audit_enumerates_or_rejects_every_form_of_read(entry, expected_field, expect_violation):
@@ -733,7 +723,7 @@ def test_every_serialization_input_kind_has_exactly_one_closure_rule():
 def test_the_closure_derivation_lives_only_in_the_lifecycle_owner():
     """closed の規則を consumer 側で再実装しない（owner は semantic_freeze / semantic_lifecycle）。"""
 
-    names = {"_serialization_closed", "_storage_payload"}
+    names = {"_serialization_closed", "_storage_payload", "_runtime_ref_payload"}
     root = pathlib.Path(expression_module.__file__).resolve().parents[1]
     owners = {root / "core" / "semantic_freeze.py", root / "core" / "semantic_lifecycle.py"}
     writers = []
@@ -914,159 +904,6 @@ def test_lifecycle_fields_cannot_be_written_through_attributes_in_any_state():
 
 
 # ---------------------------------------------------------------------------
-# 宣言（field だけで表現が決まる型）の静的な監査
-# ---------------------------------------------------------------------------
-
-
-def _package_types():
-    import importlib
-    import pkgutil
-
-    import scripts.function_tracer_pcode as package
-
-    seen = []
-    for module_info in pkgutil.walk_packages(package.__path__, package.__name__ + "."):
-        if ".tests" in module_info.name:
-            continue
-        module = importlib.import_module(module_info.name)
-        for value in vars(module).values():
-            if isinstance(value, type) and value.__module__ == module.__name__ and value not in seen:
-                seen.append(value)
-    return seen
-
-
-def test_every_declared_type_passes_the_purity_audit():
-    from scripts.function_tracer_pcode.core.semantic_lifecycle import (
-        FIELD_DETERMINED_SERIALIZATION_MARKER,
-        serialization_protocol_methods,
-    )
-    from scripts.function_tracer_pcode.tests.unit._serialization_purity_audit import PurityAudit
-
-    declared = [kind for kind in _package_types() if kind.__dict__.get(FIELD_DETERMINED_SERIALIZATION_MARKER) is True]
-    assert declared, "no type declares a field-determined serialization"
-    failures = {}
-    for kind in declared:
-        protocols = serialization_protocol_methods(kind)
-        violations = PurityAudit().audit_type(kind, protocols) if protocols else ["declares without a protocol"]
-        if violations:
-            failures[kind.__qualname__] = violations
-    assert failures == {}
-
-
-#: 直列化の protocol を持つ runtime ref の型のうち、宣言していない型と理由（宣言できない = 監査が
-#: 拒否する code を持つ）。宣言しない型の値を抱える式は closed にならない（遅くなるだけ）。
-_UNDECLARED_REF_TYPES = {
-    "CallModelCandidateRef": "`_jsonable_key_source` が field の要素を `raw()` で置く（codec が要素の型の規則で写す）",
-    "ComposedLoopSummaryRef": "`side_effect_profile` が表現の途中で別の ref を組み立てる",
-    "ExpansionBudgetTruncation": "field でない instance 状態（`_owner_scope_value` など）を読む",
-}
-
-
-def test_every_runtime_ref_type_with_a_protocol_is_declared_or_explained():
-    """ref の型を足したら、宣言するか、宣言しない理由をここへ書く（黙って closed を失わない）。"""
-
-    from scripts.function_tracer_pcode.core.semantic_lifecycle import (
-        FIELD_DETERMINED_SERIALIZATION_MARKER,
-        serialization_protocol_methods,
-    )
-
-    prefixes = ("scripts.function_tracer_pcode.core.runtime_refs.", "scripts.function_tracer_pcode.core.call_target")
-    undeclared = {
-        kind.__qualname__
-        for kind in _package_types()
-        if kind.__module__.startswith(prefixes)
-        and dataclasses.is_dataclass(kind)
-        and serialization_protocol_methods(kind)
-        and kind.__dict__.get(FIELD_DETERMINED_SERIALIZATION_MARKER) is not True
-    }
-    assert undeclared == set(_UNDECLARED_REF_TYPES)
-
-
-_AUDIT_STATE: list = []
-
-
-@dataclasses.dataclass(frozen=True)
-class _ReadsModuleState:
-    key: int
-
-    def json_items(self):
-        yield "key", _AUDIT_STATE
-
-
-@dataclasses.dataclass(frozen=True)
-class _ReadsClassState:
-    registry = {}
-    key: int = 0
-
-    def json_items(self):
-        yield "key", self.registry
-
-
-@dataclasses.dataclass(frozen=True)
-class _RawOfAField:
-    key: Any
-
-    def json_items(self):
-        from scripts.function_tracer_pcode.core.json_encoding import raw
-
-        yield "key", raw(self.key)
-
-
-@dataclasses.dataclass(frozen=True)
-class _UncheckedLocal:
-    key: Any
-
-    def json_items(self):
-        key = self.key
-        yield "key", key.anything
-
-
-@dataclasses.dataclass(frozen=True)
-class _DynamicRead:
-    key: Any
-
-    def json_items(self):
-        yield "key", getattr(self, "hidden", None)
-
-
-@dataclasses.dataclass(frozen=True)
-class _WritesState:
-    key: Any
-
-    def json_items(self):
-        self.key.append(1)
-        yield "key", self.key
-
-
-@dataclasses.dataclass(frozen=True)
-class _NarrowedOnlyInOneBranch:
-    key: Any
-
-    def json_items(self):
-        key = self.key
-        if type(key) is _DeclaredRecord:
-            yield "key", key.key
-        yield "other", key.anything
-
-
-@pytest.mark.parametrize(
-    "kind",
-    [_ReadsModuleState, _ReadsClassState, _RawOfAField, _UncheckedLocal, _DynamicRead, _WritesState, _NarrowedOnlyInOneBranch],
-    ids=lambda kind: kind.__name__,
-)
-def test_the_purity_audit_rejects_state_the_fields_do_not_determine(kind):
-    from scripts.function_tracer_pcode.tests.unit._serialization_purity_audit import PurityAudit
-
-    assert PurityAudit().audit_type(kind, ("json_items",)) != []
-
-
-def test_the_purity_audit_accepts_a_field_only_protocol():
-    from scripts.function_tracer_pcode.tests.unit._serialization_purity_audit import PurityAudit
-
-    assert PurityAudit().audit_type(_DeclaredRecord, ("json_items",)) == []
-
-
-# ---------------------------------------------------------------------------
 # round 3: 直列化の code が外部の状態を読む runtime ref（暗黙の dispatch・別名・既定引数など）
 #
 # どの ref も package の型（walker が `json_items` で表現を作る record）で、表現を作る code が
@@ -1107,7 +944,6 @@ class _StateRepr(int):
 
 @dataclasses.dataclass(frozen=True)
 class _ReprOfField:
-    __serialization_determined_by_fields__ = True
     key: Any
 
     def json_items(self):
@@ -1116,7 +952,6 @@ class _ReprOfField:
 
 @dataclasses.dataclass(frozen=True)
 class _StrOfField:
-    __serialization_determined_by_fields__ = True
     key: Any
 
     def json_items(self):
@@ -1125,7 +960,6 @@ class _StrOfField:
 
 @dataclasses.dataclass(frozen=True)
 class _FormatOfField:
-    __serialization_determined_by_fields__ = True
     key: Any
 
     def json_items(self):
@@ -1134,7 +968,6 @@ class _FormatOfField:
 
 @dataclasses.dataclass(frozen=True)
 class _OperatorOnField:
-    __serialization_determined_by_fields__ = True
     key: Any
 
     def json_items(self):
@@ -1143,7 +976,6 @@ class _OperatorOnField:
 
 @dataclasses.dataclass(frozen=True)
 class _LenOfField:
-    __serialization_determined_by_fields__ = True
     key: Any
 
     def json_items(self):
@@ -1152,7 +984,6 @@ class _LenOfField:
 
 @dataclasses.dataclass(frozen=True)
 class _IterationOverField:
-    __serialization_determined_by_fields__ = True
     key: Any
 
     def json_items(self):
@@ -1161,7 +992,6 @@ class _IterationOverField:
 
 @dataclasses.dataclass(frozen=True)
 class _GetattributeRead:
-    __serialization_determined_by_fields__ = True
     key: int
 
     def __getattribute__(self, name):
@@ -1175,7 +1005,6 @@ class _GetattributeRead:
 
 @dataclasses.dataclass(frozen=True)
 class _GetattrFallback:
-    __serialization_determined_by_fields__ = True
     key: int
 
     def __getattr__(self, name):
@@ -1187,7 +1016,6 @@ class _GetattrFallback:
 
 @dataclasses.dataclass(frozen=True)
 class _NameBase:
-    __serialization_determined_by_fields__ = True
     tag: int = 0
 
     def label(self):
@@ -1202,7 +1030,6 @@ class _NameSub(_NameBase):
 
 @dataclasses.dataclass(frozen=True)
 class _SubclassDispatch:
-    __serialization_determined_by_fields__ = True
     key: Any
 
     def json_items(self):
@@ -1213,7 +1040,6 @@ class _SubclassDispatch:
 
 @dataclasses.dataclass(frozen=True)
 class _RecordWithStableKey:
-    __serialization_determined_by_fields__ = True
     tag: int = 0
 
     def json_items(self):
@@ -1225,7 +1051,6 @@ class _RecordWithStableKey:
 
 @dataclasses.dataclass(frozen=True)
 class _RawThroughModuleAttribute:
-    __serialization_determined_by_fields__ = True
     key: Any
 
     def json_items(self):
@@ -1236,7 +1061,6 @@ class _RawThroughModuleAttribute:
 
 @dataclasses.dataclass(frozen=True)
 class _RawThroughAlias:
-    __serialization_determined_by_fields__ = True
     key: Any
 
     def json_items(self):
@@ -1247,7 +1071,6 @@ class _RawThroughAlias:
 
 @dataclasses.dataclass(frozen=True)
 class _MutableDefaultArgument:
-    __serialization_determined_by_fields__ = True
     key: int
 
     def json_items(self, scratch=_EXTERNAL["items"]):
@@ -1256,7 +1079,6 @@ class _MutableDefaultArgument:
 
 @dataclasses.dataclass(frozen=True)
 class _ClassRegistry:
-    __serialization_determined_by_fields__ = True
     registry = _EXTERNAL
     key: int = 0
 
@@ -1325,3 +1147,122 @@ def test_the_external_state_counterexamples_do_move_a_live_representation(_exter
             moved.append(label)
     # 表現が code の実行結果に依存する反例（`__eq__` を上書きした葉も含めて比べ方に依らず動くもの）
     assert {"getattribute_read", "getattr_fallback", "subclass_dispatch", "mutable_default_argument", "class_registry"} <= set(moved)
+
+
+# ---------------------------------------------------------------------------
+# round 3: 凍結時の表現の写し（runtime ref）の契約
+# ---------------------------------------------------------------------------
+
+
+def _production_refs():
+    from scripts.function_tracer_pcode.core.call_target import CallTargetRef
+    from scripts.function_tracer_pcode.core.runtime_refs import UnknownValueRef
+
+    return {
+        "pcode_op": PcodeOpRef(address_offset=0x1234, mnemonic="INT_ADD", input_sizes=(4, 4), output_size=4),
+        "opaque_unknown": UnknownValueRef.opaque(reason="u"),
+        "call_target_unknown": UnknownValueRef(kind="call", target_ref=CallTargetRef.from_name("memcpy")),
+        "origin_object_unknown": UnknownValueRef(kind="origin", origin_ref=object(), display_hint="x"),
+        "frozen_fields": _FrozenRef(("k", 1, (2, 3)), ExpressionType.MEMORY),
+        "external_registry": _RecordReadingARegistry(("k",)),
+    }
+
+
+@pytest.mark.parametrize("label", sorted(_production_refs()))
+def test_a_captured_ref_is_serialized_exactly_as_the_live_ref_would_be(label):
+    """写しから描いた表現は、同じ ref を未凍結の式で描いた表現と同じ（出力の互換性）。"""
+
+    ref = _production_refs()[label]
+    live = Expression.unknown("u", runtime_ref=ref)
+    frozen = freeze_expression(Expression.unknown("u", runtime_ref=ref))
+
+    assert serialization_closed(frozen) is True
+    assert frozen.to_dict() == live.to_dict()
+    assert _written_bytes(frozen.to_dict()) == _written_bytes(live.to_dict())
+    assert estimate_legacy_dict_bytes(frozen, work=None) == estimate_legacy_dict_bytes(live, work=None)
+    assert _snapshot_fingerprint_of(frozen) == _snapshot_fingerprint_of(live)
+
+
+def test_the_ref_serialization_code_runs_once_at_freeze(monkeypatch):
+    """ref の表現を作る code は凍結の 1 回だけ走り、以後の直列化・fingerprint では走らない。"""
+
+    reads = []
+
+    class _CountingRegistry(dict):
+        def get(self, key, default=None):
+            reads.append(key)
+            return default
+
+    monkeypatch.setitem(globals(), "_MUTABLE_REGISTRY", _CountingRegistry())
+    expr = Expression.unknown("u", runtime_ref=_RecordReadingARegistry(("k",)))
+    freeze_expression(expr)
+    assert len(reads) == 1
+
+    for _ in range(3):
+        expr.to_dict()
+    estimate_legacy_dict_bytes(expr, work=None)
+    _snapshot_fingerprint_of(expr)
+
+    assert len(reads) == 1
+
+
+def test_the_output_of_a_captured_ref_is_a_fresh_container_each_time():
+    expr = freeze_expression(Expression.unknown("u", runtime_ref=_FrozenRefWithList(items=[1, 2])))
+
+    first = expr.to_dict()
+    first["runtime_ref"]["items"].append(99)
+
+    assert expr.to_dict()["runtime_ref"] == {"items": [1, 2]}
+
+
+def test_a_ref_that_fails_to_serialize_keeps_failing_the_same_way():
+    """表現を作れない ref は写さない: 凍結は成功し、描くと従来どおり同じ失敗になる。"""
+
+    live = Expression.unknown("u", runtime_ref=_RecordThatFailsToSerialize())
+    frozen = freeze_expression(Expression.unknown("u", runtime_ref=_RecordThatFailsToSerialize()))
+
+    with pytest.raises(Exception) as live_failure:
+        live.to_dict()
+    with pytest.raises(Exception) as frozen_failure:
+        frozen.to_dict()
+    assert type(frozen_failure.value) is type(live_failure.value)
+    assert serialization_closed(frozen) is False
+
+
+@dataclasses.dataclass(frozen=True)
+class _HugeRef:
+    table: dict
+
+
+def test_capturing_a_large_ref_records_no_limitation_and_keeps_the_output():
+    """写すための 1 回の直列化は台帳へ何も記録せず、写しの表現は生の ref の表現と同じ。"""
+
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+    from scripts.function_tracer_pcode.core.live_values import SCAN_LIMIT
+
+    table = {f"k{index}": index for index in range(SCAN_LIMIT + 10)}
+    expr = Expression.unknown("u", runtime_ref=_HugeRef(table))
+    live = Expression.unknown("u", runtime_ref=_HugeRef(table))
+    with pair_failure_scope(("bin1", "bin2"), None) as ledger:
+        freeze_expression(expr)
+        assert ledger._records == []
+    assert expr.to_dict() == live.to_dict()
+
+
+def test_a_read_bound_signal_while_capturing_leaves_the_ref_uncaptured(monkeypatch):
+    """読みの量の信号（`StorageBeyondReadBound`）は写さない理由になるだけで、凍結は成功し記録も残らない。"""
+
+    from scripts.function_tracer_pcode.core import semantic_freeze
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope
+    from scripts.function_tracer_pcode.core.live_values import StorageBeyondReadBound
+
+    def _signal(_value):
+        raise StorageBeyondReadBound("a probe", 1 << 20)
+
+    monkeypatch.setattr(semantic_freeze, "runtime_ref_source", _signal)
+    expr = Expression.unknown("u", runtime_ref=_FrozenRef(("u",)))
+    with pair_failure_scope(("bin1", "bin2"), None) as ledger:
+        freeze_expression(expr)
+        assert ledger._records == []
+    assert expr.is_frozen
+    assert serialization_closed(expr) is False

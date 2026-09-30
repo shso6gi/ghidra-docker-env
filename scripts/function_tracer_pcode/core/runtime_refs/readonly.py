@@ -31,9 +31,6 @@ def _location_base_display_name(ref: Any) -> Any:
 class ReadonlyReductionTermRef:
     """Object-centric description of one scalar term in a memory reduction."""
 
-    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
-    __serialization_determined_by_fields__ = True
-
     byte_offset: int
     access_size: int
 
@@ -56,9 +53,6 @@ class ReadonlyReductionTermRef:
 @dataclass(frozen=True)
 class ReadonlyReductionWitness:
     """Concrete count-parameter witness for a readonly reduction."""
-
-    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
-    __serialization_determined_by_fields__ = True
 
     exact_count: int
     terms: Tuple[ReadonlyReductionTermRef, ...]
@@ -93,9 +87,6 @@ class ReductionAccumulatorProof:
     constant bias.  Consumers should preserve this object when future lowerings
     need more detail than ``READONLY_SUM(base, count)`` can currently express.
     """
-
-    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
-    __serialization_determined_by_fields__ = True
 
     reduction_kind: str
     pointer_base_ref: LocationBaseRef
@@ -1015,9 +1006,6 @@ class ReductionAccumulatorProof:
 class ReadonlyReductionRef:
     """Structured identity for a readonly pointer-reduction summary."""
 
-    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
-    __serialization_determined_by_fields__ = True
-
     reduction_kind: str
     pointer_base_ref: LocationBaseRef
     count_parameter_name: str
@@ -1297,9 +1285,6 @@ class ReadonlyReductionRef:
 @dataclass(frozen=True)
 class ReadonlyReductionLowering:
     """Materialized readonly lowering produced from a reduction proof."""
-
-    #: 直列化の protocol は field の値だけの関数（Issue #219。`core/semantic_lifecycle` の宣言）
-    __serialization_determined_by_fields__ = True
 
     proof: ReductionAccumulatorProof
     loop_summary: LoopSummaryRef
