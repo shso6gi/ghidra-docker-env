@@ -97,19 +97,71 @@ def test_the_same_text_gives_the_same_tree_and_a_changed_text_is_parsed_again(tm
     assert ast.dump(second) == ast.dump(ast.parse("y = 2\n"))
 
 
-def test_a_mutated_shared_tree_is_reported(tmp_path):
-    """共有の AST を書き換えると、session の終わりの確かめ（`changed_trees`）が見つける。"""
+def _issue_and_then(tmp_path, after):
+    """木を 1 つ渡し、`after(path)`（cache の entry を増やす・捨てる操作）をした後のその木を返す。"""
 
     from scripts.function_tracer_pcode.tests.unit import _package_sources
 
     path = tmp_path / "m.py"
     path.write_text("x = 1\n", encoding="utf-8")
-    tree = _package_sources.parse_source(path)
-    key = str(path.resolve())
+    tree = _package_sources.parse_source(path, filename=str(path))
+    after(path)
+    return tree
+
+
+def _rewrite_source(path):
+    from scripts.function_tracer_pcode.tests.unit import _package_sources
+
+    path.write_text("y = 2\n", encoding="utf-8")
+    _package_sources.parse_source(path, filename=str(path))
+
+
+def _change_filename(path):
+    from scripts.function_tracer_pcode.tests.unit import _package_sources
+
+    _package_sources.parse_source(path)
+    _package_sources.parse_source(path, filename="other.py")
+
+
+def _clear_cache(_path):
+    from scripts.function_tracer_pcode.tests.unit import _package_sources
+
+    _package_sources.clear_cache()
+
+
+_AFTER = {
+    "nothing": lambda _path: None,
+    "source_rewritten": _rewrite_source,
+    "filename_changed": _change_filename,
+    "cache_cleared": _clear_cache,
+}
+_MUTATIONS = {
+    # (書き換え, 元に戻す)
+    "name": (lambda t: setattr(t.body[0].targets[0], "id", "mutated"),
+             lambda t: setattr(t.body[0].targets[0], "id", "x")),
+    "position_only": (lambda t: setattr(t.body[0], "lineno", 99),
+                      lambda t: setattr(t.body[0], "lineno", 1)),
+    "appended_statement": (lambda t: t.body.append(ast.Pass(lineno=2, col_offset=0, end_lineno=2, end_col_offset=4)),
+                           lambda t: t.body.pop()),
+}
+
+
+@pytest.mark.parametrize("after", sorted(_AFTER))
+@pytest.mark.parametrize("mutation", sorted(_MUTATIONS))
+def test_any_mutation_of_any_issued_tree_is_reported(tmp_path, after, mutation):
+    """渡した木の書き換えは、その後に source・filename が変わっても、cache が捨てられても、位置の
+    属性だけの書き換えでも、session の終わりの確かめ（`changed_trees`）が見つける。"""
+
+    from scripts.function_tracer_pcode.tests.unit import _package_sources
+
+    tree = _issue_and_then(tmp_path, _AFTER[after])
+    mutate, restore = _MUTATIONS[mutation]
+    assert _package_sources.changed_trees(among=(tree,)) == []
+    mutate(tree)
     try:
-        assert key not in _package_sources.changed_trees()
-        tree.body[0].targets[0].id = "mutated"
-        assert key in _package_sources.changed_trees()
+        changed = _package_sources.changed_trees(among=(tree,))
+        assert len(changed) == 1 and str((tmp_path / "m.py").resolve()) in changed[0]
     finally:
-        # この test が作った壊れた entry を残さない（session の終わりの確かめを汚さない）
-        _package_sources._TREES.pop(key, None)
+        # この test の書き換えを残さない（session の終わりの確かめを汚さない）
+        restore(tree)
+    assert _package_sources.changed_trees(among=(tree,)) == []
