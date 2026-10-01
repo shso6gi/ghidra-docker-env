@@ -64,8 +64,6 @@ from scripts.function_tracer_pcode.core.live_values import (
     builtin_sequence,
     builtin_set,
     elements_of,
-    enum_value,
-    is_enum,
     items_of,
 )
 from scripts.function_tracer_pcode.core.semantic_freeze import seal_serialization
@@ -231,15 +229,12 @@ def _freeze_witness(value: Any) -> Any:
         return (_SEQUENCE, tuple(_freeze_witness(item) for item in elements_of(value)))
     if builtin_set(value):
         return (_SET, frozenset(_freeze_witness(item) for item in elements_of(value)))
-    if is_enum(value):
-        # member は class が持つ 1 つの object。値は instance の `_value_`（codec は mixin の member を
-        # そのまま写しに置くので、codec の写しからは辿らない）
-        return (_OBJECT, _SameObject(value), _freeze_witness(enum_value(value)))
     try:
         frozen = SnapshotFingerprintCodec._freeze_unmetered(value, True)
     except (TypeError, ValueError):
         # digest が拒む値（本体で同じ値を digest すれば同じ拒否。参照で持つだけの値なら identity で足りる）
         frozen = _OPAQUE
+    # codec が値そのものを写しに置く object（mixin の enum の member: 値は class の定義）は identity で足りる
     payload = _OPAQUE if frozen is value or frozen is _OPAQUE else _freeze_witness(frozen)
     return (_OBJECT, _SameObject(value), payload)
 
