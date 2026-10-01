@@ -124,7 +124,9 @@ class _LifecycleStaging:
     中の式が元の node を指す）も、同じ値を 2 度積むこともここで止まる。
     """
 
-    __slots__ = ("entered", "derived", "expressions", "conditions", "storage_records", "runtime_ref_records")
+    __slots__ = (
+        "entered", "derived", "expressions", "conditions", "storage_records", "runtime_ref_records", "ref_carries",
+    )
 
     def __init__(self) -> None:
         self.entered: Dict[int, bool] = {}
@@ -137,6 +139,8 @@ class _LifecycleStaging:
         self.storage_records: Dict[int, Tuple[Any, Any]] = {}
         #: `id(runtime ref)` → (その object, 表現の写し)。ref は多くの node が共有する
         self.runtime_ref_records: Dict[int, Tuple[Any, Any]] = {}
+        #: `id(runtime ref)` → (その object, 意味値を抱えるか)。closure の走査が数えた答え
+        self.ref_carries: Dict[int, Tuple[Any, bool]] = {}
 
     def enter(self, value: Any) -> bool:
         """この操作で初めて見た値なら真。2 度目は偽（再入・back-reference）。"""
@@ -229,6 +233,12 @@ def _stage_expression_validation(expr: Any, staging: _LifecycleStaging) -> None:
     # graph の辺では見えない closure（PHI の条件 object、runtime ref が抱える値）。
     for node in traversal.post_order:
         _stage_node_closure_validation(node, staging)
+    # runtime ref の表現の写しは closure の走査の後に作る（ref が意味値を抱えるかは、その走査が
+    # 数えた答えを使う。同じ ref を 2 度辿らない）
+    for node in traversal.post_order:
+        staging.derived[id(node)]["_runtime_ref_payload"] = _captured_runtime_ref(
+            node.__dict__.get("runtime_ref"), staging
+        )
 
 
 def _stage_condition_validation(condition: Any, staging: _LifecycleStaging) -> None:
@@ -253,11 +263,19 @@ def _stage_node_closure_validation(node: Any, staging: _LifecycleStaging) -> Non
     runtime_ref = node.__dict__.get("runtime_ref")
     if runtime_ref is None or not staging.enter(runtime_ref):
         return
-    _walk_semantic_carriers(
-        runtime_ref,
-        lambda expr: _stage_expression_validation(expr, staging),
-        lambda cond: _stage_condition_validation(cond, staging),
-    )
+    carried: List[Any] = []
+
+    def _on_expression(expr: Any) -> None:
+        carried.append(expr)
+        _stage_expression_validation(expr, staging)
+
+    def _on_condition(cond: Any) -> None:
+        carried.append(cond)
+        _stage_condition_validation(cond, staging)
+
+    _walk_semantic_carriers(runtime_ref, _on_expression, _on_condition)
+    # 意味値を抱える ref は表現を写さない（`_captured_runtime_ref`）
+    staging.ref_carries[id(runtime_ref)] = (runtime_ref, bool(carried))
 
 
 def _commit_validation(staging: _LifecycleStaging) -> None:
@@ -647,8 +665,9 @@ def _derive_node_fields(node: Expression, staging: _LifecycleStaging) -> Dict[st
         "_identity_complete": identity_complete,
         # LEGACY 表現の storage は凍結時の写しから描く（生の `StorageInfo` は可変）。
         "_storage_payload": _captured_storage(fields.get("storage_info"), staging),
-        # runtime ref の表現も凍結時に 1 回だけ作って写す（ref の code が何を読んでも以後は走らない）
-        "_runtime_ref_payload": _captured_runtime_ref(fields.get("runtime_ref"), staging),
+        # runtime ref の表現も凍結時に 1 回だけ作って写す（ref の code が何を読んでも以後は走らない）。
+        # 写すのは closure の走査の後（`_stage_expression_validation`）。それまでは写しが無い
+        "_runtime_ref_payload": None,
         # closed かは closure 全体を積んだ後に `_derive_serialization_closure` が決める
         # （runtime ref が抱える式は graph の後に積まれる）。決まるまでは closed でない
         "_serialization_closed": False,
@@ -747,9 +766,15 @@ def _captured_runtime_ref(runtime_ref: Any, staging: _LifecycleStaging) -> Any:
     if hit is not None and hit[0] is runtime_ref:
         return hit[1]
     record = None
-    carried: List[Any] = []
-    _walk_semantic_carriers(runtime_ref, carried.append, carried.append)
-    if not carried:
+    known = staging.ref_carries.get(id(runtime_ref))
+    if known is not None and known[0] is runtime_ref:
+        carries = known[1]
+    else:
+        # closure の走査が辿らなかった ref（この操作より前に入った値と共有される ref など）
+        found: List[Any] = []
+        _walk_semantic_carriers(runtime_ref, found.append, found.append)
+        carries = bool(found)
+    if not carries:
         try:
             # 表現の source の変換も walk の中で走るので、値の storage の読みは walker がこの予算へ
             # 数える（固定の読みの上限を超えた分も、限界を記録せずにこの予算の超過になる）
