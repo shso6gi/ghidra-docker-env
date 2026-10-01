@@ -1258,6 +1258,97 @@ class JsonEncodingPolicy:
             return _Walk(self, LEGACY, JsonBudget(None, detached=counted), build=True).run(source)
         return _Walk(self, LEGACY, budget, build=True, effort_to_budget=True).run(source)
 
+    def bounded_native_copy(self, value: Any, *, max_bytes: int) -> Optional[Tuple[Any, int]]:
+        """JSON の値になる組み込みの型 **そのもの** だけの値の写しと、それを書いた byte 数。
+
+        受けるのは葉 `None` / `bool` / `int` / 有限の `float` / `str` と、容器 `dict`（key は
+        `str`）/ `list` / `tuple`（写しでも型を保つ）だけ。それ以外・閉路・`max_bytes` 超えなら `None`。
+
+        **数え方は `dumps` が書く byte と同じ**（文字列は `string_bytes` の escape と UTF-8、key と
+        値の区切り、要素の区切り、括弧）。数えるのは写す前で、合計が `max_bytes` を超えた時点で
+        止まる: 写しの量も、辿る量（どの値も 1 byte 以上）も `max_bytes` で抑えられる。容器は
+        先頭から 1 要素ずつ引き出し、上限の前に全体を写さない。整数は桁数の下界（`bit_length`）で
+        残りを超えると分かれば文字列にしない。
+        """
+
+        item_sep = utf8_length(self.item_separator)
+        key_sep = utf8_length(self.key_separator)
+        total = 0
+        root: List[Any] = [None]
+        # [iterator, out, kind, id, first, parent, slot]
+        stack: List[List[Any]] = [[iter((value,)), root, "root", None, True, None, None]]
+        active: set = set()
+        while stack:
+            entry = stack[-1]
+            try:
+                item = next(entry[0])
+            except StopIteration:
+                stack.pop()
+                if entry[3] is not None:
+                    active.discard(entry[3])
+                if entry[2] == "tuple":
+                    entry[5][entry[6]] = tuple(entry[1])
+                continue
+            if entry[2] == "root":
+                slot: Any = 0
+            elif entry[4]:
+                entry[4] = False
+            else:
+                total += item_sep
+            if entry[2] == "dict":
+                key, item = item
+                if type(key) is not str:
+                    return None
+                total += self.string_bytes(key, max_bytes=max(0, max_bytes - total)) + key_sep
+                slot = key
+            elif entry[2] != "root":
+                slot = len(entry[1])
+                entry[1].append(None)
+            if total > max_bytes:
+                return None
+            kind = type(item)
+            if item is None:
+                total += 4
+            elif kind is bool:
+                total += 4 if item else 5
+            elif kind is int:
+                bits = int.bit_length(item)
+                lower = (bits - 1) * 30103 // 100000 + 1 if bits else 1
+                if lower + (1 if item < 0 else 0) > max_bytes - total:
+                    return None
+                try:
+                    total += len(int.__repr__(item))
+                except ValueError:
+                    return None
+            elif kind is float:
+                if item != item or item in (float("inf"), float("-inf")):
+                    return None
+                total += len(_float_text(item))
+            elif kind is str:
+                total += self.string_bytes(item, max_bytes=max(0, max_bytes - total))
+            elif kind is dict or kind is list or kind is tuple:
+                identity = id(item)
+                if identity in active:
+                    return None
+                total += 2
+                if total > max_bytes:
+                    return None
+                active.add(identity)
+                out: Any = {} if kind is dict else []
+                stack.append([
+                    iter(item.items()) if kind is dict else iter(item),
+                    out, "dict" if kind is dict else ("tuple" if kind is tuple else "list"),
+                    identity, True, entry[1], slot,
+                ])
+                entry[1][slot] = out
+                continue
+            else:
+                return None
+            if total > max_bytes:
+                return None
+            entry[1][slot] = item
+        return root[0], total
+
     def plain_bytes(
         self, value: Any, *, max_bytes: Optional[int] = None, size_only: bool = False,
         work: Optional[JsonBudget] = None,

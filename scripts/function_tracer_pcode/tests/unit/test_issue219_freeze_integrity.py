@@ -536,3 +536,156 @@ def test_a_ref_asking_for_its_own_closure_while_being_copied_does_not_recurse():
     with _Alarm(20):
         assert _closed(expr) is True
     assert expr.to_dict() == live.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# 4. 写しの上限は result JSON の writer が書く byte で決まる（review round 5）
+# ---------------------------------------------------------------------------
+#
+# 契約: 表現を写す ⇔ `RESULT_JSON_POLICY.dumps` が書く byte が `CAPTURE_MAX_BYTES` 以下。数える
+# のは写す前で、上限を超える値は大きさに依らない量の仕事で拒む。oracle は writer そのもの（実装の
+# 数え方の写しではない）。
+
+
+def _writer_bytes(value: Any) -> int:
+    return utf8_length(JsonEncodingPolicy.dumps(RESULT_JSON_POLICY, value))
+
+
+def _largest_fitting(builder, limit: int) -> int:
+    """writer の byte が `limit` 以下になる最大の `builder` の引数（byte は引数に単調）。"""
+
+    low, high = 0, 1
+    while _writer_bytes(builder(high)) <= limit:
+        low, high = high, high * 2
+    while high - low > 1:
+        middle = (low + high) // 2
+        if _writer_bytes(builder(middle)) <= limit:
+            low = middle
+        else:
+            high = middle
+    return low
+
+
+_BUILDERS = {
+    "ascii": lambda n: {"s": "a" * n},
+    "utf8_two_bytes": lambda n: {"s": "é" * n},
+    "utf8_four_bytes": lambda n: {"s": "\U0001f600" * n},
+    "control_escape": lambda n: {"s": "\x01" * n},
+    "quote_escape": lambda n: {"s": '"' * n},
+    "line_separator": lambda n: {"s": "\u2028" * n},
+    "lone_surrogate": lambda n: ["\ud800" * n],
+    "wide_integers": lambda n: [10 ** 999] * n,
+    "non_ascii_keys": lambda n: {("é" * 50) + str(i): (i,) for i in range(n)},
+    "nested_tuples": lambda n: [((), (None, False))] * n,
+}
+
+
+@pytest.mark.parametrize("name", sorted(_BUILDERS))
+def test_a_representation_is_copied_iff_its_written_json_fits_the_limit(name):
+    """境界の両側: writer の byte が上限以下の最大の値は写し、1 段大きい値（上限超え）は写さない。"""
+
+    from scripts.function_tracer_pcode.core.frozen_representation import CAPTURE_MAX_BYTES, freeze_legacy_tree
+
+    builder = _BUILDERS[name]
+    largest = _largest_fitting(builder, CAPTURE_MAX_BYTES)
+    fitting, exceeding = builder(largest), builder(largest + 1)
+    assert _writer_bytes(fitting) <= CAPTURE_MAX_BYTES < _writer_bytes(exceeding)
+    frozen = freeze_legacy_tree(fitting)
+    assert frozen is not None and frozen.thaw() == fitting
+    assert type(frozen.thaw()) is type(fitting)
+    assert freeze_legacy_tree(exceeding) is None
+
+
+def test_the_owner_counts_exactly_what_the_writer_writes():
+    """乱数で作った JSON の値（UTF-8・escape・surrogate・大きな整数・tuple / list / dict）で、owner の
+    数えた byte が writer の書いた byte と一致し、写しが元と同じ値・同じ型になる。"""
+
+    import random
+
+    rng = random.Random(219)
+    alphabet = [chr(c) for c in (0x41, 0x0A, 0x22, 0x5C, 0x01, 0x7F, 0xE9, 0x2028, 0xD800, 0x1F600)]
+
+    def leaf():
+        return rng.choice([
+            None, True, False, rng.randrange(-10 ** 40, 10 ** 40), rng.uniform(-1e300, 1e300),
+            "".join(rng.choice(alphabet) for _ in range(rng.randrange(8))),
+        ])
+
+    def value(depth):
+        choice = rng.randrange(6)
+        if depth > 3 or choice < 2:
+            return leaf()
+        size = rng.randrange(4)
+        if choice == 2:
+            return [value(depth + 1) for _ in range(size)]
+        if choice == 3:
+            return tuple(value(depth + 1) for _ in range(size))
+        return {"".join(rng.choice(alphabet) for _ in range(3)) + str(i): value(depth + 1) for i in range(size)}
+
+    for _ in range(2000):
+        original = value(0)
+        copied, counted = JsonEncodingPolicy.bounded_native_copy(RESULT_JSON_POLICY, original, max_bytes=10 ** 9)
+        assert counted == _writer_bytes(original)
+        assert copied == original and type(copied) is type(original)
+
+
+def _oversized(shape: str, scale: int):
+    if shape == "long_list":
+        return list(range(300_000 * scale))
+    if shape == "wide_dict":
+        return {str(i): i for i in range(50_000 * scale)}
+    if shape == "long_string":
+        return ["é" * (2_000_000 * scale)]
+    value = current = []
+    for _ in range(50_000 * scale):
+        nested: list = []
+        current.append(nested)
+        current = nested
+    return value
+
+
+def _rejection_peak(value) -> int:
+    import tracemalloc
+
+    from scripts.function_tracer_pcode.core.frozen_representation import freeze_legacy_tree
+
+    tracemalloc.start()
+    try:
+        assert freeze_legacy_tree(value) is None
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+@pytest.mark.parametrize("shape", ["long_list", "wide_dict", "long_string", "deep_lists"])
+def test_rejecting_an_oversized_representation_does_no_work_proportional_to_its_size(shape):
+    """上限を超える値は、上限の前に全体を写さずに拒む。拒むまでの memory は値の大きさに依らない
+    （10 倍の値でも増えない）: 写しの量と辿る量は上限で抑えられる。"""
+
+    small, large = _rejection_peak(_oversized(shape, 1)), _rejection_peak(_oversized(shape, 10))
+    assert large <= small * 1.25 + (64 << 10), (small, large)
+
+
+@dataclasses.dataclass(frozen=True)
+class _GrowsWithMultibyteText:
+    """yield した容器を、walker が数えた後で multibyte の文字列で大きくする。"""
+
+    key: int = 0
+
+    def json_items(self):
+        items: list = []
+        yield "items", raw(items)
+        items.extend("é" * 1000 for _ in range(40))
+        yield "after", self.key
+
+
+def test_a_ref_whose_raw_container_grows_past_the_limit_after_it_was_yielded_is_not_closed():
+    from scripts.function_tracer_pcode.core.frozen_representation import CAPTURE_MAX_BYTES
+
+    expr = Expression.unknown("u", runtime_ref=_GrowsWithMultibyteText())
+    freeze_expression(expr)
+    drawn = expr.to_dict()["runtime_ref"]
+    # 文字数では上限に収まるが、writer の byte では超える
+    assert sum(len(item) for item in drawn["items"]) < CAPTURE_MAX_BYTES < _writer_bytes(drawn)
+    assert _closed(expr) is False
+    assert expr.to_dict() == Expression.unknown("u", runtime_ref=_GrowsWithMultibyteText()).to_dict()
