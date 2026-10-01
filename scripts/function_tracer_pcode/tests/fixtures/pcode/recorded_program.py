@@ -129,6 +129,11 @@ class RecordedObject:
     ならず、欠落履歴 + :class:`RecordedSurfaceMissing` になる。
     """
 
+    # 外の runtime object（Ghidra object）の代わり: 意味値の到達走査
+    # （``core/semantic_freeze._is_owned_object``）は本物の Ghidra object と同じく葉として扱い、
+    # 再生の状態（記録全体・観測の履歴）を辿らない
+    __semantic_opaque__ = True
+
     def __init__(
         self, context: _RecordedContext, object_id: str, entry: Mapping[str, Any],
     ) -> None:

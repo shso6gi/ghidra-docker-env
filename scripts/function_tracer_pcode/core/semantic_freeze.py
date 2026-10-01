@@ -474,7 +474,8 @@ def _walk_semantic_carriers(container: Any, on_expression, on_condition) -> Any:
     * dataclass / NamedTuple → field へ入る
     * **この package で定義された** その他の object → `__dict__` の値へ入る。
       新しい carrier 型が dataclass でなくても取りこぼさないため
-    * それ以外（Ghidra object・mock・標準ライブラリ）→ 葉。意味の入れ物ではない。
+    * それ以外（Ghidra object・mock・標準ライブラリ）と、外の object の代わりをすると宣言した
+      この package の型（`__semantic_opaque__`。記録再生の proxy）→ 葉。意味の入れ物ではない。
       **属性を探らない**: 記録再生中の proxy に観測を作ってしまうため
 
     深さで打ち切らない（明示 stack なので再帰上限も無い）。`id` で一度見た
@@ -520,10 +521,24 @@ def _walk_semantic_carriers(container: Any, on_expression, on_condition) -> Any:
 
 
 def _is_owned_object(value: Any) -> bool:
-    """この package が定義した object か（外の object の属性は探らない）。"""
+    """この package が定義した意味の入れ物になり得る object か（外の object の属性は探らない）。
 
-    module = type(value).__module__ or ""
-    return module.startswith(_PACKAGE_PREFIX)
+    この package が定義した型でも、**外の runtime object の代わり**をする型（記録再生の Ghidra
+    object の proxy など）は `__semantic_opaque__ = True` を宣言し、外の object と同じく葉になる。
+    その `__dict__` は代わりをする仕組みの状態（記録全体・観測の履歴…）で意味の入れ物ではなく、
+    辿ると費用が記録の大きさに比例し、本物の object では起きない仕事になる。宣言は class の
+    辞書だけから読む（instance の `__getattr__` を呼ばない）。
+    """
+
+    kind = type(value)
+    module = kind.__module__ or ""
+    if not module.startswith(_PACKAGE_PREFIX):
+        return False
+    return not any(base.__dict__.get(SEMANTIC_OPAQUE_DECLARATION) is True for base in kind.__mro__)
+
+
+#: 外の runtime object の代わりをする型が宣言する class 属性（`_is_owned_object`）
+SEMANTIC_OPAQUE_DECLARATION = "__semantic_opaque__"
 
 
 def _derive_node_fields(node: Expression, staging: _LifecycleStaging) -> Dict[str, Any]:
