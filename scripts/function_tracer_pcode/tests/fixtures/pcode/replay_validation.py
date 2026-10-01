@@ -491,6 +491,38 @@ def _assert_production_pcode_path_was_used(
 # ---------------------------------------------------------------------------
 
 
+def _assert_snapshot_bodies_match_distinct_witnesses(report: Mapping[str, Any], where: str) -> None:
+    """本体の実行回数（外から数えた）== 保存した distinct な witness の数 + 理由つきの bypass。
+
+    再生は逐次なので、前後の witness が違う（unstable）・witness を作れない呼び出しは無い。
+    distinct な fingerprint の数との一致は求めない（別 object の同じ内容は別の witness）。
+    """
+
+    observed = report["snapshot_reuse"]
+    stores = observed["stores"]
+    assert stores, where + ": no snapshot reuse scope was closed during the replay"
+    totals: Dict[str, int] = {}
+    entries = 0
+    for store in stores:
+        entries += store["entries"]
+        for name, value in store["counts"].items():
+            totals[name] = totals.get(name, 0) + value
+    bypassed = sum(value for name, value in totals.items() if name.startswith("bypass:"))
+    witness_failures = {name: value for name, value in totals.items() if name.startswith("bypass:witness_failed")}
+    assert totals.get("unstable", 0) == 0 and not witness_failures, (
+        where + ": a sequential replay had unstable or unbuildable witnesses: "
+        + json.dumps(totals, sort_keys=True)
+    )
+    assert observed["body_executions_in_scope"] == totals.get("body_executions", 0), (
+        where + ": the counted body executions are not the actual executions: "
+        + json.dumps({"actual": observed["body_executions_in_scope"], **totals}, sort_keys=True)
+    )
+    assert observed["body_executions_in_scope"] == entries + bypassed, (
+        where + ": a body ran for an already stored witness: "
+        + json.dumps({"actual": observed["body_executions_in_scope"], "entries": entries, **totals}, sort_keys=True)
+    )
+
+
 def validate_replay(
     spec: ReplaySpec, *, record_property=None,
 ) -> ReplayRecord:
@@ -614,6 +646,10 @@ def validate_replay(
         where + ": the recorded surface was incomplete: "
         + json.dumps(report["missing_accesses"], sort_keys=True)[:2000]
     )
+
+    # (5) snapshot の再利用（Issue #219 AC1）: 逐次の replay では、本体の実行は distinct な
+    # safe witness ごとに 1 回（再利用しない呼び出しは理由つきで数えた分だけ）
+    _assert_snapshot_bodies_match_distinct_witnesses(report, where)
 
     # ON / OFF の経路そのもの
     if variant == VARIANT_FAST_PATH_ON:
