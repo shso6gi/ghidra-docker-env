@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 from types import MappingProxyType
-from typing import Any, Mapping, Tuple
+from typing import Any, Dict, Mapping, NamedTuple, Tuple
 
 from scripts.function_tracer_pcode.core import json_encoding
 from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
@@ -37,6 +37,7 @@ from scripts.function_tracer_pcode.core.live_values import (
     json_scalar,
     plain_scalar,
     size,
+    type_attribute,
     type_name,
 )
 from scripts.function_tracer_pcode.proof.obligations.model import SemanticFactProvenance
@@ -148,7 +149,7 @@ def deep_freeze(value: Any) -> Any:
     return value
 
 
-def _semantic_effect_summary_projection(effect_summary: Any, work: Any = None) -> Any:
+def _semantic_effect_summary_projection(effect_summary: Any, work: Any = None, witness: bool = False) -> Any:
     if effect_summary is None:
         return None
     # The dataclass projection is object-derived and includes stores, calls,
@@ -156,7 +157,7 @@ def _semantic_effect_summary_projection(effect_summary: Any, work: Any = None) -
     # rejects any opaque object that lacks a stable key instead of stringifying it.
     # Issue #22 PR-22-D: 投影は写しながら直列化の作業量へ足す（`freeze(budget=work)`）。
     # 効果が大量でも、予算を超えた時点で残りを投影しない。
-    return SnapshotFingerprintCodec.freeze(effect_summary, budget=work)
+    return SnapshotFingerprintCodec.freeze(effect_summary, budget=work, witness=witness)
 
 
 def _classify_analysis_notes(notes: Any) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
@@ -304,26 +305,31 @@ class SnapshotFingerprintCodec:
     """
 
     @classmethod
-    def freeze(cls, value: Any, *, budget: Any = None) -> Any:
+    def freeze(cls, value: Any, *, budget: Any = None, witness: bool = False) -> Any:
         """値の canonical な写し。`budget` を渡すと、写す値の byte を写しながら足す。
 
         `budget`（`JsonBudget` の interface、snapshot では `SerializationWork`）は写した
         葉と容器の区切りごとに数え、超えた時点で残りを写さない。record の `to_dict()`
         は walker が同じ `budget` で数えながら作る（作ってから数えない）。
+
+        `witness` は `_freeze_unmetered` と同じ（record の表現を写すときだけ効く。既定は偽 = 規則どおり）。
         """
 
         if budget is None:
-            return cls._freeze_unmetered(value)
+            return cls._freeze_unmetered(value, witness)
         # 値の storage の読みも固定の上限を超えた分は同じ予算へ（超えればその予算の超過）
         with metered_storage_reads(budget):
-            return cls._freeze(value, _FreezeMeter(budget))
+            return cls._freeze(value, _FreezeMeter(budget, witness))
 
     @classmethod
-    def _freeze_unmetered(cls, value: Any) -> Any:
+    def _freeze_unmetered(cls, value: Any, witness: bool = False) -> Any:
         """数えない写し（fingerprint の digest など）。`_freeze(value, None)` と同じ値。
 
         digest は snapshot のたびに値全体を写すので、数える経路の分岐・helper を通さない
         （`test_the_unmetered_freeze_equals_the_metered_copy` が同じ値であることを固定）。
+
+        `witness` が真のときだけ、型に `WITNESS_TOKEN_MARKER` を真と宣言した値（snapshot の再利用の
+        witness の token）をそのまま写しに置く。偽（digest・本体）では token も opaque な値として拒む。
         """
 
         if value is None:
@@ -334,10 +340,10 @@ class SnapshotFingerprintCodec:
         freeze = cls._freeze_unmetered
         # 速い経路: 組み込みの型そのものの容器（組み込みの振る舞いと分かっている）
         if (type(value) is tuple or type(value) is list):
-            return tuple(freeze(v) for v in value)
+            return tuple(freeze(v, witness) for v in value)
         if type(value) is dict:
             return cls.sorted_mapping_items(
-                tuple((freeze(key), freeze(item)) for key, item in value.items())
+                tuple((freeze(key, witness), freeze(item, witness)) for key, item in value.items())
             )
         scalar = plain_scalar(value)
         if scalar is not NOT_PLAIN:
@@ -351,22 +357,24 @@ class SnapshotFingerprintCodec:
         mapping = builtin_mapping(value)
         if mapping is not None:
             return cls.sorted_mapping_items(
-                tuple((freeze(key), freeze(item)) for key, item in items_of(mapping))
+                tuple((freeze(key, witness), freeze(item, witness)) for key, item in items_of(mapping))
             )
         if builtin_sequence(value):
-            return tuple(freeze(v) for v in elements_of(value))
+            return tuple(freeze(v, witness) for v in elements_of(value))
         if builtin_set(value):
-            return _set_members(tuple(freeze(v) for v in elements_of(value)))
+            return _set_members(tuple(freeze(v, witness) for v in elements_of(value)))
+        if witness and type_attribute(kind, WITNESS_TOKEN_MARKER) is True:
+            return value
         name = type_name(kind)
         has_key, identity_key = identity_key_of(value)
         if has_key:
-            return (name, freeze(identity_key))
+            return (name, freeze(identity_key, witness))
         if is_json_record(value):
             # record の LEGACY 表現（`to_dict()` と同じ walker。解析 1 件分の作業量の中ならそこへ数える）
-            return (name, freeze(materialize(value)))
+            return (name, freeze(materialize(value), witness))
         names = dataclass_field_names(value)
         if names is not None:
-            return (name, tuple((field_name, freeze(field_value(value, field_name))) for field_name in names))
+            return (name, tuple((field_name, freeze(field_value(value, field_name), witness)) for field_name in names))
         raise TypeError(f"opaque object {name} has no object-derived stable identity")
 
     @classmethod
@@ -422,7 +430,7 @@ class SnapshotFingerprintCodec:
             # object の `to_dict()` は任意の producer なので呼ばない: object-derived な identity の
             # 無い値として拒む）
             built = json_encoding.RESULT_JSON_POLICY.materialize(value, budget=meter.budget)
-            return _tagged(name, cls._freeze(built, None), meter)
+            return _tagged(name, cls._freeze_unmetered(built, meter.witness), meter)
         names = dataclass_field_names(value)
         if names is not None:
             meter.frame(len(names))
@@ -481,11 +489,13 @@ class SnapshotFingerprintCodec:
 class _FreezeMeter:
     """`freeze(budget=...)` が写した値の byte を `budget` へ足す（写しの JSON の大きさ）。"""
 
-    __slots__ = ("budget", "_policy")
+    __slots__ = ("budget", "_policy", "witness")
 
-    def __init__(self, budget: Any) -> None:
+    def __init__(self, budget: Any, witness: bool = False) -> None:
         self.budget = budget
         self._policy = RESULT_JSON_POLICY
+        #: 写した record の表現を凍結するときの `witness`（`_freeze_unmetered`）
+        self.witness = witness
 
     def frame(self, count: int) -> None:
         self.budget.charge(self._policy.container_frame_bytes(count))
@@ -517,6 +527,10 @@ class _FreezeMeter:
 
         self._policy.count_into(value, self.budget, mode=LEGACY)
 
+
+#: 型の class 属性でこの名前を真と宣言した値は、snapshot の再利用の witness の token（`_freeze_unmetered`
+#: の `witness` が真のときだけ写しにそのまま置く。token の型は再利用の owner が持つ）
+WITNESS_TOKEN_MARKER = "__snapshot_witness_token__"
 
 #: snapshot 1 つ分の直列化の作業量を数える観測点。
 SNAPSHOT_SERIALIZATION_SITE = "proof.obligations.snapshot.from_function_analysis"
@@ -566,7 +580,20 @@ class AnalysisSnapshot:
 
     @classmethod
     def from_function_analysis(cls, analysis: Any) -> "AnalysisSnapshot":
-        """Freeze the semantic extraction result, excluding mutable proof state."""
+        """Freeze the semantic extraction result, excluding mutable proof state.
+
+        Issue #219: 同じ read-set の本体は pair の中で作り直さない。再利用するかどうかは
+        snapshot の再利用の owner（`snapshot_reuse.reuse_or_build`）だけが決め、作るのは
+        常に `_build_from_function_analysis`（この snapshot の唯一の本体）。
+        """
+
+        from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse
+
+        return snapshot_reuse.reuse_or_build(analysis, cls._build_from_function_analysis)
+
+    @classmethod
+    def _build_from_function_analysis(cls, analysis: Any) -> "AnalysisSnapshot":
+        """snapshot の本体（再利用の判断をしない）。"""
 
         to_dict = getattr(analysis, "to_dict", None)
         if not callable(to_dict):
@@ -578,48 +605,79 @@ class AnalysisSnapshot:
         # 予算とは別の aggregate）。
         with serialization_scope(
             site=SNAPSHOT_SERIALIZATION_SITE,
-            target_parts=(
-                "function_analysis_snapshot",
-                getattr(analysis, "binary_id", None),
-                getattr(analysis, "function_name", None),
-                getattr(analysis, "entry_point", None),
-            ),
+            target_parts=snapshot_serialization_target(analysis),
         ) as work:
-            return cls._from_function_analysis_with(analysis, to_dict, work)
+            material = snapshot_material(analysis, work)
+            return cls.create(
+                material.snapshot_id,
+                material.semantic_fields,
+                diagnostic_refs=material.diagnostic_refs,
+            )
 
-    @classmethod
-    def _from_function_analysis_with(cls, analysis: Any, to_dict: Any, work: Any) -> "AnalysisSnapshot":
-        # 解析前提でない derived proof は下で捨てるので、表現できる解析は最初から
-        # 作らない（`semantic_snapshot_dict`。残りは `to_dict()` と同じ値）
-        semantic_view = getattr(analysis, "semantic_snapshot_dict", None)
-        semantic_fields = dict(semantic_view() if callable(semantic_view) else to_dict())
-        # These fields describe execution/diagnostic state rather than the
-        # immutable extraction premise.  Proofs are applied through a derived
-        # view and must never mutate snapshot identity.
-        for key in ("completed_recovery_proof_ids", "completed_recovery_proof_evidence"):
-            semantic_fields.pop(key, None)
-        semantic_notes, diagnostic_notes = _classify_analysis_notes(
-            semantic_fields.pop("analysis_notes", ())
-        )
-        semantic_fields["semantic_analysis_notes"] = semantic_notes
-        semantic_fields["effect_summary"] = _semantic_effect_summary_projection(
-            getattr(analysis, "effect_summary", None), work,
-        )
-        function_ref = getattr(analysis, "function_ref", None)
-        has_key, function_key = (False, None) if function_ref is None else identity_key_of(function_ref)
-        if not has_key:
-            function_key = (getattr(analysis, "function_name", None), getattr(analysis, "entry_point", None))
-        snapshot_id = (
-            "function_analysis_snapshot",
-            getattr(analysis, "binary_id", None),
-            function_key,
-            getattr(analysis, "analysis_scope_key", None),
-        )
-        return cls.create(
-            snapshot_id,
-            semantic_fields,
-            diagnostic_refs={"function_ref": function_ref, "analysis_notes": diagnostic_notes},
-        )
+
+class SnapshotMaterial(NamedTuple):
+    """snapshot を作る材料（`AnalysisSnapshot.create` の引数そのもの）。
+
+    本体と、再利用の witness（`snapshot_reuse`）は **同じ** `snapshot_material` で作る:
+    schema・identity の材料を足すのはここだけで、再利用の側は列挙を持たない。
+    """
+
+    snapshot_id: Tuple[Any, ...]
+    semantic_fields: Dict[str, Any]
+    diagnostic_refs: Dict[str, Any]
+
+
+def snapshot_serialization_target(analysis: Any) -> Tuple[Any, ...]:
+    """snapshot 1 つ分の直列化の target（限界の identity の材料）。"""
+
+    return (
+        "function_analysis_snapshot",
+        getattr(analysis, "binary_id", None),
+        getattr(analysis, "function_name", None),
+        getattr(analysis, "entry_point", None),
+    )
+
+
+def snapshot_material(analysis: Any, work: Any, witness: bool = False) -> SnapshotMaterial:
+    """解析から snapshot の材料を作る（**唯一の抽出**。`work` は開いた直列化の作業量）。
+
+    `witness` は効果要約の投影の codec へ渡す（再利用の witness だけが真。`SnapshotFingerprintCodec`）。
+    """
+
+    to_dict = getattr(analysis, "to_dict", None)
+    if not callable(to_dict):
+        raise TypeError("analysis must provide object-derived to_dict() data")
+    # 解析前提でない derived proof は下で捨てるので、表現できる解析は最初から
+    # 作らない（`semantic_snapshot_dict`。残りは `to_dict()` と同じ値）
+    semantic_view = getattr(analysis, "semantic_snapshot_dict", None)
+    semantic_fields = dict(semantic_view() if callable(semantic_view) else to_dict())
+    # These fields describe execution/diagnostic state rather than the
+    # immutable extraction premise.  Proofs are applied through a derived
+    # view and must never mutate snapshot identity.
+    for key in ("completed_recovery_proof_ids", "completed_recovery_proof_evidence"):
+        semantic_fields.pop(key, None)
+    semantic_notes, diagnostic_notes = _classify_analysis_notes(
+        semantic_fields.pop("analysis_notes", ())
+    )
+    semantic_fields["semantic_analysis_notes"] = semantic_notes
+    semantic_fields["effect_summary"] = _semantic_effect_summary_projection(
+        getattr(analysis, "effect_summary", None), work, witness,
+    )
+    function_ref = getattr(analysis, "function_ref", None)
+    has_key, function_key = (False, None) if function_ref is None else identity_key_of(function_ref)
+    if not has_key:
+        function_key = (getattr(analysis, "function_name", None), getattr(analysis, "entry_point", None))
+    snapshot_id = (
+        "function_analysis_snapshot",
+        getattr(analysis, "binary_id", None),
+        function_key,
+        getattr(analysis, "analysis_scope_key", None),
+    )
+    return SnapshotMaterial(
+        snapshot_id,
+        semantic_fields,
+        {"function_ref": function_ref, "analysis_notes": diagnostic_notes},
+    )
 
 
 @dataclass(frozen=True)

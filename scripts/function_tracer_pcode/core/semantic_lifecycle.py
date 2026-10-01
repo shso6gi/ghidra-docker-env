@@ -369,3 +369,18 @@ def serialization_closed(value: Any) -> bool:
     if lifecycle_of(value) < SemanticLifecycle.VALIDATED:
         return False
     return live_values.instance_state(value, "_serialization_closed", False) is True
+
+
+def serialization_pending(value: Any) -> bool:
+    """`value` の closed の答えが、runtime ref の写しを待っているか（読むだけ）。
+
+    真の値は `core/semantic_freeze.seal_serialization` で写すと closed / open に確定し得る。
+    偽は closed（`serialization_closed`）か、確定して closed でないか、未検証。`serialization_closed`
+    と同じく instance の `__dict__` だけを読み、計算も副作用もしない。
+    """
+
+    if lifecycle_of(value) < SemanticLifecycle.VALIDATED:
+        return False
+    if live_values.instance_state(value, "_serialization_closed", False) is True:
+        return False
+    return live_values.instance_state(value, "_serialization_pending", False) is True
