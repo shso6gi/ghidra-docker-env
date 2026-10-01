@@ -922,6 +922,7 @@ def test_the_basis_key_is_order_sensitive_and_rejects_uncomparable_graphs():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unscoped_condition_cache  # scope の外の挙動を確かめる（Issue #224）
 def test_sequence_memo_hits_only_the_same_objects_in_the_same_order():
     from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
         sequence_lookup,

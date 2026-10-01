@@ -71,6 +71,42 @@ def pytest_configure(config):
         "per-PR unit-fast job deselects these; recorded-fast and "
         "recorded-full run them.",
     )
+    config.addinivalue_line(
+        "markers",
+        f"{UNSCOPED_CONDITION_CACHE}: run the test outside any condition-cache scope "
+        "(Issue #224). Only for tests that check the out-of-scope or nesting behaviour "
+        "of the scope itself.",
+    )
+
+
+#: 条件 cache の scope の外で走らせる test の印（Issue #224。`_pair_condition_cache_scope`）
+UNSCOPED_CONDITION_CACHE = "unscoped_condition_cache"
+
+
+@pytest.fixture(autouse=True)
+def _pair_condition_cache_scope(request):
+    """test 1 つを、pair 1 つと同じ寿命の条件 cache の scope で包む（Issue #224）。
+
+    production では pair 境界（`authority/lifecycle/production_boundary.py`）が pair ごとに
+    `condition_cache_scope()` を開き、scope の外では cache は何も覚えない
+    （`analysis/condition/condition_cache.py`）。unit test は部品を pair 境界の外で直接呼ぶ
+    ので、scope が無いと条件 oracle の問い合わせが毎回 solver まで行き、production には無い
+    費用を払う（1 test で Z3 context を 1,763 回作る例がある）。ここで test ごとに空の scope
+    を開き、抜けたら捨てる: production の pair と同じく、test をまたいで意味の状態を持ち
+    越さない。test の中で pair 境界を通る経路は、その中で自分の scope を入れ子に開く
+    （production と同じ）。
+
+    scope の外の挙動・scope の入れ子そのものを確かめる test は
+    `@pytest.mark.unscoped_condition_cache` で外す。
+    """
+
+    if request.node.get_closest_marker(UNSCOPED_CONDITION_CACHE) is not None:
+        yield
+        return
+    from scripts.function_tracer_pcode.analysis.condition.condition_cache import condition_cache_scope
+
+    with condition_cache_scope():
+        yield
 
 yaml = cast(Any, importlib.import_module("yaml"))
 from dataclasses import dataclass, field
