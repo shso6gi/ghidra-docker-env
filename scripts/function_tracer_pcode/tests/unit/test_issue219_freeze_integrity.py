@@ -666,6 +666,26 @@ def test_rejecting_an_oversized_representation_does_no_work_proportional_to_its_
     assert large <= small * 1.25 + (64 << 10), (small, large)
 
 
+@pytest.mark.parametrize("shape", ["long_list", "wide_dict", "long_string", "deep_lists"])
+def test_rejecting_an_oversized_representation_encodes_no_more_text_than_the_limit(shape, monkeypatch):
+    """拒むまでに writer の escape 関数へ渡す文字の数は上限の定数倍まで（値の大きさに依らない）。"""
+
+    from scripts.function_tracer_pcode.core import json_encoding
+    from scripts.function_tracer_pcode.core.frozen_representation import CAPTURE_MAX_BYTES, freeze_legacy_tree
+
+    seen = [0]
+    for name in ("encode_basestring", "encode_basestring_ascii"):
+        original = getattr(json_encoding, name)
+
+        def counting(text, _original=original):
+            seen[0] += len(text)
+            return _original(text)
+
+        monkeypatch.setattr(json_encoding, name, counting)
+    assert freeze_legacy_tree(_oversized(shape, 10)) is None
+    assert seen[0] <= 2 * CAPTURE_MAX_BYTES, seen[0]
+
+
 @dataclasses.dataclass(frozen=True)
 class _GrowsWithMultibyteText:
     """yield した容器を、walker が数えた後で multibyte の文字列で大きくする。"""
