@@ -2,7 +2,7 @@
 """ストレージ情報のデータモデル"""
 
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Any, Dict, NamedTuple, Optional, Tuple
 from scripts.function_tracer_pcode.core.json_encoding import scalar_record_dict
 
 
@@ -252,6 +252,52 @@ class StorageInfo:
     def to_dict(self) -> Dict[str, Any]:
         # 固定個数の scalar だけの record（式の木の node ごとに書くので walker を通さない）
         return scalar_record_dict(self)
+
+    def frozen_record(self) -> "FrozenStorageRecord":
+        """今の LEGACY 表現（`to_dict()`）の不変な写し（Issue #219）。
+
+        `StorageInfo` は可変な dataclass なので、検証済みの式は凍結の時点の表現を
+        これで持ち、以後は生の object を読まない（`core/semantic_freeze` が呼ぶ）。
+        field が scalar でなければ `to_dict()` と同じく `TypeError`。
+        """
+
+        payload = scalar_record_dict(self)
+        keys = tuple(payload)
+        # key の並びは型ごとに固定なので、node ごとに持たずに 1 つを共有する
+        keys = _FROZEN_RECORD_KEYS.setdefault(keys, keys)
+        return FrozenStorageRecord(keys, tuple(payload.values()))
+
+
+class FrozenStorageRecord(NamedTuple):
+    """`StorageInfo.to_dict()` を凍結の時点で写した不変な値。
+
+    値は scalar（とその subclass）だけで、容器は tuple なので、写した後に書き換わる
+    状態を持たない。LEGACY 表現は `StorageInfo` と同じ規則（`scalar_record_dict`）で
+    作るので、写した時点の `StorageInfo.to_dict()` と同じ dict になり、毎回新しい
+    dict を返す（出力を書き換えても写しは動かない）。
+    """
+
+    keys: Tuple[str, ...]
+    values: Tuple[Any, ...]
+
+    def json_items(self):
+        keys = self.keys
+        values = self.values
+        if type(keys) is not tuple:
+            raise TypeError("FrozenStorageRecord.keys must be a tuple")
+        if type(values) is not tuple:
+            raise TypeError("FrozenStorageRecord.values must be a tuple")
+        if len(keys) != len(values):
+            raise TypeError("FrozenStorageRecord must hold one value per key")
+        return zip(keys, values)
+
+    def to_dict(self) -> Dict[str, Any]:
+        # 固定個数の scalar だけの record（`StorageInfo.to_dict` と同じ規則）
+        return scalar_record_dict(self)
+
+
+#: `FrozenStorageRecord.keys` の共有表（key の並びは `json_items` が決める固定の形）。
+_FROZEN_RECORD_KEYS: Dict[Tuple[str, ...], Tuple[str, ...]] = {}
 
 
 def coerce_storage_info(storage: Any) -> Optional[StorageInfo]:

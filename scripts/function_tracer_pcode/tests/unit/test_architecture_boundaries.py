@@ -2894,6 +2894,8 @@ _REGISTERED_WORK_SCOPES = {
     ("checker/unknown_reason.py", "iter_unknown_recovery_actions"): "J7 の登録（producer 時点の構築）",
     ("checker/debug_trace.py", "DebugTrace._iter_phase_usage"): "J7 の登録（人向けの一覧）",
     ("checker/cause_aggregate.py", "reason_detail_key"): "J7 の登録（作業量の scope の外）",
+    ("core/semantic_freeze.py", "_capture_runtime_ref"):
+        "closed の問い合わせでの表現の写し（上限は `CAPTURE_MAX_BYTES`。超えれば写さず、予算の owner の勘定に入れない）",
 }
 
 

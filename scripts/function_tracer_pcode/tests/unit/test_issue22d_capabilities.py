@@ -1026,6 +1026,10 @@ _A_FIXED = "A: 固定の大きさ（出力 schema の field / 列・定数の組
 _B_COUNTED = "B: `_counted` が同じ直列化の作業量へ数えた trace / canonical reason（とその写し）だけを辿る"
 _B_PREPARED = "B: 準備済みの値（上限 `max_bytes` の中で作った `PreparedJson` の写し）だけを辿る"
 _B_BOUND = "B: 上限（`max_bytes` / `sink.work` / 木の計測器）を持ち、辿る前にその上限へ数える"
+_B_CAPTURED = (
+    "B: 固定の上限（`frozen_representation.CAPTURE_MAX_BYTES`）の中で直列化の owner が"
+    "作った表現の写し（組み込みの値だけ）を辿る。写す走査は上限を数えながら辿り、超えた時点で止まる（Issue #219）"
+)
 _B_SIZED = "B: 木を作る前に `__json_tree_bytes__` で大きさを数え、上限の中でだけ作る"
 _B_FROZEN = (
     "B / D(#194): snapshot の作成では `freeze(budget=)` が数えた写し（組み込みの値だけ）を辿る。"
@@ -1099,6 +1103,9 @@ _PROPORTIONAL_WORK_OWNERS = {
     ("core.budget_policy", "raise_expression_size_budget_exceeded"): _A_FIXED,
     ("core.canonical_digest", "_emit"): _B_BOUND,
     ("core.expression", "Expression._to_dict_active"): _B_SIZED,
+    ("core.frozen_representation", "_thaw"): _B_CAPTURED,
+    ("core.frozen_representation", "_push_children"): _B_CAPTURED,
+    ("core.frozen_representation", "_pop_children"): _B_CAPTURED,
     ("core.expression", "_bounded_local_bytes"): _B_BOUND,
     ("core.expression", "runtime_ref_source"): _C_LAZY,
     ("core.runtime_refs.loops", "CountedLoopSummaryRef.json_items"): _A_FIXED,
