@@ -2,6 +2,7 @@
 """SMTソルバー並列実行管理"""
 
 import concurrent.futures
+import dataclasses
 import threading
 import time
 import inspect
@@ -86,6 +87,10 @@ _IN_SOLVER_ORCHESTRATION: ContextVar[bool] = ContextVar(
 #     返らなければ「止められない」と記録して、自分で返るまで待つ（その間 process は
 #     終われない: supervisor の TIMEOUT が最後の fallback。偽って UNKNOWN にしない）。
 #     待つのを期限でやめた行は、期限が時間を決めた行として扱う
+#   * 待つのをやめた実行の行は `collected_after_stop` が作る: 答え・停止による中断は採らない
+#     （TIMEOUT の行）が、backend が返した **故障**（ERROR・witness の契約違反・中止に隠れた
+#     独立した例外）は捨てずに行に残す（レビュー 3 巡目: 置き換えると settle にも authority にも
+#     故障が届かない）
 #   * backend ごとの違いは adapter（`SMTSolver.execute` / `CAPABILITIES` /
 #     `request_stop`）にだけあり、ここは backend 名で分岐しない
 # --------------------------------------------------------------------------
@@ -508,13 +513,9 @@ class ParallelSolverRunner:
                     )
                 for solver, future in zip(self._solvers, futures):
                     if future in stopped:
-                        results.append(SolverResult(
-                            solver_name=solver.name,
-                            status=SolverStatus.TIMEOUT,
-                            elapsed_time=runtime_timeout,
-                            termination=stopped[future],
-                            # 待つのを期限でやめたなら、その行の時間は期限が決めた
-                            deadline_limited=wait_limited,
+                        results.append(collected_after_stop(
+                            solver.name, future, stopped[future],
+                            elapsed=runtime_timeout, wait_limited=wait_limited,
                         ))
                         continue
                     try:
@@ -706,6 +707,64 @@ def stop_unfinished(
             })
             concurrent.futures.wait(still_running)
     return terminations
+
+
+def collected_after_stop(
+    solver_name: str,
+    future: Any,
+    termination: BackendTermination,
+    *,
+    elapsed: float,
+    wait_limited: bool,
+) -> SolverResult:
+    """待つのをやめた実行の行（Issue #106 PR-106-A）。**backend が実際に返したものを捨てない**。
+
+    待ちの上限で止めた実行の答え（SAT / UNSAT）・判定不能・停止による中断は採らない
+    （従来どおり TIMEOUT の行。待つのを期限でやめたなら期限が時間を決めた行: ``wait_limited``）。
+    ただし backend が返した行（または worker の例外）に **故障** があれば、それを結果に残す:
+    ERROR の行（parse error・witness の契約違反など）はそのまま、終了原因が中止でも独立した
+    故障（`SolverResult.observed_failure`）を観測していれば ERROR の行にする（ここで使う中止の
+    token は runner 自身のもので、停止の手順の一部: 呼び出し側の明示の中止ではない）。
+    故障を TIMEOUT に置き換えると、期限の判定（`core.deadline.settlement`）にも authority にも
+    故障が届かない。
+    """
+
+    returned: Optional[SolverResult] = None
+    if termination is not BackendTermination.CANCELLED_PENDING and future.done():
+        raised = future.exception()  # 例外を上げずに読む（worker の例外は故障の事実）
+        if raised is not None:
+            returned = SolverResult(
+                solver_name=solver_name, status=SolverStatus.ERROR,
+                error_message=f"{type(raised).__name__}: {raised}",
+            )
+        else:
+            returned = future.result()
+    if returned is not None and execution_fact(returned).failure_observed:
+        if returned.status == SolverStatus.ERROR:
+            row = dataclasses.replace(returned)
+        else:
+            row = SolverResult(
+                solver_name=solver_name,
+                status=SolverStatus.ERROR,
+                elapsed_time=returned.elapsed_time,
+                error_message=returned.observed_failure,
+            )
+        row.termination = termination
+        row.deadline_limited = wait_limited
+        return row
+    abandoned = (
+        "" if returned is None
+        else f"wait abandoned at its limit; the backend returned {returned.status.name}"
+    )
+    return SolverResult(
+        solver_name=solver_name,
+        status=SolverStatus.TIMEOUT,
+        elapsed_time=elapsed,
+        error_message=abandoned or None,
+        termination=termination,
+        # 待つのを期限でやめたなら、その行の時間は期限が決めた
+        deadline_limited=wait_limited,
+    )
 
 
 def _termination_evidence(results: List[SolverResult]) -> tuple:

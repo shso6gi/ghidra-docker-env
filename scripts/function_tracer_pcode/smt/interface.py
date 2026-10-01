@@ -177,6 +177,10 @@ class SolverResult:
     #: 明示する（中止の UNKNOWN など）。``None`` なら status から決まる（`execution_end` の表）。
     #: status と両立しない値は作った時点で拒む。結果 JSON の schema には入れない
     cause: Optional[ExecutionEnd] = None
+    #: 終了原因とは独立に観測した backend の故障（例外の要約）。終了原因が中止などでも故障を
+    #: 落とさない（`execution_fact` が `ExecutionFact.failed` に写す）。ERROR の行は status が
+    #: 故障を表すので不要。結果 JSON の schema には入れない
+    observed_failure: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.cause is not None:
@@ -387,7 +391,7 @@ _INTERRUPTION_STATUS = {
 
 def interrupted_result(
     solver_name: str, kind: str, detail: str, elapsed_time: float,
-    *, cause: Optional[ExecutionEnd] = None,
+    *, cause: Optional[ExecutionEnd] = None, failure: Optional[str] = None,
 ) -> SolverResult:
     """実行が中断された（または canonical witness を決められなかった）ときの結果。
 
@@ -403,6 +407,7 @@ def interrupted_result(
         elapsed_time=elapsed_time,
         error_message=f"{kind}: {detail}",
         cause=default_cause if cause is None else cause,
+        observed_failure=failure,
     )
 
 
@@ -510,6 +515,7 @@ def execution_fact(result: SolverResult) -> ExecutionFact:
     return ExecutionFact(
         end=execution_end(result),
         limited=bool(getattr(result, "deadline_limited", False)),
+        failed=getattr(result, "observed_failure", None) is not None,
     )
 
 

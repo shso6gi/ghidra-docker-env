@@ -15,6 +15,13 @@ backend の実行入口は、実行を始めるときに `ExecutionBudget` を 1
 確かな事実）。中断の結果の status への写し方（`CANCELLED` → UNKNOWN、`BUDGET_EXHAUSTED`
 → TIMEOUT）は `smt.interface.interrupted_result` が持つ。
 
+**例外で止まった実行**（Issue #106 PR-106-A で改めた）: 例外の時点で時計が期限を過ぎていても、
+それだけでは中断にしない（独立した故障を時間切れに分類しない）。中断にするのは、明示の中止か、
+backend の中断の合図（z3 の ``Z3Exception('canceled')``）と停止の要求・与えた時間の使い切りが
+揃ったときだけ（`ExecutionBudget.interruption_after_exception`）。明示の中止で止まった実行が
+中断の合図ではない例外を上げていたら、status は中止のまま、故障の事実を行に残す
+（`SolverResult.observed_failure`）。
+
 **解析全体の期限との関係**（Issue #106 PR-106-A）: 解析全体の期限（pair の analysis
 deadline）の owner は `core.deadline.Deadline` で、この module は 1 回の solver 実行の
 残り時間だけを持つ。両者を突き合わせるのは `ExecutionBudget.starting_now(not_after=...)`
@@ -116,6 +123,36 @@ class ExecutionBudget:
         if token is not None and token.is_cancelled():
             return CANCELLED
         if time.monotonic() >= self.deadline:
+            return BUDGET_EXHAUSTED
+        return None
+
+    def used_up(self) -> bool:
+        """与えた時間を ms の丸めの範囲で使い切ったか（backend は終わりの最大 1 ms 手前で止まる）。"""
+
+        return self.deadline - time.monotonic() <= TIMEOUT_ROUNDING_SECONDS
+
+    def interruption_after_exception(
+        self, *, signalled: bool, stop_requested: bool = False,
+    ) -> Optional[str]:
+        """例外で止まった実行が中断によるものならその種類（Issue #106 PR-106-A）。
+
+        #206 では「例外の時点で中断されていれば（中止・時計が期限を過ぎた）中断」としていたが、
+        時計が期限を過ぎていることは例外の原因の証拠ではない（独立した故障を時間切れに
+        分類してしまう）。中断と見なすのは、中断の仕組みが実際に働いた証拠があるときだけ:
+
+        1. 明示の中止（token）→ CANCELLED（呼び出し側の意思が優先: #206 の契約のまま。例外が
+           中断の合図でなければ、独立した故障の事実は行の `observed_failure` に残す）
+        2. backend が中断の合図を出した（``signalled``: z3 なら ``Z3Exception('canceled')``）
+           うえで、停止を求めていた → CANCELLED、与えた時間を使い切っていた → BUDGET_EXHAUSTED
+        3. それ以外 → None（独立した故障: ERROR）
+        """
+
+        token = self._cancellation_token
+        if token is not None and token.is_cancelled():
+            return CANCELLED
+        if signalled and stop_requested:
+            return CANCELLED
+        if signalled and self.used_up():
             return BUDGET_EXHAUSTED
         return None
 

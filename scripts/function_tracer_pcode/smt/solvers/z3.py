@@ -279,6 +279,8 @@ class Z3Solver(SMTSolver):
         self.debug = debug
         #: 実行中の context（`request_stop` が別 thread から中断を求める先）
         self._running_context: Any = None
+        #: この実行に停止を求めたか（`request_stop`。例外・unknown が停止の結果かの証拠）
+        self._stop_requested = False
     
     @property
     def name(self) -> str:
@@ -325,8 +327,22 @@ class Z3Solver(SMTSolver):
         context = self._running_context
         if context is None:
             return False
+        self._stop_requested = True
         context.interrupt()
         return True
+
+    def _is_interruption_signal(self, exc: BaseException) -> bool:
+        """z3 が中断（`Context.interrupt` / 自身の打ち切り）で API 呼び出しを止めたときの例外か。
+
+        実測（z3 4.x）: interrupt された check は例外ではなく unknown（reason ``interrupted``）で
+        返り、tactic などの API は ``Z3Exception('canceled')`` を上げる。それ以外の例外（Python の
+        例外・別の z3 の error）は中断の合図ではない（独立した故障）。
+        """
+
+        z3_exception = getattr(self._z3, "Z3Exception", None)
+        return bool(
+            z3_exception is not None and isinstance(exc, z3_exception) and "canceled" in str(exc)
+        )
 
     def check_equivalence_direct(
         self,
@@ -342,6 +358,7 @@ class Z3Solver(SMTSolver):
             return self._create_error_result("Z3 is not available")
         
         start_time = time.time()
+        self._stop_requested = False
         # Issue #161: 実行の状態（期限と中止）は 1 回の実行に 1 つの `ExecutionBudget`。
         # 入口で作り、query の準備・初回の check・canonical witness の生成と SAT の確定の
         # すべてがこれに問う（初回の check には残りだけを与える）。
@@ -414,11 +431,18 @@ class Z3Solver(SMTSolver):
         except Exception as e:
             elapsed = time.time() - start_time
             self._debug_print(f"Exception: {e}")
-            # 例外で止まった実行も、中断（中止・期限切れ）なら中断の規則で分類する
-            # （中止を優先。期限切れは従来どおり TIMEOUT）。それ以外は ERROR
-            stop = budget.interruption()
+            # 例外が中断によるものかは、中断の仕組みが働いた証拠（明示の中止・停止の要求・与えた
+            # 時間の使い切り + z3 の中断の合図）で決める。時計が期限を過ぎているだけでは中断に
+            # しない（独立した故障は ERROR: `ExecutionBudget.interruption_after_exception`）
+            signalled = self._is_interruption_signal(e)
+            stop = budget.interruption_after_exception(
+                signalled=signalled, stop_requested=self._stop_requested,
+            )
             if stop is not None:
-                return interrupted_result(self.name, stop, f"the execution raised: {e}", elapsed)
+                return interrupted_result(
+                    self.name, stop, f"the execution raised: {e}", elapsed,
+                    failure=None if signalled else f"{type(e).__name__}: {e}",
+                )
             return self._create_error_result(str(e))
         finally:
             self._running_context = None
@@ -434,6 +458,9 @@ class Z3Solver(SMTSolver):
         """
 
         stop = budget.interruption_after_unknown(reason)
+        if stop is None and self._stop_requested:
+            # `request_stop`（Context.interrupt）で止めた check は reason "interrupted" の unknown
+            stop = CANCELLED
         if stop is not None:
             return interrupted_result(self.name, stop, reason, elapsed)
         cause = budget.unknown_end(reason)

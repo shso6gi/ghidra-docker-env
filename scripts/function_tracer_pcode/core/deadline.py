@@ -42,9 +42,9 @@ decompile 1 回）の owner 側の handle で、開始の確認（`begin`）と�
 ========================================= =============================================
 期限後でも期限で切られた実行も無い         ACCEPT（答え・通常の unknown・通常の timeout・明示
                                           の中止・失敗は、期限の無いときと同じ結果のまま）
-失敗（FAILED / CONTRACT_VIOLATION）がある  KEEP_FAILURE（失敗を結果に残し、期限の限界は記録
-                                          だけして raise は次の境界）。ただし期限後で、契約
-                                          違反が無く答えがある（集約でその答えが採られて
+故障を観測した（終了原因が FAILED /       KEEP_FAILURE（故障を結果に残し、期限の限界は記録
+CONTRACT_VIOLATION、または                 だけして raise は次の境界）。ただし期限後で、契約
+`ExecutionFact.failed`）                   違反が無く答えがある（集約でその答えが採られて
                                           しまう）なら DEADLINE
 それ以外（期限後・期限で切られた実行）     DEADLINE（答えがあっても採らない）
 ========================================= =============================================
@@ -283,12 +283,21 @@ class ExecutionFact:
     #: その実行の時間の上限を解析の期限が決めた（`ExecutionWindow.limited`、または待つのを
     #: 期限でやめた）
     limited: bool
+    #: 終了原因とは独立に、backend の故障を観測した（例: 明示の中止で止まった実行が、中止の
+    #: 合図ではない例外を上げていた）。終了原因が FAILED / CONTRACT_VIOLATION なら常に真
+    failed: bool = False
 
     def __post_init__(self) -> None:
         if type(self.end) is not ExecutionEnd:
             raise TypeError("execution fact needs an ExecutionEnd")
-        if type(self.limited) is not bool:
-            raise TypeError("execution fact needs a bool limited")
+        if type(self.limited) is not bool or type(self.failed) is not bool:
+            raise TypeError("execution fact needs bool limited / failed")
+
+    @property
+    def failure_observed(self) -> bool:
+        """結果として表に出すべき故障を観測したか（期限で隠さない）。"""
+
+        return self.failed or self.end in FAILURE_ENDS
 
     @property
     def cut_by_deadline(self) -> bool:
@@ -330,7 +339,7 @@ def settlement(facts: Tuple[ExecutionFact, ...], *, expired: bool) -> Settlement
     deadline_fact = expired or any(fact.cut_by_deadline for fact in facts)
     if not deadline_fact:
         return Settlement.ACCEPT
-    if ends & FAILURE_ENDS:
+    if any(fact.failure_observed for fact in facts):
         adoptable_answer = (
             ExecutionEnd.ANSWERED in ends and ExecutionEnd.CONTRACT_VIOLATION not in ends
         )
@@ -395,7 +404,7 @@ class DeadlineQuery:
         if not self._startable or self.kept_failure:
             return False
         if self._deadline is not None:
-            self._deadline.begin_execution(self, configured_seconds, unit)
+            return self._deadline.begin_execution(self, configured_seconds, unit)
         return True
 
     def wait_timeout(self, configured_wait_seconds: float) -> Tuple[float, bool]:
@@ -496,16 +505,29 @@ class Deadline:
             ),
         )
 
-    def begin_execution(self, query: DeadlineQuery, configured_seconds: float, unit: TimeUnit) -> None:
-        """実行を 1 回始める前（owner）。期限を過ぎている・残りが余裕以下・単位へ直すと 0 なら raise。"""
+    def begin_execution(self, query: DeadlineQuery, configured_seconds: float, unit: TimeUnit) -> bool:
+        """実行を 1 回始める前（owner）。期限を過ぎている・残りが余裕以下・単位へ直すと 0 なら始めない。
+
+        始めないときは限界を raise する。ただしこの問いの先の実行で故障を観測していれば
+        （`ExecutionFact.failure_observed`）、その故障を結果に残すため raise せず、限界を記録
+        だけして偽を返す（`Settlement.KEEP_FAILURE` と同じ扱い: 次の境界で raise）。
+        """
 
         if not self._active_here():
-            return
+            return True
         now = self._read(query.stage)
+        refusal: Optional[Tuple[str, ...]] = None
         if self._trip is not None or now >= self.absolute:
-            self._raise(query.stage, now, boundary="before")
-        if bounded_timeout(configured_seconds, query.bound.not_after, unit, now=now) is None:
-            self._raise(query.stage, now, boundary="before", evidence=("remaining_below_margin",))
+            refusal = ()
+        elif bounded_timeout(configured_seconds, query.bound.not_after, unit, now=now) is None:
+            refusal = ("remaining_below_margin",)
+        if refusal is None:
+            return True
+        if any(fact.failure_observed for fact in query.facts):
+            query.kept_failure = True
+            self._mark(query.stage, now, boundary="before", evidence=("failure_kept", *refusal))
+            return False
+        self._raise(query.stage, now, boundary="before", evidence=refusal)
 
     def settle(self, query: DeadlineQuery, *, evidence: Tuple[str, ...] = ()) -> Settlement:
         """実行が返った直後（owner）。`settlement` の結論を適用する。

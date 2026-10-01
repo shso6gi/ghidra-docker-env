@@ -39,15 +39,16 @@ def _clean_ledgers():
     reset_pair_failure_scopes()
 
 
-def _replay_with_deadline(case_id, trip_stage, *, fast_path="recorded", tmp_path):
+def _replay_with_deadline(case_id, trip_stage, *, fast_path="recorded", tmp_path, extra=()):
     """子 process で 1 回だけ再生して観測を読む（採点は呼び出し側）。"""
 
-    output = tmp_path / f"{case_id}.{trip_stage}.json"
+    output = tmp_path / f"{case_id}.{trip_stage}.{'-'.join(extra) or 'plain'}.json"
     completed = subprocess.run(
         [
             sys.executable, "-B", "-m", DRIVER,
             "--case-dir", str(FIXTURES / case_id), "--case-id", case_id,
             "--trip-stage", trip_stage, "--fast-path", fast_path, "--output", str(output),
+            *extra,
         ],
         cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=REPLAY_TIMEOUT_SECONDS,
     )
@@ -148,3 +149,36 @@ def test_e2_a_decided_pair_past_the_deadline_fails_closed_to_unknown(case_id, fa
     )
 
 
+
+
+# ---------------------------------------------------------------------------
+# レビュー 3 巡目: 期限が短くした上限の後の独立した故障は、期限なしと同じ最終結果になる
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("case_id", ["gammln_snippet_B1_B2", "max_snippet_N_B2_O_B4"])
+def test_an_independent_solver_failure_after_a_shortened_limit_keeps_the_final_result(case_id, tmp_path):
+    """最初の `Z3Solver` の実行だけ期限を 1.0 s 先（窓 0.5 s）にし、z3 の check が 0.7 s で独立した
+    例外を上げる。同じ注入を期限なしで再生した結果と、final outcome・reason・error・receipt が同じ。
+
+    修正前（23ace10）は、時計が実行の予算を過ぎていることだけで例外を時間切れ（TIMEOUT）に分類し、
+    期限の切断として `analysis_budget_exceeded` の UNKNOWN にしていた（レビュー 3 巡目の再現 2）。
+    """
+
+    inject = ("--inject", "z3_error_after_limit")
+    without = _replay_with_deadline(case_id, "none", tmp_path=tmp_path, extra=(*inject, "--no-deadline"))
+    within = _replay_with_deadline(case_id, "none", tmp_path=tmp_path, extra=inject)
+    for report in (without, within):
+        assert report["failure"] is None, report["failure"]
+        assert report["injected"]["injected"] is True
+        assert report["injected"]["row_status"] == "ERROR"
+        assert report["injected"]["row_end"] == "failed"
+        assert "injected backend failure" in report["injected"]["row_error"]
+    assert without["injected"]["row_limited"] is False
+    assert within["injected"]["row_limited"] is True  # 上限は期限で短くなっていた
+    for key in ("final_outcome", "reason_ids", "error_message", "has_decision_receipt", "has_finalization_bundle"):
+        assert within[key] == without[key], key
+    assert BUDGET_REASON not in within["reason_ids"]
+    assert within["limitation_site"] is None
+    assert within["pair_stop_state"] is None
+    assert within["analysis_deadline"]["tripped"] is False

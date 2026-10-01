@@ -8,6 +8,10 @@ connector・worker authority 付き）を記録済み object の上で走らせ�
 * ``--trip-stage none``: 期限は十分に長く、どの stage で何回時計を読んだかを観測する
 * ``--trip-stage <S>``: stage ``S`` で最初に時計を読んだ瞬間に時計を期限の先へ進める
   （その境界で期限切れを観測させる。他の仕組みには手を入れない）
+* ``--inject z3_error_after_limit``（レビュー 3 巡目）: 最初の `Z3Solver` の実行 1 回だけ、
+  期限を「1.0 s 先・実行の窓は 0.5 s」に縮めて始め、z3 の check が窓の後（0.7 s）に独立した
+  例外を上げる。実行が返った後は期限を元に戻す（この 1 回の判定だけを切り出す）。
+  ``--no-deadline`` と組み合わせると、同じ注入を期限なしで観測する
 
 採点はしない。観測を JSON で返し、親の test が判定する。
 """
@@ -46,12 +50,72 @@ def _reason_ids(payload: Optional[Dict[str, Any]]) -> List[str]:
     return sorted(set(ids))
 
 
-def run(case_dir: Path, *, case_id: str, trip_stage: str, fast_path: Optional[bool]) -> Dict[str, Any]:
+class _FailingSolver:
+    """本物の z3 の solver を包み、check だけ ``fail_at``（monotonic）まで待ってから例外を上げる。"""
+
+    def __init__(self, inner: Any, fail_at: float) -> None:
+        self._inner = inner
+        self._fail_at = fail_at
+
+    def check(self, *args: Any) -> Any:
+        time.sleep(max(0.0, self._fail_at - time.monotonic()))
+        raise RuntimeError("injected backend failure")
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def _inject_z3_error_after_limit(patcher: Any, observed: Dict[str, Any]) -> None:
+    import z3
+
+    from scripts.function_tracer_pcode.smt import parallel as parallel_module
+    from scripts.function_tracer_pcode.smt.interface import execution_end
+    from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
+
+    original = parallel_module._execute_within
+    real_solver = z3.Solver
+
+    def _wrapped(backend, smt_script, timeout_seconds, bound, token):
+        if observed.get("injected") or not isinstance(backend, Z3Solver):
+            return original(backend, smt_script, timeout_seconds, bound, token)
+        observed["injected"] = True
+        deadline = deadline_module.active_deadline()
+        now = time.monotonic()
+        saved = None
+        if deadline is not None:
+            saved = deadline.absolute
+            deadline.absolute = now + 1.0
+            bound = deadline_module.ExecutionBound(not_after=now + 0.5, clock=bound.clock)
+        z3.Solver = lambda *a, **k: _FailingSolver(real_solver(*a, **k), now + 0.7)
+        try:
+            row = original(backend, smt_script, timeout_seconds, bound, token)
+        finally:
+            z3.Solver = real_solver
+            if saved is not None:
+                deadline.absolute = saved
+        observed.update({
+            "row_status": row.status.name,
+            "row_end": execution_end(row).value,
+            "row_limited": row.deadline_limited,
+            "row_error": row.error_message,
+        })
+        return row
+
+    patcher.setattr(parallel_module, "_execute_within", _wrapped)
+
+
+def run(
+    case_dir: Path, *, case_id: str, trip_stage: str, fast_path: Optional[bool],
+    inject: str = "none", no_deadline: bool = False,
+) -> Dict[str, Any]:
     left = json.loads((case_dir / "left.json").read_text(encoding="utf-8"))
     right = json.loads((case_dir / "right.json").read_text(encoding="utf-8"))
     offset = [0.0]
     tripped_at: List[str] = []
     patcher = SimplePatcher()
+    injected: Dict[str, Any] = {}
+    if inject == "z3_error_after_limit":
+        _inject_z3_error_after_limit(patcher, injected)
 
     if trip_stage != "none":
         original_read = deadline_module.Deadline._read
@@ -70,7 +134,7 @@ def run(case_dir: Path, *, case_id: str, trip_stage: str, fast_path: Optional[bo
     started = time.monotonic()
     outcome = replay_recorded_pair(
         left, right, case_id=case_id + "-deadline-" + trip_stage, monkeypatch=patcher,
-        identical_fast_path=fast_path, analysis_deadline=policy,
+        identical_fast_path=fast_path, analysis_deadline=None if no_deadline else policy,
     )
     payload = outcome.payload or {}
     diagnostics = payload.get("diagnostics") or {}
@@ -94,6 +158,7 @@ def run(case_dir: Path, *, case_id: str, trip_stage: str, fast_path: Optional[bo
         "pair_stop_state": failures.get("pair_stop_state"),
         "analysis_deadline": diagnostics.get("analysis_deadline"),
         "conditional_lane": diagnostics.get("conditional_lane"),
+        "injected": injected,
     }
 
 
@@ -104,10 +169,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--trip-stage", required=True)
     parser.add_argument("--fast-path", choices=sorted(FAST_PATH), default="recorded")
     parser.add_argument("--output", required=True)
+    parser.add_argument("--inject", choices=["none", "z3_error_after_limit"], default="none")
+    parser.add_argument("--no-deadline", action="store_true")
     args = parser.parse_args(argv)
     report = run(
         Path(args.case_dir), case_id=args.case_id, trip_stage=args.trip_stage,
-        fast_path=FAST_PATH[args.fast_path],
+        fast_path=FAST_PATH[args.fast_path], inject=args.inject, no_deadline=args.no_deadline,
     )
     Path(args.output).write_text(json.dumps(report, ensure_ascii=False, sort_keys=True), encoding="utf-8")
     return 0
