@@ -78,6 +78,7 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_faults import (
     Deadline,
     WORKER_EXIT_OBSERVATION,
     WORKER_EXIT_RELEASE,
+    WORKER_EXIT_WAIT,
     Fault,
     install_deadline_control,
     install_publication_faults,
@@ -357,6 +358,32 @@ class SupervisorHandle:
             entry for entry in read_json_lines(self._invocation.records.faults)
             if entry.get("point") == WORKER_EXIT_OBSERVATION
         ]
+
+    def worker_exit_waits(self) -> list[dict]:
+        """supervisor が worker の終了を待つ段階に入った記録（入った時点の probe の結果つき）。"""
+
+        return [
+            entry for entry in read_json_lines(self._invocation.records.faults)
+            if entry.get("point") == WORKER_EXIT_WAIT
+        ]
+
+    def wait_until_waiting_for_worker_exit(self, *, timeout: float = 60.0) -> dict:
+        """supervisor が worker の終了を待つ段階に入ったと記録するまで待ち、その記録を返す。
+
+        同期の根拠は supervisor の記録（入った証拠）で、時間ではない。入らないまま supervisor が
+        終わるか上限を過ぎたら ``SupervisorPathMismatch``。
+        """
+
+        limit = time.monotonic() + timeout
+        while True:
+            waits = self.worker_exit_waits()
+            if waits:
+                return waits[0]
+            if self._exited() or time.monotonic() > limit:
+                raise SupervisorPathMismatch(
+                    f"{self.invocation} never started waiting for the worker's exit"
+                )
+            time.sleep(0.01)
 
     def wait(self) -> SupervisorRun:
         if self._run is None:
