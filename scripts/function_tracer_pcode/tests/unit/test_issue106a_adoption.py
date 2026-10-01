@@ -131,6 +131,8 @@ def _assert_withheld(result, *, failures):
     assert result.first_definitive is None
     assert result.get_counterexample() is None
     assert all(row.status not in ANSWER for row in result.results)
+    # 外した答えの行は反例を持たない（query receipt は行の model を写すので、残すと反例が漏れる）
+    assert all(row.model is None for row in result.results if row.withheld_status is not None)
     assert ParallelResult.from_backend_results(list(result.results)).is_equivalent is None
     assert ParallelResult(results=list(result.results)).is_equivalent is None
     # 1: 故障の行はそのまま残る
