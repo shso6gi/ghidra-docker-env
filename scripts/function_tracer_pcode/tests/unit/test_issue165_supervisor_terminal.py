@@ -18,6 +18,7 @@ restart する。どの境界から復旧しても projection は bytes まで�
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -652,24 +653,48 @@ def _leader_state(pid: int) -> str:
     return stat[stat.rfind(")") + 2]
 
 
-def test_t11_a_release_after_the_worker_exit_waits_until_the_supervisor_can_observe_it(tmp_path):
-    """race A の前提の契約（Issue #226）: leader が Z でも、親から終了が観測できるまで supervisor は
-    進まない。観測できた後で進めば、signal の前の終了として `EXITED_2`・signal なしになる。
-
-    worker は SIGUSR1 で leader thread だけを先に終わらせ（Z）、test が `finish` に書くまで別の
-    thread が process を生かす（時間でなく合図で「Z なのに観測できない」状態を作る）。
-    """
-
+def _leader_first_case(tmp_path):
     script = ChildScript((
         Checkpoint(), Envelope("UNKNOWN"), Stop(exit_on_sigusr1=2, leader_exits_first=True),
     ))
-    with supervisor_case(tmp_path, script, allow_child_exit_resolution=True) as case:
-        point = FileBoundary(layout.DEADLINE)
-        with start_supervisor(
-            case, entry=SupervisorEntry.FRESH_START, deadline=Deadline.AT_CHILD_STOP,
-            faults=(pause_at(point),),
-        ) as handle:
-            handle.wait_until_paused(point.describe())
+    return supervisor_case(tmp_path, script, allow_child_exit_resolution=True)
+
+
+@contextlib.contextmanager
+def _paused_at_the_deadline(case):
+    point = FileBoundary(layout.DEADLINE)
+    with start_supervisor(
+        case, entry=SupervisorEntry.FRESH_START, deadline=Deadline.AT_CHILD_STOP,
+        faults=(pause_at(point),),
+    ) as handle:
+        handle.wait_until_paused(point.describe())
+        yield handle
+
+
+def _assert_resolved_without_a_signal(case, handle, run, child):
+    assert [
+        (entry["worker_pid"], entry["observable"], entry["status"])
+        for entry in handle.worker_exit_observations()
+    ] == [(child.pid, True, 2)]
+    assert run.projection["child_exit_disposition"] == "EXITED_2"
+    assert run.projection["child_returncode"] == 2
+    _deadline, child_exit = _evidence(case)
+    assert child_exit["payload"]["signal_actions"] == []
+
+
+def test_t11_a_release_after_the_worker_exit_waits_until_the_supervisor_can_observe_it(tmp_path):
+    """race A の前提の契約（Issue #226）: supervisor は worker の終了を待つ段階に入り、その時点で
+    親からまだ観測できなければ、観測できるまで先へ進まない。観測できた後で進めば、signal の前の
+    終了として `EXITED_2`・signal なしになる。
+
+    worker は SIGUSR1 で leader thread だけを先に終わらせ（Z）、test が `finish` に書くまで別の
+    thread が process を生かす。test は supervisor の「待ち始めた」記録で同期し（記録の不在を
+    待った証拠にしない）、その記録の probe で親からまだ観測できないことを確かめてから worker を
+    終わらせる。待たずに進む supervisor は、生きている worker に signal を送る経路へ入る。
+    """
+
+    with _leader_first_case(tmp_path) as case:
+        with _paused_at_the_deadline(case) as handle:
             child = handle.child()
             records = case.records.child(child)
             os.kill(child.pid, signal.SIGUSR1)
@@ -678,22 +703,37 @@ def test_t11_a_release_after_the_worker_exit_waits_until_the_supervisor_can_obse
                 assert time.monotonic() < limit, "the worker's leader thread did not exit"
                 time.sleep(0.01)
             handle.release_after_worker_exit()
-            # leader は Z だが、残りの thread が生きているので親からは観測できない: supervisor は
-            # 観測を記録しておらず、signal も送っていない（まだ終端を作っていない）
-            assert handle.worker_exit_observations() == []
+            waiting = handle.wait_until_waiting_for_worker_exit()
+            # 待つ段階に入った時点で、親（supervisor）からはまだ終了が観測できない
+            assert waiting["worker_pid"] == child.pid and waiting["observable_at_entry"] is False
             assert _leader_state(child.pid) == "Z"
-            assert not (case.store_directory / layout.CHILD_EXIT).exists()
             with open(records.finish, "wb") as fifo:
                 fifo.write(b"1")
             run = handle.wait()
-        assert [
-            (entry["worker_pid"], entry["observable"], entry["status"])
-            for entry in handle.worker_exit_observations()
-        ] == [(child.pid, True, 2)]
-        assert run.projection["child_exit_disposition"] == "EXITED_2"
-        assert run.projection["child_returncode"] == 2
-        _deadline, child_exit = _evidence(case)
-        assert child_exit["payload"]["signal_actions"] == []
+        assert len(handle.worker_exit_waits()) == 1
+        _assert_resolved_without_a_signal(case, handle, run, child)
+
+
+def test_t11_a_worker_already_observable_before_the_release_resolves_the_same_way(tmp_path):
+    """もう 1 つの schedule: worker が解放より前に終わり切っていても、同じく `EXITED_2`・signal なし
+    （待つ段階は入ってすぐ抜ける）。"""
+
+    with _leader_first_case(tmp_path) as case:
+        with _paused_at_the_deadline(case) as handle:
+            child = handle.child()
+            records = case.records.child(child)
+            os.kill(child.pid, signal.SIGUSR1)
+            limit = time.monotonic() + 30
+            while _leader_state(child.pid) != "Z":
+                assert time.monotonic() < limit, "the worker's leader thread did not exit"
+                time.sleep(0.01)
+            with open(records.finish, "wb") as fifo:
+                fifo.write(b"1")
+            handle.release_after_worker_exit()
+            waiting = handle.wait_until_waiting_for_worker_exit()
+            assert waiting["worker_pid"] == child.pid
+            run = handle.wait()
+        _assert_resolved_without_a_signal(case, handle, run, child)
 
 
 @pytest.mark.parametrize(("race", "stop", "disposition", "rc", "signals"), (
@@ -727,6 +767,8 @@ def test_t11_deadline_races_keep_the_observed_disposition_and_do_not_adopt_the_e
                 handle.release()
             run = handle.wait()
         if race.startswith("A"):
+            # 待つ段階に入った証拠と、観測できた証拠の両方
+            assert [entry["worker_pid"] for entry in handle.worker_exit_waits()] == [child.pid]
             assert [
                 (entry["worker_pid"], entry["observable"], entry["status"])
                 for entry in handle.worker_exit_observations()

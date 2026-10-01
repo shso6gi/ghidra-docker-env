@@ -222,6 +222,9 @@ WORKER_EXIT_RELEASE = b"worker-exit:"
 WORKER_EXIT_OBSERVE_LIMIT_SECONDS = 30.0
 #: 終了の観測の記録の ``point``
 WORKER_EXIT_OBSERVATION = "worker-exit-observable"
+#: 終了を待ち始めた記録の ``point``（待つ段階に入ったことの証拠。入った時点で親から終了が観測
+#: できたかの probe の結果を持つ）
+WORKER_EXIT_WAIT = "worker-exit-wait"
 
 
 def _wait_until_worker_exit_is_observable(pid: int, *, sink: Path) -> None:
@@ -233,8 +236,17 @@ def _wait_until_worker_exit_is_observable(pid: int, *, sink: Path) -> None:
 
     ``WNOWAIT`` なので回収しない（production の ``poll()`` が自分で回収する経路をそのまま試験する）。
     待つのは条件そのもの（blocking な ``waitid``）で、上限は観測できなかったときの失敗の記録のため。
+
+    待つ前に「待つ段階に入った」ことを記録する（``WORKER_EXIT_WAIT``。その時点の非 blocking な
+    probe で、親から終了がもう観測できたかも残す）。test はこの記録で同期し、「記録が無い」ことを
+    待った証拠にしない。
     """
 
+    probe = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    append_json_line(sink, {
+        "role": "supervisor", "pid": os.getpid(), "point": WORKER_EXIT_WAIT,
+        "action": "wait", "worker_pid": pid, "observable_at_entry": probe is not None,
+    })
     observed: list = []
 
     def _observe() -> None:
