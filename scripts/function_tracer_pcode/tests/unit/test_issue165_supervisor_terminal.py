@@ -647,9 +647,53 @@ def test_t16_exit_observation_windows_around_eof_and_kill(
 # ---------------------------------------------------------------------------
 
 
-def _zombie(pid: int) -> bool:
+def _leader_state(pid: int) -> str:
     stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    return stat[stat.rfind(")") + 2] == "Z"
+    return stat[stat.rfind(")") + 2]
+
+
+def test_t11_a_release_after_the_worker_exit_waits_until_the_supervisor_can_observe_it(tmp_path):
+    """race A の前提の契約（Issue #226）: leader が Z でも、親から終了が観測できるまで supervisor は
+    進まない。観測できた後で進めば、signal の前の終了として `EXITED_2`・signal なしになる。
+
+    worker は SIGUSR1 で leader thread だけを先に終わらせ（Z）、test が `finish` に書くまで別の
+    thread が process を生かす（時間でなく合図で「Z なのに観測できない」状態を作る）。
+    """
+
+    script = ChildScript((
+        Checkpoint(), Envelope("UNKNOWN"), Stop(exit_on_sigusr1=2, leader_exits_first=True),
+    ))
+    with supervisor_case(tmp_path, script, allow_child_exit_resolution=True) as case:
+        point = FileBoundary(layout.DEADLINE)
+        with start_supervisor(
+            case, entry=SupervisorEntry.FRESH_START, deadline=Deadline.AT_CHILD_STOP,
+            faults=(pause_at(point),),
+        ) as handle:
+            handle.wait_until_paused(point.describe())
+            child = handle.child()
+            records = case.records.child(child)
+            os.kill(child.pid, signal.SIGUSR1)
+            limit = time.monotonic() + 30
+            while _leader_state(child.pid) != "Z":
+                assert time.monotonic() < limit, "the worker's leader thread did not exit"
+                time.sleep(0.01)
+            handle.release_after_worker_exit()
+            # leader は Z だが、残りの thread が生きているので親からは観測できない: supervisor は
+            # 観測を記録しておらず、signal も送っていない（まだ終端を作っていない）
+            assert handle.worker_exit_observations() == []
+            assert _leader_state(child.pid) == "Z"
+            assert not (case.store_directory / layout.CHILD_EXIT).exists()
+            with open(records.finish, "wb") as fifo:
+                fifo.write(b"1")
+            run = handle.wait()
+        assert [
+            (entry["worker_pid"], entry["observable"], entry["status"])
+            for entry in handle.worker_exit_observations()
+        ] == [(child.pid, True, 2)]
+        assert run.projection["child_exit_disposition"] == "EXITED_2"
+        assert run.projection["child_returncode"] == 2
+        _deadline, child_exit = _evidence(case)
+        assert child_exit["payload"]["signal_actions"] == []
 
 
 @pytest.mark.parametrize(("race", "stop", "disposition", "rc", "signals"), (
@@ -674,13 +718,19 @@ def test_t11_deadline_races_keep_the_observed_disposition_and_do_not_adopt_the_e
             assert (case.store_directory / layout.DEADLINE).exists()
             child = handle.child()
             if race.startswith("A"):
+                # race A の前提「signal の前に終了した」は、supervisor（親）が終了を観測できる
+                # ことで確立する（Issue #226。`/proc` の Z は thread group leader の状態で、
+                # 親の waitpid がまだ終了を報告しないことがある）
                 os.kill(child.pid, signal.SIGUSR1)
-                limit = time.monotonic() + 30
-                while not _zombie(child.pid):
-                    assert time.monotonic() < limit, "the child did not exit"
-                    time.sleep(0.01)
-            handle.release()
+                handle.release_after_worker_exit()
+            else:
+                handle.release()
             run = handle.wait()
+        if race.startswith("A"):
+            assert [
+                (entry["worker_pid"], entry["observable"], entry["status"])
+                for entry in handle.worker_exit_observations()
+            ] == [(child.pid, True, 2)]
         _assert_terminal(run, _expected("deadline", runner=True, phase="RESOLVED"))
         assert run.projection["child_exit_disposition"] == disposition
         assert run.projection["child_returncode"] == rc

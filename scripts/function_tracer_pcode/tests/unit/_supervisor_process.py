@@ -76,6 +76,8 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_faults import (
     FAULT_CRASH_EXIT,
     ChildStopped,
     Deadline,
+    WORKER_EXIT_OBSERVATION,
+    WORKER_EXIT_RELEASE,
     Fault,
     install_deadline_control,
     install_publication_faults,
@@ -333,6 +335,28 @@ class SupervisorHandle:
     def release(self) -> None:
         with open(self._invocation.records.release, "wb") as fifo:
             fifo.write(b"1")
+
+    def release_after_worker_exit(self) -> None:
+        """worker の終了が supervisor（親）から観測できるようになってから supervisor を続けさせる。
+
+        Issue #226: 「signal の前に worker が終了した」を前提にする test はこれで解放する。待つのは
+        supervisor の process の中の ``waitid(..., WNOWAIT)``（回収しない）で、その結果は
+        ``worker_exit_observations`` に残る。``/proc`` の ``Z`` は親が観測できることを意味しない。
+        """
+
+        child = self.child()
+        if child is None:
+            raise AssertionError(f"{self.invocation} has no worker whose exit could be awaited")
+        with open(self._invocation.records.release, "wb") as fifo:
+            fifo.write(WORKER_EXIT_RELEASE + str(child.pid).encode("ascii"))
+
+    def worker_exit_observations(self) -> list[dict]:
+        """``release_after_worker_exit`` で supervisor が記録した、worker の終了の観測。"""
+
+        return [
+            entry for entry in read_json_lines(self._invocation.records.faults)
+            if entry.get("point") == WORKER_EXIT_OBSERVATION
+        ]
 
     def wait(self) -> SupervisorRun:
         if self._run is None:
