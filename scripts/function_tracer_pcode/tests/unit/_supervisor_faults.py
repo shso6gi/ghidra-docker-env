@@ -51,6 +51,7 @@ import time
 from typing import Any, Mapping, Optional, Sequence, Union
 
 from scripts.function_tracer_pcode.tests.unit._supervisor_records import (
+    ChildIdentity,
     ChildRecords,
     HarnessRecords,
     InvocationRecords,
@@ -370,6 +371,55 @@ def install_publication_faults(
 # ---------------------------------------------------------------------------
 
 
+#: `_wait_for_stop_or_end` の結果: worker が止まった / worker が終わった / 本物の timer が来た
+WORKER_STOPPED = "worker-stop"
+WORKER_ENDED = "worker-exit"
+REAL_TIMER = "timer"
+
+
+def _wait_for_stop_or_end(process: Any, marker: Path, real_deadline: float) -> str:
+    """worker が止まる（``marker``）か、終わるか、本物の timer が来るまで待つ。"""
+
+    while not marker.exists():
+        if process.poll() is not None:
+            return WORKER_ENDED
+        if time.monotonic() >= real_deadline:
+            return REAL_TIMER
+        time.sleep(_POLL_SECONDS)
+    return WORKER_STOPPED
+
+
+def install_runner_deadline_at_worker_stop(harness: HarnessRecords, *, sink: Path) -> None:
+    """runner が起こした production の supervisor の deadline を、worker の ``stop`` に結ぶ（Issue #226）。
+
+    supervisor 単体の harness の ``Deadline.AT_CHILD_STOP`` と同じ: 止まった worker の pair は
+    止まった瞬間に deadline へ進み、止まらずに終わる worker の pair は deadline に当たらない。
+    pair が deadline に当たるかを host の速さ（runner の timer）で決めない。本物の timer は
+    hang の上限としてだけ残し、どの経路を通ったかを pair ごとに ``sink`` へ記録する（test は
+    timer に当たった pair が無いことを確かめる）。
+    """
+
+    from scripts.function_tracer_pcode.authority.process.process_identity import (
+        read_process_start_token,
+    )
+    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+        ProcessSupervisorCommand,
+    )
+
+    original = ProcessSupervisorCommand._wait_for_child_until_deadline
+
+    def controlled(self: Any, process: Any, diagnostic: Any, real_deadline: float) -> Any:
+        identity = ChildIdentity(process.pid, read_process_start_token(process.pid))
+        path = _wait_for_stop_or_end(process, harness.child(identity).stopped, real_deadline)
+        arguments = list(getattr(process, "args", ()) or ())
+        function = arguments[arguments.index("-f") + 1] if "-f" in arguments else None
+        append_json_line(sink, {"worker_pid": process.pid, "function": function, "deadline": path})
+        effective = time.monotonic() if path == WORKER_STOPPED else real_deadline
+        return original(self, process, diagnostic, effective)
+
+    ProcessSupervisorCommand._wait_for_child_until_deadline = controlled
+
+
 def install_deadline_control(
     *, deadline: str, faults: Sequence[Fault], invocation: InvocationRecords,
     harness: HarnessRecords, store_directory: Path,
@@ -399,10 +449,8 @@ def install_deadline_control(
             })
             os._exit(70)
         marker = harness.child(started).stopped
-        while not marker.exists():
-            if process.poll() is not None or time.monotonic() >= real_deadline:
-                return original(self, process, diagnostic, real_deadline)
-            time.sleep(_POLL_SECONDS)
+        if _wait_for_stop_or_end(process, marker, real_deadline) != WORKER_STOPPED:
+            return original(self, process, diagnostic, real_deadline)
         write_json(invocation.store_at_child_stop, inspect_store(store_directory).to_json())
         if crash is not None:
             _fire(crash, role="supervisor", sink=invocation.faults, child=None)
