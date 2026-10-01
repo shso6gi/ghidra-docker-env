@@ -106,6 +106,34 @@ class _StableKeyMutatesTheHolder(_HolderRef):
 
 
 @dataclasses.dataclass(frozen=True)
+class _StableKeyWritesTheHolderDict(_HolderRef):
+    """属性の protocol を通らない書き換え（`__dict__` へ直接。代入の拒否では止まらない）。"""
+
+    def stable_key(self):
+        node = self.holder()
+        if node is not None:
+            node.__dict__["value"] = 2
+        return ("holder", self.key)
+
+
+@dataclasses.dataclass(frozen=True)
+class _StableKeyObservesTheRejection(_HolderRef):
+    """凍結中の値への代入を試み、拒まれたかを記録する（拒まれれば値は動かず、凍結は進む）。"""
+
+    def stable_key(self):
+        node = self.holder()
+        if node is not None:
+            try:
+                node.value = 2
+            except FrozenExpressionError:
+                _REJECTIONS.append(node)
+        return ("holder", self.key)
+
+
+_REJECTIONS: list = []
+
+
+@dataclasses.dataclass(frozen=True)
 class _StableKeyMutatesTheHolderInPlace(_HolderRef):
     """属性の protocol を通らない書き換え（構築中の式の `operands` の list の子を差し替える）。"""
 
@@ -164,6 +192,7 @@ _CALLBACKS = {
     "stable_key_of_a_child_mutates_the_parent": lambda: _holding_a_parent(_StableKeyMutatesTheHolder),
     "stable_key_mutates_operands_in_place": lambda: _holding_a_parent(_StableKeyMutatesTheHolderInPlace),
     "stable_key_reenters_publication": lambda: _holding(_StableKeyReentersFreeze),
+    "stable_key_writes_the_holder_dict": lambda: _holding(_StableKeyWritesTheHolderDict),
 }
 
 
@@ -223,6 +252,28 @@ def test_a_callback_during_freeze_never_commits_a_state_its_derived_values_do_no
         assert _snapshot_fingerprint_of(expr) == fingerprint
 
 
+def test_a_write_that_bypasses_the_attribute_protocol_during_freeze_commits_nothing():
+    """`__dict__` へ直接書いた意味 field は、commit の前の確かめ直しで拒まれる（何も commit しない）。"""
+
+    expr = _holding(_StableKeyWritesTheHolderDict)
+    with pytest.raises(FrozenExpressionError, match="changed while it was being validated"):
+        freeze_expression(expr)
+    assert expr.is_frozen is False
+    assert "_snapshot" not in expr.__dict__
+
+
+def test_an_assignment_to_a_value_being_validated_is_rejected_where_it_happens():
+    """凍結中の値の意味 field への代入は、その場で拒まれる（値は動かず、凍結は整合した状態を commit）。"""
+
+    _REJECTIONS.clear()
+    expr = _holding(_StableKeyObservesTheRejection)
+    freeze_expression(expr)
+
+    assert _REJECTIONS and all(node is expr for node in _REJECTIONS)
+    assert expr.is_frozen and expr.value == 1
+    _consistent(expr)
+
+
 def test_a_validated_value_ignores_a_ref_that_tries_to_mutate_it_when_serialized():
     """凍結後の直列化で ref の code が値を書き換えようとしても、値は動かない（凍結済みの拒否）。"""
 
@@ -277,6 +328,21 @@ def test_a_ref_that_fails_to_serialize_never_fails_freeze_and_keeps_its_failure(
     with pytest.raises(Exception) as frozen_failure:
         frozen.to_dict()
     assert type(frozen_failure.value) is type(live_failure.value)
+    # closed の問い合わせ（写す 1 回）: 表現を作れないという walker の信号（作る code の
+    # `TypeError` などを walker が包んだもの）だけが「写さない」になる。それ以外の失敗は上がる
+    if issubclass(_FAILURES[name], _WALKER_WRAPPED):
+        assert _closed(frozen) is False
+    else:
+        with pytest.raises(_FAILURES[name]):
+            _closed(frozen)
+        # 写していない: 次の問い合わせも同じ失敗、表現は生の ref から描く
+        with pytest.raises(_FAILURES[name]):
+            _closed(frozen)
+    assert frozen.is_frozen
+
+
+#: walker が「表現を作れない」（`JsonValueRejected`）に包む、作る code の失敗の型
+_WALKER_WRAPPED = (TypeError, ValueError, AttributeError, LookupError, RuntimeError, ArithmeticError)
 
 
 # ---------------------------------------------------------------------------
@@ -318,9 +384,11 @@ class _SelfReferentialRawContainer:
     key: int = 0
 
     def json_items(self):
-        items: list = [1]
-        items.append(items)
+        # walker が数えた後で、葉の無い閉路（容器だけ）にする: 辿る回数を止めるのは写しの数え方だけ
+        items: list = []
         yield "items", raw(items)
+        items.append(items)
+        yield "after", self.key
 
 
 @dataclasses.dataclass(frozen=True)
@@ -386,6 +454,10 @@ def test_draw_and_estimate_use_the_same_representation_for_a_bytes_leaf():
 
     assert frozen.to_dict() == live.to_dict()
     assert estimate_legacy_dict_bytes(frozen, work=None) == estimate_legacy_dict_bytes(live, work=None)
+    # 写せる表現は JSON の値になる組み込みの型だけ（`bytes` は JSON の writer が書かない）
+    assert _closed(frozen) is False
+    assert frozen.to_dict() == live.to_dict()
+    assert estimate_legacy_dict_bytes(frozen, work=None) == estimate_legacy_dict_bytes(live, work=None)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -425,3 +497,42 @@ def test_a_captured_representation_is_estimated_as_it_is_drawn():
     freeze_expression(expr)
     assert _closed(expr) is True
     assert estimate_legacy_dict_bytes(expr, work=None) == _written(expr.to_dict())
+
+
+def test_a_captured_representation_is_never_fed_back_to_the_ref_conversion(monkeypatch):
+    """写しから描く表現は完成した値: 見積りも描画も、生の ref の変換（`runtime_ref_source`）を通らない。"""
+
+    from scripts.function_tracer_pcode.core import expression as expression_module
+
+    expr = Expression.unknown("u", runtime_ref=_MutatesAYieldedContainer())
+    freeze_expression(expr)
+    assert _closed(expr) is True
+    drawn = expr.to_dict()
+
+    def _forbidden(_value):
+        raise AssertionError("a completed representation went through the raw ref conversion")
+
+    monkeypatch.setattr(expression_module, "runtime_ref_source", _forbidden)
+    assert expr.to_dict() == drawn
+    assert estimate_legacy_dict_bytes(expr, work=None) == _written(drawn)
+
+
+@dataclasses.dataclass(frozen=True)
+class _JsonItemsAlwaysAsksForClosure(_HolderRef):
+    """表現を作るたびに、自分を抱える式の closed を問い合わせる（入り直しを止める印が無い）。"""
+
+    def json_items(self):
+        node = self.holder()
+        if node is not None and node.is_frozen:
+            semantic_freeze.seal_serialization(node)
+        yield "key", self.key
+
+
+def test_a_ref_asking_for_its_own_closure_while_being_copied_does_not_recurse():
+    expr = _holding(_JsonItemsAlwaysAsksForClosure, kind=ExpressionType.UNKNOWN, value=None)
+    live = _holding(_JsonItemsAlwaysAsksForClosure, kind=ExpressionType.UNKNOWN, value=None)
+    freeze_expression(expr)
+
+    with _Alarm(20):
+        assert _closed(expr) is True
+    assert expr.to_dict() == live.to_dict()
