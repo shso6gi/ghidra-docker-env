@@ -1,24 +1,25 @@
 # -*- coding: utf-8 -*-
-"""凍結時に作った LEGACY 表現の不変な写し（Issue #219 C-RS2）。
+"""検証済みの値が抱える runtime ref の LEGACY 表現の不変な写し（Issue #219 C-RS2）。
 
-検証済みの意味値が抱える生 object（runtime ref）の表現は、表現を作る code（record の
-`json_items`、そこから dispatch される method、snapshot codec が読む `stable_key` …）が
-field の外の可変な状態を読み得るので、「その code が純粋か」を後から証明することはできない。
-そこで凍結の時点で **直列化の owner 自身に 1 回だけ表現を作らせ**、その結果を組み込みの値だけから
-成る不変な木として持つ（`SemanticSnapshot` が生 object を 1 回だけ読んで値にするのと同じ原理）。
-以後の直列化は、この木から毎回新しい容器を作って描く（生 object の code は 2 度と走らない）。
+runtime ref の表現を作る code（record の `json_items`、そこから dispatch される method …）は
+field の外の可変な状態を読み得るので、「その code が純粋か」を証明することはできない。そこで
+表現を **直列化の owner 自身に 1 回だけ作らせ**、その結果を組み込みの値だけから成る不変な木として
+持つ。以後の直列化は、この木から毎回新しい容器を作って描く（ref の code は 2 度と走らない）。
+写すのは検証の transaction の外、closed の問い合わせのとき（`core/semantic_freeze.seal_runtime_ref`）。
 
-木に入れてよいのは組み込みの型 **そのもの** だけ:
+木に入れてよいのは JSON の値になる組み込みの型 **そのもの** だけ:
 
-* 葉: `None` / `bool` / `int` / `float` / `str` / `bytes`
+* 葉: `None` / `bool` / `int` / `float`（有限）/ `str`
 * 容器: `dict`（key は `str`）/ `list` / `tuple`（区別して保つので、描き直すと元と同じ型になる）
 
-それ以外（record・enum・scalar の subclass・任意の object）を 1 つでも含む表現は写さない
-（`freeze_legacy_tree` が `None`）。そういう葉は、描いた後で snapshot codec や JSON の writer が
-その型の規則（任意の code）で読むので、写しても不変と言えない。
+それ以外（`bytes`・record・enum・scalar の subclass・任意の object）を 1 つでも含む表現、閉路を
+含む表現、上限（`CAPTURE_MAX_NODES` 個の値・`CAPTURE_MAX_BYTES` byte）を超える表現は写さない
+（`freeze_legacy_tree` が `None`）。写しの大きさは **写しそのもの** を数えて決める: walker の
+葉としてそのまま置かれた容器（`raw()`）は、walker が数えた後で中身が変わり得るので、walker の
+勘定には頼らない。
 
-写しの大きさは、写すときに直列化の owner が上限（`CAPTURE_MAX_BYTES`）の中で作った表現の大きさで
-抑えられる（上限を超える表現は写さない）。描き直す `thaw` はその写しだけを辿る。
+描き直した表現は、完成した表現として扱う（`thaw` の結果を生の ref と同じ変換へ通さない）。
+見積もりは完成した表現の byte を数える（`Expression` の `_CompletedRefChild`）。
 """
 
 from __future__ import annotations
@@ -28,6 +29,33 @@ from typing import Any, List, NamedTuple, Optional, Tuple
 #: 写してよい表現の大きさの上限（JSON の byte）。runtime ref の表現は field の値の分しかなく
 #: 通常は数百 byte。これを超える表現は写さない（その node は closed にならないだけ）
 CAPTURE_MAX_BYTES = 1 << 16
+#: 写してよい表現の値（葉と容器）の数の上限。写しを作る時間を、表現の形に依らず抑える
+CAPTURE_MAX_NODES = 1 << 13
+
+
+class _Marker:
+    """`_runtime_ref_payload` に置く状態の印（写しの代わり）。"""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __repr__(self) -> str:
+        return self.name
+
+    def __reduce__(self):
+        return (_marker, (self.name,))
+
+
+def _marker(name: str) -> "_Marker":
+    return SEAL_PENDING if name == "SEAL_PENDING" else UNSEALABLE
+
+
+#: 写せる ref で、まだ写していない（closed の問い合わせで写す。それまでは生の ref を描く）
+SEAL_PENDING = _Marker("SEAL_PENDING")
+#: 写そうとして写せなかった（以後は生の ref から描く。closed にならない）
+UNSEALABLE = _Marker("UNSEALABLE")
 
 
 class FrozenDict(NamedTuple):
@@ -69,17 +97,30 @@ def freeze_legacy_tree(value: Any) -> Optional[FrozenLegacyTree]:
 
 def _is_leaf(value: Any) -> bool:
     kind = type(value)
-    return value is None or kind is bool or kind is int or kind is float or kind is str or kind is bytes
+    if kind is float:
+        # JSON の writer は非有限の値を書かない（写せる表現は JSON の値になるものだけ）
+        return value == value and value not in (float("inf"), float("-inf"))
+    return value is None or kind is bool or kind is int or kind is str
 
 
 def _freeze(value: Any) -> Tuple[bool, Any]:
-    # 明示 stack（深い表現でも再帰上限に当たらない）。出る時に子の写しから親を組む
+    """組み込みの値だけの不変な写し。上限・閉路・組み込み以外の葉で `(False, None)`。
+
+    明示 stack（深い表現でも再帰上限に当たらない）。出る時に子の写しから親を組む。辿っている経路の
+    上の容器（`active`）に戻れば閉路。値の数と byte の見積もり（葉の文字列の長さと区切り）を辿り
+    ながら数え、上限を超えた時点で止める（写しの時間と大きさを表現の形に依らず抑える）。
+    """
+
     results: List[Any] = []
     stack: List[Tuple[Any, bool]] = [(value, False)]
+    active: dict = {}
+    nodes = 0
+    size = 0
     while stack:
         item, leaving = stack.pop()
         kind = type(item)
         if leaving:
+            del active[id(item)]
             count = len(item)
             children = tuple(results[len(results) - count:]) if count else ()
             if count:
@@ -91,21 +132,33 @@ def _freeze(value: Any) -> Tuple[bool, Any]:
             else:
                 results.append(FrozenTuple(children))
             continue
+        nodes += 1
+        if nodes > CAPTURE_MAX_NODES:
+            return False, None
         if _is_leaf(item):
+            size += len(item) + 2 if kind is str else 8
+            if size > CAPTURE_MAX_BYTES:
+                return False, None
             results.append(item)
             continue
+        if kind is not dict and kind is not list and kind is not tuple:
+            return False, None
+        if id(item) in active:
+            return False, None
+        active[id(item)] = True
+        size += 2 + len(item)
         if kind is dict:
             for key in item:
                 if type(key) is not str:
                     return False, None
-            stack.append((item, True))
-            stack.extend((child, False) for child in reversed(tuple(item.values())))
-            continue
-        if kind is list or kind is tuple:
-            stack.append((item, True))
-            stack.extend((child, False) for child in reversed(item))
-            continue
-        return False, None
+                size += len(key) + 3
+            children_in_order = tuple(item.values())
+        else:
+            children_in_order = tuple(item)
+        if size > CAPTURE_MAX_BYTES:
+            return False, None
+        stack.append((item, True))
+        stack.extend((child, False) for child in reversed(children_in_order))
     return True, results[0]
 
 

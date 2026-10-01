@@ -63,11 +63,12 @@ copy 機構は置かない: 複製の作り方（何を deep に、何を共有�
                               （`*_SERIALIZATION_INPUTS`）
 
 **直列化の不変性（Issue #219 C-RS2）**: VALIDATED な値のうち
-`serialization_closed(value)` が真のものは、LEGACY 表現（`to_dict()` / snapshot の
-木）が **不変な状態だけの関数** になる。PR-22-B の isolation 契約（凍結後に生 object が
+closed なもの（読み口は `core/semantic_freeze.seal_serialization(value)`）は、LEGACY 表現
+（`to_dict()` / snapshot の木）が **不変な状態だけの関数** になる。PR-22-B の isolation 契約（凍結後に生 object が
 変わっても structural key・solver query identity・SMT・幅は動かない）を、LEGACY 表現へ
 広げたもの。cache のための特別規則ではなく、「検証済みの値の直列化が何に依存するか」
-という lifecycle の契約で、答えは凍結時に 1 回だけ決まる:
+という lifecycle の契約。凍結は field だけから決まる部分を決め、runtime ref の表現を写す部分は
+closed の問い合わせまで遅らせる（下）:
 
 .. code-block:: text
 
@@ -79,15 +80,26 @@ copy 機構は置かない: 複製の作り方（何を deep に、何を共有�
                                （branch の条件と値がどちらも closed）
     operands / 条件の式        子（`Expression` そのもの）がすべて closed
     storage_info               凍結時に写した payload から描き、写しの値が組み込みの不変な型
-    runtime_ref                凍結時に直列化の owner が作った表現の不変な写しから描く
-                               （`core/frozen_representation.py`。写せなければ closed でない）
+    runtime_ref                closed の問い合わせで直列化の owner が作った表現の不変な写しから描く
+                               （`core/frozen_representation.py`。写せなければ closed でない。
+                               式を運ぶ ref は写さない）
 
 **表現を作る code の純粋さは調べない**。runtime ref の表現は、その型の `json_items` や、そこから
 dispatch される method・`repr`・`stable_key` などの任意の code が作り、その code が field の外の
-可変な状態を読んでも静的には証明できない。そこで、表現を凍結の時点で 1 回だけ作り（未凍結の値を
-描くときと同じ呼び出し）、組み込みの型そのものだけから成る不変な木として持つ。以後の直列化は写し
-から描くので、ref の code は 2 度と走らない（`SemanticSnapshot` が生 object を 1 回だけ読むのと同じ
-原理）。closed な値の表現を作るのは、この package の `Expression` / `Condition` の method（T-A5 が
+可変な状態を読んでも静的には証明できない。そこで、表現を 1 回だけ作り（未凍結の値を描くときと
+同じ呼び出し）、組み込みの型そのものだけから成る不変な木として持つ。以後の直列化は写しから描く
+ので、ref の code は 2 度と走らない（`SemanticSnapshot` が生 object を 1 回だけ読むのと同じ原理）。
+
+写すのは **検証の transaction の外**、検証済みの値の closed を問い合わせたとき
+（`core/semantic_freeze.seal_serialization` → `seal_runtime_ref`）。直列化そのものは状態を書かない
+（写す前の値は、未凍結の値と同じく生の ref を描く。closed と名乗るのは写した後だけ）。検証の transaction の中では外の code（`stable_key`・
+projection の callback）が値を書き換え得るので、そこで ref の code を走らせない。transaction の中で
+走る外の code の書き換えは、意味 field への代入を拒む（`validation_in_flight`）か、commit の前に
+field の値を確かめ直して（`core/semantic_freeze._verify_staging`）拒む。写すのに失敗したとき（JSON
+の値にならない・閉路・上限を超える）は写さずに生の ref から描く（closed にならないだけで、出力は
+従来と同じ）。それ以外の例外は未凍結の値を描くときと同じく上がる（握りつぶさない）。
+
+closed な値の表現を作るのは、この package の `Expression` / `Condition` の method（T-A5 が
 読むものを列挙する）と、組み込みの値だけを読む直列化の owner だけになる。
 
 closed と言えるのは `Expression` / `Condition` の型そのもの（subclass は表現の method を上書き
@@ -106,7 +118,7 @@ from __future__ import annotations
 
 from enum import Enum, IntEnum
 from types import MappingProxyType
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, List, Mapping
 
 from scripts.function_tracer_pcode.core import live_values
 
@@ -139,11 +151,12 @@ DERIVED_STATE_FIELDS = (
     "_equivalence_digest",
     "_tree_size",
     "_identity_complete",
-    # 直列化の不変性（Issue #219）: 凍結時に写した storage・runtime ref の LEGACY 表現と、
+    # 直列化の不変性（Issue #219）: 凍結時に写した storage・closed の問い合わせで写す runtime ref の LEGACY 表現と、
     # 「LEGACY 表現が不変な状態だけの関数か」の答え
     "_storage_payload",
     "_runtime_ref_payload",
     "_serialization_closed",
+    "_serialization_pending",
 )
 
 #: **新しい値へ引き継いではいけない field**（状態 + 状態から導いた値）。
@@ -162,8 +175,8 @@ def inherited_by_a_new_value(name: str) -> bool:
     return name not in NON_INHERITED_FIELDS
 
 
-def attribute_mutation_allowed(fields: Dict[str, Any], name: str, semantic_fields: Any) -> bool:
-    """属性の protocol（代入 `x.name = v`・削除 `del x.name`）で `name` を書き換えてよいか。
+def attribute_mutation_allowed(value: Any, name: str, semantic_fields: Any) -> bool:
+    """属性の protocol（代入 `x.name = v`・削除 `del x.name`）で `value.name` を書き換えてよいか。
 
     意味値の型（`Expression` / `Condition` の `__setattr__` / `__delattr__`）が **唯一参照する
     規則**。代入と削除を同じ規則で裁く（片方だけ守ると、削除して class の既定値へ戻すことで
@@ -173,21 +186,53 @@ def attribute_mutation_allowed(fields: Dict[str, Any], name: str, semantic_field
       書くのは lifecycle の commit（`mark_*` と凍結の commit。どちらも `__dict__` へ直接）
       だけ。`x._frozen = False` で検証済みの値を CONSTRUCTION へ戻す・派生値を消して生
       object の読みへ戻す、という逆行を作らせない
-    * 意味 field（`semantic_fields`。値の型が渡す）と `__class__` は、VALIDATED 以上では書かない
-      （`__class__` を差し替えると表現を作る method が変わる）
+    * 意味 field（`semantic_fields`。値の型が渡す）は、VALIDATED 以上の値と、**検証の途中**
+      （`validation_in_flight`）の値では書かない。検証の途中で書けると、派生値（snapshot・
+      digest）を作った後で意味 field が変わり、別の状態を述べる派生値が commit される
+    * `__class__` は VALIDATED 以上では書かない（表現を作る method が変わる）
     * それ以外（診断用の補助 flag など、意味にも表現にも入らない属性）は自由
 
-    `__dict__` を直接書き換える code はこの規則の外（契約違反）。
+    `__dict__` を直接書き換える code はこの規則の外（契約違反）。検証の途中のその種の書き換えは、
+    凍結が commit の前に確かめて拒む（`core/semantic_freeze`）。
     """
 
     if name in NON_INHERITED_FIELDS:
         return False
     # 呼ぶのは値の型の `__setattr__` / `__delattr__` だけで、`fields` は instance の `__dict__`
     # （構築中の代入ごとに通るので、組み込みの dict は owner の API を経ずに引く）
+    fields = value.__dict__
     frozen = fields.get("_frozen", False) if type(fields) is dict else live_values.lookup(fields, "_frozen", False)
     if not _flag(frozen):
-        return True
+        return not (name in semantic_fields and _VALIDATION_IN_FLIGHT and validation_in_flight(value))
     return name not in semantic_fields and name != "__class__"
+
+
+#: 検証の途中の値（凍結の transaction が積んだ値の `id` の表。transaction ごとに 1 つ、入れ子は
+#: 積み重なる）。**値ごとの公開状態ではない**: 状態の bit（`_frozen` / `_published`）は検証が
+#: 終わってから commit でだけ書き、途中の印には使わない。
+_VALIDATION_IN_FLIGHT: List[Dict[int, Any]] = []
+
+
+def begin_validation(entered: Dict[int, Any]) -> None:
+    """凍結の transaction が始まった（`entered` はその transaction が積んだ値の `id` の表）。"""
+
+    _VALIDATION_IN_FLIGHT.append(entered)
+
+
+def end_validation(entered: Dict[int, Any]) -> None:
+    """凍結の transaction が終わった（commit したか、失敗して捨てたか）。"""
+
+    for index in range(len(_VALIDATION_IN_FLIGHT) - 1, -1, -1):
+        if _VALIDATION_IN_FLIGHT[index] is entered:
+            del _VALIDATION_IN_FLIGHT[index]
+            return
+
+
+def validation_in_flight(value: Any) -> bool:
+    """`value` を、進行中の凍結の transaction が積んでいる（検証の途中）か。"""
+
+    key = id(value)
+    return any(key in entered for entered in _VALIDATION_IN_FLIGHT)
 
 
 def state_of(fields: Dict[str, Any]) -> SemanticLifecycle:
@@ -284,7 +329,7 @@ class SerializationInput(Enum):
     EXPRESSION = "expression"
     #: 凍結時に写した payload から描く（写せたこと）
     STORAGE = "storage"
-    #: 凍結時に作った表現の写しから描く（写せたこと）
+    #: closed の問い合わせで作った表現の写しから描く（写せたこと。写すまでは保留）
     RUNTIME_REF = "runtime_ref"
 
 
@@ -314,10 +359,11 @@ CONDITION_SERIALIZATION_INPUTS: Mapping[str, SerializationInput] = MappingProxyT
 def serialization_closed(value: Any) -> bool:
     """`value` の LEGACY 表現が、不変な状態だけの関数か（C-RS2 の読み口）。
 
-    VALIDATED 以上で、凍結時に `core/semantic_freeze` が closed と決めた値だけが真。
+    VALIDATED 以上で、`core/semantic_freeze` が closed と決めた値だけが真。
     `Expression` / `Condition` にだけ使う（`lifecycle_of` と同じく instance の
-    `__dict__` だけを読み、`__getattr__` を呼ばない）。答えは凍結時に 1 回だけ決まり、
-    ここは読むだけで計算しない。
+    `__dict__` だけを読み、`__getattr__` を呼ばない）。ここは読むだけで計算しない:
+    runtime ref の写しを待つ値（`_serialization_pending`）は、写すまで偽。写して答えを
+    確定させる読み口は `core/semantic_freeze.seal_serialization`。
     """
 
     if lifecycle_of(value) < SemanticLifecycle.VALIDATED:

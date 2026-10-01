@@ -107,14 +107,14 @@ class _StableKeyMutatesTheHolder(_HolderRef):
 
 @dataclasses.dataclass(frozen=True)
 class _StableKeyMutatesTheHolderInPlace(_HolderRef):
-    """属性の protocol を通らない書き換え（構築中の式の `operands` の list へ足す）。"""
+    """属性の protocol を通らない書き換え（構築中の式の `operands` の list の子を差し替える）。"""
 
     def stable_key(self):
         node = self.holder()
         if node is not None:
             operands = node.__dict__["operands"]
             if type(operands) is list:
-                operands.append(Expression.constant(9, size=4))
+                operands[1] = Expression.constant(9, size=4)
         return ("holder", self.key)
 
 
@@ -191,7 +191,13 @@ def _consistent(expr: Expression) -> None:
                 # 検証済みの値から検証されていない値へ辿れない
                 assert edge.child.is_frozen, "a validated node reaches an unvalidated child"
                 pending.append(edge.child)
-    if _closed(expr):
+    try:
+        closed = _closed(expr)
+    except FrozenExpressionError:
+        # 写すときに ref の code が凍結済みの値を書き換えようとして拒まれた（未凍結の値を
+        # 描くときと同じ失敗）。値は動いていない（上で確かめた）
+        return
+    if closed:
         before = expr.to_dict()
         assert expr.to_dict() == before
 
@@ -208,7 +214,11 @@ def test_a_callback_during_freeze_never_commits_a_state_its_derived_values_do_no
         assert expr.is_frozen is False
         return
     _consistent(expr)
-    if expr.is_frozen and _closed(expr):
+    try:
+        closed = _closed(expr)
+    except FrozenExpressionError:
+        closed = False
+    if expr.is_frozen and closed:
         fingerprint = _snapshot_fingerprint_of(expr)
         assert _snapshot_fingerprint_of(expr) == fingerprint
 
@@ -376,3 +386,42 @@ def test_draw_and_estimate_use_the_same_representation_for_a_bytes_leaf():
 
     assert frozen.to_dict() == live.to_dict()
     assert estimate_legacy_dict_bytes(frozen, work=None) == estimate_legacy_dict_bytes(live, work=None)
+
+
+@dataclasses.dataclass(frozen=True)
+class _JsonItemsReentersSerialization(_HolderRef):
+    """表現を作る途中で、自分を抱える式の直列化・closed の問い合わせへ入り直す ref。"""
+
+    def json_items(self):
+        node = self.holder()
+        # 入り直すのは 1 段だけ（入り直した先の直列化は、写している最中の ref を生の ref として描く）
+        if node is not None and node.is_frozen and not self.__dict__.get("_inside"):
+            object.__setattr__(self, "_inside", True)
+            try:
+                node.to_dict()
+                semantic_freeze.seal_serialization(node)
+            finally:
+                object.__setattr__(self, "_inside", False)
+        yield "key", self.key
+
+
+def test_reentering_serialization_while_the_ref_is_being_copied_stops_and_copies_once():
+    expr = _holding(_JsonItemsReentersSerialization, kind=ExpressionType.UNKNOWN, value=None)
+    live = _holding(_JsonItemsReentersSerialization, kind=ExpressionType.UNKNOWN, value=None)
+    freeze_expression(expr)
+
+    with _Alarm(20):
+        drawn = expr.to_dict()
+    assert drawn == live.to_dict()
+    assert _closed(expr) is True
+    assert expr.to_dict() == drawn
+    assert estimate_legacy_dict_bytes(expr, work=None) == _written(drawn)
+
+
+def test_a_captured_representation_is_estimated_as_it_is_drawn():
+    """写しから描く表現の見積りは、描いた出力を書いた byte と同じ（完成した表現を数える）。"""
+
+    expr = Expression.unknown("u", runtime_ref=_MutatesAYieldedContainer())
+    freeze_expression(expr)
+    assert _closed(expr) is True
+    assert estimate_legacy_dict_bytes(expr, work=None) == _written(expr.to_dict())
