@@ -157,8 +157,9 @@ class _LifecycleStaging:
         self.storage_records: Dict[int, Tuple[Any, Any]] = {}
         #: `id(runtime ref)` → (その object, 意味値を抱えるか)。closure の走査が数えた答え
         self.ref_carries: Dict[int, Tuple[Any, bool]] = {}
-        #: `id(値)` → (その値, 派生値を作った時点の意味 field の値)。commit の前に同じ object かを確かめる
-        self.pinned: Dict[int, Tuple[Any, Tuple[Any, ...]]] = {}
+        #: `id(値)` → (その値, 比べる意味 field の名前, 派生値を作った時点のその値)。commit の前に同じ
+        #: object かを、**pin したときと同じ名前の組** で確かめる（型から名前を引き直さない）
+        self.pinned: Dict[int, Tuple[Any, Tuple[str, ...], Tuple[Any, ...]]] = {}
 
     def enter(self, value: Any) -> bool:
         """この操作で初めて見た値なら真。2 度目は偽（再入・back-reference）。"""
@@ -274,7 +275,7 @@ def _stage_condition_validation(condition: Any, staging: _LifecycleStaging) -> N
     staging.conditions.append(condition)
     # 条件の派生値（closed の bit）は closure を積み終えた後に足す
     staging.derived[id(condition)] = {}
-    staging.pinned[id(condition)] = (condition, _semantic_field_values(condition.__dict__, CONDITION_SEMANTIC_FIELDS))
+    _pin(staging, condition, CONDITION_SEMANTIC_FIELDS)
     _stage_expression_validation(getattr(condition, "expression", None), staging)
 
 
@@ -669,7 +670,7 @@ def _derive_node_fields(node: Expression, staging: _LifecycleStaging) -> Dict[st
 
     # 派生値はこの状態から作る。生 object の code（投影の中の `stable_key` など）が走る前に
     # 意味 field を pin し、commit の前に同じ object のままかを確かめる（`_verify_staging`）
-    staging.pinned[id(node)] = (node, _semantic_field_values(fields, EXPRESSION_SEMANTIC_FIELDS))
+    _pin(staging, node, EXPRESSION_SEMANTIC_FIELDS)
 
     # snapshot を先に置く。candidate hash は `semantic_projection()` 経由で
     # snapshot を読むので、順番が逆だと生 object を読んでしまう。
@@ -763,6 +764,12 @@ def _semantic_field_values(fields: Dict[str, Any], names: Tuple[str, ...]) -> Tu
     return tuple(fields.get(name, _ABSENT_FIELD) for name in names)
 
 
+def _pin(staging: _LifecycleStaging, value: Any, names: Tuple[str, ...]) -> None:
+    """派生値を作る前の意味 field の値を、比べる名前の組と一緒に覚える（`_verify_staging` が使う）。"""
+
+    staging.pinned[id(value)] = (value, names, _semantic_field_values(value.__dict__, names))
+
+
 def _verify_staging(staging: _LifecycleStaging) -> None:
     """積んだ値の意味 field が、派生値を作った時点と同じ object のままか（commit の前に 1 回）。
 
@@ -772,8 +779,7 @@ def _verify_staging(staging: _LifecycleStaging) -> None:
     書き換え後になる。違えば内部バグとして記録して上げ、何も commit しない。
     """
 
-    for value, pinned in staging.pinned.values():
-        names = CONDITION_SEMANTIC_FIELDS if type(value) is Condition else EXPRESSION_SEMANTIC_FIELDS
+    for value, names, pinned in staging.pinned.values():
         current = _semantic_field_values(value.__dict__, names)
         for name, before, after in zip(names, pinned, current):
             if before is not after:

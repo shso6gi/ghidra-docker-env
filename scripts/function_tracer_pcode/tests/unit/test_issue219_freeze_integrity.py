@@ -769,3 +769,50 @@ def test_an_integer_that_fits_its_exact_budget_is_never_rejected_by_the_digit_bo
                 ) is None
                 checked += 1
     assert checked > 10_000
+
+
+# ---------------------------------------------------------------------------
+# 5. commit の前の確かめ直しは、pin したときと同じ field の組で比べる（round 6）
+# ---------------------------------------------------------------------------
+
+
+def test_freezing_a_subclass_of_a_semantic_value_reports_no_mutation():
+    """`Condition` / `Expression` の subclass は、書き換えていなければ凍結で内部バグにならない
+    （旧来は確かめ直しが型から field の組を引き直し、`Condition` の subclass を式の field で比べた）。"""
+
+    from scripts.function_tracer_pcode.core.condition import Condition
+
+    class SubCondition(Condition):
+        pass
+
+    class SubExpression(Expression):
+        pass
+
+    condition = SubCondition(Expression.constant(1, size=1))
+    assert condition.is_frozen
+    expression = freeze_expression(SubExpression(ExpressionType.CONSTANT, value=1, size=4))
+    assert expression.is_frozen
+
+
+def test_the_recheck_compares_exactly_the_fields_that_were_pinned():
+    from scripts.function_tracer_pcode.core.condition import Condition
+    from scripts.function_tracer_pcode.core.semantic_freeze import (
+        CONDITION_SEMANTIC_FIELDS,
+        _LifecycleStaging,
+        _pin,
+        _verify_staging,
+    )
+
+    class SubCondition(Condition):
+        pass
+
+    condition = SubCondition(Expression.constant(1, size=1))
+    staging = _LifecycleStaging()
+    _pin(staging, condition, CONDITION_SEMANTIC_FIELDS)
+    _verify_staging(staging)  # 書き換えていなければ通る
+    condition.__dict__["negated"] = not condition.__dict__["negated"]
+    try:
+        with pytest.raises(FrozenExpressionError, match="negated"):
+            _verify_staging(staging)
+    finally:
+        condition.__dict__["negated"] = not condition.__dict__["negated"]
