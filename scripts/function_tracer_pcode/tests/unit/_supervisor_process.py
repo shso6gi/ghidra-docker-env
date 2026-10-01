@@ -76,6 +76,9 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_faults import (
     FAULT_CRASH_EXIT,
     ChildStopped,
     Deadline,
+    WORKER_EXIT_OBSERVATION,
+    WORKER_EXIT_RELEASE,
+    WORKER_EXIT_WAIT,
     Fault,
     install_deadline_control,
     install_publication_faults,
@@ -333,6 +336,74 @@ class SupervisorHandle:
     def release(self) -> None:
         with open(self._invocation.records.release, "wb") as fifo:
             fifo.write(b"1")
+
+    def release_after_worker_exit(self) -> None:
+        """worker の終了が supervisor（親）から観測できるようになってから supervisor を続けさせる。
+
+        Issue #226: 「signal の前に worker が終了した」を前提にする test はこれで解放する。待つのは
+        supervisor の process の中の ``waitid(..., WNOWAIT)``（回収しない）で、その結果は
+        ``worker_exit_observations`` に残る。``/proc`` の ``Z`` は親が観測できることを意味しない。
+        """
+
+        child = self.child()
+        if child is None:
+            raise AssertionError(f"{self.invocation} has no worker whose exit could be awaited")
+        with open(self._invocation.records.release, "wb") as fifo:
+            fifo.write(WORKER_EXIT_RELEASE + str(child.pid).encode("ascii"))
+
+    def worker_exit_observations(self) -> list[dict]:
+        """``release_after_worker_exit`` で supervisor が記録した、worker の終了の観測。"""
+
+        return [
+            entry for entry in read_json_lines(self._invocation.records.faults)
+            if entry.get("point") == WORKER_EXIT_OBSERVATION
+        ]
+
+    def worker_exit_waits(self) -> list[dict]:
+        """supervisor が worker の終了を待つ段階に入った記録（入った時点の probe の結果つき）。"""
+
+        return [
+            entry for entry in read_json_lines(self._invocation.records.faults)
+            if entry.get("point") == WORKER_EXIT_WAIT
+        ]
+
+    def wait_until_blocked_on_worker_exit(self, *, timeout: float = 60.0) -> None:
+        """supervisor の thread が worker の終了を ``waitid`` で待って block していることを、kernel の
+        記録（``/proc/<pid>/task/<tid>/wchan`` と ``syscall`` の引数）で確かめるまで待つ。
+
+        Issue #226: 「待ち始めた」記録だけでは、待たずに後で 1 回だけ確かめる実装と区別できない。
+        block している thread が ``waitid(P_PID, <worker の PID>, ...)`` の中に居ることが、待って
+        いることの直接の証拠になる。
+        """
+
+        child = self.child()
+        if child is None:
+            raise AssertionError(f"{self.invocation} has no worker whose exit could be awaited")
+        limit = time.monotonic() + timeout
+        while not _blocked_in_waitid(self.pid, child.pid):
+            if self._exited() or time.monotonic() > limit:
+                raise SupervisorPathMismatch(
+                    f"{self.invocation} never blocked waiting for the worker's exit"
+                )
+            time.sleep(0.01)
+
+    def wait_until_waiting_for_worker_exit(self, *, timeout: float = 60.0) -> dict:
+        """supervisor が worker の終了を待つ段階に入ったと記録するまで待ち、その記録を返す。
+
+        同期の根拠は supervisor の記録（入った証拠）で、時間ではない。入らないまま supervisor が
+        終わるか上限を過ぎたら ``SupervisorPathMismatch``。
+        """
+
+        limit = time.monotonic() + timeout
+        while True:
+            waits = self.worker_exit_waits()
+            if waits:
+                return waits[0]
+            if self._exited() or time.monotonic() > limit:
+                raise SupervisorPathMismatch(
+                    f"{self.invocation} never started waiting for the worker's exit"
+                )
+            time.sleep(0.01)
 
     def wait(self) -> SupervisorRun:
         if self._run is None:
@@ -671,6 +742,31 @@ def _supervise_in_fork(  # pragma: no cover - runs in the forked supervisor
         code = _SUPERVISOR_RAISED_EXIT
     finally:
         os._exit(code)
+
+
+def _blocked_in_waitid(pid: int, target: int) -> bool:
+    """process ``pid`` のどれかの thread が ``waitid(P_PID, target, ...)`` で block しているか。"""
+
+    try:
+        threads = os.listdir(f"/proc/{pid}/task")
+    except OSError:
+        return False
+    for tid in threads:
+        base = Path(f"/proc/{pid}/task/{tid}")
+        try:
+            wchan = (base / "wchan").read_text(encoding="ascii").strip()
+            fields = (base / "syscall").read_text(encoding="ascii").split()
+        except OSError:
+            continue
+        if wchan != "do_wait" or len(fields) < 3 or fields[0] == "running":
+            continue
+        try:
+            idtype, target_id = int(fields[1], 16), int(fields[2], 16)
+        except ValueError:
+            continue
+        if idtype == os.P_PID and target_id == target:
+            return True
+    return False
 
 
 def _record_started_child(records: InvocationRecords) -> None:

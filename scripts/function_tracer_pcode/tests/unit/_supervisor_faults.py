@@ -46,10 +46,12 @@ from fnmatch import fnmatchcase
 import os
 from pathlib import Path, PurePosixPath
 import signal
+import threading
 import time
 from typing import Any, Mapping, Optional, Sequence, Union
 
 from scripts.function_tracer_pcode.tests.unit._supervisor_records import (
+    ChildIdentity,
     ChildRecords,
     HarnessRecords,
     InvocationRecords,
@@ -200,31 +202,110 @@ def _fire(
     if fault.action == "pause":
         if release is None:
             raise AssertionError("only a supervisor invocation can pause")
-        # 書き手（test の ``release``）が開いて 1 byte 書くまで戻らない。
+        # 書き手（test の ``release``）が開いて書き、閉じるまで戻らない。
         with open(release, "rb") as fifo:
-            fifo.read(1)
+            message = fifo.read()
+        if message.startswith(WORKER_EXIT_RELEASE):
+            _wait_until_worker_exit_is_observable(
+                int(message[len(WORKER_EXIT_RELEASE):]), sink=sink,
+            )
         return
     if child is None:
         raise AssertionError("only a worker child can stop")
     stop_here(child, point=fault.at.describe(), ignore_sigterm=fault.ignore_sigterm)
 
 
+#: 解放の合図のうち「worker の終了が supervisor から観測できるまで待ってから続ける」（Issue #226）。
+#: 後ろに worker の PID を付ける
+WORKER_EXIT_RELEASE = b"worker-exit:"
+#: 終了が観測できるまで待つ上限。超えたら観測できなかったと記録して続ける（test がその記録で落ちる）
+WORKER_EXIT_OBSERVE_LIMIT_SECONDS = 30.0
+#: 終了の観測の記録の ``point``
+WORKER_EXIT_OBSERVATION = "worker-exit-observable"
+#: 終了を待ち始めた記録の ``point``（待つ段階に入ったことの証拠。入った時点で親から終了が観測
+#: できたかの probe の結果を持つ）
+WORKER_EXIT_WAIT = "worker-exit-wait"
+
+
+def _wait_until_worker_exit_is_observable(pid: int, *, sink: Path) -> None:
+    """supervisor の process の中で、worker（この process の子）の終了が ``waitid`` で見えるまで待つ。
+
+    Issue #226: race A の前提「signal の前に worker が終了した」は、**親である supervisor が終了を
+    観測できる** ことで確立する。``/proc/<pid>/stat`` の ``Z`` は thread group leader の状態で、
+    ほかの thread の後片付けが残っていれば親の ``waitpid`` はまだ終了を報告しない。
+
+    ``WNOWAIT`` なので回収しない（production の ``poll()`` が自分で回収する経路をそのまま試験する）。
+    待つのは条件そのもの（blocking な ``waitid``）で、上限は観測できなかったときの失敗の記録のため。
+
+    待つ前に「待つ段階に入った」ことを記録する（``WORKER_EXIT_WAIT``。その時点の非 blocking な
+    probe で、親から終了がもう観測できたかも残す）。test はこの記録で同期し、「記録が無い」ことを
+    待った証拠にしない。
+    """
+
+    probe = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+    append_json_line(sink, {
+        "role": "supervisor", "pid": os.getpid(), "point": WORKER_EXIT_WAIT,
+        "action": "wait", "worker_pid": pid, "observable_at_entry": probe is not None,
+    })
+    observed: list = []
+
+    def _observe() -> None:
+        observed.append(os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT))
+
+    waiter = threading.Thread(target=_observe, daemon=True)
+    waiter.start()
+    waiter.join(WORKER_EXIT_OBSERVE_LIMIT_SECONDS)
+    info = observed[0] if observed else None
+    append_json_line(sink, {
+        "role": "supervisor", "pid": os.getpid(), "point": WORKER_EXIT_OBSERVATION,
+        "action": "observe", "worker_pid": pid, "observable": info is not None,
+        "code": None if info is None else info.si_code,
+        "status": None if info is None else info.si_status,
+    })
+
+
+def _exit_leader_first(child: ChildRecords, code: int) -> None:
+    """leader thread だけを先に終わらせ、別の thread が ``finish`` の合図の後で process を終える。"""
+
+    import ctypes
+
+    def _finish() -> None:
+        with open(child.finish, "rb") as fifo:
+            fifo.read(1)
+        os._exit(code)
+
+    threading.Thread(target=_finish, daemon=True).start()
+    ctypes.CDLL(None).pthread_exit(None)
+
+
 def stop_here(
     child: ChildRecords, *, point: str, ignore_sigterm: bool = False,
     exit_on_sigterm: Optional[int] = None, exit_on_sigusr1: Optional[int] = None,
+    leader_exits_first: bool = False,
 ) -> None:
     """止まったことを記録し、signal で終了させられるまで戻らない。
 
     Issue #165: ``exit_on_sigterm`` は SIGTERM を受けて自分で ``exit_code`` で
     終わる child（signal 後の通常終了、race B）、``exit_on_sigusr1`` は test の
     合図で通常終了する child（signal 前の通常終了、race A）。
+
+    Issue #226: ``leader_exits_first`` は ``exit_on_sigusr1`` の終わり方を 2 段にする。SIGUSR1 で
+    leader thread だけが先に終わり（``/proc`` では ``Z`` に見える）、別の thread が ``finish`` の
+    FIFO に test が書くまで process を生かし、書かれたら ``exit_on_sigusr1`` で終える。「leader は
+    ``Z`` なのに親からはまだ終了が観測できない」状態を、時間でなく test の合図で作るため。
     """
+
+    if leader_exits_first and exit_on_sigusr1 is None:
+        raise ValueError("leader_exits_first finishes the exit that SIGUSR1 starts")
 
     if ignore_sigterm:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
     if exit_on_sigterm is not None:
         signal.signal(signal.SIGTERM, lambda *_: os._exit(exit_on_sigterm))
-    if exit_on_sigusr1 is not None:
+    if leader_exits_first:
+        os.mkfifo(child.finish)
+        signal.signal(signal.SIGUSR1, lambda *_: _exit_leader_first(child, exit_on_sigusr1))
+    elif exit_on_sigusr1 is not None:
         signal.signal(signal.SIGUSR1, lambda *_: os._exit(exit_on_sigusr1))
     write_json(child.stopped, {
         "pid": os.getpid(), "point": point, "ignore_sigterm": ignore_sigterm,
@@ -302,6 +383,55 @@ def install_publication_faults(
 # ---------------------------------------------------------------------------
 
 
+#: `_wait_for_stop_or_end` の結果: worker が止まった / worker が終わった / 本物の timer が来た
+WORKER_STOPPED = "worker-stop"
+WORKER_ENDED = "worker-exit"
+REAL_TIMER = "timer"
+
+
+def _wait_for_stop_or_end(process: Any, marker: Path, real_deadline: float) -> str:
+    """worker が止まる（``marker``）か、終わるか、本物の timer が来るまで待つ。"""
+
+    while not marker.exists():
+        if process.poll() is not None:
+            return WORKER_ENDED
+        if time.monotonic() >= real_deadline:
+            return REAL_TIMER
+        time.sleep(_POLL_SECONDS)
+    return WORKER_STOPPED
+
+
+def install_runner_deadline_at_worker_stop(harness: HarnessRecords, *, sink: Path) -> None:
+    """runner が起こした production の supervisor の deadline を、worker の ``stop`` に結ぶ（Issue #226）。
+
+    supervisor 単体の harness の ``Deadline.AT_CHILD_STOP`` と同じ: 止まった worker の pair は
+    止まった瞬間に deadline へ進み、止まらずに終わる worker の pair は deadline に当たらない。
+    pair が deadline に当たるかを host の速さ（runner の timer）で決めない。本物の timer は
+    hang の上限としてだけ残し、どの経路を通ったかを pair ごとに ``sink`` へ記録する（test は
+    timer に当たった pair が無いことを確かめる）。
+    """
+
+    from scripts.function_tracer_pcode.authority.process.process_identity import (
+        read_process_start_token,
+    )
+    from scripts.function_tracer_pcode.authority.process.supervisor_command import (
+        ProcessSupervisorCommand,
+    )
+
+    original = ProcessSupervisorCommand._wait_for_child_until_deadline
+
+    def controlled(self: Any, process: Any, diagnostic: Any, real_deadline: float) -> Any:
+        identity = ChildIdentity(process.pid, read_process_start_token(process.pid))
+        path = _wait_for_stop_or_end(process, harness.child(identity).stopped, real_deadline)
+        arguments = list(getattr(process, "args", ()) or ())
+        function = arguments[arguments.index("-f") + 1] if "-f" in arguments else None
+        append_json_line(sink, {"worker_pid": process.pid, "function": function, "deadline": path})
+        effective = time.monotonic() if path == WORKER_STOPPED else real_deadline
+        return original(self, process, diagnostic, effective)
+
+    ProcessSupervisorCommand._wait_for_child_until_deadline = controlled
+
+
 def install_deadline_control(
     *, deadline: str, faults: Sequence[Fault], invocation: InvocationRecords,
     harness: HarnessRecords, store_directory: Path,
@@ -331,10 +461,8 @@ def install_deadline_control(
             })
             os._exit(70)
         marker = harness.child(started).stopped
-        while not marker.exists():
-            if process.poll() is not None or time.monotonic() >= real_deadline:
-                return original(self, process, diagnostic, real_deadline)
-            time.sleep(_POLL_SECONDS)
+        if _wait_for_stop_or_end(process, marker, real_deadline) != WORKER_STOPPED:
+            return original(self, process, diagnostic, real_deadline)
         write_json(invocation.store_at_child_stop, inspect_store(store_directory).to_json())
         if crash is not None:
             _fire(crash, role="supervisor", sink=invocation.faults, child=None)
