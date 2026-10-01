@@ -83,6 +83,22 @@ def pytest_configure(config):
 UNSCOPED_CONDITION_CACHE = "unscoped_condition_cache"
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _shared_source_trees_stay_unchanged():
+    """静的な guard が共有した AST を、どの test も書き換えていないこと（Issue #224）。
+
+    `tests/unit/_package_sources.parse_source` は同じ text の AST を test 間で共有する。session の
+    終わりに、覚えた AST を覚えたときの text の parse と比べ、違えば session を失敗させる
+    （共有の値の書き換えは、別の test の結果を test の順序に依存させる）。
+    """
+
+    yield
+    from scripts.function_tracer_pcode.tests.unit._package_sources import changed_trees
+
+    changed = changed_trees()
+    assert changed == [], "a test mutated a shared AST (tests/unit/_package_sources): " + ", ".join(changed)
+
+
 @pytest.fixture(autouse=True)
 def _pair_condition_cache_scope(request):
     """test 1 つを、pair 1 つと同じ寿命の条件 cache の scope で包む（Issue #224）。

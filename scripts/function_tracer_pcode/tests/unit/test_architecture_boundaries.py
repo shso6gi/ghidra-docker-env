@@ -52,6 +52,8 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import pytest
 
+from scripts.function_tracer_pcode.tests.unit._package_sources import parse_source
+
 
 PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PACKAGE_PREFIX = "scripts.function_tracer_pcode."
@@ -519,7 +521,8 @@ def _relative(path: pathlib.Path) -> str:
 
 
 def _parse(path: pathlib.Path) -> ast.Module:
-    return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    # 共有の AST（Issue #224）。受け取った側は書き換えない
+    return parse_source(path, filename=str(path))
 
 
 def _imported_modules(tree: ast.Module) -> List[Tuple[str, int]]:
