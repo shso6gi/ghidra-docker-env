@@ -609,6 +609,8 @@ def test_the_owner_counts_exactly_what_the_writer_writes():
         return rng.choice([
             None, True, False, rng.randrange(-10 ** 40, 10 ** 40), rng.uniform(-1e300, 1e300),
             "".join(rng.choice(alphabet) for _ in range(rng.randrange(8))),
+            # 桁数の下界が効く幅の整数（2 の冪とその前後、正負）
+            rng.choice([1, -1]) * ((1 << rng.randrange(1, 14000)) + rng.choice([-1, 0, 1])),
         ])
 
     def value(depth):
@@ -624,9 +626,15 @@ def test_the_owner_counts_exactly_what_the_writer_writes():
 
     for _ in range(2000):
         original = value(0)
+        written = _writer_bytes(original)
         copied, counted = JsonEncodingPolicy.bounded_native_copy(RESULT_JSON_POLICY, original, max_bytes=10 ** 9)
-        assert counted == _writer_bytes(original)
+        assert counted == written
         assert copied == original and type(copied) is type(original)
+        # 途中で止める判定（文字列・key・括弧・整数の桁の下界）は、ちょうど収まる予算では止めず、
+        # 1 byte 足りない予算では必ず止める
+        exact = JsonEncodingPolicy.bounded_native_copy(RESULT_JSON_POLICY, original, max_bytes=written)
+        assert exact is not None and exact[1] == written, original
+        assert JsonEncodingPolicy.bounded_native_copy(RESULT_JSON_POLICY, original, max_bytes=written - 1) is None
 
 
 def _oversized(shape: str, scale: int):
@@ -709,3 +717,55 @@ def test_a_ref_whose_raw_container_grows_past_the_limit_after_it_was_yielded_is_
     assert sum(len(item) for item in drawn["items"]) < CAPTURE_MAX_BYTES < _writer_bytes(drawn)
     assert _closed(expr) is False
     assert expr.to_dict() == Expression.unknown("u", runtime_ref=_GrowsWithMultibyteText()).to_dict()
+
+
+
+def _exact_digits(magnitude: int) -> int:
+    """`magnitude >= 1` の 10 進の桁数（文字列にせず、10 の冪との整数の比較で決める: 独立した oracle）。"""
+
+    import math
+
+    digits = max(1, int(math.log10(2) * (magnitude.bit_length() - 1)) + 1)
+    while 10 ** digits <= magnitude:
+        digits += 1
+    while digits > 1 and 10 ** (digits - 1) > magnitude:
+        digits -= 1
+    return digits
+
+
+def test_the_integer_digit_bound_is_a_lower_bound_for_every_bit_length():
+    """`integer_digits_lower_bound` は、その bit 長の整数のうち最小（`2 ** (bits - 1)`）の桁数を超えない
+    （= その bit 長のどの整数の桁数も超えない）。差は 1 桁以内（下界で仕事を抑えるのに十分きつい）。
+    bit 長 1〜20,000 はすべて、それより上は 220,000 まで間引いて確かめる。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import integer_digits_lower_bound
+
+    for bits in list(range(1, 20_001)) + list(range(20_001, 220_000, 997)):
+        smallest = 1 << (bits - 1)
+        exact = _exact_digits(smallest)
+        bound = integer_digits_lower_bound(smallest)
+        assert bound <= exact <= bound + 1, (bits, bound, exact)
+        assert integer_digits_lower_bound(-smallest) == bound
+
+
+def test_an_integer_that_fits_its_exact_budget_is_never_rejected_by_the_digit_bound():
+    """±2**k / ±(2**k - 1) を、root・配列・object の中で、ちょうど収まる予算で写せ、1 byte 足りない
+    予算では写さない（`1 << 13301` は 4004 桁で、旧い下界は 4005 と見積もって拒んだ）。k は 2,000 まで
+    すべてと、それより上を間引いたもの、報告の k = 13301 を含む。"""
+
+    ks = sorted(set(range(1, 2_001)) | set(range(2_001, 15_000, 7)) | {13_301})
+    checked = 0
+    for k in ks:
+        for value in ((1 << k), (1 << k) - 1, -(1 << k), -((1 << k) - 1)):
+            for wrapped in (value, [value], {"k": value}) if k % 50 == 1 or k == 13_301 else (value,):
+                try:
+                    written = _writer_bytes(wrapped)
+                except ValueError:
+                    continue  # writer が書けない桁数（Python の整数の文字列化の上限）
+                exact = JsonEncodingPolicy.bounded_native_copy(RESULT_JSON_POLICY, wrapped, max_bytes=written)
+                assert exact is not None and exact[1] == written, (k, value < 0, type(wrapped).__name__)
+                assert JsonEncodingPolicy.bounded_native_copy(
+                    RESULT_JSON_POLICY, wrapped, max_bytes=written - 1,
+                ) is None
+                checked += 1
+    assert checked > 10_000

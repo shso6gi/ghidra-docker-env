@@ -1045,6 +1045,25 @@ def _float_text(value: float) -> str:
     return float.__repr__(value)
 
 
+#: log10(2) の下からの有理数近似（1233 / 4096 = 0.301025390625 < log10(2) = 0.30102999566...）
+_LOG10_2_BELOW = (1233, 12)
+
+
+def integer_digits_lower_bound(value: int) -> int:
+    """`abs(value)` の 10 進の桁数の下界（符号は含まない）。文字列にせずに `bit_length` だけで決める。
+
+    根拠: `value != 0` で bit 長が `b` なら `2 ** (b - 1) <= abs(value)` なので、桁数
+    `floor(log10(abs(value))) + 1 >= floor((b - 1) * log10(2)) + 1 >= floor((b - 1) * 1233 / 4096) + 1`
+    （`1233 / 4096 < log10(2)`）。`0` は 1 桁。
+    """
+
+    bits = int.bit_length(value)
+    if bits == 0:
+        return 1
+    numerator, shift = _LOG10_2_BELOW
+    return (((bits - 1) * numerator) >> shift) + 1
+
+
 @dataclass(frozen=True)
 class JsonEncodingPolicy:
     """JSON の書き方。数え方・変換・書き出しは必ずこの object を通す。"""
@@ -1312,9 +1331,9 @@ class JsonEncodingPolicy:
             elif kind is bool:
                 total += 4 if item else 5
             elif kind is int:
-                bits = int.bit_length(item)
-                lower = (bits - 1) * 30103 // 100000 + 1 if bits else 1
-                if lower + (1 if item < 0 else 0) > max_bytes - total:
+                # 文字列にする前に、桁数の **下界** だけで残りを超えると分かる整数を拒む（文字列化の
+                # 仕事を残りの byte で抑える）。下界なので、収まる整数を拒まない
+                if integer_digits_lower_bound(item) + (1 if item < 0 else 0) > max_bytes - total:
                     return None
                 try:
                     total += len(int.__repr__(item))
