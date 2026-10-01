@@ -87,3 +87,18 @@ def test_the_recording_and_replay_proxies_declare_that_they_stand_in_for_ghidra_
 
     for proxy_type in (RecordedObject, RecordingProxy):
         assert proxy_type.__dict__.get(SEMANTIC_OPAQUE_DECLARATION) is True, proxy_type
+
+
+def test_the_shared_mock_ghidra_objects_are_leaves_when_imported_through_the_package_path():
+    """`tests/conftest.py` の Ghidra の代わり（package の path で import すると package の型になる）も、
+    本物と同じく到達走査の葉（中に意味値を置いても辿らない）。"""
+
+    from scripts.function_tracer_pcode.tests import conftest
+
+    inner = Expression.constant(1, size=4)
+    for stand_in in (conftest.MockProgram, conftest.MockDataTypeManager, conftest.MockDataType,
+                     conftest.MockDataOrganization):
+        assert stand_in.__dict__.get(SEMANTIC_OPAQUE_DECLARATION) is True, stand_in
+        instance = stand_in.__new__(stand_in)
+        instance.__dict__["carried"] = inner
+        assert _carried(instance) == [], stand_in

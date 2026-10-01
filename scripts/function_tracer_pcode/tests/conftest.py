@@ -104,6 +104,9 @@ def load_golden_cases() -> List[Dict[str, Any]]:
 
 
 class MockDataOrganization:
+    # 外の runtime object（Ghidra の object）の代わり: 意味値の到達走査では葉（Issue #227）
+    __semantic_opaque__ = True
+
     def __init__(self, *, int_size=4, long_size=8, long_long_size=8, short_size=2, char_size=1, pointer_size=8):
         self._int_size = int_size
         self._long_size = long_size
@@ -132,6 +135,9 @@ class MockDataOrganization:
 
 
 class MockDataType:
+    # 外の runtime object（Ghidra の object）の代わり: 意味値の到達走査では葉（Issue #227）
+    __semantic_opaque__ = True
+
     def __init__(self, name: str, length: int, is_signed: bool, path: Optional[str] = None):
         self._name = name
         self._length = length
@@ -196,6 +202,9 @@ class MockFloatDataType(MockDataType):
 
 
 class MockDataTypeManager:
+    # 外の runtime object（Ghidra の object）の代わり: 意味値の到達走査では葉（Issue #227）
+    __semantic_opaque__ = True
+
     def __init__(self, architecture: str = "x86:LE:64:default"):
         pointer_size = 8 if ":64:" in architecture else 4
         self._data_organization = MockDataOrganization(pointer_size=pointer_size)
@@ -309,6 +318,9 @@ def resolve_mock_data_type(type_name: Optional[str], data_type_manager: Optional
 @dataclass
 class MockProgram:
     """モックバイナリプログラム（ArchitectureDetectorと整合性を保つ）"""
+    # 外の runtime object（Ghidra の object）の代わり: 意味値の到達走査では葉（Issue #227）
+    __semantic_opaque__ = True
+
     name: str
     architecture: str = "x86:LE:64:default"
     data_type_manager: Optional[MockDataTypeManager] = None
