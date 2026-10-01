@@ -189,6 +189,7 @@ from typing import (
 import pytest
 
 from scripts.function_tracer_pcode.analysis.debug import render as debug_render
+from scripts.function_tracer_pcode.tests.unit._package_sources import parse_source
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch
 from scripts.function_tracer_pcode.analysis.recurrence import counted_loop
 from scripts.function_tracer_pcode.analysis.recurrence.models import StateTransitionLoopModel
@@ -1333,7 +1334,7 @@ def bounded_renderer_names(root: Path = PACKAGE_ROOT) -> FrozenSet[str]:
 
     definitions: Dict[str, List[ast.AST]] = {}
     for path in _iter_source_files(Path(root)):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = parse_source(path, filename=str(path))
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 definitions.setdefault(node.name, []).append(node)
@@ -1880,7 +1881,7 @@ def scan_package(root: Path = PACKAGE_ROOT) -> EagerDebugRenderingViolations:
     violations = EagerDebugRenderingViolations()
     for path in _iter_source_files(Path(root)):
         module = _module_name(Path(root), path)
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = parse_source(path, filename=str(path))
         _EagerDebugRenderingScanner(module, violations, renderers).scan(tree)
     return violations
 
@@ -2635,7 +2636,7 @@ def observed_guard_shapes(root: Path = PACKAGE_ROOT) -> Dict[debug_render.GuardS
 
     observed: Dict[debug_render.GuardShape, str] = {}
     for path in _iter_source_files(root):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = parse_source(path, filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, (ast.If, ast.IfExp)):
                 continue
@@ -2688,7 +2689,7 @@ def observed_render_call_targets(root: Path = PACKAGE_ROOT) -> Dict[debug_render
     renderers = bounded_renderer_names(root)
     observed: Dict[debug_render.RenderCallTarget, str] = {}
     for path in _iter_source_files(root):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = parse_source(path, filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue

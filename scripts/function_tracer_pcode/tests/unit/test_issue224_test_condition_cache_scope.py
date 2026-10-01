@@ -73,3 +73,43 @@ def test_only_the_scope_contract_tests_opt_out_of_the_scope():
     production と違う条件で走らせることを、印 1 つで黙って増やさない）。"""
 
     assert _marked_files() <= _UNSCOPED_ALLOWED
+
+
+# ---------------------------------------------------------------------------
+# 静的な guard が共有する source の AST（`tests/unit/_package_sources`）
+# ---------------------------------------------------------------------------
+
+
+def test_the_same_text_gives_the_same_tree_and_a_changed_text_is_parsed_again(tmp_path):
+    from scripts.function_tracer_pcode.tests.unit import _package_sources
+
+    path = tmp_path / "m.py"
+    path.write_text("x = 1\n", encoding="utf-8")
+    first = _package_sources.parse_source(path, filename=str(path))
+    assert _package_sources.parse_source(path, filename=str(path)) is first
+    assert ast.dump(first) == ast.dump(ast.parse("x = 1\n"))
+    # filename が違えば別の値（SyntaxError の文面・code の filename が違う）
+    assert _package_sources.parse_source(path) is not first
+    # text が変われば parse し直す（共有が test の書き換えを覆い隠さない）
+    path.write_text("y = 2\n", encoding="utf-8")
+    second = _package_sources.parse_source(path, filename=str(path))
+    assert second is not first
+    assert ast.dump(second) == ast.dump(ast.parse("y = 2\n"))
+
+
+def test_a_mutated_shared_tree_is_reported(tmp_path):
+    """共有の AST を書き換えると、session の終わりの確かめ（`changed_trees`）が見つける。"""
+
+    from scripts.function_tracer_pcode.tests.unit import _package_sources
+
+    path = tmp_path / "m.py"
+    path.write_text("x = 1\n", encoding="utf-8")
+    tree = _package_sources.parse_source(path)
+    key = str(path.resolve())
+    try:
+        assert key not in _package_sources.changed_trees()
+        tree.body[0].targets[0].id = "mutated"
+        assert key in _package_sources.changed_trees()
+    finally:
+        # この test が作った壊れた entry を残さない（session の終わりの確かめを汚さない）
+        _package_sources._TREES.pop(key, None)
