@@ -895,6 +895,7 @@ def test_d11_the_same_root_in_two_queries_is_rendered_with_each_querys_mapping(s
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unscoped_condition_cache  # scope の外の挙動を確かめる（Issue #224）
 def test_nothing_is_remembered_outside_a_pair_scope(monkeypatch):
     builds = _count_builds(monkeypatch)
     conditions = [_slt(_param("param_1", 0), _const(0)), _slt(_const(0), _param("param_1", 0))]
@@ -909,6 +910,7 @@ def test_nothing_is_remembered_outside_a_pair_scope(monkeypatch):
     assert len(built) == 2
 
 
+@pytest.mark.unscoped_condition_cache  # scope の外の挙動を確かめる（Issue #224）
 def test_each_scope_starts_empty_and_restores_the_outer_store():
     key = _query(_slt(_param("param_1", 0), _const(0)))
     with condition_cache_scope() as outer:
@@ -1093,6 +1095,7 @@ def test_reset_caches_clears_only_the_owners_tables(scoped):
     assert cache_lookup("unrelated", key) == (True, True)
 
 
+@pytest.mark.unscoped_condition_cache  # scope の外の挙動を確かめる（Issue #224）
 def test_the_pair_boundary_gives_every_pair_a_fresh_cache_and_counters():
     """pair 境界が cache と計測の scope を開閉する（次の pair へ持ち越さない）。"""
 

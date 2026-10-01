@@ -19,6 +19,12 @@ production の module。Ghidra の CLI だけを ``runner_child``（harness の 
   pair-status は ``PAIR_STATUS_AUTHORITY_INVALID``（``classification_valid``
   false）、``run_pair`` は 2。
 * scheduler の失敗数は ``run_pair`` が 0 以外だった pair の数。
+
+Issue #226: どの pair が deadline に当たるかを host の速さで決めない。supervisor は runner の
+引数のまま ``runner_supervisor`` から起こし、deadline は worker が ``stop`` した瞬間に来る
+（supervisor 単体の harness の ``Deadline.AT_CHILD_STOP`` と同じ）。止まる worker は
+``timeoutpair`` だけで、ほかの pair は deadline に当たらずに終わる。runner の timer は hang の
+上限で、どの pair も timer に当たらなかったことを確かめる。
 """
 
 from __future__ import annotations
@@ -46,6 +52,11 @@ _WRAPPER = """#!/bin/sh
 if [ "${1:-}" = "-m" ] && [ "${2:-}" = "scripts.function_tracer_pcode.cli.main" ]; then
   exec python3 -B -m scripts.function_tracer_pcode.tests.fixtures.issue165.runner_child "$@"
 fi
+# Issue #226: supervisor は deadline を worker の stop に結ぶ入口から起こす（引数は runner のまま）
+if [ "${1:-}" = "-m" ] && [ "${2:-}" = "scripts.function_tracer_pcode.authority.process.supervisor_command" ]; then
+  shift 2
+  exec python3 -B -m scripts.function_tracer_pcode.tests.fixtures.issue165.runner_supervisor "$@"
+fi
 exec python3 -B "$@"
 """
 
@@ -57,8 +68,9 @@ PYTHON_BIN="__TMP__/python-wrapper"
 EQBENCH_RUN_TMPDIR="__TMP__/runtmp"
 EQBENCH_TMPDIR="__TMP__/runtmp"
 EQUIV_TIMEOUT=10; DECOMPILE_TIMEOUT=60; PAIRWISE_TIMEOUT=5; PAIRWISE_TIMEOUT_HARD=30
-PAIR_PROCESS_TIMEOUT_SECONDS=4; PAIR_PROCESS_KILL_AFTER_SECONDS=5
-PAIR_PROCESS_TIMEOUT=4s; PAIR_PROCESS_KILL_AFTER=5s
+# timer は hang の上限（deadline は worker の stop で来る）。supervisor 単体の harness の既定と同じ
+PAIR_PROCESS_TIMEOUT_SECONDS=60; PAIR_PROCESS_KILL_AFTER_SECONDS=5
+PAIR_PROCESS_TIMEOUT=60s; PAIR_PROCESS_KILL_AFTER=5s
 PAIR_STACK_DUMP_LEAD_SECONDS=1
 PAIR_PROCESS_DEADLINE_POLICY_DIGEST=issue165-t18-policy
 PROCESS_SUPERVISOR_KEY_ID=t18-supervisor; PROCESS_SUPERVISOR_KEY_FILE="__TMP__/keys/supervisor.key"
@@ -202,6 +214,29 @@ def test_t18_canonical_error_pair_is_valid_and_fails_the_run_as_before(runner_re
     assert status["canonical_outcome"] == "ERROR"
     assert status["supervisor_status"] == "RESOLVED"
     assert "supervisor_exit=0" in _status_line(completed, "errorpair")
+
+
+def test_t18_only_the_stopped_worker_reaches_the_deadline_and_none_reaches_the_timer(runner_result):
+    """Issue #226: deadline に当たるのは worker が止まる ``timeoutpair`` だけで、どの pair も
+    runner の timer には当たらない（pair の結末を host の速さで決めていない）。"""
+
+    from scripts.function_tracer_pcode.tests.fixtures.issue165.runner_supervisor import (
+        DEADLINE_CONTROL_RECORD,
+    )
+
+    tmp, _completed = runner_result
+    lines = (tmp / "harness" / DEADLINE_CONTROL_RECORD).read_text(encoding="utf-8").splitlines()
+    paths = {}
+    for line in lines:
+        entry = json.loads(line)
+        paths.setdefault(entry["function"], []).append(entry["deadline"])
+    # invalidpair は runner が非終端の projection を 1 回だけ再実行する（resume は worker を起こさない）
+    assert paths == {
+        "timeoutpair": ["worker-stop"],
+        "invalidpair": ["worker-exit"],
+        "errorpair": ["worker-exit"],
+        "unknownpair": ["worker-exit"],
+    }
 
 
 def test_t18_unknown_pair_is_valid(runner_result):

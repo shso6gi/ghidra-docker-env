@@ -542,6 +542,10 @@ class Recorder:
 class RecordingProxy:
     """実 Ghidra object 1 つの記録 proxy。"""
 
+    # 外の runtime object（Ghidra object）の代わり: 意味値の到達走査
+    # （``core/semantic_freeze.declares_semantic_opaque``）は本物と同じく葉として扱い、記録器を辿らない
+    __semantic_opaque__ = True
+
     def __init__(self, recorder: Recorder, index: int, real: Any) -> None:
         object.__setattr__(self, "_rec_recorder", recorder)
         object.__setattr__(self, "_rec_index", index)

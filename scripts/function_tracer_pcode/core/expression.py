@@ -7,10 +7,12 @@ from typing import List, NamedTuple, Optional, Any, Dict, Set, Mapping
 
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     SemanticLifecycle,
+    attribute_mutation_allowed,
     inherited_by_a_new_value,
     state_of,
 )
-from scripts.function_tracer_pcode.core.storage import StorageInfo
+from scripts.function_tracer_pcode.core.storage import FrozenStorageRecord, StorageInfo
+from scripts.function_tracer_pcode.core.frozen_representation import SEAL_PENDING, UNSEALABLE, FrozenLegacyTree
 from scripts.function_tracer_pcode.core.render_output import utf8_length
 from scripts.function_tracer_pcode.core import json_encoding
 from scripts.function_tracer_pcode.core.json_encoding import JsonEncodingPolicy, source_converter
@@ -158,6 +160,12 @@ class Expression:
     _equivalence_digest: Optional[bytes] = None
     _tree_size: Optional[int] = None
     _identity_complete: bool = False
+    #: 凍結時に写した storage の LEGACY 表現（`FrozenStorageRecord`）と、LEGACY 表現が
+    #: 不変な状態だけの関数か（Issue #219 C-RS2。意味は `core/semantic_lifecycle.py`）
+    _storage_payload: Any = None
+    _runtime_ref_payload: Any = None
+    _serialization_closed: bool = False
+    _serialization_pending: bool = False
     _recurrence_semantic_key: Any = None
     
     def __init__(
@@ -203,20 +211,36 @@ class Expression:
             self.__dict__["_recurrence_semantic_key"] = recurrence_semantic_key
 
     def __setattr__(self, name: str, value: Any) -> None:
-        """凍結後の意味 field 書き換えを内部バグとして拒否する。
+        """凍結後の意味 field と、lifecycle が所有する field の書き換えを内部バグとして拒否する。
+
+        規則は `core/semantic_lifecycle.attribute_mutation_allowed`（削除も同じ規則）。状態・
+        派生値（snapshot・digest・凍結時の storage の写し・serialization-closed の bit）は
+        どの状態でも属性の protocol では書かない（書くのは lifecycle の commit だけ）。書き換わると
+        LEGACY 表現や identity が凍結後に動く（Issue #219 C-RS2）。
 
         `TypeError` / `AttributeError` 派生ではない専用の型を投げるのは、
         「回復可能」な例外 tuple に吸収されて UNKNOWN や `None` に化けるのを
         防ぐため（`core/errors.py` の `FrozenExpressionError` を参照）。
         """
 
-        if name in SEMANTIC_FIELDS and self.__dict__.get("_frozen", False):
+        if not attribute_mutation_allowed(self, name, SEMANTIC_FIELDS):
             from scripts.function_tracer_pcode.core.semantic_freeze import (
                 frozen_mutation_error,
             )
 
             raise frozen_mutation_error(self, name)
         object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        """削除も代入と同じ規則で拒否する（`core/semantic_lifecycle.attribute_mutation_allowed`）。"""
+
+        if not attribute_mutation_allowed(self, name, SEMANTIC_FIELDS):
+            from scripts.function_tracer_pcode.core.semantic_freeze import (
+                frozen_mutation_error,
+            )
+
+            raise frozen_mutation_error(self, name)
+        object.__delattr__(self, name)
 
     def __copy__(self) -> 'Expression':
         """浅い複製。**新しい root は CONSTRUCTION、子 object は元と共有する**。
@@ -938,14 +962,37 @@ class Expression:
             else:
                 collect.extend(elements_of(operands))
                 result["operands"] = [0] * size(operands)
-        storage_info = self.storage_info
-        if storage_info is not None:
-            if type(storage_info) is not StorageInfo:
-                raise TypeError("Expression storage_info must be a StorageInfo")
-            result["storage_info"] = storage_info.to_dict()
+        # 凍結済みの node は凍結時に写した storage を描く（Issue #219 C-RS2: 生の `StorageInfo`
+        # は可変なので、凍結後に書き換わっても表現を動かさない）。写しの無い node（未凍結・
+        # storage が無い・写せなかった）は従来どおり今の `StorageInfo` を読む
+        storage_payload = self._storage_payload
+        if storage_payload is not None:
+            if type(storage_payload) is not FrozenStorageRecord:
+                raise TypeError("Expression storage payload must be a FrozenStorageRecord")
+            result["storage_info"] = storage_payload.to_dict()
+        else:
+            storage_info = self.storage_info
+            if storage_info is not None:
+                if type(storage_info) is not StorageInfo:
+                    raise TypeError("Expression storage_info must be a StorageInfo")
+                result["storage_info"] = storage_info.to_dict()
         if self.read_order_key is not None:
             result["read_order_key"] = self.read_order_key
-        if self.runtime_ref is not None:
+        # 写した表現があれば写しから描く（Issue #219 C-RS2: ref の表現を作る code は field の外を
+        # 読み得るので、写した後は走らせない）。写すのは closed の問い合わせ
+        # （`semantic_freeze.seal_serialization`）だけで、直列化は状態を書かない。写しの無い node
+        # （未検証・まだ写していない `SEAL_PENDING`・写せなかった `UNSEALABLE`）は生の ref を描く
+        ref_payload = self._runtime_ref_payload
+        if type(ref_payload) is FrozenLegacyTree:
+            if collect is None:
+                result["runtime_ref"] = ref_payload.thaw()
+            else:
+                # 写しから描いた表現は完成した表現（生の ref と同じ変換へ通さずに数える）
+                collect.append(_CompletedRefChild(ref_payload.thaw()))
+                result["runtime_ref"] = 0
+        elif ref_payload is not None and ref_payload is not SEAL_PENDING and ref_payload is not UNSEALABLE:
+            raise TypeError("Expression runtime ref payload must be a FrozenLegacyTree")
+        elif self.runtime_ref is not None:
             if collect is None:
                 result["runtime_ref"] = self._serialize_runtime_ref(self.runtime_ref)
             else:
@@ -1084,7 +1131,7 @@ def estimate_legacy_dict_bytes(
                 policy, local, None if max_bytes is None else max_bytes - distinct_total + len(children),
             ) - len(children)
             for child in children:
-                if type(child) is _RuntimeRefChild:
+                if type(child) in _REF_CHILDREN:
                     local_size += child.measure(
                         policy, None if max_bytes is None else max_bytes - distinct_total - local_size, work,
                     )
@@ -1093,7 +1140,7 @@ def estimate_legacy_dict_bytes(
                 return max_bytes + 1
             size = local_size
             for child in children:
-                if type(child) is not _RuntimeRefChild:
+                if type(child) not in _REF_CHILDREN:
                     size += sizes[id(child)]
             if max_bytes is not None and size > max_bytes:
                 return max_bytes + 1
@@ -1118,7 +1165,7 @@ def estimate_legacy_dict_bytes(
         stack.append(node)
         exits.append(True)
         for child in reversed(children):
-            if type(child) is not _RuntimeRefChild and id(child) not in sizes:
+            if type(child) not in _REF_CHILDREN and id(child) not in sizes:
                 stack.append(child)
                 exits.append(False)
     return sizes.get(id(root))
@@ -1143,7 +1190,7 @@ def _node_local_bytes(node: "Expression", policy: Any, max_bytes: Optional[int],
         policy, local, None if max_bytes is None else max_bytes + len(children),
     ) - len(children)
     for child in children:
-        if type(child) is _RuntimeRefChild:
+        if type(child) in _REF_CHILDREN:
             size += child.measure(policy, None if max_bytes is None else max_bytes - size, work)
     return size
 
@@ -1294,6 +1341,38 @@ class _RuntimeRefChild:
             if max_bytes is None:
                 raise
             return max_bytes + 1
+
+
+class _CompletedRefChild:
+    """見積りで node の外に置く、写しから描いた runtime ref の表現（完成した組み込みの値）。
+
+    写しは JSON の値になる組み込みの型だけなので、生の ref の変換（`runtime_ref_source`）へは
+    通さず、そのまま書いた byte を数える（`to_dict` が描く値と同じ値を数える）。
+    """
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+    def measure(self, policy: Any, max_bytes: Optional[int], work: Any) -> int:
+        from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted
+
+        if max_bytes is not None and max_bytes < 0:
+            return 1
+        try:
+            size = JsonEncodingPolicy.plain_bytes(policy, self.value, max_bytes=max_bytes, size_only=True, work=work)
+        except JsonBudgetExhausted:
+            if max_bytes is None:
+                raise
+            return max_bytes + 1
+        if size is None:
+            raise TypeError("a completed runtime ref representation holds only built-in values")
+        return size
+
+
+#: node の外で数える runtime ref の子
+_REF_CHILDREN = (_RuntimeRefChild, _CompletedRefChild)
 
 
 @source_converter

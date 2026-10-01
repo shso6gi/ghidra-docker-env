@@ -26,6 +26,8 @@ import collections
 import pathlib
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+from scripts.function_tracer_pcode.tests.unit._package_sources import parse_source
+
 PKG = "scripts.function_tracer_pcode"
 #: 作業量か authority の event の契約が仕事を抑える authority の入口（その owner の表）
 from scripts.function_tracer_pcode.authority.event_contract import BOUNDED_ENTRY_POINTS  # noqa: E402
@@ -150,7 +152,7 @@ class PackageIndex:
             name = ".".join((PKG,) + rel.with_suffix("").parts)
             if name.endswith(".__init__"):
                 name = name[: -len(".__init__")]
-            self.modules[name] = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            self.modules[name] = parse_source(path, filename=str(path))
         self.functions: Dict[Tuple[str, str], ast.AST] = {}
         self.classes: Dict[Tuple[str, str], ast.ClassDef] = {}
         self.imports: Dict[str, Dict[str, Tuple[str, str]]] = collections.defaultdict(dict)

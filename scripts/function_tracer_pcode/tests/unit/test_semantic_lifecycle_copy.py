@@ -358,3 +358,87 @@ def test_updating_the_conditions_of_a_copied_case_publishes_them_too():
     template.update_conditions([Condition(_guard("c"))])
 
     assert unpublished_semantic_values(template) == ()
+
+
+# ---------------------------------------------------------------------------
+# Issue #219 T-A4: 派生値（凍結時の storage の写し・serialization-closed の bit）を引き継がない
+# ---------------------------------------------------------------------------
+
+
+def _storage_rooted(name: str = "a") -> Expression:
+    from scripts.function_tracer_pcode.core.storage import StorageInfo
+
+    storage = StorageInfo(is_register=True, space_name="register", offset=8, size=4, register_name="x0")
+    return Expression.binary_op(
+        "INT_ADD", Expression.parameter(name, 0, size=4, storage_info=storage), Expression.constant(1, size=4)
+    )
+
+
+@pytest.mark.parametrize("start", [CONSTRUCTION, VALIDATED, PUBLISHED])
+@pytest.mark.parametrize("label,derive", _EXPRESSION_DERIVATIONS, ids=[n for n, _ in _EXPRESSION_DERIVATIONS])
+def test_an_expression_derivation_inherits_no_derived_state_field(label, derive, start):
+    """`DERIVED_STATE_FIELDS` の **どの** field も新しい値の `__dict__` に現れない（表から読む）。"""
+
+    from scripts.function_tracer_pcode.core.semantic_lifecycle import DERIVED_STATE_FIELDS
+
+    expr = _storage_rooted()
+    if start >= VALIDATED:
+        expr.freeze()
+    if start is PUBLISHED:
+        publish(expr)
+
+    derived = derive(expr)
+
+    for node in (derived, *derived.operands):
+        if node.lifecycle is CONSTRUCTION:
+            leaked = set(DERIVED_STATE_FIELDS) & set(node.__dict__)
+            assert leaked == set(), (label, leaked)
+
+
+def test_a_derived_expression_captures_its_own_storage_not_the_sources():
+    """派生値は作り直す: 元の写しを持ち越さず、派生した値の storage を凍結時に写す。"""
+
+    from scripts.function_tracer_pcode.core.storage import StorageInfo
+
+    source = Expression.parameter(
+        "a", 0, size=4, storage_info=StorageInfo(is_register=True, space_name="register", register_name="x0", size=4)
+    ).freeze()
+    replacement = StorageInfo(is_register=True, space_name="register", register_name="x7", size=4)
+
+    derived = source.clone_with(storage_info=replacement).freeze()
+
+    assert derived.to_dict()["storage_info"]["register_name"] == "x7"
+    assert source.to_dict()["storage_info"]["register_name"] == "x0"
+
+
+@pytest.mark.parametrize(
+    "label,derive",
+    [
+        ("copy", lambda condition: copy.copy(condition)),
+        ("deepcopy", lambda condition: copy.deepcopy(condition)),
+        ("negate", lambda condition: condition.negate()),
+    ],
+    ids=["copy", "deepcopy", "negate"],
+)
+def test_a_condition_derivation_recomputes_serialization_closure(label, derive):
+    """条件の複製・反転は closed の bit を元から写さず、自分の式から決め直す。
+
+    元の bit を（ありえない値に）書き換えておき、複製がそれを拾わないことで確かめる。
+    `negate` が公開を引き継ぐ例外は公開の話で、派生値には及ばない。
+    """
+
+    from scripts.function_tracer_pcode.core.semantic_lifecycle import serialization_closed
+
+    from scripts.function_tracer_pcode.core.expression import ExpressionType
+
+    # 表現にそのまま置かれる値が可変な容器の葉（closed にならない）
+    unclosed = Expression.binary_op(
+        "INT_LESS", Expression(ExpressionType.LITERAL, value=[1], size=4), Expression.constant(1, size=4)
+    )
+    condition = publish(Condition(unclosed))
+    assert serialization_closed(condition) is False
+    condition.__dict__["_serialization_closed"] = True  # 引き継げば closed に見える
+
+    derived = derive(condition)
+
+    assert serialization_closed(derived) is False, label
