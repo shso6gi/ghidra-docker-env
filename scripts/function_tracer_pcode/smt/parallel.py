@@ -33,6 +33,7 @@ from scripts.function_tracer_pcode.smt.interface import (
     SMTSolver,
     SolverResult,
     SolverStatus,
+    apply_adoption,
     backend_capabilities,
     enforce_witness_contract,
     execute_on_backend,
@@ -447,6 +448,7 @@ class ParallelSolverRunner:
                 query.settle(
                     [execution_fact(result)], evidence=_termination_evidence([result]),
                 )
+                [result] = apply_adoption([result], query.adoption)
             return result
         finally:
             elapsed = time.perf_counter() - backend_started
@@ -477,9 +479,9 @@ class ParallelSolverRunner:
             runtime_timeout = self._resolve_timeout(timeout)
             query = deadline_query(SOLVER_STAGE)
             if not query.begin(runtime_timeout):
-                return ParallelResult.from_backend_results(
-                    [not_started_result(solver.name) for solver in self._solvers]
-                )
+                return ParallelResult.from_backend_results(apply_adoption(
+                    [not_started_result(solver.name) for solver in self._solvers], query.adoption,
+                ))
             if self.debug:
                 print(f"[ParallelRunner] Starting parallel execution with {len(self._solvers)} solvers")
         
@@ -540,7 +542,7 @@ class ParallelSolverRunner:
                 [execution_fact(row) for row in results],
                 evidence=_termination_evidence(results),
             )
-            parallel = ParallelResult.from_backend_results(results)
+            parallel = ParallelResult.from_backend_results(apply_adoption(results, query.adoption))
             if self.debug:
                 print(f"[ParallelRunner] Final result: is_equivalent={parallel.is_equivalent}")
             return parallel
@@ -583,7 +585,8 @@ class ParallelSolverRunner:
                     print(f"[ParallelRunner] {solver.name}: {result.status.name} ({result.elapsed_time:.3f}s)")
                 query.settle([execution_fact(result)], evidence=_termination_evidence(results))
 
-            return ParallelResult.from_backend_results(results)
+            # 期限が打ち切った問いの答えは、行に残っていても採用しない（`apply_adoption`）
+            return ParallelResult.from_backend_results(apply_adoption(results, query.adoption))
 
     def _resolve_timeout(self, timeout: Optional[int]) -> int:
         """実行に使うタイムアウトを決定する。"""
@@ -610,6 +613,7 @@ def run_backend_query(
         return not_started_result(backend.name)
     result = _execute_within(backend, smt_script, timeout_seconds, query.bound, cancellation_token)
     query.settle([execution_fact(result)], evidence=_termination_evidence([result]))
+    [result] = apply_adoption([result], query.adoption)
     return result
 
 

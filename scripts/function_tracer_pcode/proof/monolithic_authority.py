@@ -773,6 +773,7 @@ class SharedZ3RegionSession:
         from scripts.function_tracer_pcode.smt.solvers.z3 import sat_result_with_witness
         from scripts.function_tracer_pcode.core.deadline import TimeUnit, deadline_query
         from scripts.function_tracer_pcode.smt.interface import (
+            apply_adoption,
             execution_fact,
             not_started_result,
         )
@@ -790,7 +791,7 @@ class SharedZ3RegionSession:
         if window is None:
             item = not_started_result("Z3(shared-region)")
             query_deadline.settle([execution_fact(item)])
-            return ParallelResult.from_backend_results([item])
+            return ParallelResult.from_backend_results(apply_adoption([item], query_deadline.adoption))
         # Issue #161: 実行の状態（期限と中止）は 1 回の実行に 1 つの `ExecutionBudget`。
         # execute の入口で作り、初回の check と canonical witness の生成・SAT の確定がこれに
         # 問う（共有 session には中止の入力が無いので期限だけ）。
@@ -806,7 +807,7 @@ class SharedZ3RegionSession:
                 )
                 item.deadline_limited = window.limited
                 query_deadline.settle([execution_fact(item)])
-                return ParallelResult.from_backend_results([item])
+                return ParallelResult.from_backend_results(apply_adoption([item], query_deadline.adoption))
             self._solver.set(timeout=budget.timeout_ms())
             verdict = self._solver.check()
             elapsed = time.time() - started
@@ -838,7 +839,7 @@ class SharedZ3RegionSession:
         # 切られていれば採らない
         item.deadline_limited = window.limited
         query_deadline.settle([execution_fact(item)])
-        return ParallelResult.from_backend_results([item])
+        return ParallelResult.from_backend_results(apply_adoption([item], query_deadline.adoption))
 
 def create_shared_z3_region_session(
     query_set: ExpectedRegionQuerySet,

@@ -12,6 +12,7 @@ import time
 from typing import List  # noqa: F401
 from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.deadline import (
+    Adoption,
     ExecutionEnd,
     ExecutionFact,
     TimeUnit,
@@ -181,6 +182,10 @@ class SolverResult:
     #: 落とさない（`execution_fact` が `ExecutionFact.failed` に写す）。ERROR の行は status が
     #: 故障を表すので不要。結果 JSON の schema には入れない
     observed_failure: Optional[str] = None
+    #: 解析の期限が問いを打ち切ったので採用しなかった答え（backend が返した SAT / UNSAT の
+    #: status。`apply_adoption` だけが設定する。行の status は TIMEOUT）。診断用で、判定にも結果 JSON の
+    #: schema にも入れない
+    withheld_status: Optional["SolverStatus"] = None
 
     def __post_init__(self) -> None:
         if self.cause is not None:
@@ -516,6 +521,41 @@ def execution_fact(result: SolverResult) -> ExecutionFact:
         end=execution_end(result),
         limited=bool(getattr(result, "deadline_limited", False)),
         failed=getattr(result, "observed_failure", None) is not None,
+    )
+
+
+def apply_adoption(results: Any, adoption: Adoption) -> List[SolverResult]:
+    """**問いの採否を行へ適用する唯一の場所**（Issue #106 PR-106-A レビュー 4 巡目）。
+
+    ``adoption`` は `core.deadline.DeadlineQuery.adoption`。WITHHELD（解析の期限がこの問いを
+    打ち切った）なら、答えの行（SAT / UNSAT。終了原因 ANSWERED）を、採用できない行（TIMEOUT・
+    期限が時間を決めた・反例なし）に置き換え、返した status を `withheld_status` に残す。故障
+    （ERROR・witness の契約違反）・判定不能・中止・未開始の行はそのまま残す（故障を消さない）。
+
+    runner・共有 session の結果は、集約（`smt.aggregation`）・execution authority の query
+    receipt・proof の cache・producer の再集約のどれもが行を読むので、行から答えを外す（結果の
+    判定だけを None にしても、行の UNSAT から採用し直せてしまう）。
+    """
+
+    rows = list(results)
+    if adoption is Adoption.ADOPTABLE:
+        return rows
+    return [_withheld(row) if execution_end(row) is ExecutionEnd.ANSWERED else row for row in rows]
+
+
+def _withheld(row: SolverResult) -> SolverResult:
+    return SolverResult(
+        solver_name=row.solver_name,
+        status=SolverStatus.TIMEOUT,
+        elapsed_time=row.elapsed_time,
+        error_message=(
+            f"answer withheld: the analysis deadline cut this query "
+            f"(the backend returned {live_values.enum_name(row.status)})"
+        ),
+        termination=row.termination,
+        deadline_limited=True,
+        cause=ExecutionEnd.TIME_LIMIT,
+        withheld_status=row.status,
     )
 
 

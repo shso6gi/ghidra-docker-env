@@ -42,15 +42,28 @@ decompile 1 回）の owner 側の handle で、開始の確認（`begin`）と�
 ========================================= =============================================
 期限後でも期限で切られた実行も無い         ACCEPT（答え・通常の unknown・通常の timeout・明示
                                           の中止・失敗は、期限の無いときと同じ結果のまま）
-故障を観測した（終了原因が FAILED /       KEEP_FAILURE（故障を結果に残し、期限の限界は記録
-CONTRACT_VIOLATION、または                 だけして raise は次の境界）。ただし期限後で、契約
-`ExecutionFact.failed`）                   違反が無く答えがある（集約でその答えが採られて
-                                          しまう）なら DEADLINE
-それ以外（期限後・期限で切られた実行）     DEADLINE（答えがあっても採らない）
+故障を観測した（終了原因が FAILED /       KEEP_FAILURE（故障の行を結果に残し、期限の限界は
+CONTRACT_VIOLATION、または                 記録だけして raise は次の境界。**問いの答えは採用
+`ExecutionFact.failed`）                   しない**: `Adoption.WITHHELD`）
+それ以外（期限後・期限で切られた実行）     DEADLINE（raise。答えがあっても採らない）
 ========================================= =============================================
 
 失敗を限界より先に置くのは、台帳の優先順位（内部バグ > 限界、`core.errors`）と同じ向き:
 期限は「失敗が起きた」事実を隠す理由にならない。
+
+**4 つの責務は別のもの**（レビュー 4 巡目: 「故障を残すために raise しない」が、残した行の
+答えの採用まで許していた）:
+
+1. 観測の保持: 実行が返した行・故障（`smt` が行として持つ。ここは `ExecutionFact` を読むだけ）
+2. 後続の実行を始めてよいか: `DeadlineQuery.begin`（期限後・余裕以下なら始めない）
+3. 問いの答え・反例を採用してよいか: `DeadlineQuery.adoption`。期限がこの問いを打ち切ったら
+   （KEEP_FAILURE。開始の拒否・返却後の確認・待ちの打ち切りのどれでも同じ）WITHHELD で、
+   **以後は戻らない**。`smt` は WITHHELD の問いの行から答え（SAT / UNSAT・反例）を外して返す
+   （`smt.interface.apply_adoption`。行を返す入口: runner の逐次 / 並列 / 単独・直接の問い合わせ・
+   共有 session）。DEADLINE は raise するので結果自体を返さない。1 実行で答えを出す問い
+   （条件 oracle・decompile）は、故障と答えが同じ実行に同居しないので、WITHHELD のときは答えを
+   持たない（KEEP_FAILURE はその実行の故障からしか生じない）
+4. 最終の UNKNOWN / ERROR と receipt: 既存の authority（ここは持たない）
 
 ここが持たないもの: UNKNOWN / ERROR の判断と receipt（authority）、失敗を結果へ変える
 こと（`checker.pair_execution`）、backend ごとの時間の単位・中断の方法（`smt` の adapter）、
@@ -317,6 +330,15 @@ class ExecutionFact:
 NOT_STARTED_FACT = ExecutionFact(end=ExecutionEnd.NOT_STARTED, limited=True)
 
 
+class Adoption(Enum):
+    """問いの答え・反例を採用してよいか（`DeadlineQuery.adoption`。module docstring の責務 3）。"""
+
+    #: 採用してよい（期限はこの問いを打ち切っていない）
+    ADOPTABLE = "adoptable"
+    #: 期限がこの問いを打ち切った: 行は残すが、答え（SAT / UNSAT）・反例は採用しない
+    WITHHELD = "withheld"
+
+
 class Settlement(Enum):
     """`settlement` の結論。"""
 
@@ -324,8 +346,8 @@ class Settlement(Enum):
     ACCEPT = "accept"
     #: 期限の限界（raise。答えがあっても採らない）
     DEADLINE = "deadline"
-    #: 期限の事実（期限後・期限で切られた実行）はあるが、失敗を結果に残す。限界は記録だけして
-    #: 次の境界で raise（この問いの後の実行は始めない）
+    #: 期限の事実（期限後・期限で切られた実行）はあるが、故障を結果に残す。限界は記録だけして
+    #: 次の境界で raise（この問いの後の実行は始めない）。問いの答えは採用しない（WITHHELD）
     KEEP_FAILURE = "keep_failure"
 
 
@@ -335,16 +357,12 @@ def settlement(facts: Tuple[ExecutionFact, ...], *, expired: bool) -> Settlement
     ``facts`` は 1 つの問いのそれまでに返った実行すべて、``expired`` は今が期限以後か。
     """
 
-    ends = {fact.end for fact in facts}
     deadline_fact = expired or any(fact.cut_by_deadline for fact in facts)
     if not deadline_fact:
         return Settlement.ACCEPT
     if any(fact.failure_observed for fact in facts):
-        adoptable_answer = (
-            ExecutionEnd.ANSWERED in ends and ExecutionEnd.CONTRACT_VIOLATION not in ends
-        )
-        if expired and adoptable_answer:
-            return Settlement.DEADLINE
+        # 故障を残す。答えの採用は止める（`Adoption.WITHHELD`）ので、答えが同居していても
+        # raise で故障を消す必要は無い
         return Settlement.KEEP_FAILURE
     return Settlement.DEADLINE
 
@@ -382,7 +400,7 @@ class DeadlineQuery:
       実行を始める前）。事実はこの問いの中で積み上がり、`settlement` はそれまでの全部を見る
     """
 
-    __slots__ = ("stage", "_deadline", "_startable", "bound", "facts")
+    __slots__ = ("stage", "_deadline", "_startable", "bound", "facts", "adoption")
 
     def __init__(
         self, stage: str, *, deadline: Optional["Deadline"] = None, startable: bool = True,
@@ -394,6 +412,8 @@ class DeadlineQuery:
         self.bound = bound
         #: この問いのそれまでに返った実行の事実
         self.facts: Tuple[ExecutionFact, ...] = ()
+        #: 答え・反例を採用してよいか（期限が打ち切ったら WITHHELD。以後は戻らない）
+        self.adoption = Adoption.ADOPTABLE
 
     @property
     def bounded(self) -> bool:
@@ -523,6 +543,7 @@ class Deadline:
         if refusal is None:
             return True
         if any(fact.failure_observed for fact in query.facts):
+            query.adoption = Adoption.WITHHELD
             self._mark(query.stage, now, boundary="before", evidence=("failure_kept", *refusal))
             return False
         self._raise(query.stage, now, boundary="before", evidence=refusal)
@@ -546,6 +567,7 @@ class Deadline:
         if verdict is Settlement.DEADLINE:
             self._raise(query.stage, now, boundary="after", evidence=(*detail, *evidence))
         if verdict is Settlement.KEEP_FAILURE:
+            query.adoption = Adoption.WITHHELD
             self._mark(
                 query.stage, now, boundary="after",
                 evidence=("failure_kept", *detail, *evidence),
@@ -774,6 +796,7 @@ def finalization() -> Iterator[None]:
 
 __all__ = [
     "ANALYSIS_COMPLETE_STAGE",
+    "Adoption",
     "DEADLINE_TARGET",
     "DEFAULT_POLL_INTERVAL",
     "DEFAULT_SUB_OPERATION_MARGIN_SECONDS",

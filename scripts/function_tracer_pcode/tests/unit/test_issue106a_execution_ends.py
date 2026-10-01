@@ -205,7 +205,8 @@ _SETTLEMENT_TABLE = [
     ((NS,), Settlement.DEADLINE, Settlement.DEADLINE),
     ((F_L, T_L), Settlement.KEEP_FAILURE, Settlement.KEEP_FAILURE),  # 失敗が限界より先
     ((V_L, A), Settlement.ACCEPT, Settlement.KEEP_FAILURE),    # 違反があれば答えは集約で採られない
-    ((F_L, A), Settlement.ACCEPT, Settlement.DEADLINE),        # 答えが採られてしまうので期限で止める
+    # レビュー 4 巡目: 故障と答えが同居しても故障を残す。答えは採否（`Adoption.WITHHELD`）で止める
+    ((F_L, A), Settlement.ACCEPT, Settlement.KEEP_FAILURE),
     ((F_L, NS), Settlement.KEEP_FAILURE, Settlement.KEEP_FAILURE),
     ((A, T), Settlement.ACCEPT, Settlement.DEADLINE),
     ((A, T_L), Settlement.DEADLINE, Settlement.DEADLINE),
@@ -394,12 +395,20 @@ def test_an_answer_after_the_deadline_is_not_adopted_even_beside_a_failure():
         _backend("broken", calls, lambda _t, _n: SolverResult("broken", SolverStatus.ERROR, error_message="boom")),
         _backend("late", calls, _late_unsat),
     ])
-    with pair_failure_scope(("pair",), None):
+    with pair_failure_scope(("pair",), None) as ledger:
         with deadline_scope(_policy(5.0, clock)):
-            with pytest.raises(DeadlineExceeded) as raised:
-                runner.run_sequential(QUERY)
+            result = runner.run_sequential(QUERY)
+            with pytest.raises(DeadlineExceeded):
+                checkpoint("next_stage")
     assert calls == ["broken", "late"]
-    assert "boundary=after" in raised.value.evidence_refs
+    broken, late = result.results
+    # 故障は残し（ERROR のまま）、期限の後の答えは採用しない（判定も反例も無い）
+    assert broken.status is SolverStatus.ERROR and broken.error_message == "boom"
+    assert late.status is SolverStatus.TIMEOUT and late.withheld_status is SolverStatus.UNSAT
+    assert result.is_equivalent is None and result.get_counterexample() is None
+    pending = ledger.pending_failure()
+    assert pending.stop_state is PairStopState.PAIR_TERMINAL_DEADLINE
+    assert "failure_kept" in pending.exception.evidence_refs
 
 
 # ---------------------------------------------------------------------------
