@@ -171,7 +171,6 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 from contextlib import contextmanager
-from functools import lru_cache
 from pathlib import Path
 from typing import (
     Callable,
@@ -189,6 +188,7 @@ from typing import (
 import pytest
 
 from scripts.function_tracer_pcode.analysis.debug import render as debug_render
+from scripts.function_tracer_pcode.tests.unit._package_sources import parse_source
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch
 from scripts.function_tracer_pcode.analysis.recurrence import counted_loop
 from scripts.function_tracer_pcode.analysis.recurrence.models import StateTransitionLoopModel
@@ -1322,7 +1322,12 @@ def _delegates_to_a_bounded_renderer(
     return all(_is_simple_argument(argument) for argument in arguments)
 
 
-@lru_cache(maxsize=None)
+#: `bounded_renderer_names` の結果。鍵は root の下の source の木の並び（`parse_source` は path・
+#: filename・text が同じときだけ同じ木を返すので、鍵が同じ ⇔ 読んだ source が同じ。Issue #224:
+#: root の path だけを鍵にすると、source を書き換えた root で古い結果を返す）
+_RENDERER_NAMES: Dict[Tuple[ast.AST, ...], FrozenSet[str]] = {}
+
+
 def bounded_renderer_names(root: Path = PACKAGE_ROOT) -> FrozenSet[str]:
     """owner の宣言 + そこへ委譲する family wrapper の名前を返す。
 
@@ -1331,9 +1336,16 @@ def bounded_renderer_names(root: Path = PACKAGE_ROOT) -> FrozenSet[str]:
     owner だけでよく、この test も家族側の module も変えなくてよい。
     """
 
+    trees = tuple(parse_source(path, filename=str(path)) for path in _iter_source_files(Path(root)))
+    known = _RENDERER_NAMES.get(trees)
+    if known is None:
+        known = _RENDERER_NAMES[trees] = _derive_renderer_names(trees)
+    return known
+
+
+def _derive_renderer_names(trees: Tuple[ast.AST, ...]) -> FrozenSet[str]:
     definitions: Dict[str, List[ast.AST]] = {}
-    for path in _iter_source_files(Path(root)):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for tree in trees:
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 definitions.setdefault(node.name, []).append(node)
@@ -1880,7 +1892,7 @@ def scan_package(root: Path = PACKAGE_ROOT) -> EagerDebugRenderingViolations:
     violations = EagerDebugRenderingViolations()
     for path in _iter_source_files(Path(root)):
         module = _module_name(Path(root), path)
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = parse_source(path, filename=str(path))
         _EagerDebugRenderingScanner(module, violations, renderers).scan(tree)
     return violations
 
@@ -2635,7 +2647,7 @@ def observed_guard_shapes(root: Path = PACKAGE_ROOT) -> Dict[debug_render.GuardS
 
     observed: Dict[debug_render.GuardShape, str] = {}
     for path in _iter_source_files(root):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = parse_source(path, filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, (ast.If, ast.IfExp)):
                 continue
@@ -2688,7 +2700,7 @@ def observed_render_call_targets(root: Path = PACKAGE_ROOT) -> Dict[debug_render
     renderers = bounded_renderer_names(root)
     observed: Dict[debug_render.RenderCallTarget, str] = {}
     for path in _iter_source_files(root):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = parse_source(path, filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -4558,3 +4570,15 @@ def test_repr_works_with_full_rendering_disabled(monkeypatch):
 
     assert "ExpandedValue(" in repr(ExpandedValue(value, list(conditions)))
     assert "ExpandedBranch(" in repr(ExpandedBranch(list(conditions), value))
+
+
+def test_bounded_renderer_names_follow_the_source_text_not_the_root_path(tmp_path):
+    """Issue #224: 同じ root で source を書き換えたら、委譲する wrapper の判定も書き換えに従う
+    （root の path だけを鍵にした memo は古い答えを返していた）。"""
+
+    owned = sorted(OWNED_SUMMARY_FUNCTIONS)[0]
+    module = tmp_path / "family.py"
+    module.write_text(f"def family_wrapper(value):\n    return {owned}(value)\n", encoding="utf-8")
+    assert "family_wrapper" in bounded_renderer_names(tmp_path)
+    module.write_text("def family_wrapper(value):\n    total = 0\n    return total\n", encoding="utf-8")
+    assert "family_wrapper" not in bounded_renderer_names(tmp_path)
