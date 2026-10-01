@@ -78,6 +78,7 @@ class Condition:
     #: LEGACY 表現が不変な状態だけの関数か（Issue #219 C-RS2。凍結時に式から決まる派生値で、
     #: 複製・反転は引き継がずに自分の式から決め直す。意味は `core/semantic_lifecycle.py`）
     _serialization_closed: bool = False
+    _serialization_pending: bool = False
 
     def __init__(self, expression: Optional["Expression"], negated: bool = False):
         if expression is None:
@@ -97,7 +98,7 @@ class Condition:
         _freeze(self)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if not attribute_mutation_allowed(self.__dict__, name, SEMANTIC_FIELDS):
+        if not attribute_mutation_allowed(self, name, SEMANTIC_FIELDS):
             from scripts.function_tracer_pcode.core.semantic_freeze import (
                 frozen_mutation_error,
             )
@@ -108,7 +109,7 @@ class Condition:
     def __delattr__(self, name: str) -> None:
         """削除も代入と同じ規則で拒否する（`core/semantic_lifecycle.attribute_mutation_allowed`）。"""
 
-        if not attribute_mutation_allowed(self.__dict__, name, SEMANTIC_FIELDS):
+        if not attribute_mutation_allowed(self, name, SEMANTIC_FIELDS):
             from scripts.function_tracer_pcode.core.semantic_freeze import (
                 frozen_mutation_error,
             )

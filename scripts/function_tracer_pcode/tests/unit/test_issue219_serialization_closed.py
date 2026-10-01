@@ -1,14 +1,18 @@
 # -*- coding: utf-8 -*-
 """検証済みの意味値の直列化は不変（Issue #219 PR-219-A、契約 C-RS2）。
 
-`lifecycle >= VALIDATED` で `serialization_closed(value)` が真の意味値では、LEGACY 表現
-（`to_dict()` / snapshot の木）が **不変な状態だけの関数** になる。PR-22-B の isolation
-契約（structural key・solver query identity・SMT・幅は凍結後の生 object の変化で動かない）を
-LEGACY 表現へ広げたもの。ここで固定するのは次のこと:
+`lifecycle >= VALIDATED` で closed（問い合わせの入口は `semantic_freeze.seal_serialization(value)`）
+な意味値では、LEGACY 表現（`to_dict()` / snapshot の木）が **不変な状態だけの関数** になる。PR-22-B
+の isolation 契約（structural key・solver query identity・SMT・幅は凍結後の生 object の変化で動かない）
+を LEGACY 表現へ広げたもの。ここで固定するのは次のこと:
 
 * T-A1: 凍結は表現を変えない（凍結の前と後で `to_dict()` が同じ）。
-* T-A3: closed になるのは、表現が読む状態がすべて不変なときだけ。可変な runtime ref・
-  可変な容器・opaque な値・closed でない子・写し取れない storage を含む値は closed でない。
+* T-A3: closed になるのは、表現が読む状態が凍結後に動かないときだけ。scalar・member・不変な
+  tuple・写した storage は field だけで決まる。runtime ref は **ref そのものの可変さを問わず**、
+  closed の問い合わせ（`seal_serialization`）で直列化の owner が作った表現を写せたときだけ closed（以後は写しから描くので、ref や
+  ref が指す容器・外の registry が後で変わっても表現は動かない）。式を抱える ref・写せない表現
+  （JSON の値にならない葉・閉路・上限超え・作るときの失敗）・closed でない子・subclass・写せない
+  storage を含む値は closed でない。
 * T-A5: 表現が読む field はすべて、lifecycle の表（`EXPRESSION_SERIALIZATION_INPUTS` /
   `CONDITION_SERIALIZATION_INPUTS`）に規則があるか、凍結時の派生値である（静的な監査）。
   規則の無い field を読むようになったら、closed の判定がその field を見落とすので落ちる。
@@ -44,16 +48,23 @@ from scripts.function_tracer_pcode.core.runtime_refs import PcodeOpRef
 from scripts.function_tracer_pcode.core.semantic_freeze import (
     SERIALIZATION_CLOSURE_RULES,
     freeze_expression,
+    seal_serialization,
 )
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     CONDITION_SERIALIZATION_INPUTS,
     DERIVED_STATE_FIELDS,
     EXPRESSION_SERIALIZATION_INPUTS,
     SerializationInput,
-    serialization_closed,
 )
 from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.tests.unit._publication import published
+
+
+def serialization_closed(value):
+    """closed の答え（C-RS2 の問い合わせの入口 `seal_serialization`。runtime ref の表現は最初の
+    直列化で写すので、写して答えを確定させてから読む）。"""
+
+    return seal_serialization(value)
 
 
 @pytest.fixture(autouse=True)
@@ -130,7 +141,7 @@ def _written_bytes(value: Any) -> int:
 def _random_expression(rng: random.Random, depth: int, pool: list, carriers: Optional[list] = None) -> Expression:
     """storage / PHI / runtime ref を含む式をランダムに組む（共有 DAG になるよう pool から再利用する）。
 
-    `carriers` に list を渡すと、式を抱える runtime ref（凍結時に表現を写さない ref）も作り、作った
+    `carriers` に list を渡すと、式を抱える runtime ref（表現を写さない ref）も作り、作った
     node をそこへ積む。渡さなければ作らない（生成した式は必ず closed になる）。
     """
 
@@ -255,7 +266,7 @@ def _unclosed_leaf():
 
 
 def _ref_carrying_an_expression():
-    """式を抱える runtime ref（表現は式の木を展開して含むので、凍結時に写さない）。"""
+    """式を抱える runtime ref（表現は式の木を展開して含むので、写さない）。"""
 
     return Expression.unknown("u", runtime_ref=_FrozenRef(("u",), inner=_parameter("a")))
 
@@ -458,7 +469,7 @@ _CLOSED = {
     "variable_without_storage": lambda: Expression.variable("v", size=8),
     "tuple_value": lambda: Expression(ExpressionType.LITERAL, value=("a", 1, (2, 3)), size=4),
     "phi_with_closed_conditions": _closed_expression,
-    # runtime ref: 表現を凍結時に写せるもの（ref の型が表現をどう作るかに依らない）
+    # runtime ref: 表現を（closed の問い合わせで）写せるもの（ref の型が表現をどう作るかに依らない）
     "frozen_runtime_ref": lambda: Expression.unknown("u", runtime_ref=_FrozenRef(("u", 1))),
     "pcode_op_ref": lambda: Expression.unknown("op", runtime_ref=PcodeOpRef(address_offset=16, mnemonic="COPY")),
     "mutable_runtime_ref": lambda: Expression.unknown("u", runtime_ref=_MutableRef(("u", 1))),
@@ -579,7 +590,7 @@ _EXPRESSION_LOCAL_READS = {
     ("condition", "negated"): _CONDITION_FIELD,
     ("expr_type", "_name_"): "enum の member の名前（class の定義 = code。SCALAR の規則が型を固定する）",
     ("storage_payload", "to_dict"): "凍結時の写し（`FrozenStorageRecord`、STORAGE の規則）",
-    ("ref_payload", "thaw"): "凍結時に作った runtime ref の表現の写し（`FrozenLegacyTree`、RUNTIME_REF の規則）",
+    ("ref_payload", "thaw"): "closed の問い合わせで作った runtime ref の表現の写し（`FrozenLegacyTree`、RUNTIME_REF の規則）",
     ("storage_info", "to_dict"): "未凍結の node だけが読む生の storage（closed にならない経路）",
     ("work", "charge"): _MACHINERY,
     ("work", "remaining"): _MACHINERY,
@@ -1184,8 +1195,11 @@ def test_a_captured_ref_is_serialized_exactly_as_the_live_ref_would_be(label):
     assert _snapshot_fingerprint_of(frozen) == _snapshot_fingerprint_of(live)
 
 
-def test_the_ref_serialization_code_runs_once_at_freeze(monkeypatch):
-    """ref の表現を作る code は凍結の 1 回だけ走り、以後の直列化・fingerprint では走らない。"""
+def test_the_ref_serialization_code_never_runs_inside_freeze_and_runs_once_when_sealed(monkeypatch):
+    """ref の表現を作る code は凍結（検証の transaction）の中では走らない。closed の問い合わせで
+    1 回だけ走って写し、以後の直列化・見積り・fingerprint・問い合わせでは走らない。
+    写す前の直列化は未凍結の値と同じく生の ref を描く（状態を書かない）。
+    """
 
     reads = []
 
@@ -1197,14 +1211,20 @@ def test_the_ref_serialization_code_runs_once_at_freeze(monkeypatch):
     monkeypatch.setitem(globals(), "_MUTABLE_REGISTRY", _CountingRegistry())
     expr = Expression.unknown("u", runtime_ref=_RecordReadingARegistry(("k",)))
     freeze_expression(expr)
+    assert reads == []
+
+    expr.to_dict()
     assert len(reads) == 1
+    assert serialization_closed(expr) is True
+    assert len(reads) == 2
 
     for _ in range(3):
         expr.to_dict()
     estimate_legacy_dict_bytes(expr, work=None)
     _snapshot_fingerprint_of(expr)
+    assert serialization_closed(expr) is True
 
-    assert len(reads) == 1
+    assert len(reads) == 2
 
 
 def test_the_output_of_a_captured_ref_is_a_fresh_container_each_time():
