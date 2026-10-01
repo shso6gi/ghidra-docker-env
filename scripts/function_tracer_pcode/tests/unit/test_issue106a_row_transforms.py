@@ -117,6 +117,8 @@ _INPUTS = {
     "sat": SolverResult("b", SolverStatus.SAT, elapsed_time=0.4, model={"x": 1}, raw_output="sat\n(model)"),
     "sat_no_witness": SolverResult("b", SolverStatus.SAT, elapsed_time=0.4, model=None, raw_output="sat"),
     "sat_noncanonical": SolverResult("b", SolverStatus.SAT, elapsed_time=0.4, model={"x": 9}, raw_output="sat"),
+    # 形の違う witness（宣言されていない入力）: canonical の検査で契約違反になる
+    "sat_malformed_witness": SolverResult("b", SolverStatus.SAT, elapsed_time=0.4, model={"y": 1}, raw_output="sat"),
     "unsat": SolverResult("b", SolverStatus.UNSAT, elapsed_time=0.4, raw_output="unsat", deadline_limited=True),
 }
 
