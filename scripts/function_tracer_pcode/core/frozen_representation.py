@@ -13,10 +13,11 @@ field の外の可変な状態を読み得るので、「その code が純粋�
 * 容器: `dict`（key は `str`）/ `list` / `tuple`（区別して保つので、描き直すと元と同じ型になる）
 
 それ以外（`bytes`・record・enum・scalar の subclass・任意の object）を 1 つでも含む表現、閉路を
-含む表現、上限（`CAPTURE_MAX_NODES` 個の値・`CAPTURE_MAX_BYTES` byte）を超える表現は写さない
-（`freeze_legacy_tree` が `None`）。写しの大きさは **写しそのもの** を数えて決める: walker の
-葉としてそのまま置かれた容器（`raw()`）は、walker が数えた後で中身が変わり得るので、walker の
-勘定には頼らない。
+含む表現、`CAPTURE_MAX_BYTES` を超える表現は写さない（`freeze_legacy_tree` が `None`）。写しの
+大きさは **写しそのもの** を辿りながら数えて決める: walker の葉としてそのまま置かれた容器
+（`raw()`）は、walker が数えた後で中身が変わり得るので、walker の勘定には頼らない。辿る値は 1 つ
+ごとに 2 byte 以上を数えるので、辿る回数は `CAPTURE_MAX_BYTES / 2` 以下で止まる（閉路・共有の
+多い DAG・深い入れ子でも、写しの時間と大きさは表現の形に依らず上限の中）。
 
 描き直した表現は、完成した表現として扱う（`thaw` の結果を生の ref と同じ変換へ通さない）。
 見積もりは完成した表現の byte を数える（`Expression` の `_CompletedRefChild`）。
@@ -29,8 +30,6 @@ from typing import Any, List, NamedTuple, Optional, Tuple
 #: 写してよい表現の大きさの上限（JSON の byte）。runtime ref の表現は field の値の分しかなく
 #: 通常は数百 byte。これを超える表現は写さない（その node は closed にならないだけ）
 CAPTURE_MAX_BYTES = 1 << 16
-#: 写してよい表現の値（葉と容器）の数の上限。写しを作る時間を、表現の形に依らず抑える
-CAPTURE_MAX_NODES = 1 << 13
 
 
 class _Marker:
@@ -104,23 +103,21 @@ def _is_leaf(value: Any) -> bool:
 
 
 def _freeze(value: Any) -> Tuple[bool, Any]:
-    """組み込みの値だけの不変な写し。上限・閉路・組み込み以外の葉で `(False, None)`。
+    """組み込みの値だけの不変な写し。上限の超過・組み込み以外の値で `(False, None)`。
 
-    明示 stack（深い表現でも再帰上限に当たらない）。出る時に子の写しから親を組む。辿っている経路の
-    上の容器（`active`）に戻れば閉路。値の数と byte の見積もり（葉の文字列の長さと区切り）を辿り
-    ながら数え、上限を超えた時点で止める（写しの時間と大きさを表現の形に依らず抑える）。
+    明示 stack（深い表現でも再帰上限に当たらない）。出る時に子の写しから親を組む。辿る値ごとに
+    byte の見積もり（葉は文字列の長さ + 2 か 8、容器は 2 + 要素数、dict の key は長さ + 3）を
+    足し、上限を超えた時点で止める。どの値も 2 byte 以上なので、閉路（同じ容器へ戻り続ける）も
+    共有の多い DAG も、辿る回数が上限で止まる。
     """
 
     results: List[Any] = []
     stack: List[Tuple[Any, bool]] = [(value, False)]
-    active: dict = {}
-    nodes = 0
     size = 0
     while stack:
         item, leaving = stack.pop()
         kind = type(item)
         if leaving:
-            del active[id(item)]
             count = len(item)
             children = tuple(results[len(results) - count:]) if count else ()
             if count:
@@ -132,9 +129,6 @@ def _freeze(value: Any) -> Tuple[bool, Any]:
             else:
                 results.append(FrozenTuple(children))
             continue
-        nodes += 1
-        if nodes > CAPTURE_MAX_NODES:
-            return False, None
         if _is_leaf(item):
             size += len(item) + 2 if kind is str else 8
             if size > CAPTURE_MAX_BYTES:
@@ -143,9 +137,6 @@ def _freeze(value: Any) -> Tuple[bool, Any]:
             continue
         if kind is not dict and kind is not list and kind is not tuple:
             return False, None
-        if id(item) in active:
-            return False, None
-        active[id(item)] = True
         size += 2 + len(item)
         if kind is dict:
             for key in item:
