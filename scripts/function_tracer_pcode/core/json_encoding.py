@@ -923,8 +923,11 @@ class JsonBudget:
         consumed = self.consumed if self.max_bytes is None else self.max_bytes + 1
         raise JsonBudgetExhausted(consumed_bytes=consumed, max_bytes=self.max_bytes)
 
-    def tree(self, leaf: Any, *, build: bool) -> Tuple[Any, int]:
-        """sized leaf の大きさを **作る前に** 求めて足し、`build` なら木を作る。"""
+    def tree(self, leaf: Any, *, build: bool, substitutable: bool = False) -> Tuple[Any, int]:
+        """sized leaf の大きさを **作る前に** 求めて足し、`build` なら木を作る。
+
+        `substitutable` は `SerializationWork.tree` と同じ interface（この予算は置き換えを持たない）。
+        """
 
         remaining = self.remaining()
         # sized leaf の protocol は package の型の関数を直接呼ぶ（instance の属性を引かない）
@@ -2095,6 +2098,11 @@ class _Walk:
         self.token_sink = token_sink
         #: 1 回しか辿れない列（iterator）を辿ったか（辿った後の値は同じ値として辿り直せない）
         self.entered_iterator = False
+        #: sized leaf を予算の置き換え（`SerializationWork.leaf_substitution`）に任せてよいか。walk の外から
+        #: 始めた LEGACY の構築だけ（`run` が決める）: 置き換えた葉は、walk を始めた呼ぶ側だけが受け取る。
+        #: walk の中の producer（`json_items` とその helper）が始めた walk の値は、producer の code が読むので
+        #: 置き換えない
+        self.substitutable = False
         self.item_separator = utf8_length(policy.item_separator)
         self.key_separator = utf8_length(policy.key_separator)
         self.stack: List[_Frame] = []
@@ -2454,7 +2462,7 @@ class _Walk:
             self.push("dict", _walk_iter(json_items(item)), parent, key, item, build=build)
             return
         if _record_protocol(kind, "__json_tree__") is not None:
-            built, size = self.budget.tree(item, build=build)
+            built, size = self.budget.tree(item, build=build, substitutable=self.substitutable)
             if self.token_sink is not None:
                 self.token("t" + protocol_method(item, "__json_identity__")(item))
             if build:
@@ -2768,6 +2776,9 @@ class _Walk:
 
     def run(self, source: Any) -> Any:
         holder: List[Any] = [None]
+        self.substitutable = (
+            _ACTIVE_WORK.get() is None and self.mode == LEGACY and self.build and self.token_sink is None
+        )
         # walk の間に呼ぶ producer が作る予算は、この walk の作業量の子（`JsonBudget.parent`）
         active = _ACTIVE_WORK.set(self.effort)
         try:

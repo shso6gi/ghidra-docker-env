@@ -489,6 +489,7 @@ class SerializationWork:
 
     __slots__ = (
         "site", "enabled", "_target_parts", "max_bytes", "consumed", "_meter", "_policy", "terminal", "runtime_ref_memo", "parent",
+        "leaf_substitution", "record_observations",
     )
 
     def __init__(
@@ -500,6 +501,8 @@ class SerializationWork:
         terminal: bool = True,
         max_bytes: Optional[int] = None,
         parent: Optional["SerializationWork"] = None,
+        leaf_substitution: Optional["LeafSubstitution"] = None,
+        record_observations: bool = True,
     ) -> None:
         from scripts.function_tracer_pcode.core.json_encoding import active_walk_work
         from scripts.function_tracer_pcode.core.semantic_snapshot import (
@@ -510,8 +513,19 @@ class SerializationWork:
             # walk の中（converter・reducer・`json_items`）で新しい作業量を作らない（`JsonBudget` と
             # 同じ規則。その仕事は walk の作業量へ数える: owner は 1 つ）
             raise TypeError("a serialization scope cannot start inside a walk; count into the walk's work instead")
+        if leaf_substitution is not None:
+            if terminal or parent is not None:
+                # 置き換えた葉の byte は表現の大きさではない: 意味の限界にも、外側の作業量への合算にもしない
+                raise ValueError("a leaf substitution needs a non-terminal work of its own")
+            if not isinstance(leaf_substitution, LeafSubstitution):
+                raise TypeError("a leaf substitution must be a LeafSubstitution")
         #: 入れ子の terminal な scope は外側の作業量へも足す（外側の上限も効く）
         self.parent = parent
+        #: sized leaf を作る前に呼ぶ置き換え（`NO_SUBSTITUTION` 以外を返せば、その値を葉として置く）。
+        #: 何を置き換えるかは渡す側が決める（ここは置き換えの仕組みだけを持つ）
+        self.leaf_substitution = leaf_substitution
+        #: 終わったときに量を `BudgetObservations` へ残すか
+        self.record_observations = bool(record_observations)
 
         self.site = str(site)
         #: この直列化 1 回の間だけの、式の木の中の runtime ref の LEGACY 表現の memo
@@ -565,11 +579,24 @@ class SerializationWork:
             target_key=self.target_key(), limit=limit,
         )
 
-    def tree(self, leaf: Any, *, build: bool) -> Tuple[Any, int]:
-        """sized leaf（式の木）の大きさを **作る前に** 求めて足し、`build` なら作る。"""
+    def tree(self, leaf: Any, *, build: bool, substitutable: bool = False) -> Tuple[Any, int]:
+        """sized leaf（式の木）の大きさを **作る前に** 求めて足し、`build` なら作る。
+
+        `substitutable` は、作った葉を受け取るのが置き換えを頼んだ呼ぶ側だけのとき（walk の外から
+        始めた LEGACY の構築が置く葉。`core/json_encoding._Walk`）。そのときだけ `leaf_substitution`
+        に尋ねる: walk の中の code が読む値・`Expression.to_dict()` の返り値は置き換えない。
+        """
 
         from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, protocol_method
 
+        substitution = self.leaf_substitution if substitutable else None
+        if substitution is not None:
+            # 置き換えは package の `LeafSubstitution` の protocol（型の関数を直接呼ぶ）
+            substitute = protocol_method(substitution, "__leaf_substitute__")(substitution, leaf)
+            if substitute is not NO_SUBSTITUTION:
+                # 置き換えた葉は見積もらず・数えず・作らない（1 歩 1 byte 以上の規則だけを守る）
+                self.charge(SUBSTITUTED_LEAF_BYTES)
+                return (substitute if build else None), SUBSTITUTED_LEAF_BYTES
         # sized leaf の protocol は package の型の関数を直接呼ぶ（instance の属性を引かない）
         if not self.enabled:
             return (protocol_method(leaf, "__json_tree__")(leaf) if build else None), 0
@@ -635,7 +662,7 @@ class SerializationWork:
         run ごとに揺れ、既定値の根拠にもならない。
         """
 
-        if self.enabled and self.terminal:
+        if self.enabled and self.terminal and self.record_observations:
             observe_budget_usage(BudgetKind.SERIALIZATION_BYTES, self.consumed, site=self.site)
             observe_budget_usage(BudgetKind.SERIALIZATION_NODES, self.distinct_nodes, site=self.site)
 
@@ -644,6 +671,37 @@ class SerializationWork:
 live_values.register_storage_meter(SerializationWork)
 
 _SERIALIZATION = threading.local()
+
+
+class _NoSubstitution:
+    """`leaf_substitution` が「この葉は置き換えない」と答える印（1 つだけ）。"""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "NO_SUBSTITUTION"
+
+
+#: `leaf_substitution` の答え: 置き換えない（葉は通常どおり見積もって作る）
+NO_SUBSTITUTION = _NoSubstitution()
+
+
+class LeafSubstitution:
+    """直列化の作業量の sized leaf の置き換え（`serialization_scope(leaf_substitution=...)`）の protocol。
+
+    `__leaf_substitute__(leaf)` は、作業量が sized leaf を作る **前** に呼ばれ、置く値か
+    `NO_SUBSTITUTION` を返す。何を置き換えるかは subclass（渡す側）が決める。呼ばれるのは walk の外
+    から始めた LEGACY の構築が置く葉だけ（`SerializationWork.tree`）。
+    """
+
+    __slots__ = ()
+
+    def __leaf_substitute__(self, leaf: Any) -> Any:
+        return NO_SUBSTITUTION
+
+
+#: 置き換えた葉 1 つに数える byte（走査の 1 歩を 1 byte 以上に数える規則の下限）
+SUBSTITUTED_LEAF_BYTES = 1
 
 
 def active_serialization_work() -> Optional[SerializationWork]:
@@ -661,6 +719,8 @@ def serialization_scope(
     terminal: bool = True,
     max_bytes: Optional[int] = None,
     enabled: Optional[bool] = None,
+    leaf_substitution: Optional["LeafSubstitution"] = None,
+    record_observations: bool = True,
 ) -> Iterator[SerializationWork]:
     """直列化 1 つ分の作業量を数える scope（同じ意味の入れ子は外側へ合流する）。
 
@@ -669,6 +729,11 @@ def serialization_scope(
     すべて同じ作業量へ足される。scope の外で単独に呼ばれた `Expression.to_dict`
     は、その 1 本だけの作業量になる。thread ごとに持つ（直列化は同期処理で、
     別 thread の直列化と合算しない）。
+
+    `leaf_substitution` は sized leaf（`SerializationWork.tree`）を作る前に呼ばれ、
+    `NO_SUBSTITUTION` 以外を返すとその値を葉として置く（見積もり・数え・木の構築をしない）。
+    置き換えた量は表現の大きさではないので、置き換えを持つ scope は terminal でなく、外側へ
+    合流も合算もしない。`record_observations=False` の scope は量を観測値へ残さない。
     """
 
     stack = getattr(_SERIALIZATION, "stack", None)
@@ -676,7 +741,10 @@ def serialization_scope(
         stack = []
         _SERIALIZATION.stack = stack
     parent = stack[-1] if stack else None
-    if parent is not None and terminal and max_bytes is None:
+    if leaf_substitution is not None:
+        if terminal:
+            raise ValueError("a leaf substitution needs a non-terminal work of its own")
+    elif parent is not None and terminal and max_bytes is None:
         # 同じ意味の入れ子（terminal・上限なし）は外側の作業量へ合流する
         yield parent
         return
@@ -687,6 +755,8 @@ def serialization_scope(
         enabled=(budget_scope_is_active() if enabled is None else enabled),
         terminal=terminal, max_bytes=max_bytes,
         parent=parent if terminal else None,
+        leaf_substitution=leaf_substitution,
+        record_observations=record_observations,
     )
     stack.append(work)
     try:
@@ -762,4 +832,7 @@ __all__ = [
     "serialization_scope",
     "SerializationWork",
     "active_serialization_work",
+    "LeafSubstitution",
+    "NO_SUBSTITUTION",
+    "SUBSTITUTED_LEAF_BYTES",
 ]
