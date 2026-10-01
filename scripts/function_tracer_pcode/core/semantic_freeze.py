@@ -48,6 +48,7 @@ freeze と公開は同じ到達規則に別の操作を載せるだけなので�
 from __future__ import annotations
 
 import dataclasses
+import enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core import structural as _structural
@@ -463,19 +464,23 @@ def _commit_publication(staging: _LifecycleStaging) -> None:
 def _walk_semantic_carriers(container: Any, on_expression, on_condition) -> Any:
     """入れ物から到達できる意味値に操作を 1 回ずつ適用する。**到達規則の唯一の実装**。
 
-    走査の範囲は明示してある（黙って諦める経路を作らない）:
+    値をどう扱うかは `_carrier_rule` が **優先順位つきの 1 つの表** で決める（上から最初に
+    当てはまる規則）:
 
-    * 式 / 条件 → `on_expression` / `on_condition` を適用して、そこで止まる
-      （その先は操作側が graph を辿る）
-    * tuple / list / set / frozenset → 要素へ入る
-    * dict → **key と value の両方へ入る**。式を鍵にした cache が実在する
-      （`analysis/condition/bitvector.py` の `Dict[Expression, ...]`）ので、
-      「到達できる意味値をすべて」と言う以上 key を外す理由が無い
-    * dataclass / NamedTuple → field へ入る
-    * **この package で定義された** その他の object → `__dict__` の値へ入る。
-      新しい carrier 型が dataclass でなくても取りこぼさないため
-    * それ以外（Ghidra object・mock・標準ライブラリ）→ 葉。意味の入れ物ではない。
-      **属性を探らない**: 記録再生中の proxy に観測を作ってしまうため
+    1. 式 / 条件 → `on_expression` / `on_condition` を適用して、そこで止まる（その先は操作側が
+       graph を辿る）。意味値は宣言に依らず必ず意味値として扱う
+    2. 外の runtime object の代わりをすると宣言した型（`__semantic_opaque__`。記録再生の proxy・
+       test の Ghidra の代わり）→ 葉。**値を開く規則（3〜6）より先**に判定する: dataclass でも
+       容器の subclass でも、宣言した型の中は辿らない（本物の Ghidra object と同じ）
+    3. tuple / list / set / frozenset → 要素へ入る
+    4. dict → **key と value の両方へ入る**。式を鍵にした cache が実在する
+       （`analysis/condition/bitvector.py` の `Dict[Expression, ...]`）ので、
+       「到達できる意味値をすべて」と言う以上 key を外す理由が無い
+    5. dataclass / NamedTuple → field へ入る
+    6. **この package で定義された** その他の object → `__dict__` の値へ入る。新しい carrier 型が
+       dataclass でなくても取りこぼさないため
+    7. それ以外（Ghidra object・mock・標準ライブラリ）→ 葉。**属性を探らない**: 記録再生中の
+       proxy に観測を作ってしまうため
 
     深さで打ち切らない（明示 stack なので再帰上限も無い）。`id` で一度見た
     object は二度見ないので、循環があっても止まる。
@@ -491,39 +496,73 @@ def _walk_semantic_carriers(container: Any, on_expression, on_condition) -> Any:
         if value_id in seen:
             continue
         seen[value_id] = True
-
-        # 型は `isinstance` で見る。`hasattr` で属性を探ると、解析結果が抱えて
-        # いる Ghidra object（記録再生中は proxy）に観測が走ってしまう。
-        if isinstance(value, Expression):
+        rule = _carrier_rule(value)
+        if rule is CarrierRule.EXPRESSION:
             on_expression(value)
-            continue
-        if isinstance(value, Condition):
+        elif rule is CarrierRule.CONDITION:
             on_condition(value)
-            continue
-        if isinstance(value, (tuple, list, set, frozenset)):
+        elif rule is CarrierRule.SEQUENCE:
             stack.extend(value)
-            continue
-        if isinstance(value, dict):
+        elif rule is CarrierRule.MAPPING:
             stack.extend(value.keys())
             stack.extend(value.values())
-            continue
-        if dataclasses.is_dataclass(value) and not isinstance(value, type):
-            stack.extend(
-                getattr(value, field.name, None) for field in dataclasses.fields(value)
-            )
-            continue
-        if _is_owned_object(value):
+        elif rule is CarrierRule.FIELDS:
+            stack.extend(getattr(value, field.name, None) for field in dataclasses.fields(value))
+        elif rule is CarrierRule.OWNED_STATE:
             owned_state = getattr(value, "__dict__", None)
             if isinstance(owned_state, dict):
                 stack.extend(owned_state.values())
     return container
 
 
-def _is_owned_object(value: Any) -> bool:
-    """この package が定義した object か（外の object の属性は探らない）。"""
+class CarrierRule(enum.Enum):
+    """到達走査が値をどう扱うか（`_carrier_rule` の答え。表の順が優先順位）。"""
 
-    module = type(value).__module__ or ""
-    return module.startswith(_PACKAGE_PREFIX)
+    EXPRESSION = "expression"
+    CONDITION = "condition"
+    DECLARED_OPAQUE = "declared_opaque"
+    SEQUENCE = "sequence"
+    MAPPING = "mapping"
+    FIELDS = "fields"
+    OWNED_STATE = "owned_state"
+    LEAF = "leaf"
+
+
+def _carrier_rule(value: Any) -> CarrierRule:
+    """`value` に当てはまる最初の規則（`_walk_semantic_carriers` の表。型は `isinstance` と class の
+    辞書だけで見る: `hasattr` で属性を探ると、記録再生中の proxy に観測が走る）。"""
+
+    if isinstance(value, Expression):
+        return CarrierRule.EXPRESSION
+    if isinstance(value, Condition):
+        return CarrierRule.CONDITION
+    kind = type(value)
+    if declares_semantic_opaque(kind):
+        return CarrierRule.DECLARED_OPAQUE
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return CarrierRule.SEQUENCE
+    if isinstance(value, dict):
+        return CarrierRule.MAPPING
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return CarrierRule.FIELDS
+    if (kind.__module__ or "").startswith(_PACKAGE_PREFIX):
+        return CarrierRule.OWNED_STATE
+    return CarrierRule.LEAF
+
+
+def declares_semantic_opaque(kind: type) -> bool:
+    """型 `kind` が外の runtime object の代わりだと宣言しているか（`SEMANTIC_OPAQUE_DECLARATION`）。
+
+    宣言は class の辞書（MRO）だけから読む（instance の `__getattr__` を呼ばない）。subclass は
+    基底の宣言を継ぐ。宣言した型の中は走査しない: その状態（記録全体・観測の履歴…）は意味の
+    入れ物ではなく、辿ると費用が記録の大きさに比例し、本物の object では起きない仕事になる。
+    """
+
+    return any(base.__dict__.get(SEMANTIC_OPAQUE_DECLARATION) is True for base in kind.__mro__)
+
+
+#: 外の runtime object の代わりをする型が宣言する class 属性（`declares_semantic_opaque`）
+SEMANTIC_OPAQUE_DECLARATION = "__semantic_opaque__"
 
 
 def _derive_node_fields(node: Expression, staging: _LifecycleStaging) -> Dict[str, Any]:

@@ -1700,6 +1700,8 @@ def test_recorder_and_replayer_declare_the_same_recorded_surface():
         RecordedDecompiler,
     )
 
+    from scripts.function_tracer_pcode.core.semantic_freeze import SEMANTIC_OPAQUE_DECLARATION
+
     recording = record_pcode_fixture.RecordingProxy
     for name in fixture_schema.RECORDED_DUNDERS:
         assert name in recording.__dict__, name
@@ -1715,9 +1717,14 @@ def test_recorder_and_replayer_declare_the_same_recorded_surface():
                 "__repr__", "__eq__", "__ne__", "__hash__",
                 "__copy__", "__deepcopy__", "__getattr__", "__dict__",
                 "__weakref__",
+                # 記録しない class の宣言（外の object の代わりなので意味値の走査では葉）。
+                # 両側が同じく宣言する
+                SEMANTIC_OPAQUE_DECLARATION,
             }
         }
         assert recorded_dunders == declared, (owner, recorded_dunders)
+    assert recording.__dict__.get(SEMANTIC_OPAQUE_DECLARATION) is True
+    assert RecordedObject.__dict__.get(SEMANTIC_OPAQUE_DECLARATION) is True
     # ``dispose`` は記録側 no-op / 再生側 no-op を**両側で**宣言する。
     assert "dispose" in record_pcode_fixture.RecordingDecompiler.__dict__
     assert "dispose" in RecordedDecompiler.__dict__

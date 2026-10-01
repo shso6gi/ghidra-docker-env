@@ -35,6 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterator, List, Mapping, Tuple
 
+from scripts.function_tracer_pcode.tests.unit._package_sources import parse_source
+
 
 #: 包括捕捉とみなす例外名（tuple の要素に 1 つでもあれば包括捕捉）。
 BROAD_EXCEPTION_NAMES = frozenset({"Exception", "BaseException"})
@@ -188,7 +190,7 @@ def scan_broad_except_handlers(root: Path) -> Dict[str, Dict[str, Dict[str, int]
     entries: Dict[str, Dict[str, Dict[str, int]]] = {}
     for path in _iter_source_files(Path(root)):
         module = _module_name(Path(root), path)
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = parse_source(path, filename=str(path))
         per_qualname: Dict[str, Dict[str, int]] = {}
         for handler, qualname in _walk_qualnames(tree, ""):
             if not _is_broad(handler):

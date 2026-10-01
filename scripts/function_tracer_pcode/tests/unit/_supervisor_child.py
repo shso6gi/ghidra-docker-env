@@ -106,12 +106,16 @@ class Stop:
     ignore_sigterm: bool = False
     exit_on_sigterm: Optional[int] = None
     exit_on_sigusr1: Optional[int] = None
+    #: Issue #226: SIGUSR1 で leader thread だけが先に終わり、test が ``finish`` に書いてから
+    #: 別の thread が process を終える（``_supervisor_faults.stop_here``）
+    leader_exits_first: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return {
             "step": "stop", "ignore_sigterm": self.ignore_sigterm,
             "exit_on_sigterm": self.exit_on_sigterm,
             "exit_on_sigusr1": self.exit_on_sigusr1,
+            "leader_exits_first": self.leader_exits_first,
         }
 
 
@@ -442,6 +446,7 @@ def _step_stop(context: _ChildContext, step: Mapping[str, Any]) -> None:
     stop_here(
         context.records, point="step:stop", ignore_sigterm=step["ignore_sigterm"],
         exit_on_sigterm=step["exit_on_sigterm"], exit_on_sigusr1=step["exit_on_sigusr1"],
+        leader_exits_first=step["leader_exits_first"],
     )
 
 

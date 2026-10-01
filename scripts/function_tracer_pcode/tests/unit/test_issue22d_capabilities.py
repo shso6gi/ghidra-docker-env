@@ -17,6 +17,7 @@ from typing import Any, Iterable, List, Set, Tuple
 
 import pytest
 
+from scripts.function_tracer_pcode.tests.unit._package_sources import parse_source
 from scripts.function_tracer_pcode.tests.unit import _live_flow_audit as flow
 
 PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -446,7 +447,7 @@ def _package_modules() -> Iterable[Tuple[str, ast.Module]]:
         relative = path.relative_to(PACKAGE_ROOT)
         if relative.parts[0] == "tests":
             continue
-        yield relative.as_posix(), ast.parse(path.read_text(encoding="utf-8"))
+        yield relative.as_posix(), parse_source(path)
 
 
 def _is_source_converter(decorator: ast.expr) -> bool:
