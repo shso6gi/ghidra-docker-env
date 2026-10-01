@@ -2,7 +2,6 @@
 """SMTソルバー並列実行管理"""
 
 import concurrent.futures
-import dataclasses
 import threading
 import time
 import inspect
@@ -13,6 +12,7 @@ from dataclasses import dataclass, field
 
 from scripts.function_tracer_pcode.core.deadline import (
     UNBOUNDED,
+    ExecutionEnd,
     UNBOUNDED_WINDOW,
     ExecutionBound,
     deadline_query,
@@ -35,6 +35,8 @@ from scripts.function_tracer_pcode.smt.interface import (
     SolverStatus,
     apply_adoption,
     backend_capabilities,
+    derive_row,
+    without_answer,
     enforce_witness_contract,
     execute_on_backend,
     execution_fact,
@@ -430,10 +432,11 @@ class ParallelSolverRunner:
                 if self.debug:
                     print(f"[ParallelRunner] <<< {solver.name} completed: {result.status.name}", flush=True)
 
-                result = _keep_window(result, enforce_witness_contract(
+                # 契約の検査は行を `derive_row` で変える（窓・終わり方・故障の事実は引き継がれる）
+                result = enforce_witness_contract(
                     result, smt_script,
                     canonical=bool(getattr(solver, "PROVIDES_CANONICAL_WITNESS", False)),
-                ))
+                )
             except Exception as e:
                 if self.debug:
                     import traceback
@@ -644,15 +647,6 @@ def _execute_within(
     return result
 
 
-def _keep_window(executed: SolverResult, checked: SolverResult) -> SolverResult:
-    """契約の検査で作り直した行にも、実行の窓の事実を引き継ぐ。"""
-
-    if checked is not executed:
-        checked.deadline_limited = executed.deadline_limited
-        checked.termination = executed.termination
-    return checked
-
-
 def stop_unfinished(
     backends_and_futures: List[Any],
     not_done: Any,
@@ -745,29 +739,32 @@ def collected_after_stop(
             returned = future.result()
     if returned is not None and execution_fact(returned).failure_observed:
         if returned.status == SolverStatus.ERROR:
-            row = dataclasses.replace(returned)
-        else:
-            row = SolverResult(
-                solver_name=solver_name,
-                status=SolverStatus.ERROR,
-                elapsed_time=returned.elapsed_time,
-                error_message=returned.observed_failure,
-            )
-        row.termination = termination
-        row.deadline_limited = wait_limited
-        return row
-    abandoned = (
-        "" if returned is None
-        else f"wait abandoned at its limit; the backend returned {returned.status.name}"
-    )
-    return SolverResult(
-        solver_name=solver_name,
-        status=SolverStatus.TIMEOUT,
-        elapsed_time=elapsed,
-        error_message=abandoned or None,
-        termination=termination,
-        # 待つのを期限でやめたなら、その行の時間は期限が決めた
+            return derive_row(returned, termination=termination, deadline_limited=wait_limited)
+        # 中止で止まった実行の独立した故障（runner 自身の token による停止）: ERROR の行にする
+        return derive_row(
+            returned,
+            status=SolverStatus.ERROR,
+            cause=ExecutionEnd.FAILED,
+            error_message=returned.observed_failure,
+            termination=termination,
+            deadline_limited=wait_limited,
+        )
+    if returned is None:
+        return SolverResult(
+            solver_name=solver_name,
+            status=SolverStatus.TIMEOUT,
+            elapsed_time=elapsed,
+            termination=termination,
+            # 待つのを期限でやめたなら、その行の時間は期限が決めた
+            deadline_limited=wait_limited,
+        )
+    # 待つのをやめた後に返った答え・判定不能・停止による中断は採らない（答えを外す唯一の規則）
+    return without_answer(
+        returned,
+        detail=f"wait abandoned at its limit; the backend returned {returned.status.name}",
         deadline_limited=wait_limited,
+        termination=termination,
+        elapsed_time=elapsed,
     )
 
 

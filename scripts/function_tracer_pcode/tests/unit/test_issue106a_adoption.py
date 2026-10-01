@@ -68,8 +68,8 @@ def _rows_of(kind, name):
 
     return {
         "error": lambda: SolverResult(name, SolverStatus.ERROR, error_message=f"{name} failed"),
-        "unsat": lambda: SolverResult(name, SolverStatus.UNSAT),
-        "sat": lambda: SolverResult(name, SolverStatus.SAT, model={"x": 1}),
+        "unsat": lambda: SolverResult(name, SolverStatus.UNSAT, raw_output="unsat"),
+        "sat": lambda: SolverResult(name, SolverStatus.SAT, model={"x": 1}, raw_output="sat (model x 1)"),
         "no_witness": lambda: SolverResult(name, SolverStatus.SAT, model=None),
         "cancelled": lambda: interrupted_result(name, CANCELLED, "the caller cancelled", 0.0),
         "timeout": lambda: SolverResult(name, SolverStatus.TIMEOUT),
@@ -133,6 +133,8 @@ def _assert_withheld(result, *, failures):
     assert all(row.status not in ANSWER for row in result.results)
     # 外した答えの行は反例を持たない（query receipt は行の model を写すので、残すと反例が漏れる）
     assert all(row.model is None for row in result.results if row.withheld_status is not None)
+    # raw_output（答えの中身。query receipt へ写る）も残さない（レビュー 5 巡目）
+    assert all(row.raw_output is None for row in result.results if row.withheld_status is not None)
     assert ParallelResult.from_backend_results(list(result.results)).is_equivalent is None
     assert ParallelResult(results=list(result.results)).is_equivalent is None
     # 1: 故障の行はそのまま残る
@@ -375,3 +377,46 @@ def test_every_row_returning_entry_applies_the_adoption():
                 if isinstance(argument, ast.List) and not argument.elts:
                     continue  # backend が 1 つも無い（問いを開く前）
                 assert isinstance(argument, ast.Call) and getattr(argument.func, "id", None) == "apply_adoption", entry.name
+
+
+def test_parallel_an_answer_collected_after_the_stop_beside_a_failure_is_withheld():
+    """停止の後の回収: 待つのを期限でやめた（1.0 s）後に grace の中で返った UNSAT は、外した答えの
+    行になる（何を返したかは残し、model と raw_output は残さない）。同じ問いの故障はそのまま。"""
+    import time
+
+    released = threading.Event()
+
+    def _late(name):
+        class _Late(SMTSolver):
+            CAPABILITIES = MS
+
+            @property
+            def name(self):
+                return name
+
+            def check_availability(self):
+                return True, "test"
+
+            def check_equivalence_direct(self, smt_script, cancellation_token=None):
+                raise AssertionError("the adapter path must be used")
+
+            def execute(self, smt_script, *, timeout_seconds, not_after=None, cancellation_token=None):
+                time.sleep(1.3)  # 待ちの終わり（期限 1.0 s）の後、grace（1.0 s）の中で返る
+                released.set()
+                return SolverResult(name, SolverStatus.UNSAT, raw_output="unsat")
+
+        return _Late
+
+    runner = ParallelSolverRunner(timeout=10, solver_classes=[_backend("b1", "error", []), _late("b2")])
+    with pair_failure_scope(("pair",), None) as ledger:
+        with deadline_scope(DeadlinePolicy(budget_seconds=1.0, sub_operation_margin_seconds=0.5)):
+            result = runner.run_parallel(QUERY)
+            with pytest.raises(DeadlineExceeded):
+                checkpoint("next_stage")
+    assert released.is_set()
+    _assert_withheld(result, failures={"b1": "b1 failed"})
+    late = {row.solver_name: row for row in result.results}["b2"]
+    assert late.termination is BackendTermination.RETURNED_LATE
+    assert late.withheld_status is SolverStatus.UNSAT
+    assert late.model is None and late.raw_output is None
+    _assert_deadline_recorded(ledger, next_raised=True)

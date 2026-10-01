@@ -4,6 +4,7 @@
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 from typing import Callable, ClassVar, Optional, Dict, Any, Tuple
+import dataclasses
 from dataclasses import dataclass
 import time
 
@@ -179,15 +180,26 @@ class SolverResult:
     #: status と両立しない値は作った時点で拒む。結果 JSON の schema には入れない
     cause: Optional[ExecutionEnd] = None
     #: 終了原因とは独立に観測した backend の故障（例外の要約）。終了原因が中止などでも故障を
-    #: 落とさない（`execution_fact` が `ExecutionFact.failed` に写す）。ERROR の行は status が
-    #: 故障を表すので不要。結果 JSON の schema には入れない
+    #: 落とさない（`execution_fact` が `ExecutionFact.failed` に写す）。作るのは
+    #: `interrupted_result(failure=...)`（中止の行）だけで、答え（SAT / UNSAT）とは同居しない
+    #: （`__post_init__` が拒む）。結果 JSON の schema には入れない
     observed_failure: Optional[str] = None
-    #: 解析の期限が問いを打ち切ったので採用しなかった答え（backend が返した SAT / UNSAT の
-    #: status。`apply_adoption` だけが設定する。行の status は TIMEOUT）。診断用で、判定にも結果 JSON の
-    #: schema にも入れない
+    #: 採用しなかった答え（backend が返した SAT / UNSAT の status。`without_answer` だけが設定する:
+    #: 期限が打ち切った問いの答えと、待つのをやめた後に返った答え。行の status は TIMEOUT）。
+    #: 診断用で、判定にも結果 JSON の schema にも入れない
     withheld_status: Optional["SolverStatus"] = None
 
     def __post_init__(self) -> None:
+        """行の状態の契約（作った時点で、`derive_row` で変えた時点でも検査する）。
+
+        * ``cause`` は status と両立する値だけ（`_CAUSES_BY_STATUS`）
+        * ``observed_failure``（独立した故障）は答え（SAT / UNSAT）と同居しない。故障を観測した
+          実行の答えは信頼できない: 故障を伝える backend は ERROR を返すか、中断の行
+          （`interrupted_result(failure=...)`、status は UNKNOWN / TIMEOUT）に載せる。答えに付けると
+          採否・集約が故障を見落とす（Issue #106 PR-106-A レビュー 5 巡目）
+        * ``witness_contract_violation`` は ERROR の行だけ（`enforce_witness_contract` が作る）
+        * ``withheld_status``（採用しなかった答え）は SAT / UNSAT で、行の status は TIMEOUT
+        """
         if self.cause is not None:
             if type(self.cause) is not ExecutionEnd:
                 raise TypeError("SolverResult.cause must be an ExecutionEnd")
@@ -197,6 +209,16 @@ class SolverResult:
                     f"SolverResult.cause {self.cause.value} contradicts status "
                     f"{live_values.enum_name(self.status)}"
                 )
+        answered = self.status in (SolverStatus.SAT, SolverStatus.UNSAT)
+        if self.observed_failure is not None and answered:
+            raise ValueError("an observed failure cannot accompany a SAT / UNSAT answer")
+        if self.witness_contract_violation is not None and self.status != SolverStatus.ERROR:
+            raise ValueError("a witness contract violation is reported only by an ERROR row")
+        if self.withheld_status is not None and (
+            self.withheld_status not in (SolverStatus.SAT, SolverStatus.UNSAT)
+            or self.status != SolverStatus.TIMEOUT
+        ):
+            raise ValueError("a withheld answer is a SAT / UNSAT kept on a TIMEOUT row")
     
     def is_equivalent(self) -> bool:
         """等価かどうか"""
@@ -365,24 +387,20 @@ def enforce_witness_contract(
         violation = witness_contract_violation(witness_targets(smt_script), result.model)
         if violation is None:
             return result
-        return SolverResult(
-            solver_name=result.solver_name,
+        return derive_row(
+            result,
             status=SolverStatus.ERROR,
-            elapsed_time=result.elapsed_time,
+            model=None,
             error_message=f"canonical witness contract violated: {violation}",
-            raw_output=result.raw_output,
             witness_contract_violation=violation,
             cause=ExecutionEnd.CONTRACT_VIOLATION,
         )
     if result.model is None:
         return result
-    return SolverResult(
-        solver_name=result.solver_name,
-        status=result.status,
-        elapsed_time=result.elapsed_time,
+    return derive_row(
+        result,
         model=None,
         error_message="canonical witness unavailable: backend does not provide one",
-        raw_output=result.raw_output,
     )
 
 
@@ -544,18 +562,56 @@ def apply_adoption(results: Any, adoption: Adoption) -> List[SolverResult]:
 
 
 def _withheld(row: SolverResult) -> SolverResult:
-    return SolverResult(
-        solver_name=row.solver_name,
-        status=SolverStatus.TIMEOUT,
-        elapsed_time=row.elapsed_time,
-        error_message=(
+    return without_answer(
+        row,
+        detail=(
             f"answer withheld: the analysis deadline cut this query "
             f"(the backend returned {live_values.enum_name(row.status)})"
         ),
-        termination=row.termination,
         deadline_limited=True,
+    )
+
+
+def derive_row(row: SolverResult, **changes: Any) -> SolverResult:
+    """**行を変える唯一の手段**（Issue #106 PR-106-A レビュー 5 巡目）。
+
+    変える field だけを指定し、他の field（故障・契約違反・終わり方・期限の事実・診断）は
+    すべて元の行から引き継ぐ（`dataclasses.replace`。行の状態の契約は新しい行の
+    `__post_init__` が検査する）。field を 1 つずつ写して作り直すと、後から足した field
+    （`observed_failure` など）を黙って落とす。
+    """
+
+    return dataclasses.replace(row, **changes)
+
+
+def without_answer(
+    row: SolverResult,
+    *,
+    detail: str,
+    deadline_limited: bool,
+    termination: Optional[BackendTermination] = None,
+    elapsed_time: Optional[float] = None,
+) -> SolverResult:
+    """採用しない行（TIMEOUT・時間の上限・反例なし）。**答えを外す唯一の規則**。
+
+    答え（SAT / UNSAT）だった行は、その status を `withheld_status` に残し、model と
+    raw_output（答えの中身）を外す。故障は運ばない（故障のある行はこの関数に渡さない:
+    呼び出し側が先に故障の行として残す）。期限が打ち切った問いの答え（`apply_adoption`）と、
+    待つのをやめた実行が後から返した行（`smt.parallel.collected_after_stop`）が使う。
+    """
+
+    answered = execution_end(row) is ExecutionEnd.ANSWERED
+    return derive_row(
+        row,
+        status=SolverStatus.TIMEOUT,
         cause=ExecutionEnd.TIME_LIMIT,
-        withheld_status=row.status,
+        model=None,
+        raw_output=None,
+        error_message=detail,
+        deadline_limited=deadline_limited,
+        termination=row.termination if termination is None else termination,
+        elapsed_time=row.elapsed_time if elapsed_time is None else elapsed_time,
+        withheld_status=row.status if answered else None,
     )
 
 
