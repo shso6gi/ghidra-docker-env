@@ -374,14 +374,15 @@ class DeadlineQuery:
 
     * `begin(...)`: 実行を 1 回始める前に owner の thread で呼ぶ（逐次なら backend ごと）。
       解析中に期限を過ぎていれば限界を raise する。偽なら始めない（打ち切った後の
-      finalization、またはこの問いが失敗を結果に残すと決めた後: 限界は記録済み）
+      finalization、またはこの問いで故障を観測済みで開始を断るとき: 故障を結果に残し、限界は
+      記録だけ）
     * `bound`: worker へ渡す `ExecutionBound`
     * `wait_timeout(...)`: 結果を待つ上限と、それを期限が決めたか
     * `settle(facts)`: 実行が返った直後に owner の thread で呼ぶ（逐次なら **実行ごと**。次の
       実行を始める前）。事実はこの問いの中で積み上がり、`settlement` はそれまでの全部を見る
     """
 
-    __slots__ = ("stage", "_deadline", "_startable", "bound", "facts", "kept_failure")
+    __slots__ = ("stage", "_deadline", "_startable", "bound", "facts")
 
     def __init__(
         self, stage: str, *, deadline: Optional["Deadline"] = None, startable: bool = True,
@@ -393,15 +394,13 @@ class DeadlineQuery:
         self.bound = bound
         #: この問いのそれまでに返った実行の事実
         self.facts: Tuple[ExecutionFact, ...] = ()
-        #: 失敗を結果に残すと決めた（`Settlement.KEEP_FAILURE` で期限の限界を記録した）
-        self.kept_failure = False
 
     @property
     def bounded(self) -> bool:
         return self._deadline is not None
 
     def begin(self, configured_seconds: float, unit: TimeUnit = TimeUnit.MILLISECONDS) -> bool:
-        if not self._startable or self.kept_failure:
+        if not self._startable:
             return False
         if self._deadline is not None:
             return self._deadline.begin_execution(self, configured_seconds, unit)
@@ -524,7 +523,6 @@ class Deadline:
         if refusal is None:
             return True
         if any(fact.failure_observed for fact in query.facts):
-            query.kept_failure = True
             self._mark(query.stage, now, boundary="before", evidence=("failure_kept", *refusal))
             return False
         self._raise(query.stage, now, boundary="before", evidence=refusal)
@@ -534,7 +532,8 @@ class Deadline:
 
         DEADLINE は限界を raise する（始めたときに期限内だったことは答えを採る理由にならない）。
         KEEP_FAILURE は結果を返す: 期限を過ぎた・期限で切られた実行があれば限界を記録だけして
-        （打ち切りは sticky なので次の境界で raise）、この問いの後の実行は始めない。
+        （打ち切りは sticky なので次の境界で raise）。この問いの後の実行は `begin_execution` が
+        断る（打ち切り済みで、この問いは故障を観測しているので raise せず偽を返す）。
         """
 
         if not self._active_here():
@@ -547,7 +546,6 @@ class Deadline:
         if verdict is Settlement.DEADLINE:
             self._raise(query.stage, now, boundary="after", evidence=(*detail, *evidence))
         if verdict is Settlement.KEEP_FAILURE:
-            query.kept_failure = True
             self._mark(
                 query.stage, now, boundary="after",
                 evidence=("failure_kept", *detail, *evidence),
