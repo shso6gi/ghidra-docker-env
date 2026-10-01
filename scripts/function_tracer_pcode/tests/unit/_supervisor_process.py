@@ -367,6 +367,26 @@ class SupervisorHandle:
             if entry.get("point") == WORKER_EXIT_WAIT
         ]
 
+    def wait_until_blocked_on_worker_exit(self, *, timeout: float = 60.0) -> None:
+        """supervisor の thread が worker の終了を ``waitid`` で待って block していることを、kernel の
+        記録（``/proc/<pid>/task/<tid>/wchan`` と ``syscall`` の引数）で確かめるまで待つ。
+
+        Issue #226: 「待ち始めた」記録だけでは、待たずに後で 1 回だけ確かめる実装と区別できない。
+        block している thread が ``waitid(P_PID, <worker の PID>, ...)`` の中に居ることが、待って
+        いることの直接の証拠になる。
+        """
+
+        child = self.child()
+        if child is None:
+            raise AssertionError(f"{self.invocation} has no worker whose exit could be awaited")
+        limit = time.monotonic() + timeout
+        while not _blocked_in_waitid(self.pid, child.pid):
+            if self._exited() or time.monotonic() > limit:
+                raise SupervisorPathMismatch(
+                    f"{self.invocation} never blocked waiting for the worker's exit"
+                )
+            time.sleep(0.01)
+
     def wait_until_waiting_for_worker_exit(self, *, timeout: float = 60.0) -> dict:
         """supervisor が worker の終了を待つ段階に入ったと記録するまで待ち、その記録を返す。
 
@@ -722,6 +742,31 @@ def _supervise_in_fork(  # pragma: no cover - runs in the forked supervisor
         code = _SUPERVISOR_RAISED_EXIT
     finally:
         os._exit(code)
+
+
+def _blocked_in_waitid(pid: int, target: int) -> bool:
+    """process ``pid`` のどれかの thread が ``waitid(P_PID, target, ...)`` で block しているか。"""
+
+    try:
+        threads = os.listdir(f"/proc/{pid}/task")
+    except OSError:
+        return False
+    for tid in threads:
+        base = Path(f"/proc/{pid}/task/{tid}")
+        try:
+            wchan = (base / "wchan").read_text(encoding="ascii").strip()
+            fields = (base / "syscall").read_text(encoding="ascii").split()
+        except OSError:
+            continue
+        if wchan != "do_wait" or len(fields) < 3 or fields[0] == "running":
+            continue
+        try:
+            idtype, target_id = int(fields[1], 16), int(fields[2], 16)
+        except ValueError:
+            continue
+        if idtype == os.P_PID and target_id == target:
+            return True
+    return False
 
 
 def _record_started_child(records: InvocationRecords) -> None:

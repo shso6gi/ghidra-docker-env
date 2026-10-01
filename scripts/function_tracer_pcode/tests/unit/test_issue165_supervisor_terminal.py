@@ -706,7 +706,10 @@ def test_t11_a_release_after_the_worker_exit_waits_until_the_supervisor_can_obse
             waiting = handle.wait_until_waiting_for_worker_exit()
             # 待つ段階に入った時点で、親（supervisor）からはまだ終了が観測できない
             assert waiting["worker_pid"] == child.pid and waiting["observable_at_entry"] is False
+            # supervisor の thread が worker の終了を waitid で待って block している（kernel の記録）
+            handle.wait_until_blocked_on_worker_exit()
             assert _leader_state(child.pid) == "Z"
+            assert handle.worker_exit_observations() == []
             with open(records.finish, "wb") as fifo:
                 fifo.write(b"1")
             run = handle.wait()
