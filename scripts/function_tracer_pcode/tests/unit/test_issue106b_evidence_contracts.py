@@ -369,3 +369,87 @@ def test_the_start_refusal_bound_follows_every_time_unit():
     # the rounding rule itself: a seconds API with 0.999 s left before the margin is not started
     assert deadline.bounded_timeout(10.0, 100.999, deadline.TimeUnit.SECONDS, now=100.0) is None
     assert deadline.bounded_timeout(10.0, 101.0, deadline.TimeUnit.SECONDS, now=100.0) == 1
+
+
+@pytest.mark.parametrize("where, value, interval, reason", [
+    ("elapsed_seconds", -5.0, "pre", "deadline_tripped elapsed_seconds is negative"),
+    ("lead_seconds", -1.0, "lead", "sidecar lead_seconds is negative"),
+])
+def test_a_negative_elapsed_or_lead_is_unobserved(tmp_path, where, value, interval, reason):
+    profile = _tree(tmp_path, "profile")
+    _cut(profile)
+    rows = _cut_rows()
+    sidecar = _sidecar(123.5)
+    if where == "elapsed_seconds":
+        rows[1]["payload"]["elapsed_seconds"] = value
+    else:
+        sidecar[where] = value
+    _write_pair(profile, "f_B3_B4", _resolved_unknown(), journal=rows, sidecar=sidecar)
+    verdict = _verdict(tmp_path, [profile])
+
+    assert verdict["status"] == "undetermined", verdict
+    assert f"pool P: pair {KEY_2}: {interval} unobserved ({reason})" in verdict["undetermined"]
+
+
+def test_a_trip_without_a_time_is_not_measured(tmp_path):
+    """``null`` is not a field error (the field may be absent), but a trip needs its time."""
+
+    profile = _tree(tmp_path, "profile")
+    _cut(profile)
+    rows = _cut_rows()
+    rows[1]["t_monotonic"] = None
+    _write_pair(profile, "f_B3_B4", _resolved_unknown(), journal=rows, sidecar=_sidecar(123.5))
+    verdict = _verdict(tmp_path, [profile])
+
+    assert verdict["status"] == "undetermined", verdict
+    assert (f"pool P: pair {KEY_2}: pre unobserved (deadline_tripped has no finite t_monotonic)"
+            in verdict["undetermined"])
+
+
+def test_a_row_without_a_time_after_the_trip_leaves_the_end_unknown(tmp_path):
+    profile = _tree(tmp_path, "profile")
+    _cut(profile)
+    rows = _cut_rows()
+    rows[3]["t_monotonic"] = None
+    _write_pair(profile, "f_B3_B4", _resolved_unknown(), journal=rows, sidecar=_sidecar(123.5))
+    verdict = _verdict(tmp_path, [profile])
+
+    assert verdict["status"] == "undetermined", verdict
+    assert verdict["undetermined"] == [
+        f"pool P: pair {KEY_2}: post_trip unobserved (1 journal row(s) have no time)",
+        f"pool P: pair {KEY_2}: tail unobserved (1 journal row(s) have no time)",
+    ]
+
+
+def test_the_start_refusal_bound_is_not_applied_to_another_machinery(tmp_path):
+    """Pool F holds runs of other code (only ``pre`` is used); its trips follow that code's rule."""
+
+    profile = _tree(tmp_path, "profile")
+    _cut(profile)
+    other = _tree(tmp_path, "other", commit="d" * 40, dirty="1")
+    _cut(other, overrun=-20.0)
+    verdict = _verdict(tmp_path, [profile], pre=[other])
+
+    assert verdict["status"] == "holds", verdict
+
+
+def test_a_sum_that_overflows_is_not_a_requirement():
+    def run(pool_pairs):
+        facts = margin.RunFacts(
+            root="r", deadline_seconds=100.0, deadline_off=False, deadline_source="m",
+            pair_process_timeout_seconds=240.0, stack_dump_lead_seconds=2.0, parallel_jobs=1,
+            git_commit=COMMIT, git_dirty=False, samples=frozenset({"REVE/sample/Eq/new"}))
+        return margin.RunObservation(facts=facts, pairs=tuple(pool_pairs))
+
+    huge = margin.PairObservation(
+        key=KEY, outcome="UNKNOWN", termination="resolved", timeout_kind=None, cut=True,
+        values={"pre": 1e308, "overrun": 1e308, "post_trip": 1.0, "tail": 1.0},
+        lead_seconds=2.0, needed=None, budget_seconds=100.0, process_timeout_seconds=240.0)
+    profile = acceptance.MarginProfile(
+        name="p", deadline_seconds=100.0, margin_seconds=140.0, pair_process_timeout_seconds=240.0,
+        machinery_commits=frozenset({COMMIT}))
+    verdict = acceptance.evaluate_margin(profile, {"P": [run([huge])]})
+
+    assert verdict.status == "undetermined"
+    assert verdict.required_margin_seconds is None
+    assert "required margin inf is not a finite number" in verdict.undetermined
