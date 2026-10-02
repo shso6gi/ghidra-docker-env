@@ -23,6 +23,7 @@ import pytest
 
 from scripts.function_tracer_pcode.reporting import deadline_margin_summary as margin
 from scripts.function_tracer_pcode.tests.unit.test_issue106b_review1_regressions import (
+    T0,
     _child_timeout_sidecar,
     _process_timeout_status,
     _resolved_timeout_status,
@@ -49,19 +50,42 @@ def _tree(tmp_path: Path, name: str, *, deadline="100", process="240", commit=CO
     return root
 
 
+def _run_settings(root: Path):
+    """The deadline and process timeout the tree's manifest records: the pairs a runner
+    writes carry the same values (the trip's budget, the supervisor's timeout)."""
+
+    fields = dict(line.split("=", 1) for line in
+                  (root / "run_manifest.txt").read_text(encoding="utf-8").splitlines())
+    deadline = float(fields["analysis_timeout"])
+    return (deadline if deadline > 0 else 100.0), float(fields["pair_process_timeout_seconds"])
+
+
+def _sidecar_for(root: Path, exit_at: float, **kwargs):
+    _, process = _run_settings(root)
+    sidecar = _sidecar(exit_at, **kwargs)
+    sidecar["timeout_seconds"] = process
+    sidecar["deadline_monotonic"] = T0 + process
+    if sidecar["cancel_linearized_offset_seconds"] is not None:
+        sidecar["cancel_linearized_offset_seconds"] = exit_at - process
+    return sidecar
+
+
 def _cut(root: Path, stem: str = "f_B1_B2", *, origin_at=20.0, overrun=1.0, emit=1.5,
          tail=1.0, sidecar=True, status=None) -> None:
     """A pair the deadline cut: pre ``origin_at``, overrun, post_trip ``emit``, tail."""
 
-    trip_at = origin_at + 100.0 + overrun
+    budget, _ = _run_settings(root)
+    trip_at = origin_at + budget + overrun
+    trip = _trip(2, trip_at, origin_at=origin_at)
+    trip["payload"]["budget_seconds"] = budget
     rows = [
         _row(1, "note", 0.0, payload={"note": "pair_journal_opened"}),
-        _trip(2, trip_at, origin_at=origin_at),
+        trip,
         _row(3, "stage_start", trip_at, "result_emit"),
         _row(4, "stage_end", trip_at + emit, "result_emit", emit),
     ]
     _write_pair(root, stem, status or _resolved_unknown(), journal=rows,
-                sidecar=_sidecar(trip_at + emit + tail) if sidecar else None)
+                sidecar=_sidecar_for(root, trip_at + emit + tail) if sidecar else None)
 
 
 def _finished(root: Path, stem: str, status) -> None:

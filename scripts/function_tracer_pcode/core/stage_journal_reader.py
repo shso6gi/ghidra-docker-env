@@ -26,6 +26,13 @@ readiness / stage / dump を current に流用しない。複数 segment を合�
 
 * 判定には一切関与しない（journal は結果 JSON の外の診断）。
 * 読めない・壊れている・曖昧な場合は例外を投げず、`unavailable_reason` を返す。
+* **読めた行だけが観測である。** 読み取りで失った情報（上限で切った・書きかけの最終行・
+  壊れた行・型の合わない field）は `JournalRead.incomplete_reasons` に残る。進行中の stage を
+  見るような診断は不完全な journal でも使ってよいが、**「ある event が無い」ことから結論を
+  出す読み手**（例: margin の計測で「trip が無い = 期限内に終わった」）は、
+  `incomplete_reasons` が空でない journal から結論を出してはならない。
+* 数値の field は有限な数だけを値とする（JSON の ``NaN`` / ``Infinity`` は値にせず、
+  型の合わない field として数える）。
 * regular file 以外は読まない（FIFO を開いて固まらないため）。読む量にも上限を置く。
 
 dependency rule: 標準ライブラリ以外を import しない（`core` は最下層）。
@@ -34,6 +41,7 @@ dependency rule: 標準ライブラリ以外を import しない（`core` は最
 from __future__ import annotations
 
 import json
+import math
 import os
 import stat
 from dataclasses import dataclass, field
@@ -133,6 +141,23 @@ class JournalRead:
     seq_rollbacks: int = 0
     opened_notes: int = 0
     unavailable_reason: Optional[str] = None
+    #: 行としては読めたが、field の型・値が契約に合わなかった数（値は ``None`` / ``{}`` にした）
+    field_errors: int = 0
+
+    @property
+    def incomplete_reasons(self) -> Tuple[str, ...]:
+        """読み取りで失った情報（空なら、書かれた行をすべて契約どおりに読めた）。"""
+
+        reasons: List[str] = []
+        if self.truncated:
+            reasons.append("truncated")
+        if self.partial_final_line:
+            reasons.append("partial_final_line")
+        if self.malformed_lines:
+            reasons.append(f"malformed_lines={self.malformed_lines}")
+        if self.field_errors:
+            reasons.append(f"field_errors={self.field_errors}")
+        return tuple(reasons)
 
     @property
     def multi_execution(self) -> bool:
@@ -159,6 +184,7 @@ class JournalRead:
             "truncated": self.truncated,
             "seq_rollbacks": self.seq_rollbacks,
             "opened_notes": self.opened_notes,
+            "field_errors": self.field_errors,
             "multi_execution": self.multi_execution,
             "unavailable_reason": self.unavailable_reason,
         }
@@ -170,6 +196,7 @@ class _Builder:
     malformed: int = 0
     partial_final_line: bool = False
     truncated: bool = False
+    field_errors: int = 0
 
 
 def _coerce_int(value: Any) -> Optional[int]:
@@ -177,12 +204,32 @@ def _coerce_int(value: Any) -> Optional[int]:
 
 
 def _coerce_float(value: Any) -> Optional[float]:
+    """有限な数だけを値にする（``NaN`` / ``Infinity`` は時刻・秒数ではない）。"""
+
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value)
+    value = float(value)
+    return value if math.isfinite(value) else None
 
 
-def _parse_line(text: str, line_number: int) -> Optional[JournalRow]:
+def _field_errors(row: Mapping[str, Any]) -> int:
+    """書かれているのに契約に合わない field の数（書かれていない・``null`` は数えない）。"""
+
+    errors = 0
+    for key in ("seq", "pid"):
+        if row.get(key) is not None and _coerce_int(row.get(key)) is None:
+            errors += 1
+    for key in ("seconds", "t_monotonic", "t_epoch"):
+        if row.get(key) is not None and _coerce_float(row.get(key)) is None:
+            errors += 1
+    if row.get("payload") is not None and not isinstance(row.get("payload"), dict):
+        errors += 1
+    if row.get("stage") is not None and not isinstance(row.get("stage"), str):
+        errors += 1
+    return errors
+
+
+def _parse_line(text: str, line_number: int) -> Optional[Tuple[JournalRow, int]]:
     try:
         row = json.loads(text)
     except ValueError:
@@ -204,7 +251,7 @@ def _parse_line(text: str, line_number: int) -> Optional[JournalRow]:
         t_epoch=_coerce_float(row.get("t_epoch")),
         pid=_coerce_int(row.get("pid")),
         payload=payload if isinstance(payload, dict) else {},
-    )
+    ), _field_errors(row)
 
 
 def _read_rows(path: str, *, max_bytes: int) -> _Builder:
@@ -225,10 +272,12 @@ def _read_rows(path: str, *, max_bytes: int) -> _Builder:
     for index, text in enumerate(lines, start=1):
         if not text.strip():
             continue
-        row = _parse_line(text, index)
-        if row is None:
+        parsed = _parse_line(text, index)
+        if parsed is None:
             builder.malformed += 1
             continue
+        row, errors = parsed
+        builder.field_errors += errors
         builder.rows.append(row)
     return builder
 
@@ -305,6 +354,7 @@ def read_stage_journal(
             partial_final_line=builder.partial_final_line,
             truncated=builder.truncated,
             unavailable_reason=UNAVAILABLE_EMPTY,
+            field_errors=builder.field_errors,
         )
     segments, rollbacks, opened = _split_segments(builder.rows)
     return JournalRead(
@@ -316,6 +366,7 @@ def read_stage_journal(
         truncated=builder.truncated,
         seq_rollbacks=rollbacks,
         opened_notes=opened,
+        field_errors=builder.field_errors,
     )
 
 

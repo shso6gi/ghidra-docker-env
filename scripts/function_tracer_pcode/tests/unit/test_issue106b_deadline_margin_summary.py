@@ -104,8 +104,8 @@ def test_a_sidecar_without_the_deadline_loses_only_the_intervals_that_need_it():
 
     assert sorted(pair.values) == ["overrun", "post_trip"]
     assert pair.missing == {
-        "pre": "sidecar has no usable deadline_monotonic",
-        "tail": "sidecar has no usable deadline_monotonic",
+        "pre": "sidecar deadline_monotonic is missing",
+        "tail": "sidecar deadline_monotonic is missing",
     }
     assert pair.needed is None
 
@@ -140,6 +140,7 @@ def test_a_run_tree_keeps_every_pair_and_its_reason(tmp_path):
     assert pairs["f_B3_B4"].cut is False
     assert pairs["f_B5_B6"].missing == {
         "pre": "no stack-dump status sidecar", "tail": "no stack-dump status sidecar",
+        "lead": "no stack-dump status sidecar",
     }
     assert pairs["f_B7_B8"].cut is None
     assert pairs["f_B7_B8"].cut_unknown_reason.startswith("journal: ")
@@ -171,7 +172,8 @@ def test_a_manifest_without_the_deadline_takes_the_single_trip_budget(tmp_path):
     facts = margin.observe_run(root).facts
 
     assert facts.deadline_seconds == 100.0
-    assert facts.deadline_note.startswith("deadline_tripped budget_seconds")
+    assert facts.deadline_source == (
+        "deadline_tripped budget_seconds (the manifest does not record it)")
 
 
 def test_percentiles_are_nearest_rank_and_p99_needs_enough_samples():

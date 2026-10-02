@@ -49,6 +49,7 @@ solver の terminal timeout（`child_solver_timeout`）は process の TIMEOUT �
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -71,6 +72,9 @@ def pool_intervals(pool: str) -> Tuple[str, ...]:
 
     return tuple(term for term, pools in TERM_POOLS.items() if pool in pools)
 
+#: ``P`` の pair ごとに観測が必須な、採用式の和に入る区間以外の項（stack dump の lead）
+LEAD = "lead"
+
 STATUS_HOLDS = "holds"
 STATUS_VIOLATED = "violated"
 STATUS_UNDETERMINED = "undetermined"
@@ -90,7 +94,10 @@ TERMINATIONS = frozenset({
 
 @dataclass(frozen=True)
 class MarginProfile:
-    """margin を判定する runner profile（値が ``None`` の項目は判定不能の理由になる）。"""
+    """margin を判定する runner profile（値が ``None`` の項目は判定不能の理由になる）。
+
+    秒の値は ``None`` か正の有限な数（``NaN`` は比較をすり抜けるので、作る時点で拒む）。
+    """
 
     name: str
     deadline_seconds: Optional[float]
@@ -100,6 +107,15 @@ class MarginProfile:
     population: Optional[frozenset] = None
     #: 期限の機構（`core/deadline.py`・solver の停止・checkpoint の配置）が対象と同じ code の commit
     machinery_commits: Optional[frozenset] = None
+
+    def __post_init__(self) -> None:
+        for name in ("deadline_seconds", "margin_seconds", "pair_process_timeout_seconds"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value <= 0):
+                raise ValueError(f"MarginProfile.{name} must be a positive finite number: {value!r}")
 
 
 @dataclass
@@ -139,12 +155,12 @@ def run_eligibility_problems(pool: str, run: Any, profile: MarginProfile) -> Lis
 
     facts = run.facts
     where = f"pool {pool}: run {facts.root}"
-    problems: List[str] = []
+    problems: List[str] = [f"{where}: {conflict}" for conflict in facts.conflicts]
     if facts.deadline_off:
         problems.append(f"{where}: ran without the analysis deadline")
         return problems
-    if facts.deadline_seconds is None:
-        problems.append(f"{where}: its analysis deadline is not recorded ({facts.deadline_note})")
+    if facts.deadline_seconds is None and not facts.conflicts:
+        problems.append(f"{where}: its analysis deadline is not recorded ({facts.deadline_source})")
     if pool in (POOL_P, POOL_L):
         if profile.machinery_commits is None:
             problems.append(f"{where}: the deadline machinery commits are not given")
@@ -167,7 +183,10 @@ def run_eligibility_problems(pool: str, run: Any, profile: MarginProfile) -> Lis
                     f"{where}: deadline {facts.deadline_seconds:g}s is shorter than the "
                     f"profile's {profile.deadline_seconds:g}s"
                 )
-            if facts.pair_process_timeout_seconds != profile.pair_process_timeout_seconds:
+            if facts.pair_process_timeout_seconds is None:
+                if not facts.conflicts:
+                    problems.append(f"{where}: its process timeout is not recorded")
+            elif facts.pair_process_timeout_seconds != profile.pair_process_timeout_seconds:
                 problems.append(
                     f"{where}: process timeout {facts.pair_process_timeout_seconds} is not the "
                     f"profile's {profile.pair_process_timeout_seconds:g}s"
@@ -206,7 +225,8 @@ def _pair_findings(
             if interval in pair.missing:
                 undetermined.append(f"{where}: {interval} unobserved ({pair.missing[interval]})")
         if pool == POOL_P and pair.lead_seconds is None:
-            undetermined.append(f"{where}: lead unobserved (no stack-dump status sidecar)")
+            reason = pair.missing.get(LEAD, "no stack-dump status sidecar")
+            undetermined.append(f"{where}: lead unobserved ({reason})")
     return violations, undetermined
 
 
@@ -269,6 +289,9 @@ def evaluate_margin(
     required = None
     if all(terms[term].get("n") for term in (*TERM_POOLS, "lead")):
         required = round(sum(terms[term]["max"] for term in (*TERM_POOLS, "lead")), 3)
+        if not math.isfinite(required):
+            undetermined.append(f"required margin {required!r} is not a finite number")
+            required = None
     over: List[str] = []
     if profile.margin_seconds is not None:
         for pair in p_pairs:
