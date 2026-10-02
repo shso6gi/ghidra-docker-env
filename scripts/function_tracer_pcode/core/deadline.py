@@ -133,6 +133,21 @@ class TimeUnit(Enum):
     SECONDS = "s"
 
 
+def parse_budget_seconds(text: str) -> float:
+    """秒数の文字列を、期限の予算として受け取れる値にする（唯一の規則）。
+
+    CLI の `--analysis-timeout` と runner の `ANALYSIS_TIMEOUT`（`reporting/runner_timeout_policy`）
+    が同じこの関数を通るので、片方だけが受け取る値は無い。値は `float(text)` そのもので、
+    正の有限値でなければ ``ValueError``（10 進では正でも double で 0 や ``inf`` になる綴りを含む）。
+    """
+
+    try:
+        value = float(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"not a number of seconds: {text!r}") from exc
+    return _exact_positive("seconds", value)
+
+
 def _exact_positive(name: str, value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise TypeError(f"{name} must be a number")

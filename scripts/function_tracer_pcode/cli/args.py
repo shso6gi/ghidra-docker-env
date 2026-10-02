@@ -58,15 +58,19 @@ CLI_EPILOG = """
 
 
 def _positive_seconds(text: str) -> float:
-    """正の有限な秒数（`--analysis-timeout`）。0・負・非数は起動時に拒む。"""
+    """正の有限な秒数（`--analysis-timeout`）。0・負・非数は起動時に拒む。
+
+    規則は `core.deadline.parse_budget_seconds`（runner の policy と共有）。
+    """
+
+    from scripts.function_tracer_pcode.core.deadline import parse_budget_seconds
 
     try:
-        value = float(text)
+        return parse_budget_seconds(text)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError(f"not a number of seconds: {text!r}") from exc
-    if not (value > 0) or value == float("inf"):
-        raise argparse.ArgumentTypeError(f"must be a positive finite number of seconds: {text!r}")
-    return value
+        raise argparse.ArgumentTypeError(
+            f"must be a positive finite number of seconds: {text!r}"
+        ) from exc
 
 
 def build_parser() -> argparse.ArgumentParser:

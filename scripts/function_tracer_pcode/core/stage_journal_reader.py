@@ -446,3 +446,49 @@ def segment_stages(
         started=started,
         completed=completed,
     )
+
+
+@dataclass(frozen=True)
+class StageInterval:
+    """1 つの stage の区間（`stage_start` から対応する `stage_end` まで、monotonic）。
+
+    ``end`` が ``None`` なのは、segment の終わりまで `stage_end` が来なかった区間。
+    """
+
+    stage: Optional[str]
+    path: Tuple[str, ...]
+    start: float
+    end: Optional[float]
+
+
+def stage_intervals(segment: JournalSegment) -> Tuple[StageInterval, ...]:
+    """segment の stage の区間（開始順）。突き合わせは `segment_stages` と同じ規則。
+
+    `stage_start` と `stage_end` は stage 名と region path の組で、最も内側（最後に開いた）
+    ものから閉じる。時刻の無い行は区間にしない。
+    """
+    open_stack: List[JournalRow] = []
+    closed: List[StageInterval] = []
+    for row in segment.rows:
+        if row.t_monotonic is None:
+            continue
+        if row.event == EVENT_STAGE_START:
+            open_stack.append(row)
+            continue
+        if row.event != EVENT_STAGE_END:
+            continue
+        for index in range(len(open_stack) - 1, -1, -1):
+            candidate = open_stack[index]
+            if candidate.stage == row.stage and candidate.region_path == row.region_path:
+                del open_stack[index]
+                closed.append(StageInterval(
+                    stage=candidate.stage, path=candidate.region_path,
+                    start=float(candidate.t_monotonic), end=float(row.t_monotonic),
+                ))
+                break
+    closed.extend(
+        StageInterval(stage=row.stage, path=row.region_path,
+                      start=float(row.t_monotonic), end=None)
+        for row in open_stack
+    )
+    return tuple(sorted(closed, key=lambda interval: interval.start))
