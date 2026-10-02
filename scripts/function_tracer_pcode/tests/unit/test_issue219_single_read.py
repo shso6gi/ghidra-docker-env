@@ -399,3 +399,88 @@ def test_hits_happen_and_the_body_runs_once_per_distinct_witness(monkeypatch):
     # 1 回目: pending を描いて読み、写す。2 回目: closed になった値の token で読む（別の witness）。以後は hit
     assert counts["body_executions"] == 2 and counts["hits"] == 3 and counts["sealed"] == 1
     assert metrics["off"]["counts"]["sealed"] == 1 and "hits" not in metrics["off"]["counts"]
+
+
+# ---------------------------------------------------------------------------
+# 監査で見つけた隣接の経路（view の code が読む葉・codec の入口・thread・hit の object）
+# ---------------------------------------------------------------------------
+
+
+from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis  # noqa: E402
+
+
+class _DedupingAnalysis(FunctionReturnAnalysis):
+    """view が自分で walk の結果を読み、`==` で重複を除く解析（置き換えた葉を view の code が受け取り得る）。"""
+
+    def semantic_snapshot_dict(self):
+        seen = []
+        for ret in self.returns:
+            tree = ret.to_dict()["value"]
+            if tree not in seen:
+                seen.append(tree)
+        return {"distinct_values": seen, "count": len(seen)}
+
+
+def test_a_view_that_reads_its_own_walk_never_receives_a_token(monkeypatch):
+    def factory() -> State:
+        state = State(["plain"], pending=False)
+        twin = published(Expression.binary_op("INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(7, size=4)))
+        analysis = _DedupingAnalysis.__new__(_DedupingAnalysis)
+        analysis.__dict__.update(state.analysis.__dict__)
+        analysis.returns = [state.analysis.returns[0], ReturnInfo(address="0x00401100", conditions=[], value=twin)]
+        state.analysis = analysis
+        return state
+
+    _compare(factory, [("call", "canonical")] * 3, monkeypatch)
+
+
+@pytest.mark.parametrize("name", ["digest", "freeze", "_freeze_unmetered"])
+def test_a_replaced_codec_entry_is_not_the_canonical_path(monkeypatch, name):
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec
+
+    original = SnapshotFingerprintCodec.__dict__[name]
+    monkeypatch.setattr(SnapshotFingerprintCodec, name, original)
+    # 同じ関数でも、置き直した入口は定義のままと言えない（読む前に通常の本体へ）
+    monkeypatch.setattr(SnapshotFingerprintCodec, name, type(original)(original.__func__))
+    state = State(["plain"], pending=False)
+    with pair_failure_scope(("pair", 1), None), budget_policy_scope(BudgetPolicy()), snapshot_reuse_scope():
+        AnalysisSnapshot.from_function_analysis(state.analysis)
+        counts = snapshot_reuse_metrics()["counts"]
+    assert counts == {"bypass:generation_path": 1}
+
+
+def test_a_scope_closing_in_one_thread_keeps_the_scope_another_thread_opened_later():
+    import threading
+
+    entered, release, done = threading.Event(), threading.Event(), threading.Event()
+    seen = {}
+
+    def inner():
+        with snapshot_reuse_scope() as store:
+            entered.set()
+            release.wait(5)
+            seen["active"] = snapshot_reuse._active_store() is store
+        done.set()
+
+    with snapshot_reuse_scope() as outer:
+        worker = threading.Thread(target=inner)
+        worker.start()
+        assert entered.wait(5)
+    release.set()
+    assert done.wait(5)
+    worker.join(5)
+    assert seen["active"] is True
+    assert outer is not None and snapshot_reuse._active_store() is None
+
+
+def test_a_hit_returns_a_new_snapshot_object_with_the_same_retained_values():
+    from scripts.function_tracer_pcode.tests.unit import _snapshot_oracle as oracle
+
+    state = State(["plain"], pending=False)
+    with pair_failure_scope(("pair", 1), None), budget_policy_scope(BudgetPolicy()), snapshot_reuse_scope():
+        first = AnalysisSnapshot.from_function_analysis(state.analysis)
+        second = AnalysisSnapshot.from_function_analysis(state.analysis)
+        assert snapshot_reuse_metrics()["counts"]["hits"] == 1
+        built = AnalysisSnapshot._build_from_function_analysis(state.analysis)
+    assert second is not first
+    assert oracle.snapshot_problems(second, built) == []

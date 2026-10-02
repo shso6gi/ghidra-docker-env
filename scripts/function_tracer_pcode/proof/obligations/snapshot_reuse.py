@@ -32,6 +32,7 @@ C-RS3〜C-RS8 は計画 v2 のとおり（寿命・失敗の原子性・透過�
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 from types import MappingProxyType
@@ -393,10 +394,11 @@ def snapshot_reuse_scope() -> Iterator[SnapshotReuse]:
         yield store
     finally:
         with _SCOPE_LOCK:
-            if _SCOPES and _SCOPES[-1] is store:
-                _SCOPES.pop()
-            elif store in _SCOPES:
-                del _SCOPES[_SCOPES.index(store):]
+            # 自分の store だけを外す（別の thread が後から開いた scope の store を巻き込まない）
+            for index in range(len(_SCOPES) - 1, -1, -1):
+                if _SCOPES[index] is store:
+                    del _SCOPES[index]
+                    break
         metrics = store.metrics()
         store.release()
         if metrics["counts"]:
@@ -504,6 +506,10 @@ def reuse_or_build(cls: Any, analysis: Any) -> Any:
             witness = None
         store.add_seconds("witness", time.perf_counter() - started)
         store.count("hits" if snapshot is not None else "misses")
+        if snapshot is not None:
+            # main は呼び出しごとに新しい snapshot を返す: 保存した値を持つ新しい object を返す（`is` で比べる
+            # consumer にも main と同じ）
+            snapshot = dataclasses.replace(snapshot)
     if snapshot is None:
         started = time.perf_counter()
         store.count("body_executions")

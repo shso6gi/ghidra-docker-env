@@ -749,6 +749,9 @@ def snapshot_material(
     # 解析前提でない derived proof は下で捨てるので、表現できる解析は最初から
     # 作らない（`semantic_snapshot_dict`。残りは `to_dict()` と同じ値）
     semantic_view = getattr(analysis, "semantic_snapshot_dict", None)
+    if leaf_substitution is not None and not _view_returns_its_walk(analysis):
+        # 置き換えた葉を受け取るのが view 自身の code になり得る（view が walk の結果を読む・作り直す）
+        leaf_substitution = None
     with substituting_leaves(work, leaf_substitution):
         semantic_fields = dict(semantic_view() if callable(semantic_view) else to_dict())
     # These fields describe execution/diagnostic state rather than the
@@ -778,6 +781,35 @@ def snapshot_material(
         semantic_fields,
         {"function_ref": function_ref, "analysis_notes": diagnostic_notes},
     )
+
+
+def _view_returns_its_walk(analysis: Any) -> bool:
+    """`analysis` の意味の view が、owner（`core/analysis.FunctionReturnAnalysis`）の定義のままで、walk の結果を
+    そのまま返すか（置き換えた葉を受け取るのが snapshot の材料だけである、と言える view か）。
+
+    型そのもので、view（`semantic_snapshot_dict` → `_materialize`）を instance・class のどちらでも置き換えて
+    いないときだけ。それ以外の view では置き換えない（読みは同じ 1 回: 置き換えないだけ）。
+    """
+
+    from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
+
+    if type(analysis) is not FunctionReturnAnalysis:
+        return False
+    instance = getattr(analysis, "__dict__", {})
+    if "semantic_snapshot_dict" in instance or "_materialize" in instance:
+        return False
+    namespace = FunctionReturnAnalysis.__dict__
+    return (
+        namespace.get("semantic_snapshot_dict") is _CANONICAL_VIEW[0]
+        and namespace.get("_materialize") is _CANONICAL_VIEW[1]
+    )
+
+
+def _canonical_view() -> Tuple[Any, Any]:
+    from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
+
+    namespace = FunctionReturnAnalysis.__dict__
+    return namespace["semantic_snapshot_dict"], namespace["_materialize"]
 
 
 class SnapshotRead(NamedTuple):
@@ -851,16 +883,26 @@ def canonical_generation_path(cls: Any) -> bool:
     if cls is not AnalysisSnapshot:
         return False
     namespace = AnalysisSnapshot.__dict__
+    codec = SnapshotFingerprintCodec.__dict__
     return (
         namespace.get("create") is _CANONICAL_CREATE
         and namespace.get("_build_from_function_analysis") is _CANONICAL_BUILD
         and namespace.get("_from_parts") is _CANONICAL_FROM_PARTS
+        # 本体の `create` が通る codec の入口（`digest` → `freeze` → `_freeze_unmetered`）も定義のまま
+        and codec.get("digest") is _CANONICAL_CODEC[0]
+        and codec.get("freeze") is _CANONICAL_CODEC[1]
+        and codec.get("_freeze_unmetered") is _CANONICAL_CODEC[2]
+        and codec.get("digest_frozen") is _CANONICAL_CODEC[3]
     )
 
 
 _CANONICAL_CREATE = AnalysisSnapshot.__dict__["create"]
 _CANONICAL_BUILD = AnalysisSnapshot.__dict__["_build_from_function_analysis"]
 _CANONICAL_FROM_PARTS = AnalysisSnapshot.__dict__["_from_parts"]
+_CANONICAL_CODEC = tuple(
+    SnapshotFingerprintCodec.__dict__[name] for name in ("digest", "freeze", "_freeze_unmetered", "digest_frozen")
+)
+_CANONICAL_VIEW = _canonical_view()
 
 
 @dataclass(frozen=True)
