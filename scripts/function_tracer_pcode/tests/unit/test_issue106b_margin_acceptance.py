@@ -364,3 +364,40 @@ def test_without_the_profile_facts_the_verdict_is_undetermined(tmp_path):
         f"pool P: run {profile}: the deadline machinery commits are not given",
         f"pool P: run {profile}: the profile deadline / process timeout are not given",
     ]
+
+
+# --------------------------------------------------------------------------
+# extension points: a new termination class or a new interval reaches the verdict
+# --------------------------------------------------------------------------
+
+
+def test_a_termination_class_without_a_rule_is_undetermined(tmp_path, monkeypatch):
+    profile = _tree(tmp_path, "profile")
+    _cut(profile)
+    _finished(profile, "f_B3_B4", _process_timeout_status())
+    monkeypatch.setattr(margin, "termination_of", lambda outcome, kind: (
+        "resolved" if outcome != "TIMEOUT" else "new_kind_of_end"))
+    verdict = _verdict(tmp_path, [profile])
+
+    assert verdict["status"] == "undetermined", verdict
+    assert verdict["undetermined"] == [
+        f"pool P: pair {KEY_2}: termination 'new_kind_of_end' has no acceptance rule"
+    ]
+
+
+def test_an_interval_added_to_the_formula_without_an_observer_is_undetermined(
+    tmp_path, monkeypatch,
+):
+    from scripts.function_tracer_pcode.reporting import deadline_margin_acceptance as acceptance
+
+    profile = _tree(tmp_path, "profile")
+    _cut(profile)
+    monkeypatch.setattr(acceptance, "TERM_POOLS", {**acceptance.TERM_POOLS, "teardown": ("P",)})
+    verdict = _verdict(tmp_path, [profile])
+
+    assert verdict["status"] == "undetermined", verdict
+    assert verdict["undetermined"] == [
+        f"pool P: pair {KEY}: teardown unobserved (no observer for this interval)",
+        "term teardown: no sample",
+    ]
+    assert verdict["required_margin_seconds"] is None

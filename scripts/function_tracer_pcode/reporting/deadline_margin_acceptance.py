@@ -64,10 +64,12 @@ TERM_POOLS: Mapping[str, Tuple[str, ...]] = {
     "post_trip": (POOL_P,),
     "tail": (POOL_P,),
 }
-#: pool が使う区間（= その pool の打ち切った pair で観測が必須の区間）
-POOL_INTERVALS: Mapping[str, Tuple[str, ...]] = {
-    pool: tuple(term for term, pools in TERM_POOLS.items() if pool in pools) for pool in POOLS
-}
+
+
+def pool_intervals(pool: str) -> Tuple[str, ...]:
+    """``pool`` が使う区間（= その pool の打ち切った pair で観測が必須の区間）。`TERM_POOLS` から引く。"""
+
+    return tuple(term for term, pools in TERM_POOLS.items() if pool in pools)
 
 STATUS_HOLDS = "holds"
 STATUS_VIOLATED = "violated"
@@ -79,6 +81,11 @@ TERMINATION_PROCESS_TIMEOUT = "process_timeout"
 TERMINATION_SOLVER_TIMEOUT = "solver_timeout"
 TERMINATION_TIMEOUT_UNCLASSIFIED = "timeout_unclassified"
 TERMINATION_INVALID = "termination_invalid"
+#: 判定が扱う終了の分類のすべて（ここに無い分類は判定不能: 新しい分類は規則を足すまで PASS しない）
+TERMINATIONS = frozenset({
+    TERMINATION_RESOLVED, TERMINATION_PROCESS_TIMEOUT, TERMINATION_SOLVER_TIMEOUT,
+    TERMINATION_TIMEOUT_UNCLASSIFIED, TERMINATION_INVALID,
+})
 
 
 @dataclass(frozen=True)
@@ -187,13 +194,15 @@ def _pair_findings(
             undetermined.append(f"{where}: timeout_unclassified (timeout_kind not established)")
         elif pair.termination == TERMINATION_INVALID:
             undetermined.append(f"{where}: termination evidence invalid")
+        elif pair.termination not in TERMINATIONS:
+            undetermined.append(f"{where}: termination {pair.termination!r} has no acceptance rule")
         if pair.entered_lead_window:
             violations.append(f"{where}: still running when the stack-dump send started")
     if pair.cut is None:
         undetermined.append(f"{where}: cannot tell whether the deadline cut it ({pair.cut_unknown_reason})")
         return violations, undetermined
     if pair.cut:
-        for interval in POOL_INTERVALS[pool]:
+        for interval in pool_intervals(pool):
             if interval in pair.missing:
                 undetermined.append(f"{where}: {interval} unobserved ({pair.missing[interval]})")
         if pool == POOL_P and pair.lead_seconds is None:

@@ -98,8 +98,8 @@ from scripts.function_tracer_pcode.reporting.timeout_hotspot_summary import (
 
 SCHEMA = "deadline-margin-summary-v3"
 TRIP_NOTE = "deadline_tripped"
-#: margin の和に入る区間（``needed`` は確認用の合計）
-MARGIN_INTERVALS = ("pre", "overrun", "post_trip", "tail")
+#: margin の和に入る区間（``needed`` は確認用の合計）。採用式の項の表（acceptance）が唯一の一覧
+MARGIN_INTERVALS = tuple(acceptance.TERM_POOLS)
 INTERVALS = MARGIN_INTERVALS + ("needed",)
 POST_TRIP_STAGES = ("authority_finalize", "conditional_lane", "close_programs", "result_emit")
 POST_TRIP_PARTS = POST_TRIP_STAGES + ("other",)
@@ -315,7 +315,7 @@ def observe_pair(
             values[name] = round(value, 3)
 
     if note_problem:
-        for name in MARGIN_INTERVALS:
+        for name in acceptance.TERM_POOLS:
             missing[name] = note_problem
     else:
         put("pre", None if origin is None else trip_at - elapsed - origin,
@@ -324,6 +324,9 @@ def observe_pair(
         put("post_trip", None if last is None else last - trip_at, "journal has no timestamps")
         put("tail", None if child_exit is None or last is None else child_exit - last,
             deadline_problem or offset_problem or "journal has no timestamps")
+    for name in acceptance.TERM_POOLS:
+        if name not in values and name not in missing:
+            missing[name] = "no observer for this interval"
     needed = None
     if not missing and child_exit is not None and origin is not None and budget is not None:
         needed = round(child_exit - origin - budget, 3)
@@ -420,7 +423,7 @@ def _pool_summary(runs: Sequence[RunObservation]) -> Dict[str, Any]:
         ],
         "intervals": {
             **{name: describe([pair.values[name] for pair in cut if name in pair.values])
-               for name in MARGIN_INTERVALS},
+               for name in acceptance.TERM_POOLS},
             "needed": describe([pair.needed for pair in cut if pair.needed is not None]),
         },
     }
