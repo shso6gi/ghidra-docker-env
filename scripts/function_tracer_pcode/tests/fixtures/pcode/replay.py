@@ -228,27 +228,26 @@ def replay_recorded_pair(
 def _observe_snapshot_reuse(monkeypatch) -> Dict[str, Any]:
     """snapshot の本体の実行を外から数え、閉じた再利用の scope の計測値を集める（判定はしない）。
 
-    数え方を再利用の実装に頼らない: 本体（`_build_from_function_analysis`）を包み、再利用の
-    scope の中で実際に走った回数を数える。
+    数え方を再利用の判断に頼らない: canonical な経路の本体（読んだ値から snapshot を作る
+    `assemble_snapshot`）を包み、再利用の scope の中で実際に走った回数を数える。
     """
 
     from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse as reuse
-    from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
 
     observed: Dict[str, Any] = {"body_executions_in_scope": 0, "stores": []}
-    build = AnalysisSnapshot.__dict__["_build_from_function_analysis"].__func__
+    assemble = reuse.assemble_snapshot
     release = reuse.SnapshotReuse.release
 
-    def counted_build(cls, analysis):
+    def counted_assemble(read):
         if reuse.snapshot_reuse_metrics():
             observed["body_executions_in_scope"] += 1
-        return build(cls, analysis)
+        return assemble(read)
 
     def observed_release(store):
         observed["stores"].append(store.metrics())
         return release(store)
 
-    monkeypatch.setattr(AnalysisSnapshot, "_build_from_function_analysis", classmethod(counted_build))
+    monkeypatch.setattr(reuse, "assemble_snapshot", counted_assemble)
     monkeypatch.setattr(reuse.SnapshotReuse, "release", observed_release)
     return observed
 

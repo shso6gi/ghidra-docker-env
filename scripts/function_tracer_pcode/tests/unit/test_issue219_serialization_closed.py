@@ -1290,3 +1290,84 @@ def test_a_ref_read_beyond_the_fixed_read_bound_is_counted_by_the_capture_budget
         freeze_expression(expr)
         assert ledger._records == []
     assert expr.is_frozen
+
+
+# ---------------------------------------------------------------------------
+# 描いた表現から写す（`seal_serialization(observed=...)`。Issue #219 PR-219-B レビュー 4）
+# ---------------------------------------------------------------------------
+
+
+_REF_READS = {"count": 0}
+
+
+@dataclasses.dataclass(frozen=True)
+class _CountingRef:
+    """表現を作る code が走った回数を数える ref（深く不変な field だけを持つ）。"""
+
+    key: int
+    text: str = "t"
+
+    def stable_key(self):
+        return ("counting", self.key)
+
+    def json_items(self):
+        _REF_READS["count"] += 1
+        yield "key", self.key
+        yield "text", self.text
+
+
+def _ref_expression(ref: Any) -> Expression:
+    return published(Expression.binary_op("INT_ADD", _parameter("a"), Expression.unknown("u", runtime_ref=ref)))
+
+
+def _rendered(value: Expression) -> Tuple[Any, Any]:
+    """`value` を本体と同じ直列化の作業量の中で描き、描いた木と、その作業量が描いた ref の表現を返す。"""
+
+    from scripts.function_tracer_pcode.core.budget_policy import BudgetPolicy, budget_policy_scope, serialization_scope
+
+    with budget_policy_scope(BudgetPolicy()):
+        with serialization_scope(site="test.render", target_parts=("t",)) as work:
+            tree = RESULT_JSON_POLICY.materialize(value, budget=work)
+    return tree, work.observed_runtime_ref
+
+
+def test_sealing_from_observed_representations_runs_no_ref_code_and_matches_capture():
+    from scripts.function_tracer_pcode.core.semantic_freeze import NOT_OBSERVED
+
+    observed_value = _ref_expression(_CountingRef(1))
+    captured_value = _ref_expression(_CountingRef(1))
+    tree, observed_ref = _rendered(observed_value)
+    reads = _REF_READS["count"]
+    assert seal_serialization(observed_value, observed=lambda ref: observed_ref(ref, NOT_OBSERVED))
+    assert _REF_READS["count"] == reads  # 写すときに表現を作る code を走らせない
+    assert seal_serialization(captured_value)  # 比較: 表現を作る code を 1 回走らせて写す
+    assert _REF_READS["count"] == reads + 1
+    # 写した値は写しから描く: 描いた表現・capture で写した表現と同じ
+    assert RESULT_JSON_POLICY.materialize(observed_value) == tree == RESULT_JSON_POLICY.materialize(captured_value)
+
+
+def test_an_unobserved_ref_is_left_pending_without_running_its_code():
+    from scripts.function_tracer_pcode.core.semantic_freeze import NOT_OBSERVED
+    from scripts.function_tracer_pcode.core.semantic_lifecycle import serialization_pending
+
+    value = _ref_expression(_CountingRef(2))
+    reads = _REF_READS["count"]
+    assert not seal_serialization(value, observed=lambda ref: NOT_OBSERVED)
+    assert _REF_READS["count"] == reads
+    assert serialization_pending(value)
+    # 後で表現を作る code を走らせて写すことはできる（状態を変えていない）
+    assert seal_serialization(value)
+
+
+def test_an_observed_representation_beyond_the_capture_bound_is_unsealable_like_capture():
+    from scripts.function_tracer_pcode.core.frozen_representation import CAPTURE_MAX_BYTES
+    from scripts.function_tracer_pcode.core.semantic_freeze import NOT_OBSERVED
+    from scripts.function_tracer_pcode.core.semantic_lifecycle import serialization_pending
+
+    big = "x" * (CAPTURE_MAX_BYTES + 16)
+    observed_value = _ref_expression(_CountingRef(3, big))
+    captured_value = _ref_expression(_CountingRef(3, big))
+    _tree, observed_ref = _rendered(observed_value)
+    assert not seal_serialization(observed_value, observed=lambda ref: observed_ref(ref, NOT_OBSERVED))
+    assert not seal_serialization(captured_value)
+    assert not serialization_pending(observed_value) and not serialization_pending(captured_value)

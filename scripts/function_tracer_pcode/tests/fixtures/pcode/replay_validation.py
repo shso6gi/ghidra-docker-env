@@ -492,10 +492,12 @@ def _assert_production_pcode_path_was_used(
 
 
 def _assert_snapshot_bodies_match_distinct_witnesses(report: Mapping[str, Any], where: str) -> None:
-    """本体の実行回数（外から数えた）== 保存した distinct な witness の数 + 理由つきの bypass。
+    """本体の実行回数（外から数えた）== 保存した distinct な witness の数。
 
-    再生は逐次なので、前後の witness が違う（unstable）・witness を作れない呼び出しは無い。
-    distinct な fingerprint の数との一致は求めない（別 object の同じ内容は別の witness）。
+    本体は canonical な経路で読んだ値から snapshot を作る部分（`assemble_snapshot`）。再生は逐次なので、
+    witness を作れない（比べる途中の再帰の深さ）呼び出しは無く、miss はすべて保存される。通常の本体へ
+    回した呼び出し（`bypass:*`）は理由つきで別に数える。distinct な fingerprint の数との一致は求めない
+    （別 object の同じ内容は別の witness）。
     """
 
     observed = report["snapshot_reuse"]
@@ -507,17 +509,15 @@ def _assert_snapshot_bodies_match_distinct_witnesses(report: Mapping[str, Any], 
         entries += store["entries"]
         for name, value in store["counts"].items():
             totals[name] = totals.get(name, 0) + value
-    bypassed = sum(value for name, value in totals.items() if name.startswith("bypass:"))
     witness_failures = {name: value for name, value in totals.items() if name.startswith("bypass:witness_failed")}
-    assert totals.get("unstable", 0) == 0 and not witness_failures, (
-        where + ": a sequential replay had unstable or unbuildable witnesses: "
-        + json.dumps(totals, sort_keys=True)
+    assert not witness_failures, (
+        where + ": a sequential replay had unbuildable witnesses: " + json.dumps(totals, sort_keys=True)
     )
     assert observed["body_executions_in_scope"] == totals.get("body_executions", 0), (
         where + ": the counted body executions are not the actual executions: "
         + json.dumps({"actual": observed["body_executions_in_scope"], **totals}, sort_keys=True)
     )
-    assert observed["body_executions_in_scope"] == entries + bypassed, (
+    assert observed["body_executions_in_scope"] == entries, (
         where + ": a body ran for an already stored witness: "
         + json.dumps({"actual": observed["body_executions_in_scope"], "entries": entries, **totals}, sort_keys=True)
     )

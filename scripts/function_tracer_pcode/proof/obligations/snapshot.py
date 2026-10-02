@@ -5,10 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 from types import MappingProxyType
-from typing import Any, Dict, List, Mapping, NamedTuple, Tuple
+from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
 from scripts.function_tracer_pcode.core import json_encoding
-from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
+from scripts.function_tracer_pcode.core.budget_policy import serialization_scope, substituting_leaves
 from scripts.function_tracer_pcode.core.json_encoding import (
     LEGACY,
     RESULT_JSON_POLICY,
@@ -148,7 +148,7 @@ def deep_freeze(value: Any) -> Any:
     return value
 
 
-def _semantic_effect_summary_projection(effect_summary: Any, work: Any = None, witness: bool = False) -> Any:
+def _semantic_effect_summary_projection(effect_summary: Any, work: Any = None) -> Any:
     if effect_summary is None:
         return None
     # The dataclass projection is object-derived and includes stores, calls,
@@ -156,7 +156,7 @@ def _semantic_effect_summary_projection(effect_summary: Any, work: Any = None, w
     # rejects any opaque object that lacks a stable key instead of stringifying it.
     # Issue #22 PR-22-D: 投影は写しながら直列化の作業量へ足す（`freeze(budget=work)`）。
     # 効果が大量でも、予算を超えた時点で残りを投影しない。
-    return SnapshotFingerprintCodec.freeze(effect_summary, budget=work, witness=witness)
+    return SnapshotFingerprintCodec.freeze(effect_summary, budget=work)
 
 
 def _classify_analysis_notes(notes: Any) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
@@ -273,12 +273,7 @@ def _frozen_repr(value: Any) -> str:
                 if index:
                     pending.append(_Text(", "))
         else:
-            try:
-                pieces.append(as_repr(item))
-            except TypeError:
-                if _is_witness_token_type(kind):
-                    raise WitnessOrderUnavailable("a witness token is a set member") from None
-                raise
+            pieces.append(as_repr(item))
     return "".join(pieces)
 
 
@@ -309,21 +304,19 @@ class SnapshotFingerprintCodec:
     """
 
     @classmethod
-    def freeze(cls, value: Any, *, budget: Any = None, witness: bool = False) -> Any:
+    def freeze(cls, value: Any, *, budget: Any = None) -> Any:
         """値の canonical な写し。`budget` を渡すと、写す値の byte を写しながら足す。
 
         `budget`（`JsonBudget` の interface、snapshot では `SerializationWork`）は写した
         葉と容器の区切りごとに数え、超えた時点で残りを写さない。record の `to_dict()`
         は walker が同じ `budget` で数えながら作る（作ってから数えない）。
-
-        `witness` は `_freeze_unmetered` と同じ（record の表現を写すときだけ効く。既定は偽 = 規則どおり）。
         """
 
         if budget is None:
-            return cls._freeze_unmetered(value, witness)
+            return cls._freeze_unmetered(value)
         # 値の storage の読みも固定の上限を超えた分は同じ予算へ（超えればその予算の超過）
         with metered_storage_reads(budget):
-            return cls._freeze(value, _FreezeMeter(budget, witness))
+            return cls._freeze(value, _FreezeMeter(budget))
 
     @classmethod
     def _freeze_unmetered(cls, value: Any, witness: bool = False) -> Any:
@@ -333,8 +326,8 @@ class SnapshotFingerprintCodec:
         （`test_the_unmetered_freeze_equals_the_metered_copy` が同じ値であることを固定）。
 
         `witness` が真のときだけ、再利用の owner が登録した token の型 **そのもの**（`register_witness_token_type`）
-        の値を写しにそのまま置く。入力の型が自分で何を宣言しても token にはならない。偽（digest・本体）では
-        token も opaque な値として拒む。
+        の値を写しにそのまま置く（`expand_witness_tokens` が、token が代わりに置かれた値の写しへ戻す）。入力の型が
+        自分で何を宣言しても token にはならない。偽（digest・本体）では token も opaque な値として拒む。
         """
 
         if value is None:
@@ -435,7 +428,7 @@ class SnapshotFingerprintCodec:
             # object の `to_dict()` は任意の producer なので呼ばない: object-derived な identity の
             # 無い値として拒む）
             built = json_encoding.RESULT_JSON_POLICY.materialize(value, budget=meter.budget)
-            return _tagged(name, cls._freeze_unmetered(built, meter.witness), meter)
+            return _tagged(name, cls._freeze(built, None), meter)
         names = dataclass_field_names(value)
         if names is not None:
             meter.frame(len(names))
@@ -472,12 +465,7 @@ class SnapshotFingerprintCodec:
         # 位置は数えながら持つ（組ごとに列の長さを読み直さない）
         count = 0
         for key, _item in items:
-            try:
-                keyed.append((_fingerprint_json(key), count))
-            except TypeError:
-                if _holds_witness_token(key):
-                    raise WitnessOrderUnavailable("a witness token is in a mapping key") from None
-                raise
+            keyed.append((_fingerprint_json(key), count))
             count += 1
         keyed.sort()
         for index in range(1, count):
@@ -491,7 +479,12 @@ class SnapshotFingerprintCodec:
 
     @classmethod
     def digest(cls, value: Any) -> str:
-        frozen = cls.freeze(value)
+        return cls.digest_frozen(cls.freeze(value))
+
+    @staticmethod
+    def digest_frozen(frozen: Any) -> str:
+        """凍結した値の digest（`digest(value)` は `digest_frozen(freeze(value))`）。"""
+
         payload = _fingerprint_json(frozen)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -499,13 +492,11 @@ class SnapshotFingerprintCodec:
 class _FreezeMeter:
     """`freeze(budget=...)` が写した値の byte を `budget` へ足す（写しの JSON の大きさ）。"""
 
-    __slots__ = ("budget", "_policy", "witness")
+    __slots__ = ("budget", "_policy")
 
-    def __init__(self, budget: Any, witness: bool = False) -> None:
+    def __init__(self, budget: Any) -> None:
         self.budget = budget
         self._policy = RESULT_JSON_POLICY
-        #: 写した record の表現を凍結するときの `witness`（`_freeze_unmetered`）
-        self.witness = witness
 
     def frame(self, count: int) -> None:
         self.budget.charge(self._policy.container_frame_bytes(count))
@@ -538,53 +529,70 @@ class _FreezeMeter:
         self._policy.count_into(value, self.budget, mode=LEGACY)
 
 
-#: snapshot の再利用の witness の token の型（`_freeze_unmetered` の `witness` が真のときだけ、この型
-#: **そのもの** の値を写しにそのまま置く）。登録するのは再利用の owner だけ（静的 test）
-_WITNESS_TOKEN_TYPES: List[type] = []
+#: snapshot の再利用の token の型と、token が代わりに置かれた値の LEGACY の木を作る関数（`_freeze_unmetered` の
+#: `witness` が真のときだけ、この型 **そのもの** の値を写しにそのまま置く）。登録するのは再利用の owner だけ（静的 test）
+_WITNESS_TOKEN_TYPES: List[Tuple[type, Callable[[Any], Any]]] = []
 
 
-def register_witness_token_type(kind: type) -> type:
-    """再利用の owner が発行する token の型を登録する（その module の読み込み時に 1 回）。"""
+def register_witness_token_type(kind: type, tree_of: Callable[[Any], Any]) -> type:
+    """再利用の owner が発行する token の型と、その展開を登録する（その module の読み込み時に 1 回）。
 
-    if not any(kind is known for known in _WITNESS_TOKEN_TYPES):
-        _WITNESS_TOKEN_TYPES.append(kind)
+    `tree_of(token)` は、token が代わりに置かれた葉を walker が置くはずだった LEGACY の木（組み込みの値だけ。
+    入力の code を呼ばない純粋な関数）。
+    """
+
+    if not any(kind is known for known, _tree_of in _WITNESS_TOKEN_TYPES):
+        _WITNESS_TOKEN_TYPES.append((kind, tree_of))
     return kind
 
 
-def _is_witness_token_type(kind: type) -> bool:
-    """`kind` が登録した token の型 **そのもの** か（型の比較は identity だけ: metaclass の `__eq__` を呼ばない）。"""
+def _witness_token_tree(kind: type) -> Optional[Callable[[Any], Any]]:
+    """`kind` が登録した token の型 **そのもの** ならその展開（型の比較は identity だけ: metaclass の `__eq__` を呼ばない）。"""
 
-    for known in _WITNESS_TOKEN_TYPES:
+    for known, tree_of in _WITNESS_TOKEN_TYPES:
         if kind is known:
-            return True
-    return False
+            return tree_of
+    return None
 
 
-class WitnessOrderUnavailable(Exception):
-    """witness の凍結で、codec が並べる位置（set の要素・mapping の key）に token がある。
-
-    本体の並びは、token が代わりに置かれた値の写しで決まる。token はその写しを持たないので、
-    並びは witness からは決まらない（witness を作れない: 再利用の owner は本体へ回す）。token は
-    witness の凍結にしか無いので、本体の codec からは上がらない。
-    """
+def _is_witness_token_type(kind: type) -> bool:
+    return _witness_token_tree(kind) is not None
 
 
-def _holds_witness_token(frozen: Any) -> bool:
-    """凍結した値（tuple・scalar・enum の値の写しの list / dict）の中に token があるか。"""
+def _replace_witness_tokens(value: Any, leaf: Callable[[Any, Callable[[Any], Any]], Any]) -> Any:
+    """組み込みの容器（tuple / list / dict / MappingProxy / frozenset）の中の token を `leaf(token, tree_of)` に
+    置き換える。token の無い容器は同じ object を返す（容器でない値・入力の object の中は辿らない）。"""
 
-    pending = [frozen]
-    while pending:
-        item = pending.pop()
-        kind = type(item)
-        if kind is tuple or kind is list:
-            pending.extend(item)
-        elif kind is dict:
-            for key, child in items_of(item):
-                pending.append(key)
-                pending.append(child)
-        elif _is_witness_token_type(kind):
-            return True
-    return False
+    kind = type(value)
+    tree_of = _witness_token_tree(kind)
+    if tree_of is not None:
+        return leaf(value, tree_of)
+    if kind is tuple or kind is list or kind is frozenset:
+        items = [_replace_witness_tokens(item, leaf) for item in value]
+        if all(new is old for new, old in zip(items, value)):
+            return value
+        return kind(items)
+    if kind is dict or kind is MappingProxyType:
+        rows = [(key, _replace_witness_tokens(key, leaf), item, _replace_witness_tokens(item, leaf)) for key, item in value.items()]
+        if all(new_key is key and new_item is item for key, new_key, item, new_item in rows):
+            return value
+        rebuilt = {new_key: new_item for _key, new_key, _item, new_item in rows}
+        return MappingProxyType(rebuilt) if kind is MappingProxyType else rebuilt
+    return value
+
+
+def expand_witness_tokens(frozen: Any) -> Any:
+    """凍結した値（codec の写し）の token を、token が代わりに置かれた値の凍結した写しへ戻す（純粋）。"""
+
+    return _replace_witness_tokens(
+        frozen, lambda token, tree_of: SnapshotFingerprintCodec._freeze_unmetered(tree_of(token)),
+    )
+
+
+def _expand_held_tokens(held: Any) -> Any:
+    """snapshot に置く値（`retained_form` の写し）の token を、置かれるはずだった木の写しへ戻す（純粋）。"""
+
+    return _replace_witness_tokens(held, lambda token, tree_of: deep_freeze(tree_of(token)))
 
 
 #: `AnalysisSnapshot.create` の既定の抽出 schema の版
@@ -637,6 +645,14 @@ class AnalysisSnapshot:
             fingerprint_payload(snapshot_id, semantic_fields, extraction_schema_version)
         )
         held_id, held_fields, held_refs = retained_form(snapshot_id, semantic_fields, diagnostic_refs)
+        return cls._from_parts(fingerprint, held_id, held_fields, held_refs, extraction_schema_version)
+
+    @classmethod
+    def _from_parts(
+        cls, fingerprint: str, held_id: Any, held_fields: Any, held_refs: Any, extraction_schema_version: int,
+    ) -> "AnalysisSnapshot":
+        """`create` が最後に作る snapshot（digest と `retained_form` の写しから）。"""
+
         return cls(
             snapshot_id=held_id,
             semantic_fields=held_fields,
@@ -670,11 +686,11 @@ class AnalysisSnapshot:
 
         from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse
 
-        return snapshot_reuse.reuse_or_build(analysis, cls._build_from_function_analysis)
+        return snapshot_reuse.reuse_or_build(cls, analysis)
 
     @classmethod
     def _build_from_function_analysis(cls, analysis: Any) -> "AnalysisSnapshot":
-        """snapshot の本体（再利用の判断をしない）。"""
+        """snapshot の本体（再利用の判断をしない。main の本体と同じ読み・同じ結果）。"""
 
         to_dict = getattr(analysis, "to_dict", None)
         if not callable(to_dict):
@@ -688,7 +704,7 @@ class AnalysisSnapshot:
             site=SNAPSHOT_SERIALIZATION_SITE,
             target_parts=snapshot_serialization_target(analysis),
         ) as work:
-            material = snapshot_material(analysis, work)
+            material = snapshot_material(analysis, to_dict, work)
             return cls.create(
                 material.snapshot_id,
                 material.semantic_fields,
@@ -719,19 +735,22 @@ def snapshot_serialization_target(analysis: Any) -> Tuple[Any, ...]:
     )
 
 
-def snapshot_material(analysis: Any, work: Any, witness: bool = False) -> SnapshotMaterial:
+def snapshot_material(
+    analysis: Any, to_dict: Any, work: Any, leaf_substitution: Any = None,
+) -> SnapshotMaterial:
     """解析から snapshot の材料を作る（**唯一の抽出**。`work` は開いた直列化の作業量）。
 
-    `witness` は効果要約の投影の codec へ渡す（再利用の witness だけが真。`SnapshotFingerprintCodec`）。
+    `leaf_substitution`（`core/budget_policy.LeafSubstitution`）は、意味の view（`semantic_snapshot_dict` /
+    `to_dict()`）を walker が作る間だけ効く: token になり得るのは、walker が record の field の値・列の要素として
+    置く葉だけ（walker は key を `json_items` の名前から作り、set を作らない: codec の並び・key に token は来ない）。
+    `assemble_snapshot` が戻す位置はここだけ。効果要約の投影・`snapshot_id`・診断の参照は置き換えない。
     """
 
-    to_dict = getattr(analysis, "to_dict", None)
-    if not callable(to_dict):
-        raise TypeError("analysis must provide object-derived to_dict() data")
     # 解析前提でない derived proof は下で捨てるので、表現できる解析は最初から
     # 作らない（`semantic_snapshot_dict`。残りは `to_dict()` と同じ値）
     semantic_view = getattr(analysis, "semantic_snapshot_dict", None)
-    semantic_fields = dict(semantic_view() if callable(semantic_view) else to_dict())
+    with substituting_leaves(work, leaf_substitution):
+        semantic_fields = dict(semantic_view() if callable(semantic_view) else to_dict())
     # These fields describe execution/diagnostic state rather than the
     # immutable extraction premise.  Proofs are applied through a derived
     # view and must never mutate snapshot identity.
@@ -742,7 +761,7 @@ def snapshot_material(analysis: Any, work: Any, witness: bool = False) -> Snapsh
     )
     semantic_fields["semantic_analysis_notes"] = semantic_notes
     semantic_fields["effect_summary"] = _semantic_effect_summary_projection(
-        getattr(analysis, "effect_summary", None), work, witness,
+        getattr(analysis, "effect_summary", None), work,
     )
     function_ref = getattr(analysis, "function_ref", None)
     has_key, function_key = (False, None) if function_ref is None else identity_key_of(function_ref)
@@ -759,6 +778,89 @@ def snapshot_material(analysis: Any, work: Any, witness: bool = False) -> Snapsh
         semantic_fields,
         {"function_ref": function_ref, "analysis_notes": diagnostic_notes},
     )
+
+
+class SnapshotRead(NamedTuple):
+    """canonical な生成経路の本体が読んだもの（`read_snapshot_inputs`）。snapshot はこれの純粋な関数。
+
+    token（`leaf_substitution` が置いた値）は `material.semantic_fields` の意味の view の木の中と、そこから
+    写した `frozen_payload` / `held_fields` の中にだけある。
+    """
+
+    material: SnapshotMaterial
+    #: `create` の digest が凍結する値（`fingerprint_payload` の codec の写し。token はそのまま）
+    frozen_payload: Any
+    #: `create` が snapshot に置く値（`retained_form`。token はそのまま）
+    held_id: Tuple[Any, ...]
+    held_fields: Any
+    held_refs: Any
+    #: この読みの直列化が描いた runtime ref の表現（`SerializationWork.observed_runtime_ref`）
+    observed_runtime_ref: Callable[[Any, Any], Any]
+
+
+def read_snapshot_inputs(analysis: Any, leaf_substitution: Any = None) -> SnapshotRead:
+    """`_build_from_function_analysis` と **同じ読みを同じ順に 1 回** 行い、snapshot を作る前で止める。
+
+    同じ scope（site・target・上限・観測）の中で、抽出・digest の凍結・`retained_form` を本体と同じ順に行う。
+    入力の code（解析の view・record の protocol・`stable_key`）を走らせるのはここだけで、`assemble_snapshot`
+    は読んだ値から snapshot を作る純粋な関数。`leaf_substitution` が置き換えた葉は、作業量の量・上限の超過・
+    観測値を変えない（`core/budget_policy.substituting_leaves`）。
+    """
+
+    to_dict = getattr(analysis, "to_dict", None)
+    if not callable(to_dict):
+        raise TypeError("analysis must provide object-derived to_dict() data")
+    with serialization_scope(
+        site=SNAPSHOT_SERIALIZATION_SITE,
+        target_parts=snapshot_serialization_target(analysis),
+    ) as work:
+        material = snapshot_material(analysis, to_dict, work, leaf_substitution)
+        frozen = SnapshotFingerprintCodec._freeze_unmetered(
+            fingerprint_payload(material.snapshot_id, material.semantic_fields, SNAPSHOT_EXTRACTION_SCHEMA_VERSION),
+            True,
+        )
+        held_id, held_fields, held_refs = retained_form(
+            material.snapshot_id, material.semantic_fields, material.diagnostic_refs,
+        )
+    return SnapshotRead(material, frozen, held_id, held_fields, held_refs, work.observed_runtime_ref)
+
+
+def assemble_snapshot(read: SnapshotRead) -> "AnalysisSnapshot":
+    """読んだ値から、`create` と同じ snapshot を作る（純粋: 入力の code を呼ばない）。
+
+    token を、token が代わりに置かれた値の木に戻す: digest は凍結した写しの中で、snapshot に置く値は
+    `retained_form` の写しの中で。token の無い読み（置き換えなし）では `create` そのもの。
+    """
+
+    return AnalysisSnapshot._from_parts(
+        SnapshotFingerprintCodec.digest_frozen(expand_witness_tokens(read.frozen_payload)),
+        read.held_id,
+        _expand_held_tokens(read.held_fields),
+        read.held_refs,
+        SNAPSHOT_EXTRACTION_SCHEMA_VERSION,
+    )
+
+
+def canonical_generation_path(cls: Any) -> bool:
+    """`cls.from_function_analysis` の生成経路が、`read_snapshot_inputs` / `assemble_snapshot` が再現する経路か。
+
+    `AnalysisSnapshot` そのもので、本体（`_build_from_function_analysis`）と `create` が定義のままのときだけ。
+    派生の型・置き換えた本体は、ここが再現しない生成経路（通常の本体へ回す）。
+    """
+
+    if cls is not AnalysisSnapshot:
+        return False
+    namespace = AnalysisSnapshot.__dict__
+    return (
+        namespace.get("create") is _CANONICAL_CREATE
+        and namespace.get("_build_from_function_analysis") is _CANONICAL_BUILD
+        and namespace.get("_from_parts") is _CANONICAL_FROM_PARTS
+    )
+
+
+_CANONICAL_CREATE = AnalysisSnapshot.__dict__["create"]
+_CANONICAL_BUILD = AnalysisSnapshot.__dict__["_build_from_function_analysis"]
+_CANONICAL_FROM_PARTS = AnalysisSnapshot.__dict__["_from_parts"]
 
 
 @dataclass(frozen=True)

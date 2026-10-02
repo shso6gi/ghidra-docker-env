@@ -128,7 +128,7 @@ def _reuse_matches_the_body(prime: List[Any], target: Any, policy: BudgetPolicy)
 def _measured_nodes(analysis: Any) -> int:
     with budget_policy_scope(BudgetPolicy()):
         with serialization_scope(site="probe", target_parts=("p",)) as work:
-            snapshot_module.snapshot_material(analysis, work)
+            snapshot_module.snapshot_material(analysis, analysis.to_dict, work)
             return work.distinct_nodes
 
 
@@ -138,7 +138,7 @@ def _measured_bytes(analysis: Any) -> int:
 
     with budget_policy_scope(BudgetPolicy()):
         with serialization_scope(site=snapshot_module.SNAPSHOT_SERIALIZATION_SITE, target_parts=("p",)) as work:
-            material = snapshot_module.snapshot_material(analysis, work)
+            material = snapshot_module.snapshot_material(analysis, analysis.to_dict, work)
             original(AnalysisSnapshot, material.snapshot_id, material.semantic_fields,
                      diagnostic_refs=material.diagnostic_refs)
             seen.append(work.consumed)

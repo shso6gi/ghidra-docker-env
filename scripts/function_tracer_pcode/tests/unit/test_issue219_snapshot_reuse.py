@@ -78,10 +78,17 @@ def _clean_ledger_stack():
 _RAW_BUILD = AnalysisSnapshot.__dict__["_build_from_function_analysis"].__func__
 
 
-def body(analysis: Any) -> AnalysisSnapshot:
-    """oracle: memo を通らない本体（その時点の解析の状態の snapshot）。"""
+_ORACLE = threading.local()
 
-    return _RAW_BUILD(AnalysisSnapshot, analysis)
+
+def body(analysis: Any) -> AnalysisSnapshot:
+    """oracle: memo を通らない本体（その時点の解析の状態の snapshot。本体の実行回数には数えない）。"""
+
+    _ORACLE.active = True
+    try:
+        return _RAW_BUILD(AnalysisSnapshot, analysis)
+    finally:
+        _ORACLE.active = False
 
 
 def fields_of(snapshot: AnalysisSnapshot) -> tuple:
@@ -101,21 +108,55 @@ def fields_of(snapshot: AnalysisSnapshot) -> tuple:
 
 
 class BodyCounter:
-    """本体の実行回数を外から数える（`_build_from_function_analysis` を包む）。"""
+    """本体（高コストな部分）の実行回数を外から数える。
+
+    canonical な経路は読み（`read_snapshot_inputs`）の後の `assemble_snapshot`、通常の本体へ回した経路は
+    `snapshot_material` の呼び出しのうち読みの外のもの（main の本体）。`hook(analysis)` は本体を作る前に呼ぶ
+    （読みの直後: 入力の読みの後、snapshot を作る前）。
+    """
 
     def __init__(self, monkeypatch, hook=None) -> None:
         self.calls: List[Any] = []
+        self.reads: List[Any] = []
         self.hook = hook
         lock = threading.Lock()
+        original_read = snapshot_reuse.read_snapshot_inputs
+        original_assemble = snapshot_reuse.assemble_snapshot
+        original_material = snapshot_module.snapshot_material
+        reading = threading.local()
 
-        def counted(cls, analysis):
+        def counted_read(analysis, leaf_substitution=None):
+            with lock:
+                self.reads.append(analysis)
+            reading.active = True
+            try:
+                read = original_read(analysis, leaf_substitution)
+            finally:
+                reading.active = False
+            read_analyses[id(read)] = analysis
+            return read
+
+        read_analyses = {}
+
+        def counted_assemble(read):
+            analysis = read_analyses.pop(id(read), None)
             with lock:
                 self.calls.append(analysis)
             if self.hook is not None:
                 self.hook(analysis)
-            return _RAW_BUILD(cls, analysis)
+            return original_assemble(read)
 
-        monkeypatch.setattr(AnalysisSnapshot, "_build_from_function_analysis", classmethod(counted))
+        def counted_material(analysis, *args, **kwargs):
+            if not getattr(reading, "active", False) and not getattr(_ORACLE, "active", False):
+                with lock:
+                    self.calls.append(analysis)
+                if self.hook is not None:
+                    self.hook(analysis)
+            return original_material(analysis, *args, **kwargs)
+
+        monkeypatch.setattr(snapshot_reuse, "read_snapshot_inputs", counted_read)
+        monkeypatch.setattr(snapshot_reuse, "assemble_snapshot", counted_assemble)
+        monkeypatch.setattr(snapshot_module, "snapshot_material", counted_material)
 
     @property
     def count(self) -> int:
@@ -530,7 +571,7 @@ def test_t_b8_equal_content_in_other_objects_is_another_read_set(bodies):
     def nodes(analysis):
         with budget_policy_scope(BudgetPolicy()):
             with serialization_scope(site="probe", target_parts=("p",)) as work:
-                snapshot_module.snapshot_material(analysis, work)
+                snapshot_module.snapshot_material(analysis, analysis.to_dict, work)
                 return work.distinct_nodes
 
     limit = nodes(sharing)
@@ -606,15 +647,16 @@ def test_t_b12_concurrent_first_access_builds_twice_and_keeps_one_entry(monkeypa
         assert counter.count == 2
 
 
-def test_t_b13_a_write_during_the_body_is_not_stored(monkeypatch):
-    """本体の途中の書き換え（同じ thread の書き換えと同じ検査）。
+def test_t_b13_a_write_after_the_read_is_seen_by_the_next_call(monkeypatch):
+    """読みの後・snapshot を作る前の書き換え（同じ thread）: その呼び出しは読んだ時点の snapshot、次の
+    呼び出しは書き換えた後の snapshot。
 
-    C-RS8 の前提（snapshot の生成中に別の thread が解析を書き換えない）は変えない。この test は
-    本体の中で同じ解析を書き換える（同じ thread の書き換え）と前後の witness が違い、保存しない
-    ことを固定する。並行 writer に対する正しさの証明ではない。
+    snapshot は読んだ値の純粋な関数なので、読みの後の書き換えはその呼び出しの結果を変えない（main の本体も
+    読んだ値から snapshot を作る）。C-RS8 の前提（別の thread が生成中に書き換えない）は変えない。
     """
 
     analysis = _analysis()
+    read_time = body(analysis)
     written = []
 
     def write_once(target):
@@ -624,12 +666,12 @@ def test_t_b13_a_write_during_the_body_is_not_stored(monkeypatch):
 
     counter = BodyCounter(monkeypatch, hook=write_once)
     with budget_policy_scope(BudgetPolicy()), snapshot_reuse_scope() as store:
-        AnalysisSnapshot.from_function_analysis(analysis)
-        assert store.metrics()["entries"] == 0
-        assert _counts()["unstable"] == 1
+        first = AnalysisSnapshot.from_function_analysis(analysis)
+        assert fields_of(first)[:6] == fields_of(read_time)[:6]
         after = AnalysisSnapshot.from_function_analysis(analysis)
-        assert counter.count == 2
+        assert counter.count == 2 and store.metrics()["entries"] == 2
         assert fields_of(after) == fields_of(body(analysis))
+        assert after.semantic_fingerprint != first.semantic_fingerprint
 
 
 # ---------------------------------------------------------------------------
@@ -750,7 +792,8 @@ def test_t_b15_a_budget_failure_of_the_body_leaves_the_store_empty_and_repeats(b
                     AnalysisSnapshot.from_function_analysis(analysis)
                 raised.append((type(caught.value), caught.value.site))
             assert store.metrics()["entries"] == 0
-            assert bodies.count == 2
+            # 読み（本体と同じ scope・上限）が上げる: snapshot は作らない
+            assert bodies.count == 0 and len(bodies.reads) == 2
         assert raised[0] == raised[1] == (ExpressionSizeBudgetExceeded, SNAPSHOT_SERIALIZATION_SITE)
 
 
@@ -765,36 +808,25 @@ def test_t_b15_a_type_error_of_the_body_leaves_the_store_empty_and_repeats(pair_
     assert pair_scope.metrics()["entries"] == 0
 
 
-@pytest.mark.parametrize("failure", [JsonBudgetExhausted(consumed_bytes=2, max_bytes=1), RecursionError("deep")])
-def test_t_b16_an_unbuildable_witness_falls_back_to_the_body(monkeypatch, pair_scope, bodies, failure):
+@pytest.mark.parametrize("where", ["witness", "store"])
+def test_t_b16_a_comparison_too_deep_to_judge_builds_without_storing(monkeypatch, pair_scope, bodies, where):
+    """witness を比べられない（再帰の深さ）ときは保存せずに作る（結果は同じ純粋な関数: 本体と同じ）。"""
+
     analysis = _analysis()
 
-    def unbuildable(*_args, **_kwargs):
-        raise failure
+    def too_deep(*_args, **_kwargs):
+        raise RecursionError("deep")
 
-    monkeypatch.setattr(snapshot_reuse, "_extract", unbuildable)
-    snapshot = AnalysisSnapshot.from_function_analysis(analysis)
-    assert fields_of(snapshot) == fields_of(body(analysis))
-    assert bodies.count == 1
+    if where == "witness":
+        monkeypatch.setattr(snapshot_reuse, "_witness_of", too_deep)
+    else:
+        monkeypatch.setattr(snapshot_reuse.SnapshotReuse, "put_if_absent", too_deep)
+    for _ in range(2):
+        snapshot = AnalysisSnapshot.from_function_analysis(analysis)
+        assert fields_of(snapshot) == fields_of(body(analysis))
+    assert bodies.count == 2
     assert pair_scope.metrics()["entries"] == 0
-
-
-def test_t_b16_a_witness_failure_the_body_does_not_share_is_an_internal_error(monkeypatch, bodies):
-    """凍結できない値・walker の拒否は本体でも同じ規則で失敗する: 本体が成功したら再利用の誤り。"""
-
-    analysis = _analysis()
-
-    def broken(*_args, **_kwargs):
-        raise TypeError("a bug in the reuse layer")
-
-    # witness の側だけが読む参照（本体の `create` は schema の module の `retained_form` を呼ぶ）
-    monkeypatch.setattr(snapshot_reuse, "retained_form", broken)
-    with pair_failure_scope(("pair", 1), None) as ledger, budget_policy_scope(BudgetPolicy()), snapshot_reuse_scope():
-        with pytest.raises(InternalError) as caught:
-            AnalysisSnapshot.from_function_analysis(analysis)
-    assert isinstance(caught.value.__cause__, TypeError)
-    assert bodies.count == 1
-    assert ledger.pending_failure() is not None
+    assert _counts()["bypass:witness_failed:RecursionError"] == 2
 
 
 def test_t_b16_a_witness_failure_the_body_shares_raises_the_body_failure(monkeypatch, pair_scope, bodies):
@@ -853,24 +885,29 @@ def _snapshot_observation():
     }
 
 
-def test_t_b20_a_hit_adds_no_observation_and_the_witness_never_appears(monkeypatch, bodies):
+def test_t_b20_every_call_observes_its_read_like_the_body_with_memo_on_and_off(monkeypatch, bodies):
+    """観測値（結果の JSON の `diagnostics.expression_budget.observed`）は on / off と main の本体で同じ。
+
+    呼び出しはどれも本体と同じ読み（同じ scope）を 1 回行うので、hit も本体と同じ量を観測する。
+    再利用は自分の観測点を持たない。
+    """
+
     observed = {}
-    for enabled in (True, False):
-        monkeypatch.setattr(snapshot_reuse, "_SNAPSHOT_REUSE_ENABLED", enabled)
+    for mode in ("on", "off", "main"):
+        monkeypatch.setattr(snapshot_reuse, "_SNAPSHOT_REUSE_ENABLED", mode == "on")
         analysis = _analysis()
         with budget_policy_scope(BudgetPolicy()), snapshot_reuse_scope():
-            AnalysisSnapshot.from_function_analysis(analysis)
-            first = _snapshot_observation()
-            AnalysisSnapshot.from_function_analysis(analysis)
-            observed[enabled] = (first, _snapshot_observation(), budget_observations())
-    on_first, on_second, on_all = observed[True]
-    off_first, _off_second, _off_all = observed[False]
-    # 本体の観測は memo を切ったときの 1 回分と同じ値
-    assert on_first == off_first and on_first
-    # hit は本体の観測を増やさない
-    assert on_second == on_first
-    # witness の作業量は観測値に現れない
-    assert not any(snapshot_reuse.SNAPSHOT_WITNESS_SITE in key for key in on_all)
+            rows = []
+            for _ in range(3):
+                if mode == "main":
+                    body(analysis)
+                else:
+                    AnalysisSnapshot.from_function_analysis(analysis)
+                rows.append(_snapshot_observation())
+            observed[mode] = (rows, budget_observations())
+    assert observed["on"] == observed["off"] == observed["main"]
+    assert observed["on"][0][0]
+    assert not any("snapshot_reuse" in key for key in observed["on"][1])
 
 
 # ---------------------------------------------------------------------------
@@ -955,14 +992,15 @@ def test_sealing_runs_outside_every_walk_and_serialization(monkeypatch, pair_sco
     seen = []
     real = snapshot_reuse.seal_serialization
 
-    def observed(value):
-        seen.append((active_walk_work() is None, active_serialization_work() is None))
-        return real(value)
+    def observed(value, **kwargs):
+        # 読みが描いた表現から写す（ref の code を走らせない）
+        seen.append((active_walk_work() is None, active_serialization_work() is None, callable(kwargs.get("observed"))))
+        return real(value, **kwargs)
 
     monkeypatch.setattr(snapshot_reuse, "seal_serialization", observed)
     analysis = _analysis(value=_ref_value(PcodeOpRef(address_offset=0x20, mnemonic="INT_ADD", input_sizes=(4, 4))))
     AnalysisSnapshot.from_function_analysis(analysis)
-    assert seen and all(outside == (True, True) for outside in seen)
+    assert seen and all(outside == (True, True, True) for outside in seen)
 
 
 def test_an_analysis_without_to_dict_fails_like_the_body_even_after_a_hit(pair_scope, bodies):
@@ -1075,9 +1113,12 @@ def test_the_counted_body_executions_are_the_actual_executions(monkeypatch, bodi
         monkeypatch.setattr(snapshot_reuse, "_SNAPSHOT_REUSE_ENABLED", False)
         AnalysisSnapshot.from_function_analysis(analysis)
         counts = _counts()
-    assert counts["body_executions"] == bodies.count == 4
-    assert counts["requests"] == 4 and counts["hits"] == 1
-    assert counts["bypass:nested_serialization"] == 1 and counts["bypass:disabled"] == 1
+    # canonical な経路の本体（読んだ値から作る）3 回 + 通常の本体へ回した入れ子 1 回
+    assert counts["body_executions"] == 3 and bodies.count == 4
+    assert counts["requests"] == 4 and counts["hits"] == 1 and counts["misses"] == 2
+    assert counts["bypass:nested_serialization"] == 1
+    # 読みは 4 回（入れ子は読みの外の本体）
+    assert len(bodies.reads) == 4
 
 
 def test_t_b21_body_executions_equal_the_distinct_safe_witnesses_of_a_sequential_pair(pair_scope, bodies):

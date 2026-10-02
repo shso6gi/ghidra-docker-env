@@ -1,43 +1,33 @@
 """pair の中の snapshot の再利用（Issue #219 PR-219-B）: **read-set witness** の owner。
 
-`AnalysisSnapshot.from_function_analysis` の本体（`_build_from_function_analysis`）を、同じ
-read-set の解析に対して pair の中で作り直さない。再利用の根拠・token・store・寿命・計測は
-この module だけが持つ（caller・writer・schema の owner は何も持たない）。
+`AnalysisSnapshot.from_function_analysis` の本体を、同じ read-set の解析に対して pair の中で作り直さない。
+再利用の根拠・token・store・寿命・計測はこの module だけが持つ（caller・writer は何も持たない。投影と codec は
+schema の owner `snapshot.py`）。
 
-契約（計画 v2 §4 の C-RS1〜C-RS8。C-RS2 は `core/semantic_freeze` / `core/semantic_lifecycle`）:
+**保証**: 同じ初期状態から始めた呼び出しの列は、再利用の on / off（と main の本体）で、返す snapshot の全 field・
+fingerprint・参照の保持の意味、上げる例外と予算の成功 / 失敗・種類、そして入力に対して走る code（解析の view・
+record の protocol・`stable_key`・runtime ref の表現）の回数と順が同じ。
 
-* **C-RS1 再利用の唯一の根拠**: 呼び出しのたびに witness を作り、保存済みの witness と等しい
-  ときだけ保存済みの snapshot を返す。保証は「同じ witness なら、その時点の通常の build と、全 field・
-  fingerprint・参照の保持の意味・予算の成功 / 失敗と種類が一致する」。witness は本体の **投影そのもの**:
-  同じ抽出（`snapshot.snapshot_material`）を、serialization-closed な検証済みの意味値だけを identity token
-  （`ElidedSemanticValue`。強参照を持つ）に置き換えて行い、fingerprint が digest する値（`fingerprint_payload`）
-  の codec の写しと、`create` が置く値（`retained_form`）を、同じ関数で作る。比べ方は 1 つの規則
-  （`_same`。snapshot の等しさと保持から導く）。予算の成功 / 失敗と種類は、この抽出が呼び出しごとに本体と
-  同じ量を数えて同じ上限で止まることで決まる（量そのものは snapshot に入らないので witness に入れない）。
-  writer を列挙せず、invalidate の hook も置かない。
-* **sealing**（C-RS2 の接続）: closed かどうかは読むだけ（`serialization_closed`）。runtime ref の
-  写しを待つ値（pending）は、抽出の外で `seal_serialization` を明示的に呼んで確定させてから
-  witness を作り直す。sealing は memo の on / off に依らず、scope の中の入れ子でない呼び出しで
-  同じように行う（写した後の値は写しから描くので、on だけが写すと on / off の本体が別の状態を
-  読み得る）。sealing が上げた例外はそのまま上げる（値は pending のまま。本体が生の ref を
-  描いても同じ code が走る）。
-* **C-RS3 寿命**: store は `snapshot_reuse_scope()` の中だけ（pair 境界が開閉する）。入れ子の scope は
-  自分の store を持ち、抜けると entry（token の強参照）を捨てる。scope の外は今と同じ本体だけ。
-* **C-RS4 失敗の原子性**: store へ入れるのは、本体が例外なしに完成し、本体の前後の witness が
-  等しいときだけ。本体の例外は store を変えずにそのまま上げる。
-* **C-RS5 透過性**: on / off で同じ snapshot・同じ例外。witness は `BudgetObservations` に残さず
-  （`record_observations=False`）、hit は本体の観測を増やさない。計測は `snapshot_reuse_metrics()`。
-* **C-RS6 入れ子の直列化**: 別の直列化（作業量・walk）の中からの呼び出しは lookup も store も
-  sealing もしない（外側の勘定を変えない）。置き換えは core の作業量の規則で terminal でなく、
-  外側へ合算されない。
-* **C-RS7 token の封じ込め**: token は codec にとって opaque（`stable_key` / `json_items` などを
-  持たない）なので、本体の digest に入れば `TypeError`。置き換えの hook を渡すのはこの module だけ。
-* **C-RS8 並行性**: store の get / put は lock で linearize する（lock の中で利用者の code を呼ばない）。
-  同時の初回 build は両方が作り、残るのは 1 つ。解析の並行 writer は前提の外。
+**根拠（単一の読み）**: canonical な生成経路（`snapshot.canonical_generation_path`）の呼び出しは、本体と同じ読みを
+同じ順に **1 回だけ** 行う（`snapshot.read_snapshot_inputs`。本体と同じ scope・上限・観測）。違いは 1 つだけ:
+意味の view の木の中の serialization-closed な検証済みの値（C-RS2: 不変で、直列化は写しから描く純粋な処理）を、
+その値への identity token に置いたまま読む。snapshot は読んだ値の **純粋な関数**（`snapshot.assemble_snapshot`:
+token を戻し、digest を求め、`retained_form` の写しを作る）で、witness はその関数の入力そのもの（codec の写しと
+`retained_form` の写し。token は値の identity）。等しい witness からは等しい snapshot が出るので、hit は純粋な部分
+だけを省く。入力に対して走る code は hit / miss / on / off で変わらない（読みは毎回 1 回、hit が省くのは純粋な部分）。
 
-witness を作れないとき（作業量の上限・閉路の深さ・codec が token を並べる位置）は本体へ回す。凍結できない値・
-walker の拒否は本体でも同じ規則で失敗するはずなので、本体が成功したら再利用の側の誤りとして
-内部エラーにする（fallback に紛れさせない）。
+**通常の本体へ回す境界**（読む前に決める。回した呼び出しは main の本体そのもの）:
+
+* scope の外（`snapshot_reuse_scope` が無い。部品単体の呼び出し・tool）
+* 別の直列化（作業量・walk）の中からの呼び出し（外側の勘定を変えない）
+* canonical でない生成経路（派生の型、置き換えた `create` / 本体）: 単一の読みが再現する経路ではない
+
+**sealing**（C-RS2 の接続）: closed かどうかは読むだけ。単一の読みの中で pending だった値（runtime ref の写しを
+待つ値）は、読みの後で、**その読みが描いた ref の表現** から写す（`seal_serialization(observed=...)`。表現を作る
+code を走らせない）。on / off で同じ値を同じように写す。
+
+C-RS3〜C-RS8 は計画 v2 のとおり（寿命・失敗の原子性・透過性・入れ子・token の封じ込め・並行性）。本体の例外は
+そのまま上がり、store を変えない（読みが上げれば witness も snapshot も作らない）。
 """
 
 from __future__ import annotations
@@ -46,7 +36,7 @@ import threading
 import time
 from types import MappingProxyType
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.budget_policy import (
     NO_SUBSTITUTION,
@@ -54,44 +44,30 @@ from scripts.function_tracer_pcode.core.budget_policy import (
     active_budget_policy,
     active_serialization_work,
     budget_scope_is_active,
-    serialization_scope,
 )
 from scripts.function_tracer_pcode.core.condition import Condition
-from scripts.function_tracer_pcode.core.errors import InternalError, record_internal_bug
 from scripts.function_tracer_pcode.core.expression import Expression
-from scripts.function_tracer_pcode.core.json_encoding import (
-    JsonBudgetExhausted,
-    JsonValueRejected,
-    active_walk_work,
-)
-from scripts.function_tracer_pcode.core.semantic_freeze import seal_serialization
+from scripts.function_tracer_pcode.core.json_encoding import active_walk_work, protocol_method
+from scripts.function_tracer_pcode.core.semantic_freeze import NOT_OBSERVED, seal_serialization
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     serialization_closed,
     serialization_pending,
 )
 from scripts.function_tracer_pcode.core.stage_journal import journal_note
 from scripts.function_tracer_pcode.proof.obligations.snapshot import (
-    SNAPSHOT_EXTRACTION_SCHEMA_VERSION,
-    SnapshotFingerprintCodec,
-    WitnessOrderUnavailable,
-    fingerprint_payload,
+    SnapshotRead,
+    assemble_snapshot,
+    canonical_generation_path,
+    read_snapshot_inputs,
     register_witness_token_type,
-    retained_form,
-    snapshot_material,
-    snapshot_serialization_target,
 )
 
-#: 再利用を切る test の口（module の名前を monkeypatch で切る。DI は足さない）。切っても
-#: sealing は同じように行う（on / off の本体が同じ状態を読む）
+#: 再利用を切る test の口（module の名前を monkeypatch で切る。DI は足さない）。切っても読みと sealing は
+#: 同じ（on / off で入力に対して走る code が同じ）で、token を置かず store を引かない
 _SNAPSHOT_REUSE_ENABLED = True
 
-#: witness の抽出の作業量の観測点（`record_observations=False` なので観測値には現れない）
-SNAPSHOT_WITNESS_SITE = "proof.obligations.snapshot_reuse.witness"
-#: witness が予測しなかった本体の成功（再利用の側の誤り）の観測点
-SNAPSHOT_REUSE_DIVERGENCE_SITE = "proof.obligations.snapshot_reuse.witness_divergence"
-
 #: witness の形の版（形を変えたら上げる。pair をまたがないので互換は要らない）
-_WITNESS_FORMAT = 1
+_WITNESS_FORMAT = 2
 
 
 # ---------------------------------------------------------------------------
@@ -100,34 +76,34 @@ _WITNESS_FORMAT = 1
 
 
 class ElidedSemanticValue:
-    """witness の中で、serialization-closed な検証済みの意味値の代わりに置く identity token。
+    """単一の読みの中で、serialization-closed な検証済みの意味値の代わりに置く identity token。
 
-    `value` への強参照を持つ（witness が生きている間 `id` は再利用されない）。witness の比べ方は
-    `_same` / `_hash` だけが決める（`value` が同じ object であること）: この型は等しさを定義しない。
-    codec が読む protocol（`stable_key` / `to_key` / `json_items` / `__json_tree__`）を持たず
-    dataclass でもないので、本体の digest に入れば `TypeError`（C-RS7）。
+    `value` への強参照を持つ（witness が生きている間 `id` は再利用されない）。比べ方は `_same` / `_hash`
+    だけが決める（`value` が同じ object であること）: この型は等しさを定義しない。codec が読む protocol を
+    持たず dataclass でもないので、本体の digest（`witness` の偽の codec）に入れば `TypeError`（C-RS7）。
+    `snapshot.assemble_snapshot` は、登録した展開（`_token_tree`）で、置かれるはずだった木に戻す。
     """
 
-    __slots__ = ("value",)
+    __slots__ = ("value", "tree")
 
     def __init__(self, value: Any) -> None:
         self.value = value
+        #: 置かれるはずだった LEGACY の木（初めて要るときに 1 回作る。closed な値の木は純粋に決まる）
+        self.tree: Any = None
 
 
-register_witness_token_type(ElidedSemanticValue)
+def _token_tree(token: ElidedSemanticValue) -> Any:
+    """token が代わりに置かれた葉の、walker が置くはずだった木（`SerializationWork.tree` の構築と同じ関数）。
+
+    closed な値の木は、写した ref の表現と検証済みの値だけから作る（入力の code を呼ばない。C-RS2）。
+    """
+
+    if token.tree is None:
+        token.tree = protocol_method(token.value, "__json_tree__")(token.value)
+    return token.tree
 
 
-class _Pending:
-    """抽出の 1 回目で、写しを待つ値の代わりに置く印（その抽出の材料は witness にしない）。"""
-
-    __slots__ = ()
-
-    def __repr__(self) -> str:
-        return "<witness:pending>"
-
-
-register_witness_token_type(_Pending)
-_PENDING = _Pending()
+register_witness_token_type(ElidedSemanticValue, _token_tree)
 
 
 class _Retained:
@@ -143,34 +119,36 @@ class _Retained:
         self.value = value
 
 
-class _LeafSubstitution(LeafSubstitution):
-    """witness の抽出の sized leaf の置き換え（`serialization_scope(leaf_substitution=...)`）。
 
-    closed かどうかは **読むだけ**（`serialization_closed` / `serialization_pending`）。写すのは
-    抽出の外（`_witness`）。`collect` の回は、写しを待つ値を印に置き換えて集める。
+
+class _ReadHook(LeafSubstitution):
+    """単一の読みの、意味の view の sized leaf への hook（`snapshot.snapshot_material` が view の間だけ渡す）。
+
+    closed かどうかは **読むだけ**（`serialization_closed` / `serialization_pending`）。`elide` なら closed な値を
+    token に置く（同じ値には同じ token）。pending な値は置き換えず（本体と同じく描く）、読みの後で写すために集める。
     """
 
-    __slots__ = ("collect", "pending")
+    __slots__ = ("elide", "pending", "_tokens")
 
-    def __init__(self, *, collect: bool) -> None:
-        self.collect = collect
+    def __init__(self, *, elide: bool) -> None:
+        self.elide = elide
         self.pending: List[Any] = []
+        self._tokens: Dict[int, ElidedSemanticValue] = {}
 
     def __leaf_substitute__(self, leaf: Any) -> Any:
         kind = type(leaf)
         if kind is not Expression and kind is not Condition:
             return NO_SUBSTITUTION
         if serialization_closed(leaf):
-            return ElidedSemanticValue(leaf)
-        if self.collect and serialization_pending(leaf):
+            if not self.elide:
+                return NO_SUBSTITUTION
+            token = self._tokens.get(id(leaf))
+            if token is None:
+                token = self._tokens[id(leaf)] = ElidedSemanticValue(leaf)
+            return token
+        if serialization_pending(leaf):
             self.pending.append(leaf)
-            return _PENDING
         return NO_SUBSTITUTION
-
-
-# ---------------------------------------------------------------------------
-# witness
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
@@ -343,52 +321,6 @@ class _Witness:
         return self._hash
 
 
-def _extract(analysis: Any, *, collect: bool, parts: bool = True) -> Tuple[Optional[Tuple[Any, ...]], List[Any]]:
-    """本体と同じ抽出を、closed な値を token に置き換えて行う（witness の部品と、写しを待つ値の列）。
-
-    `collect` の回に写しを待つ値があれば、部品は作らずに値の列だけを返す（印を含む材料を
-    witness にしない）。`parts` が偽なら写しを待つ値だけを集める（部品を作らない）。
-    """
-
-    policy = active_budget_policy()
-    substitution = _LeafSubstitution(collect=collect)
-    with serialization_scope(
-        site=SNAPSHOT_WITNESS_SITE,
-        target_parts=snapshot_serialization_target(analysis),
-        # 上限は本体と同じ（`max_bytes` を渡さなければ今の policy の直列化の上限）。超えれば
-        # `JsonBudgetExhausted`（terminal でない: 限界にしない）で、本体が判定する
-        terminal=False,
-        leaf_substitution=substitution,
-        record_observations=False,
-    ) as work:
-        material = snapshot_material(analysis, work, True)
-        if substitution.pending or not parts:
-            return None, substitution.pending
-        # witness は本体の投影そのもの（同じ関数）: fingerprint が digest する値の codec の写しと、`create` が
-        # snapshot に置く値。closed な値は token のまま（token の型は owner が codec に登録したものだけ）
-        fingerprint_form = SnapshotFingerprintCodec._freeze_unmetered(
-            fingerprint_payload(material.snapshot_id, material.semantic_fields, SNAPSHOT_EXTRACTION_SCHEMA_VERSION),
-            True,
-        )
-        held_id, held_fields, held_refs = retained_form(
-            material.snapshot_id, material.semantic_fields, material.diagnostic_refs,
-        )
-        # 本体の結果（全 field・fingerprint・保持・予算）を決めるのは、この組と予算の scope / policy:
-        # * fingerprint の codec の写し（set の並び・object の今の状態は、codec が値として写す）
-        # * `create` が置く値（型・容器・参照で置く object の identity）
-        # 予算の成功 / 失敗と種類は witness に入れない: この抽出が呼び出しごとに本体と同じ量を数え、同じ
-        # 上限で止まる（置き換えた葉も数える）。snapshot は作業量を持たないので、量は結果を決めない
-        parts = (
-            _WITNESS_FORMAT,
-            budget_scope_is_active(),
-            policy.to_diagnostic(),
-            fingerprint_form,
-            _Retained(held_id),
-            held_fields,
-            held_refs,
-        )
-    return parts, []
-
 
 # ---------------------------------------------------------------------------
 # store / scope / 計測
@@ -493,25 +425,39 @@ def snapshot_reuse_metrics() -> Dict[str, Any]:
     return {} if store is None else store.metrics()
 
 
+
 # ---------------------------------------------------------------------------
 # 再利用の判断
 # ---------------------------------------------------------------------------
 
 
-#: witness を作れない理由のうち、本体に任せればよいもの（witness の上限・Python の再帰の深さ・
-#: token の並びを codec が決められない位置）
-_WITNESS_UNBUILDABLE = (JsonBudgetExhausted, RecursionError, WitnessOrderUnavailable)
-#: 本体の抽出・digest も同じ規則で失敗するはずの理由（本体が成功したら再利用の側の誤り）
-_WITNESS_PREDICTED_FAILURES = (TypeError, ValueError, JsonValueRejected)
+def _witness_of(read: SnapshotRead) -> _Witness:
+    """`assemble_snapshot` の入力（codec の写しと `retained_form` の写し）と、予算の scope・policy。"""
+
+    return _Witness((
+        _WITNESS_FORMAT,
+        budget_scope_is_active(),
+        active_budget_policy().to_diagnostic(),
+        read.frozen_payload,
+        _Retained(read.held_id),
+        read.held_fields,
+        read.held_refs,
+    ))
 
 
-def _seal_pending(store: SnapshotReuse, pending: List[Any]) -> None:
+def _seal_observed(store: SnapshotReuse, pending: List[Any], read: SnapshotRead) -> None:
+    """読みが描いた ref の表現から、読みの中で pending だった値を写す（表現を作る code は走らせない）。"""
+
+    if not pending:
+        return
     started = time.perf_counter()
+
+    def observed(ref: Any) -> Any:
+        return read.observed_runtime_ref(ref, NOT_OBSERVED)
+
     try:
         for value in pending:
-            # 写す（ref の表現を作る code が 1 回走る）。表現を作れないのは closed にならないだけ、
-            # それ以外の例外はそのまま上げる（値は pending のまま。生の ref を描く本体でも同じ code）
-            if seal_serialization(value):
+            if seal_serialization(value, observed=observed):
                 store.count("sealed")
             else:
                 store.count("seal_left_open")
@@ -519,106 +465,64 @@ def _seal_pending(store: SnapshotReuse, pending: List[Any]) -> None:
         store.add_seconds("seal", time.perf_counter() - started)
 
 
-def _witness(store: SnapshotReuse, analysis: Any, *, complete: bool) -> Optional[_Witness]:
-    """写しを待つ値を確定させ、`complete` なら witness を返す。"""
+def reuse_or_build(cls: Any, analysis: Any) -> Any:
+    """`cls.from_function_analysis(analysis)` の snapshot（同じ witness の間だけ保存した snapshot を返す）。
 
-    started = time.perf_counter()
-    parts, pending = _extract(analysis, collect=True, parts=complete)
-    store.add_seconds("witness", time.perf_counter() - started)
-    if pending:
-        _seal_pending(store, pending)
-        if not complete:
-            return None
-        started = time.perf_counter()
-        parts, _pending = _extract(analysis, collect=False)
-        store.add_seconds("witness", time.perf_counter() - started)
-    if not complete:
-        return None
-    return _Witness(parts)
-
-
-def _run_body(store: SnapshotReuse, analysis: Any, build: Callable[[Any], Any]) -> Any:
-    started = time.perf_counter()
-    store.count("body_executions")
-    try:
-        return build(analysis)
-    finally:
-        store.add_seconds("body", time.perf_counter() - started)
-
-
-def _body_after_witness_failure(
-    store: SnapshotReuse, analysis: Any, build: Callable[[Any], Any], failure: BaseException,
-) -> Any:
-    """witness を作れなかった呼び出しの本体。予測した失敗なのに本体が成功したら内部エラー。"""
-
-    store.count(f"bypass:witness_failed:{type(failure).__name__}")
-    snapshot = _run_body(store, analysis, build)
-    if isinstance(failure, _WITNESS_PREDICTED_FAILURES):
-        error = InternalError(failure, site=SNAPSHOT_REUSE_DIVERGENCE_SITE)
-        record_internal_bug(error, site=SNAPSHOT_REUSE_DIVERGENCE_SITE)
-        raise error
-    return snapshot
-
-
-def reuse_or_build(analysis: Any, build: Callable[[Any], Any]) -> Any:
-    """`build(analysis)`（snapshot の本体）の結果を、同じ witness の間だけ再利用する。
-
-    `AnalysisSnapshot.from_function_analysis` だけが呼ぶ。返す値と上げる例外は `build` と同じ
-    （C-RS5）。手順は module の docstring の契約どおり。
+    `AnalysisSnapshot.from_function_analysis` だけが呼ぶ。返す値と上げる例外は本体と同じ（C-RS5）。手順は
+    module の docstring のとおり。
     """
 
     store = _active_store()
     if store is None:
-        # scope の外（部品単体の呼び出し・tool）: 今と同じ本体だけ
-        return build(analysis)
+        # scope の外（部品単体の呼び出し・tool）: main と同じ本体だけ
+        return cls._build_from_function_analysis(analysis)
     if active_serialization_work() is not None or active_walk_work() is not None:
         # C-RS6: 別の直列化の中。外側の勘定を変えない（sealing もしない）
         store.count("bypass:nested_serialization")
-        return _run_body(store, analysis, build)
+        return cls._build_from_function_analysis(analysis)
+    if not canonical_generation_path(cls):
+        # 単一の読みが再現しない生成経路（派生の型・置き換えた本体）: 読む前に通常の本体へ
+        store.count("bypass:generation_path")
+        return cls._build_from_function_analysis(analysis)
     store.count("requests")
-    try:
-        witness = _witness(store, analysis, complete=_SNAPSHOT_REUSE_ENABLED)
-    except _WITNESS_UNBUILDABLE as failure:
-        store.count(f"bypass:witness_failed:{type(failure).__name__}")
-        return _run_body(store, analysis, build)
-    except _WITNESS_PREDICTED_FAILURES as failure:
-        return _body_after_witness_failure(store, analysis, build, failure)
-    if witness is None:
-        store.count("bypass:disabled")
-        return _run_body(store, analysis, build)
-    try:
-        cached = store.lookup(witness)
-    except RecursionError as failure:
-        # 比べる途中で再帰の深さに当たった: 判断できないので本体へ
-        store.count(f"bypass:witness_failed:{type(failure).__name__}")
-        return _run_body(store, analysis, build)
-    if cached is not None:
-        store.count("hits")
-        return cached
-    store.count("misses")
-    snapshot = _run_body(store, analysis, build)
-    try:
-        after = _witness(store, analysis, complete=True)
-    except _WITNESS_UNBUILDABLE + _WITNESS_PREDICTED_FAILURES:
-        store.count("unstable")
-        return snapshot
-    try:
-        stable = after == witness
-    except RecursionError:
-        stable = False
-    if not stable:
-        # 本体の間に読む値が変わった（同じ thread の書き換え）: どちらの状態の snapshot か
-        # 言えないので保存しない
-        store.count("unstable")
-        return snapshot
-    if store.put_if_absent(witness, snapshot):
-        store.count("stores")
+    enabled = _SNAPSHOT_REUSE_ENABLED
+    hook = _ReadHook(elide=enabled)
+    started = time.perf_counter()
+    # 本体と同じ読み（1 回）。上げた例外はそのまま上げる（witness も snapshot も作らない）
+    read = read_snapshot_inputs(analysis, hook)
+    store.add_seconds("read", time.perf_counter() - started)
+    snapshot = None
+    witness = None
+    if enabled:
+        started = time.perf_counter()
+        try:
+            witness = _witness_of(read)
+            snapshot = store.lookup(witness)
+        except RecursionError:
+            # 比べる途中で再帰の深さに当たった: 判断できないので保存せずに作る（結果は同じ純粋な関数）
+            store.count("bypass:witness_failed:RecursionError")
+            witness = None
+        store.add_seconds("witness", time.perf_counter() - started)
+        store.count("hits" if snapshot is not None else "misses")
+    if snapshot is None:
+        started = time.perf_counter()
+        store.count("body_executions")
+        snapshot = assemble_snapshot(read)
+        store.add_seconds("body", time.perf_counter() - started)
+        if witness is not None:
+            try:
+                stored = store.put_if_absent(witness, snapshot)
+            except RecursionError:
+                store.count("bypass:witness_failed:RecursionError")
+                stored = False
+            if stored:
+                store.count("stores")
+    _seal_observed(store, hook.pending, read)
     return snapshot
 
 
 __all__ = [
     "ElidedSemanticValue",
-    "SNAPSHOT_WITNESS_SITE",
     "SnapshotReuse",
     "reuse_or_build",
     "snapshot_reuse_metrics",

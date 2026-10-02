@@ -24,12 +24,14 @@ from scripts.function_tracer_pcode.tests.unit._package_sources import parse_sour
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 OWNER = PACKAGE_ROOT / "proof" / "obligations" / "snapshot_reuse.py"
-#: 置き換えを次へ渡すだけの core の仕組み（同名の引数をそのまま渡す）
-FORWARDER = PACKAGE_ROOT / "core" / "budget_policy.py"
-OWNER_NAMES = frozenset({"ElidedSemanticValue", "_Witness", "_Retained", "_Pending", "_LeafSubstitution"})
-#: witness の材料を写す口（`witness` が真のときだけ token を通す）。真を渡すのは owner だけ
-WITNESS_FLAG_CALLEES = frozenset({
-    "snapshot_material", "_semantic_effect_summary_projection", "freeze", "_freeze_unmetered", "_FreezeMeter",
+#: schema の owner（単一の読み `read_snapshot_inputs` と、置き換えを渡す `snapshot_material`）
+SCHEMA = PACKAGE_ROOT / "proof" / "obligations" / "snapshot.py"
+OWNER_NAMES = frozenset({"ElidedSemanticValue", "_Witness", "_Retained", "_ReadHook"})
+#: 入力を読む口（入力の code を走らせ得る）。再利用の owner は自分では呼ばない（読みは `read_snapshot_inputs` だけ）
+INPUT_READERS = frozenset({
+    "snapshot_material", "_semantic_effect_summary_projection", "freeze", "_freeze_unmetered", "_freeze",
+    "digest", "materialize", "to_dict", "semantic_snapshot_dict", "json_items", "stable_key", "create",
+    "_build_from_function_analysis_with",
 })
 SNAPSHOT_PRODUCERS = frozenset({"from_function_analysis", "_build_from_function_analysis", "snapshot_material"})
 MEMO_DECORATORS = frozenset({"lru_cache", "cache", "cached_property"})
@@ -53,41 +55,61 @@ def _calls_snapshot_producer(node: ast.AST) -> bool:
     return False
 
 
-def test_only_the_reuse_owner_passes_a_leaf_substitution():
-    offenders: List[str] = []
-    for path, tree in _production_modules():
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            for keyword in node.keywords:
-                if keyword.arg != "leaf_substitution":
-                    continue
-                forwarding = (
-                    path == FORWARDER
-                    and isinstance(keyword.value, ast.Name)
-                    and keyword.value.id == "leaf_substitution"
-                )
-                if path != OWNER and not forwarding:
-                    offenders.append(f"{path.relative_to(PACKAGE_ROOT)}:{node.lineno}")
-    assert offenders == []
-
-
-def test_only_the_reuse_owner_asks_the_codec_to_pass_witness_tokens():
-    offenders: List[str] = []
-    for path, tree in _production_modules():
-        if path == OWNER:
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
+def _calls(tree: ast.AST) -> Iterator[Tuple[ast.Call, str]]:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-            if name not in WITNESS_FLAG_CALLEES:
-                continue
-            values = list(node.args) + [keyword.value for keyword in node.keywords]
-            if any(isinstance(value, ast.Constant) and value.value is True for value in values):
+            if name is not None:
+                yield node, name
+
+
+def test_only_the_snapshot_material_turns_on_a_leaf_substitution_and_only_the_owner_defines_one():
+    """置き換えを効かせるのは schema の owner の `snapshot_material`（意味の view の間だけ）。置き換える型を
+    定義するのは再利用の owner だけ。"""
+
+    offenders: List[str] = []
+    for path, tree in _production_modules():
+        for node, name in _calls(tree):
+            if name == "substituting_leaves" and path != SCHEMA:
                 offenders.append(f"{path.relative_to(PACKAGE_ROOT)}:{node.lineno}")
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and path != OWNER:
+                bases = [base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", None) for base in node.bases]
+                if "LeafSubstitution" in bases:
+                    offenders.append(f"{path.relative_to(PACKAGE_ROOT)}:{node.lineno}: {node.name}")
     assert offenders == []
+    sites = [
+        node for node in ast.walk(parse_source(SCHEMA))
+        if isinstance(node, ast.FunctionDef) and any(name == "substituting_leaves" for _n, name in _calls(node))
+    ]
+    assert [node.name for node in sites] == ["snapshot_material"]
+
+
+def test_only_the_single_read_asks_the_codec_to_pass_witness_tokens():
+    """codec が token を通すのは、canonical な経路の単一の読み（`read_snapshot_inputs`）の digest の凍結だけ。"""
+
+    offenders: List[str] = []
+    for path, tree in _production_modules():
+        functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+        for function in functions:
+            for node, name in _calls(function):
+                if name != "_freeze_unmetered":
+                    continue
+                values = list(node.args) + [keyword.value for keyword in node.keywords]
+                if any(isinstance(value, ast.Constant) and value.value is True for value in values):
+                    if not (path == SCHEMA and function.name == "read_snapshot_inputs"):
+                        offenders.append(f"{path.relative_to(PACKAGE_ROOT)}:{node.lineno}:{function.name}")
+    assert offenders == []
+
+
+def test_the_reuse_owner_reads_the_input_only_through_the_single_read():
+    """再利用の owner は入力を読む口を自分で呼ばない: 入力に対して走る code は本体と同じ 1 回の読みだけ。"""
+
+    calls = sorted({name for _node, name in _calls(parse_source(OWNER)) if name in INPUT_READERS})
+    assert calls == []
+    called = {name for _node, name in _calls(parse_source(OWNER))}
+    assert {"read_snapshot_inputs", "assemble_snapshot", "canonical_generation_path"} <= called
 
 
 def test_reuse_tokens_and_witnesses_stay_inside_the_owner():
@@ -154,11 +176,8 @@ def test_only_the_owner_runs_the_snapshot_body_and_from_function_analysis_delega
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
     ]
     assert [call.func.attr for call in calls] == ["reuse_or_build"]
-    # 本体は class の方法として 1 か所で渡す（呼ばない）
-    assert any(
-        isinstance(arg, ast.Attribute) and arg.attr == "_build_from_function_analysis"
-        for arg in calls[0].args
-    )
+    # 生成経路（class）と解析をそのまま渡す（本体を選ぶのは再利用の owner: canonical でなければ本体へ）
+    assert [getattr(arg, "id", None) for arg in calls[0].args] == ["cls", "analysis"]
 
 
 def test_the_live_flow_audit_follows_the_leaf_substitution_protocol():
@@ -167,7 +186,7 @@ def test_the_live_flow_audit_follows_the_leaf_substitution_protocol():
     from scripts.function_tracer_pcode.tests.unit import _live_flow_audit as flow
 
     _violations, analyzed, _index, _missing = flow.audit(PACKAGE_ROOT)
-    assert (flow.PKG + ".proof.obligations.snapshot_reuse", "_LeafSubstitution.__leaf_substitute__") in analyzed
+    assert (flow.PKG + ".proof.obligations.snapshot_reuse", "_ReadHook.__leaf_substitute__") in analyzed
 
 
 def test_only_the_reuse_owner_registers_witness_token_types():
@@ -189,4 +208,4 @@ def test_only_the_reuse_owner_registers_witness_token_types():
     from scripts.function_tracer_pcode.proof.obligations import snapshot as snapshot_module
     from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse
 
-    assert set(snapshot_module._WITNESS_TOKEN_TYPES) == {snapshot_reuse.ElidedSemanticValue, snapshot_reuse._Pending}
+    assert [kind for kind, _tree_of in snapshot_module._WITNESS_TOKEN_TYPES] == [snapshot_reuse.ElidedSemanticValue]

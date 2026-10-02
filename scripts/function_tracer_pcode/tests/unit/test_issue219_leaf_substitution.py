@@ -1,15 +1,14 @@
 # -*- coding: utf-8 -*-
 """直列化の作業量の葉の置き換え（Issue #219 PR-219-B、`core/budget_policy` の汎用の仕組み）。
 
-core は「sized leaf を作る前に、渡された置き換えに尋ねる」ことと「量を観測値へ残すか」だけを
-持ち、何を置き換えるか（snapshot の意味）は知らない。ここでは仕組みの契約を固定する:
+core は「sized leaf を作る前に、渡された置き換えに尋ねる」ことだけを持ち（`substituting_leaves`）、
+何を置き換えるか（snapshot の意味）は知らない。ここでは仕組みの契約を固定する:
 
 * 置き換えを渡さない作業量の挙動は今と同じ（出力・数えた量・観測）
-* 尋ねるのは、walk の外から始めた LEGACY の構築が置く葉だけ（呼ぶ側だけが受け取る値）。
-  walk の中の code が読む値（producer が作る record の表現）・`Expression.to_dict()` の返り値・
-  数えるだけの walk は置き換えない
-* 置き換えを持つ作業量は terminal でなく、外側へ合流も合算もしない
-* `record_observations=False` は観測値へ残さない
+* 置き換えが変えるのは置く値だけ: 数えた byte・distinct な node・上限の超過（terminal な限界を含む）・
+  観測値は、置き換えない作業量と同じ（そのため本体の terminal な作業量でも使える）
+* 尋ねるのは `substituting_leaves` の間に、walk の外から始めた LEGACY の構築が置く葉だけ（呼ぶ側だけが
+  受け取る値）。walk の中の code が読む値・`Expression.to_dict()` の返り値・数えるだけの walk は置き換えない
 """
 
 from __future__ import annotations
@@ -23,10 +22,15 @@ from scripts.function_tracer_pcode.core.budget_policy import (
     NO_SUBSTITUTION,
     LeafSubstitution,
     BudgetPolicy,
-    SerializationWork,
     budget_observations,
     budget_policy_scope,
     serialization_scope,
+    substituting_leaves,
+)
+from scripts.function_tracer_pcode.core.errors import (
+    ExpressionSizeBudgetExceeded,
+    pair_failure_scope,
+    reset_pair_failure_scopes,
 )
 from scripts.function_tracer_pcode.core.expression import Expression
 from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
@@ -89,67 +93,78 @@ class _Fields:
         yield from self.fields.items()
 
 
-def _materialized(source: Any, **scope: Any):
-    with serialization_scope(site="test.leaf", target_parts=("t",), **scope) as work:
-        built = RESULT_JSON_POLICY.materialize(source, budget=work)
-        return built, work.consumed
+@pytest.fixture(autouse=True)
+def _clean_ledger_stack():
+    reset_pair_failure_scopes()
+    yield
+    reset_pair_failure_scopes()
+
+
+def _measured(source: Any, substitution: Any = None, *, terminal: bool = True, site: str = "test.leaf"):
+    with serialization_scope(site=site, target_parts=("t",), terminal=terminal) as work:
+        with substituting_leaves(work, substitution):
+            built = RESULT_JSON_POLICY.materialize(source, budget=work)
+        return built, work.consumed, work.distinct_nodes
 
 
 def test_without_a_substitution_the_work_is_unchanged():
     expr = _expr()
     with budget_policy_scope(BudgetPolicy()):
-        plain, plain_bytes = _materialized(_Fields(a=expr, b=_Fields(k=expr)))
-        explicit, explicit_bytes = _materialized(_Fields(a=expr, b=_Fields(k=expr)), leaf_substitution=None, terminal=True)
-    assert plain == explicit == {"a": expr.to_dict(), "b": {"k": expr.to_dict()}}
-    assert plain_bytes == explicit_bytes
+        plain = _measured(_Fields(a=expr, b=_Fields(k=expr)))
+        explicit = _measured(_Fields(a=expr, b=_Fields(k=expr)), None)
+    assert plain == explicit
+    assert plain[0] == {"a": expr.to_dict(), "b": {"k": expr.to_dict()}}
 
 
-def _measured(source: Any, **scope: Any):
-    with serialization_scope(site="test.leaf", target_parts=("t",), **scope) as work:
-        built = RESULT_JSON_POLICY.materialize(source, budget=work)
-        return built, work.consumed, work.distinct_nodes
-
-
-def test_a_substituted_leaf_is_placed_but_counted_exactly_like_a_built_one():
-    """置き換えが変えるのは置く値だけ: 数えた byte と distinct な node は、置き換えない作業量と同じ。"""
+@pytest.mark.parametrize("terminal", [True, False])
+def test_a_substituted_leaf_is_placed_but_counted_and_observed_exactly_like_a_built_one(terminal):
+    """置き換えが変えるのは置く値だけ: 数えた byte・distinct な node・観測値は、置き換えない作業量と同じ。"""
 
     shared = _expr()
     other = _expr(5)
     source = _Fields(a=shared, b=Expression.binary_op("INT_AND", shared, other), c=other)
     asked = _Asked()
     with budget_policy_scope(BudgetPolicy()):
-        built, consumed, nodes = _measured(source, terminal=False, leaf_substitution=asked)
-        plain, plain_bytes, plain_nodes = _measured(source, terminal=False)
+        built, consumed, nodes = _measured(source, asked, terminal=terminal, site="test.leaf.sub")
+        substituted_observed = {k.split("@")[0]: v for k, v in budget_observations().items() if k.endswith("@test.leaf.sub")}
+    with budget_policy_scope(BudgetPolicy()):
+        _plain, plain_bytes, plain_nodes = _measured(source, terminal=terminal, site="test.leaf.sub")
+        plain_observed = {k.split("@")[0]: v for k, v in budget_observations().items() if k.endswith("@test.leaf.sub")}
     assert [type(item) for item in built.values()] == [_Marker, _Marker, _Marker]
     assert len(asked.leaves) == 3
     assert (consumed, nodes) == (plain_bytes, plain_nodes)
+    assert substituted_observed == plain_observed
+    assert bool(plain_observed) == terminal
 
 
 @pytest.mark.parametrize("offset", [-1, 0, 1])
-def test_a_substituting_work_stops_at_the_same_node_limit_as_a_plain_work(offset):
+@pytest.mark.parametrize("terminal", [True, False])
+def test_a_substituting_work_stops_at_the_same_node_limit_as_a_plain_work(offset, terminal):
     from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted
 
     shared = _expr()
     source = _Fields(a=shared, b=Expression.binary_op("INT_AND", shared, _expr(5)))
     with budget_policy_scope(BudgetPolicy()):
-        _built, _bytes, nodes = _measured(source, terminal=False)
+        _built, _bytes, nodes = _measured(source)
     outcomes = []
-    with budget_policy_scope(BudgetPolicy(serialization_nodes=nodes + offset)):
-        for scope in ({"leaf_substitution": _Asked()}, {}):
+    for substitution in (_Asked(), None):
+        with pair_failure_scope(("pair", 1), None), budget_policy_scope(BudgetPolicy(serialization_nodes=nodes + offset)):
             try:
-                _measured(source, terminal=False, **scope)
+                _measured(source, substitution, terminal=terminal)
                 outcomes.append("ok")
-            except JsonBudgetExhausted:
-                outcomes.append("exhausted")
-    assert outcomes[0] == outcomes[1] == ("exhausted" if offset < 0 else "ok")
+            except (JsonBudgetExhausted, ExpressionSizeBudgetExceeded) as failure:
+                outcomes.append(type(failure).__name__)
+        reset_pair_failure_scopes()
+    expected = ("ExpressionSizeBudgetExceeded" if terminal else "JsonBudgetExhausted") if offset < 0 else "ok"
+    assert outcomes[0] == outcomes[1] == expected
 
 
 def test_no_substitution_answer_keeps_the_leaf():
     expr = _expr()
     with budget_policy_scope(BudgetPolicy()):
-        built, consumed = _materialized(_Fields(a=expr), terminal=False, leaf_substitution=_Asked(NO_SUBSTITUTION))
-        plain, plain_bytes = _materialized(_Fields(a=expr), terminal=False)
-    assert built == plain and consumed == plain_bytes
+        built = _measured(_Fields(a=expr), _Asked(NO_SUBSTITUTION))
+        plain = _measured(_Fields(a=expr))
+    assert built == plain
 
 
 def test_values_built_for_code_inside_a_walk_are_never_substituted():
@@ -157,7 +172,7 @@ def test_values_built_for_code_inside_a_walk_are_never_substituted():
     asked = _Asked()
     record = _Record(_Inner(expr))
     with budget_policy_scope(BudgetPolicy()):
-        built, _consumed = _materialized(_Fields(record=record, outer=expr), terminal=False, leaf_substitution=asked)
+        built, _consumed, _nodes = _measured(_Fields(record=record, outer=expr), asked)
     # producer が読んだ表現は本物（置き換えは walk の外から始めた構築が置いた葉だけ）
     assert built["record"] == {"inner_type": "BINARY_OP", "expr_dict": "BINARY_OP"}
     assert type(built["outer"]) is _Marker
@@ -168,59 +183,41 @@ def test_to_dict_and_count_only_walks_are_never_substituted():
     expr = _expr()
     asked = _Asked()
     with budget_policy_scope(BudgetPolicy()):
-        with serialization_scope(site="t", target_parts=("t",), terminal=False, leaf_substitution=asked) as work:
-            assert expr.to_dict() == Expression.to_dict(expr) and type(expr.to_dict()) is dict
-            RESULT_JSON_POLICY.count_into(_Fields(a=expr), work)
+        with serialization_scope(site="t", target_parts=("t",)) as work:
+            with substituting_leaves(work, asked):
+                assert expr.to_dict() == Expression.to_dict(expr) and type(expr.to_dict()) is dict
+                RESULT_JSON_POLICY.count_into(_Fields(a=expr), work)
     assert asked.leaves == []
 
 
-def test_a_substitution_must_be_a_leaf_substitution():
-    with pytest.raises(TypeError):
-        with serialization_scope(site="t", target_parts=("t",), terminal=False, leaf_substitution=lambda leaf: leaf):
-            pass
-
-
-def test_a_substitution_needs_a_non_terminal_work_of_its_own():
-    with pytest.raises(ValueError):
-        with serialization_scope(site="t", target_parts=("t",), leaf_substitution=_Asked()):
-            pass
-    with budget_policy_scope(BudgetPolicy()):
-        with serialization_scope(site="outer", target_parts=("o",)) as outer:
-            with pytest.raises(ValueError):
-                SerializationWork(site="t", target_parts=("t",), terminal=False, parent=outer, leaf_substitution=_Asked())
-
-
-def test_a_terminal_substitution_inside_an_outer_work_is_refused_not_merged():
-    with budget_policy_scope(BudgetPolicy()):
-        with serialization_scope(site="outer", target_parts=("o",)):
-            with pytest.raises(ValueError):
-                with serialization_scope(site="inner", target_parts=("i",), leaf_substitution=_Asked()):
-                    pass
-
-
-def test_a_substitution_work_is_not_merged_into_or_charged_to_the_outer_work():
+def test_only_the_leaves_built_while_substituting_are_asked():
     expr = _expr()
+    asked = _Asked()
     with budget_policy_scope(BudgetPolicy()):
-        with serialization_scope(site="outer", target_parts=("o",)) as outer:
-            before = outer.consumed
-            with serialization_scope(
-                site="inner", target_parts=("i",), terminal=False, leaf_substitution=_Asked(),
-            ) as inner:
-                assert inner is not outer
-                RESULT_JSON_POLICY.materialize(_Fields(a=expr), budget=inner)
-            assert outer.consumed == before
+        with serialization_scope(site="t", target_parts=("t",)) as work:
+            before = RESULT_JSON_POLICY.materialize(_Fields(a=expr), budget=work)
+            with substituting_leaves(work, asked):
+                during = RESULT_JSON_POLICY.materialize(_Fields(a=expr), budget=work)
+            after = RESULT_JSON_POLICY.materialize(_Fields(a=expr), budget=work)
+            assert work.leaf_substitution is None
+    assert before == after == {"a": expr.to_dict()}
+    assert type(during["a"]) is _Marker and asked.leaves == [expr]
+
+
+def test_a_substitution_must_be_a_leaf_substitution_and_does_not_nest():
+    with budget_policy_scope(BudgetPolicy()):
+        with serialization_scope(site="t", target_parts=("t",)) as work:
+            with pytest.raises(TypeError):
+                with substituting_leaves(work, lambda leaf: leaf):
+                    pass
+            with substituting_leaves(work, _Asked()):
+                with pytest.raises(ValueError):
+                    with substituting_leaves(work, _Asked()):
+                        pass
+            assert work.leaf_substitution is None
 
 
 def test_the_substitution_is_asked_even_outside_a_budget_scope():
     asked = _Asked()
-    built, _consumed = _materialized(_Fields(a=_expr()), terminal=False, leaf_substitution=asked)
+    built, _consumed, _nodes = _measured(_Fields(a=_expr()), asked)
     assert type(built["a"]) is _Marker
-
-
-def test_record_observations_false_leaves_no_observation():
-    expr = _expr()
-    with budget_policy_scope(BudgetPolicy()):
-        _materialized(_Fields(a=expr), record_observations=False)
-        assert not any(key.endswith("@test.leaf") for key in budget_observations())
-        _materialized(_Fields(a=expr))
-        assert any(key.endswith("@test.leaf") for key in budget_observations())

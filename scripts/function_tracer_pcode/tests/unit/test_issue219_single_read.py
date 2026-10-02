@@ -1,0 +1,401 @@
+# -*- coding: utf-8 -*-
+"""snapshot の再利用の単一の読み（Issue #219 PR-219-B レビュー 4）: 同じ初期状態から始めた呼び出しの列は、
+再利用の on / off と main の本体で、同じ結果・同じ副作用になる。
+
+oracle は production の再利用を使わない: 同じ factory から作った **別の初期状態** を mode ごとに用意し、同じ手順を
+流して、次を mode の間で比べる。
+
+* 各呼び出しの結果（snapshot の全 field を型まで写した形・fingerprint・返る型）か、上げた例外の型と文面
+* 手順の後の入力の状態（producer の code が読んだ回数・書いた値）
+
+run ごとに object が違うので、object の葉は factory が付けた名前で比べる（同じ run の中の保持の identity は
+`_snapshot_oracle` が別に確かめる）。main の本体は `_build_from_function_analysis` を直接呼ぶ（再利用を通らない）。
+
+mode:
+
+* `on`: 再利用の scope の中、memo あり
+* `off`: 再利用の scope の中、memo なし（`_SNAPSHOT_REUSE_ENABLED = False`）
+* `main`: 再利用の scope の外の本体（main と同じ本体）
+
+runtime ref の表現を作る code が外の状態を読む場合は、C-RS2 の規則（写した値は写しから描く）で on / off は同じ、
+main とは違い得る（`test_issue219_snapshot_reuse.py` の外部状態の test）。ここの producer はそれを含まない。
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import random
+from typing import Any, Callable, Dict, List, Tuple
+
+import pytest
+
+from scripts.function_tracer_pcode.core.analysis import ReturnInfo
+from scripts.function_tracer_pcode.core.budget_policy import BudgetPolicy, budget_policy_scope, serialization_scope
+from scripts.function_tracer_pcode.core.errors import pair_failure_scope, reset_pair_failure_scopes
+from scripts.function_tracer_pcode.core.expression import Expression
+from scripts.function_tracer_pcode.core.runtime_refs import PcodeOpRef
+from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse
+from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
+from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import snapshot_reuse_metrics, snapshot_reuse_scope
+from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
+from scripts.function_tracer_pcode.tests.unit._publication import published
+
+
+@pytest.fixture(autouse=True)
+def _clean_ledger_stack():
+    reset_pair_failure_scopes()
+    yield
+    reset_pair_failure_scopes()
+
+
+@pytest.fixture(autouse=True, params=["hash", "collide"])
+def _witness_hash_mode(request, monkeypatch):
+    """`collide` は witness の hash を定数にして、比べ方（`_same`）だけで決めさせる。"""
+
+    if request.param == "collide":
+        monkeypatch.setattr(snapshot_reuse, "_witness_hash", lambda parts: 0)
+        monkeypatch.setattr(snapshot_reuse, "_hash", lambda value, retained=False: 0)
+    yield request.param
+
+
+# ---------------------------------------------------------------------------
+# 入力の producer（package の型: codec が protocol を呼ぶ）
+# ---------------------------------------------------------------------------
+
+
+class Counting:
+    """`json_items` が読むたびに内部の counter を進める record（読みの副作用）。"""
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def json_items(self):
+        self.reads += 1
+        yield "reads", self.reads
+
+    def observe(self) -> Any:
+        return ("reads", self.reads)
+
+
+class CountingKey:
+    """`stable_key` が読むたびに counter を進める object（identity の読みの副作用）。"""
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def stable_key(self):
+        self.reads += 1
+        return ("keyed", self.reads)
+
+    def observe(self) -> Any:
+        return ("reads", self.reads)
+
+
+class FailsOnRead:
+    """`fail_at` 回目の読みで失敗する record（例外の経路）。"""
+
+    def __init__(self, fail_at: int) -> None:
+        self.reads = 0
+        self.fail_at = fail_at
+
+    def json_items(self):
+        self.reads += 1
+        if self.reads == self.fail_at:
+            raise ValueError("read %d failed" % self.reads)
+        yield "reads", self.reads
+
+    def observe(self) -> Any:
+        return ("reads", self.reads)
+
+
+class WritesNote:
+    """読むたびに解析の別の field（注記）へ書く record（読みの中の別 field への書き込み）。"""
+
+    def __init__(self) -> None:
+        self.target: Any = None
+        self.reads = 0
+
+    def json_items(self):
+        self.reads += 1
+        if self.target is not None:
+            self.target.analysis_notes.append("diagnostic:read-%d" % self.reads)
+        yield "reads", self.reads
+
+    def observe(self) -> Any:
+        return ("reads", self.reads)
+
+
+@dataclasses.dataclass
+class Plain:
+    """副作用の無い、変わり得る dataclass（状態の変更の経路）。"""
+
+    value: Any
+
+    def observe(self) -> Any:
+        return ("value", self.value)
+
+
+PRODUCERS: Dict[str, Callable[[], Any]] = {
+    "counting": Counting,
+    "counting_key": CountingKey,
+    "fails_on_third": lambda: FailsOnRead(3),
+    "writes_note": WritesNote,
+    "plain": lambda: Plain(1),
+}
+
+
+# ---------------------------------------------------------------------------
+# 生成経路
+# ---------------------------------------------------------------------------
+
+
+class Derived(AnalysisSnapshot):
+    """`create` が field を足す派生（生成経路が違う）。"""
+
+    @classmethod
+    def create(cls, snapshot_id, semantic_fields, *, diagnostic_refs=None, **kwargs):
+        fields = dict(semantic_fields)
+        fields["derived_extra"] = ("derived", len(fields))
+        return super().create(snapshot_id, fields, diagnostic_refs=diagnostic_refs, **kwargs)
+
+
+class Inherit(AnalysisSnapshot):
+    """継承だけの派生（返る型だけが違う）。"""
+
+
+CLASSES = {"canonical": AnalysisSnapshot, "derived": Derived, "inherit": Inherit}
+
+
+# ---------------------------------------------------------------------------
+# 状態と手順
+# ---------------------------------------------------------------------------
+
+
+class State:
+    """1 run 分の入力（factory が毎回新しく作る）。object の葉は名前で比べる。"""
+
+    def __init__(self, producers: List[str], *, pending: bool) -> None:
+        self.objects: Dict[str, Any] = {}
+        facts = {}
+        for index, name in enumerate(producers):
+            value = PRODUCERS[name]()
+            self.objects["%s#%d" % (name, index)] = value
+            facts["p%d" % index] = value
+        closed = published(Expression.binary_op("INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(7, size=4)))
+        values = [closed]
+        if pending:
+            values.append(published(Expression.binary_op(
+                "INT_ADD", Expression.parameter("a", 0, size=4),
+                Expression.unknown("u", runtime_ref=PcodeOpRef(address_offset=0x40, mnemonic="INT_ADD", input_sizes=(4, 4))),
+            )))
+        self.analysis = create_mock_analysis(
+            "f",
+            returns=[ReturnInfo(address="0x%08x" % (0x401000 + 4 * i), conditions=[], value=v) for i, v in enumerate(values)],
+        )
+        self.analysis.return_abi_facts = facts
+        self.analysis.analysis_scope_key = ("scope", tuple(facts.values())[:1])
+        for value in facts.values():
+            if isinstance(value, WritesNote):
+                value.target = self.analysis
+        self.labels = {id(value): label for label, value in self.objects.items()}
+
+    def observe(self) -> Any:
+        return (
+            tuple((label, value.observe()) for label, value in sorted(self.objects.items())),
+            tuple(self.analysis.analysis_notes),
+        )
+
+
+def _shape(value: Any, labels: Dict[int, str]) -> Any:
+    """run をまたいで比べる形（型まで。object は名前、名前の無い object は型名と内容）。"""
+
+    kind = type(value)
+    if value is None or kind in (bool, int, str, bytes):
+        return (kind.__name__, value)
+    if kind is float:
+        return ("float", float.__repr__(value))
+    if kind in (tuple, list):
+        return (kind.__name__, tuple(_shape(item, labels) for item in value))
+    if kind in (frozenset, set):
+        return (kind.__name__, tuple(sorted(repr(_shape(item, labels)) for item in value)))
+    if isinstance(value, dict) or type(value).__name__ == "mappingproxy":
+        return (kind.__name__, tuple((_shape(key, labels), _shape(item, labels)) for key, item in value.items()))
+    label = labels.get(id(value))
+    if label is not None:
+        return ("object", label)
+    if dataclasses.is_dataclass(value):
+        return (kind.__name__, tuple((f.name, _shape(getattr(value, f.name), labels)) for f in dataclasses.fields(value)))
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict) and isinstance(value, Expression):
+        return ("Expression", _shape(to_dict(), labels))
+    return ("opaque", kind.__name__)
+
+
+def _result(snapshot: AnalysisSnapshot, labels: Dict[int, str]) -> Any:
+    refs = dict(snapshot.diagnostic_refs)
+    refs.pop("function_ref", None)
+    return (
+        type(snapshot).__name__,
+        _shape(snapshot.snapshot_id, labels),
+        _shape(snapshot.semantic_fields, labels),
+        snapshot.semantic_fingerprint,
+        snapshot.comparison_fingerprint,
+        _shape(refs, labels),
+    )
+
+
+Step = Tuple[str, Any]
+
+
+def _mutate_plain(state: State) -> None:
+    for value in state.objects.values():
+        if isinstance(value, Plain):
+            value.value = value.value + 1
+
+
+def _replace_first(state: State) -> None:
+    key = sorted(state.analysis.return_abi_facts)[0]
+    state.analysis.return_abi_facts[key] = Plain(99)
+    state.labels[id(state.analysis.return_abi_facts[key])] = "replacement"
+
+
+def _append_note(state: State) -> None:
+    state.analysis.analysis_notes.append("indirect_control_flow_unresolved")
+
+
+MUTATIONS = {"mutate_plain": _mutate_plain, "replace_first": _replace_first, "append_note": _append_note}
+
+
+def _call(mode: str, cls: Any, analysis: Any, *, nested: bool) -> Any:
+    if mode == "main":
+        return cls._build_from_function_analysis(analysis)
+    if nested:
+        with serialization_scope(site="test.outer", target_parts=("outer",)):
+            return cls.from_function_analysis(analysis)
+    return cls.from_function_analysis(analysis)
+
+
+def _run(mode: str, factory: Callable[[], State], steps: List[Step], monkeypatch) -> Any:
+    reset_pair_failure_scopes()
+    monkeypatch.setattr(snapshot_reuse, "_SNAPSHOT_REUSE_ENABLED", mode == "on")
+    state = factory()
+    out: List[Any] = []
+    with pair_failure_scope(("pair", 1), None), budget_policy_scope(BudgetPolicy()), snapshot_reuse_scope():
+        for kind, arg in steps:
+            if kind in ("call", "nested"):
+                try:
+                    snapshot = _call(mode, CLASSES[arg], state.analysis, nested=kind == "nested")
+                    out.append(("ok", _result(snapshot, state.labels)))
+                except (TypeError, ValueError) as failure:
+                    out.append(("raised", type(failure).__name__, str(failure)))
+                except Exception as failure:  # noqa: BLE001 - test oracle: record any exception type
+                    out.append(("raised", type(failure).__name__, str(failure)[:200]))
+            else:
+                MUTATIONS[arg](state)
+        metrics = snapshot_reuse_metrics()
+    out.append(("state", state.observe()))
+    return out, metrics
+
+
+def _compare(factory: Callable[[], State], steps: List[Step], monkeypatch) -> Dict[str, Any]:
+    runs = {mode: _run(mode, factory, steps, monkeypatch) for mode in ("on", "off", "main")}
+    assert runs["on"][0] == runs["off"][0], steps
+    assert runs["on"][0] == runs["main"][0], steps
+    return {mode: run[1] for mode, run in runs.items()}
+
+
+# ---------------------------------------------------------------------------
+# 回帰: レビュー 4 の反例
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("producer", sorted(PRODUCERS))
+@pytest.mark.parametrize("where", ["return_abi_facts", "analysis_scope_key"])
+def test_a_reading_side_effect_runs_the_same_number_of_times_with_memo_on_off_and_main(producer, where, monkeypatch):
+    """読むたびに状態を変える producer: on / off / main で同じ fingerprint の列・同じ回数の読み（レビュー 4 の A）。"""
+
+    def factory() -> State:
+        state = State([producer], pending=False)
+        if where == "analysis_scope_key":
+            value = state.analysis.return_abi_facts.pop("p0")
+            state.analysis.analysis_scope_key = ("scope", value)
+        return state
+
+    _compare(factory, [("call", "canonical")] * 4, monkeypatch)
+
+
+@pytest.mark.parametrize("order", [("canonical", "derived"), ("derived", "canonical"), ("canonical", "inherit"), ("inherit", "canonical")])
+def test_each_generation_path_returns_its_own_type_and_fields_in_either_order(order, monkeypatch):
+    """同じ pair・同じ解析で生成経路を混ぜても、それぞれの経路の本体と同じ型・field（レビュー 4 の B）。"""
+
+    def factory() -> State:
+        return State(["plain"], pending=False)
+
+    steps = [("call", order[0]), ("call", order[1]), ("call", order[0]), ("call", order[1])]
+    metrics = _compare(factory, steps, monkeypatch)
+    counts = metrics["on"]["counts"]
+    assert counts["bypass:generation_path"] == 2
+
+
+def test_a_replaced_body_or_create_is_not_the_canonical_path(monkeypatch):
+    """置き換えた `create` / 本体は canonical でない（読む前に通常の本体へ）。"""
+
+    seen = []
+    original = AnalysisSnapshot.__dict__["create"].__func__
+
+    def recorded_create(cls, *args, **kwargs):
+        seen.append(cls)
+        return original(cls, *args, **kwargs)
+
+    monkeypatch.setattr(AnalysisSnapshot, "create", classmethod(recorded_create))
+    state = State(["plain"], pending=False)
+    with pair_failure_scope(("pair", 1), None), budget_policy_scope(BudgetPolicy()), snapshot_reuse_scope():
+        AnalysisSnapshot.from_function_analysis(state.analysis)
+        AnalysisSnapshot.from_function_analysis(state.analysis)
+        counts = snapshot_reuse_metrics()["counts"]
+    assert seen == [AnalysisSnapshot, AnalysisSnapshot]
+    assert counts == {"bypass:generation_path": 2}
+
+
+# ---------------------------------------------------------------------------
+# 組み合わせ: hit / miss / bypass、生成経路、状態の変更、副作用、例外、sealing
+# ---------------------------------------------------------------------------
+
+
+def _random_steps(rng: random.Random) -> List[Step]:
+    steps: List[Step] = []
+    for _ in range(rng.randrange(3, 9)):
+        pick = rng.random()
+        if pick < 0.55:
+            steps.append(("call", rng.choice(("canonical", "canonical", "derived", "inherit"))))
+        elif pick < 0.65:
+            steps.append(("nested", "canonical"))
+        else:
+            steps.append(("mutate", rng.choice(sorted(MUTATIONS))))
+    return steps
+
+
+@pytest.mark.parametrize("seed", range(120))
+def test_random_sequences_have_the_same_results_and_side_effects_with_memo_on_off_and_main(seed, monkeypatch):
+    rng = random.Random(seed)
+    producers = [rng.choice(sorted(PRODUCERS)) for _ in range(rng.randrange(1, 4))]
+    pending = rng.random() < 0.5
+    steps = _random_steps(rng)
+
+    def factory() -> State:
+        return State(producers, pending=pending)
+
+    _compare(factory, steps, monkeypatch)
+
+
+def test_hits_happen_and_the_body_runs_once_per_distinct_witness(monkeypatch):
+    """同じ読みは hit する（全部を作り直す修正ではない）。pending な値は 1 回目の読みの後で写す。"""
+
+    def factory() -> State:
+        return State(["plain"], pending=True)
+
+    metrics = _compare(factory, [("call", "canonical")] * 5, monkeypatch)
+    counts = metrics["on"]["counts"]
+    # 1 回目: pending を描いて読み、写す。2 回目: closed になった値の token で読む（別の witness）。以後は hit
+    assert counts["body_executions"] == 2 and counts["hits"] == 3 and counts["sealed"] == 1
+    assert metrics["off"]["counts"]["sealed"] == 1 and "hits" not in metrics["off"]["counts"]
