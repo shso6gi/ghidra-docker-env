@@ -26,6 +26,8 @@ from scripts.function_tracer_pcode.core.live_values import (
     elements_of,
     enum_name,
     field_value,
+    float_value,
+    int_value,
     is_kind,
     items_of,
     json_scalar,
@@ -133,6 +135,29 @@ SEMANTIC_FIELDS = frozenset({
     "_recurrence_semantic_key",
 })
 
+#: 意味 field のうち scalar を持つ field（Issue #235）。構築と代入の入口で、scalar の subclass を
+#: 組み込みの型そのものへ写す（`_exact_scalar`）
+SCALAR_SEMANTIC_FIELDS = frozenset({"value", "operator", "size", "name", "data_type", "read_order_key", "opcode"})
+
+
+def _exact_scalar(value: Any) -> Any:
+    """scalar の subclass（JPype の `JInt` / `JLong` / `JString` など外の runtime の型）を、基底型の値へ写す。
+
+    基底型の slot で読む（subclass の `__int__` / `__str__` を呼ばない: `core/live_values`）。値と意味
+    （整数値・文字列）は変えず、JSON・digest・式の文字列が読む基底型の値と同じ。bool・enum の member・
+    scalar でない値はそのまま。式の意味 field の scalar を組み込みの型そのものにするのは、検証済みの値の
+    直列化の不変性（#219 C-RS2）が組み込みの不変な型だけを受けるため（subclass は外の code へ dispatch し得る）。
+    """
+
+    kind = type(value)
+    if value is None or kind is int or kind is str or kind is float or kind is bool:
+        return value
+    for convert in (int_value, str_value, float_value):
+        exact = convert(value)
+        if exact is not NOT_PLAIN:
+            return exact
+    return value
+
 class Expression:
     """
     式を表現するクラス（AST的な構造）
@@ -192,19 +217,20 @@ class Expression:
             resolved_operands.append(operand)
         # 構築は必ず未凍結なので `__setattr__` の判定を通す必要がない。
         # `__dict__` へ直接置いて構築費用を増やさない。
+        # scalar の意味 field は組み込みの型そのものにする（Issue #235。`_exact_scalar`）
         self.__dict__.update(
             expr_type=expr_type,
-            value=value,
-            operator=operator,
+            value=_exact_scalar(value),
+            operator=_exact_scalar(operator),
             operands=resolved_operands,
-            size=size,
-            name=name,
-            data_type=data_type,
+            size=_exact_scalar(size),
+            name=_exact_scalar(name),
+            data_type=_exact_scalar(data_type),
             data_type_obj=data_type_obj,
             storage_info=storage_info,
-            read_order_key=read_order_key,
+            read_order_key=_exact_scalar(read_order_key),
             runtime_ref=runtime_ref,
-            opcode=opcode,
+            opcode=_exact_scalar(opcode),
             call_argument_width_evidence=call_argument_width_evidence,
         )
         if recurrence_semantic_key is not None:
@@ -229,6 +255,8 @@ class Expression:
             )
 
             raise frozen_mutation_error(self, name)
+        if name in SCALAR_SEMANTIC_FIELDS:
+            value = _exact_scalar(value)
         object.__setattr__(self, name, value)
 
     def __delattr__(self, name: str) -> None:
