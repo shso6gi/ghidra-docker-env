@@ -108,6 +108,16 @@ def attach_failure_diagnostics(result: Any) -> None:
     record_failure_diagnostic(result, FAILURE_SWALLOWED_EXCEPTIONS, payload)
 
 
+def attach_analysis_deadline(result: Any, deadline: Any) -> None:
+    """解析の期限の要約（`core.deadline.Deadline.diagnostic`）を診断へ添付する（Issue #106 PR-106-A）。
+
+    期限を与えた pair だけに付ける（期限なしの結果 JSON は変えない）。判定には効かない。
+    """
+    diagnostics = dict(getattr(result, "diagnostics", None) or {})
+    diagnostics["analysis_deadline"] = deadline.diagnostic()
+    result.diagnostics = diagnostics
+
+
 def attach_stage_timing(result: Any, clock: StageClock) -> None:
     """結果オブジェクトの診断ブロックに段階別時間を添付する（判定には効かない）。
 
@@ -818,6 +828,11 @@ class _ResultDiagnosticsView:
         # Issue #105 PR-105-A: 条件簡約・条件 oracle の計測（DPLL の決定・oracle の query・
         # cache の hit / miss）。PR-105-B の予算を決める分布で、判定には効かない観測。
         yield "condition_simplify", _base_value(base, "condition_simplify", None, falsy=True)
+        # Issue #106 PR-106-A: 解析の期限の要約（期限を与えた pair だけ。無ければ key も出さない:
+        # 期限なしの結果 JSON は変えない）。判定には効かない観測。
+        analysis_deadline = _base_value(base, "analysis_deadline", None, falsy=True)
+        if analysis_deadline is not None:
+            yield "analysis_deadline", analysis_deadline
         yield "pairs", _or_default(live_values.attribute(result, "pairwise_stats"), caches_empty)
         yield "solver_invocations", self._timing("solver_invocations")
         yield "stage_path", _or_default(live_values.attribute(result, "stage_path", ()), ())

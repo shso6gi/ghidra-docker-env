@@ -538,6 +538,11 @@ def region_identity_rows(
 # -- module level API --------------------------------------------------------
 
 
+def active_region_path() -> Tuple[str, ...]:
+    """いま開いている region の path（読み取りのみ。worker thread では空）。"""
+    return _ACTIVE_REGION_PATH.get()
+
+
 def stage_region(name: str):
     """有効な clock があれば region を開く。無ければ no-op。
 

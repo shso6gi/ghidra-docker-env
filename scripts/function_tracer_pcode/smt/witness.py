@@ -50,6 +50,7 @@ import re
 from dataclasses import dataclass
 from typing import Dict, Mapping, Optional, Protocol, Sequence, Tuple, Union
 
+from scripts.function_tracer_pcode.core.deadline import ExecutionEnd
 from scripts.function_tracer_pcode.smt.execution import BUDGET_EXHAUSTED, CANCELLED
 
 
@@ -121,12 +122,17 @@ class WitnessUnavailable(Exception):
     （TIMEOUT / UNKNOWN）を返す（`SolverResult.model` の契約）。
     """
 
-    def __init__(self, kind: str, detail: str) -> None:
+    def __init__(self, kind: str, detail: str, *, end: Optional[ExecutionEnd] = None) -> None:
         if kind not in (BUDGET_EXHAUSTED, INCONCLUSIVE, CANCELLED):
             raise ValueError(f"unknown witness failure kind: {kind}")
+        if end is not None and type(end) is not ExecutionEnd:
+            raise TypeError("witness failure end must be an ExecutionEnd")
         super().__init__(f"{kind}: {detail}")
         self.kind = kind
         self.detail = detail
+        #: 観測された終了原因を kind から決まる既定と変えるとき（判定不能の問いが時間の上限で
+        #: 止まっていた: `ExecutionBudget.unknown_end`）。Issue #106 PR-106-A
+        self.end = end
 
 
 class WitnessSession(Protocol):

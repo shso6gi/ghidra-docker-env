@@ -771,12 +771,31 @@ class SharedZ3RegionSession:
             interrupted_result,
         )
         from scripts.function_tracer_pcode.smt.solvers.z3 import sat_result_with_witness
+        from scripts.function_tracer_pcode.core.deadline import TimeUnit, deadline_query
+        from scripts.function_tracer_pcode.smt.interface import (
+            apply_adoption,
+            execution_fact,
+            not_started_result,
+        )
+        from scripts.function_tracer_pcode.smt.parallel import SOLVER_STAGE
 
         started = time.time()
+        configured = max(1, int(timeout))
+        # Issue #106 PR-106-A: 問いを始める境界（runner の問い合わせと同じ規則）。期限を
+        # 過ぎていれば始めない。この実行の窓の終わりが実行の予算の上限になる
+        query_deadline = deadline_query(SOLVER_STAGE)
+        window = (
+            query_deadline.bound.window(configured, TimeUnit.MILLISECONDS)
+            if query_deadline.begin(configured) else None
+        )
+        if window is None:
+            item = not_started_result("Z3(shared-region)")
+            query_deadline.settle([execution_fact(item)])
+            return ParallelResult.from_backend_results(apply_adoption([item], query_deadline.adoption))
         # Issue #161: 実行の状態（期限と中止）は 1 回の実行に 1 つの `ExecutionBudget`。
         # execute の入口で作り、初回の check と canonical witness の生成・SAT の確定がこれに
         # 問う（共有 session には中止の入力が無いので期限だけ）。
-        budget = ExecutionBudget.starting_now(max(1, int(timeout)))
+        budget = ExecutionBudget.starting_now(configured, not_after=window.adapter_end)
         self._solver.push()
         try:
             self._solver.add(*self._specific[digest])
@@ -786,8 +805,10 @@ class SharedZ3RegionSession:
                     "Z3(shared-region)", stop, "the execution stopped before the check",
                     time.time() - started,
                 )
-                return ParallelResult.from_backend_results([item])
-            self._solver.set(timeout=max(1, budget.remaining_ms()))
+                item.deadline_limited = window.limited
+                query_deadline.settle([execution_fact(item)])
+                return ParallelResult.from_backend_results(apply_adoption([item], query_deadline.adoption))
+            self._solver.set(timeout=budget.timeout_ms())
             verdict = self._solver.check()
             elapsed = time.time() - started
             self.check_count += 1
@@ -808,12 +829,17 @@ class SharedZ3RegionSession:
                     item = interrupted_result("Z3(shared-region)", stop, reason, elapsed)
                 else:
                     item = SolverResult("Z3(shared-region)", SolverStatus.UNKNOWN,
-                                        elapsed_time=elapsed, error_message=reason)
+                                        elapsed_time=elapsed, error_message=reason,
+                                        cause=budget.unknown_end(reason))
             # 1 query × 1 backend の結果: 契約を境界で検査し、backend 集約の規則で包む
             item = enforce_witness_contract(item, query, canonical=True)
-            return ParallelResult.from_backend_results([item])
         finally:
             self._solver.pop()
+        # 返った直後（共有 solver を元の assertion に戻した後）: 期限を過ぎていれば・期限で
+        # 切られていれば採らない
+        item.deadline_limited = window.limited
+        query_deadline.settle([execution_fact(item)])
+        return ParallelResult.from_backend_results(apply_adoption([item], query_deadline.adoption))
 
 def create_shared_z3_region_session(
     query_set: ExpectedRegionQuerySet,

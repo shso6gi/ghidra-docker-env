@@ -53,12 +53,16 @@ from typing import Any, Callable, Dict, FrozenSet, Mapping, Optional, Sequence, 
 from scripts.function_tracer_pcode.analysis.condition.condition_cache import root_memo
 from scripts.function_tracer_pcode.core.condition_metrics import note
 from scripts.function_tracer_pcode.core.semantic_freeze import validated
+from scripts.function_tracer_pcode.core.deadline import poller as deadline_poller
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
     ImmutableSemanticGraph,
     encode_stable_atoms,
     semantic_projection,
     walk_dag_nodes,
 )
+
+#: Issue #106 PR-106-A: identity graph の構築の checkpoint の stage
+IDENTITY_GRAPH_STAGE = "identity_graph"
 
 
 #: identity の schema。値の作り方（何を比べるか・symbol の割当順）を変えたら上げる。
@@ -339,13 +343,18 @@ class RootQueryGraph:
 
 def _build_root_graph(root: Any) -> RootQueryGraph:
     note("identity.root_graph_built")
-    graph, nodes = walk_dag_nodes(validated(root))
+    # Issue #106 PR-106-A: 大きな root の graph の構築（走査・node ごとの payload と digest）は
+    # 1 回で長くなり得るので、node ごとに期限を見る（時計は間引く。構築は新しい値を作るだけで、
+    # 途中で止めても memo には何も残らない）
+    poll = deadline_poller(IDENTITY_GRAPH_STAGE)
+    graph, nodes = walk_dag_nodes(validated(root), poll=poll)
     payloads = tuple(_node_solver_payload(node) for node in nodes)
     symbols = []
     seen_symbols = set()
     digest = hashlib.blake2b(digest_size=16, person=_GRAPH_PERSON)
     digest.update(b"%d|" % len(graph.nodes))
     for record, node, payload in zip(graph.nodes, nodes, payloads):
+        poll()
         candidate = record.candidate_digest or b""
         digest.update(b"%d:" % len(candidate))
         digest.update(candidate)

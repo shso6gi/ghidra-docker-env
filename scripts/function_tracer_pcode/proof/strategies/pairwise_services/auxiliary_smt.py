@@ -26,6 +26,7 @@ from scripts.function_tracer_pcode.core.signature import is_floating_data_type
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.smt import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
+from scripts.function_tracer_pcode.smt.parallel import run_backend_query
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     ConditionSMTOracle,
     ParameterInfo,
@@ -551,7 +552,7 @@ def _impl__prove_intrinsic_equivalence_under_conditions(
     query = self._build_intrinsic_equivalence_query(left, right, conditions, parameters)
     if not query:
         return False
-    result = Z3Solver(timeout=max(1, int(timeout)), debug=self.debug).check_equivalence_direct(query)
+    result = run_backend_query(Z3Solver(timeout=max(1, int(timeout)), debug=self.debug), query)
     return result.status == SolverStatus.UNSAT
 
 def _impl__build_intrinsic_equivalence_query(

@@ -7,6 +7,8 @@ from scripts.function_tracer_pcode.core.analysis import ComparisonSurface, Funct
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
+# Issue #106 PR-106-A: 解析の段を始める境界（期限を過ぎていれば始めない）
+from scripts.function_tracer_pcode.core.deadline import checkpoint as deadline_checkpoint
 from scripts.function_tracer_pcode.core.structural import StructuralKey, expression_key_safe
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ANALYSIS_STATUS_DECOMPILATION_FAILED,
@@ -149,10 +151,10 @@ def _impl_analyze_function(
 
     from scripts.function_tracer_pcode.ghidra.decompilation_broker import (
         TOP_LEVEL_SOURCE_CONTRACT,
-        decompile_function,
+        decompile_within_deadline,
     )
     with stage_region("decompile"):
-        results = decompile_function(
+        results = decompile_within_deadline(
             self, function, timeout, None,
             source_contract_id=TOP_LEVEL_SOURCE_CONTRACT,
             semantic_owner="slice6",
@@ -266,6 +268,7 @@ def _impl_analyze_function(
             return_infos = list(recovered_control_returns)
         else:
             # Issue #124: 効果要約の構築（side ごとの analysis_regions の内訳）。
+            deadline_checkpoint("effect_summary")
             with stage_region("effect_summary"):
                 effect_summary = self._invoke_build_effect_summary(
                     function,
@@ -309,6 +312,7 @@ def _impl_analyze_function(
             # Issue #124: RETURN ごとの戻り値意味の抽出（p-code 走査本体）。
             with stage_region("trace_returns"):
                 for i, return_op in enumerate(return_ops):
+                    deadline_checkpoint("trace_returns")
                     self._debug_print(f"--- Analyzing RETURN #{i + 1} ---")
                     infos = self._analyze_return_op(
                         return_op,
@@ -425,6 +429,7 @@ def _impl_analyze_function(
         # them into several overlapping finite-unroll members.  Rejected
         # proposals remain diagnostics-only and continue through the legacy
         # refinement path unchanged.
+        deadline_checkpoint("recurrence_summary")
         with stage_region("recurrence_summary"):
             pre_refinement_summary = self._apply_structural_recurrence_summary(
                 function,
@@ -443,6 +448,7 @@ def _impl_analyze_function(
                 result.deferred_calls
                 and not result.quarantined_recurrence_proposals
             ):
+                deadline_checkpoint("bounded_refinement")
                 with stage_region("bounded_refinement"):
                     self._apply_bounded_call_refinement(
                         result,
@@ -466,6 +472,7 @@ def _impl_analyze_function(
 
         if not recurrence_proposal_open:
             self._sync_expansion_budget_truncations(result)
+            deadline_checkpoint("recurrence_summary")
             with stage_region("recurrence_summary"):
                 summary_view = self._apply_structural_recurrence_summary(
                     function,
@@ -482,6 +489,7 @@ def _impl_analyze_function(
                 if current_active_key is not None:
                     self._analysis_in_progress[current_active_key] = result
                 try:
+                    deadline_checkpoint("bounded_refinement")
                     with stage_region("bounded_refinement"):
                         self._apply_bounded_call_refinement(
                             result,
@@ -660,7 +668,7 @@ def _impl_refresh_structural_recurrence_summary(
 
     from scripts.function_tracer_pcode.ghidra.decompilation_broker import (
         RECURRENCE_REFRESH_SOURCE_CONTRACT,
-        decompile_function,
+        decompile_within_deadline,
     )
     parent_binding = None
     recurrence_proposals = tuple(
@@ -733,7 +741,7 @@ def _impl_refresh_structural_recurrence_summary(
                 authority_digest(requirement.semantic_target_key),
             )
     with stage_region("decompile"):
-        results = decompile_function(
+        results = decompile_within_deadline(
             self, function, timeout, None,
             source_contract_id=RECURRENCE_REFRESH_SOURCE_CONTRACT,
             semantic_owner="subordinate",

@@ -16,6 +16,7 @@ from scripts.function_tracer_pcode.core.runtime_refs import UnknownValueRef
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
+from scripts.function_tracer_pcode.smt.parallel import run_backend_query
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     ConditionSMTOracle,
     _reduce_expression_under_conditions,
@@ -95,7 +96,7 @@ def _impl__prove_return_value_equals_summary_closed_form(
     if not usable or not script:
         return False
     try:
-        result = Z3Solver(timeout=2, debug=False).check_equivalence_direct(script)
+        result = run_backend_query(Z3Solver(timeout=2, debug=False), script)
     except Exception:
         return False
     return result.status == SolverStatus.UNSAT

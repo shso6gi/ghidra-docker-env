@@ -12,6 +12,10 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
+from scripts.function_tracer_pcode.core.deadline import checkpoint as deadline_checkpoint
+
+#: Issue #106 PR-106-A: 条件簡約の checkpoint の stage
+CONDITION_SIMPLIFY_STAGE = "condition_simplify"
 from scripts.function_tracer_pcode.core.structural import (
     ConditionsSignature,
     expression_provenance_key,
@@ -701,6 +705,9 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
                 "solver_backed": False,
             }
 
+        # Issue #106 PR-106-A: 条件の並び 1 つの正規化を始める境界（ここから先の identity の構築・
+        # 矛盾判定・oracle は、期限を過ぎていれば始めない）
+        deadline_checkpoint(CONDITION_SIMPLIFY_STAGE)
         guard_key = SolverQueryIdentity.from_conditions(conditions)
         reentered = guard_key in cls._active_normalization_keys
         if reentered:

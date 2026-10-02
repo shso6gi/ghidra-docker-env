@@ -14,6 +14,19 @@ backend の実行入口は、実行を始めるときに `ExecutionBudget` を 1
 両方が成り立つときは中止を優先する（中止は呼び出し側の意思で、期限切れより先に
 確かな事実）。中断の結果の status への写し方（`CANCELLED` → UNKNOWN、`BUDGET_EXHAUSTED`
 → TIMEOUT）は `smt.interface.interrupted_result` が持つ。
+
+**例外で止まった実行**（Issue #106 PR-106-A で改めた）: 例外の時点で時計が期限を過ぎていても、
+それだけでは中断にしない（独立した故障を時間切れに分類しない）。中断にするのは、明示の中止か、
+backend の中断の合図（z3 の ``Z3Exception('canceled')``）と停止の要求・与えた時間の使い切りが
+揃ったときだけ（`ExecutionBudget.interruption_after_exception`）。明示の中止で止まった実行が
+中断の合図ではない例外を上げていたら、status は中止のまま、故障の事実を行に残す
+（`SolverResult.observed_failure`）。
+
+**解析全体の期限との関係**（Issue #106 PR-106-A）: 解析全体の期限（pair の analysis
+deadline）の owner は `core.deadline.Deadline` で、この module は 1 回の solver 実行の
+残り時間だけを持つ。両者を突き合わせるのは `ExecutionBudget.starting_now(not_after=...)`
+の 1 箇所だけ（解析の期限の手前で実行の期限を切る）。実行を始めてよいか・返った答えを
+採ってよいかは `core.deadline`（`DeadlineQuery.begin` / `settle`）が決める。
 """
 
 from __future__ import annotations
@@ -21,10 +34,36 @@ from __future__ import annotations
 import time
 from typing import Any, Optional
 
+from scripts.function_tracer_pcode.core.deadline import (
+    ExecutionEnd,
+    TimeUnit,
+    bounded_timeout,
+    execution_window,
+)
+
 
 #: 中断の種類
 CANCELLED = "cancelled"
 BUDGET_EXHAUSTED = "budget_exhausted"
+
+#: backend に渡す timeout は ms に切り捨てる（`timeout_ms` → `core.deadline.bounded_timeout`）
+#: ので、backend は与えた終わりの最大 1 ms 手前で止まる
+TIMEOUT_ROUNDING_SECONDS = 0.001
+
+
+def unknown_end(reason: str, *, remaining_seconds: float) -> ExecutionEnd:
+    """**中断としなかった unknown の観測された終了原因の唯一の規則**（Issue #106 PR-106-A）。
+
+    backend が timeout と報告した（z3 の reason ``"timeout"``）か、**与えた時間を使い切った**
+    （残り ``remaining_seconds`` が ms の丸め以下）なら TIME_LIMIT、それ以外は INCONCLUSIVE。
+    z3 は push した incremental の solver の timeout を ``"canceled"`` と報告し、しかも丸めの分だけ
+    早く返るので、reason の文字列ではなく「使い切ったか」で見る（時間に余裕のある "canceled" は
+    z3 側の打ち切りで、判定不能のまま: #213）。行の status は変えない（期限なしの互換）。
+    """
+
+    if reason == "timeout" or remaining_seconds <= TIMEOUT_ROUNDING_SECONDS:
+        return ExecutionEnd.TIME_LIMIT
+    return ExecutionEnd.INCONCLUSIVE
 
 
 class ExecutionBudget:
@@ -37,15 +76,45 @@ class ExecutionBudget:
         self._cancellation_token = cancellation_token
 
     @classmethod
-    def starting_now(cls, seconds: float, cancellation_token: Optional[Any] = None) -> "ExecutionBudget":
-        """今から `seconds` 秒の実行予算。"""
+    def starting_now(
+        cls,
+        seconds: float,
+        cancellation_token: Optional[Any] = None,
+        *,
+        not_after: Optional[float] = None,
+    ) -> "ExecutionBudget":
+        """今から `seconds` 秒の実行予算。
 
-        return cls(time.monotonic() + float(seconds), cancellation_token)
+        `not_after`（Issue #106 PR-106-A）はこの実行が越えてはならない absolute monotonic の
+        時刻（runner が `core.deadline.execution_window` で求めた終わり）。終わりの決め方は
+        `execution_window`（解析の期限と 1 回の実行の期限を突き合わせる唯一の規則）に従い、
+        残り時間の計算（`remaining_ms` / `interruption`）はこの 1 つの期限だけを見る。
+        """
+
+        now = time.monotonic()
+        window = execution_window(seconds, not_after, TimeUnit.MILLISECONDS, now=now)
+        if window is None:
+            # 始める時間が無い: 期限切れの予算（最初の `interruption()` で止まる）
+            return cls(now, cancellation_token)
+        return cls(now + float(seconds) if window.end is None else window.end, cancellation_token)
 
     def remaining_ms(self) -> int:
         """期限までの残り（ミリ秒、切り捨て）。0 以下なら期限切れ。"""
 
         return int((self.deadline - time.monotonic()) * 1000)
+
+    def timeout_ms(self) -> int:
+        """solver の問い 1 回に渡すミリ秒の timeout（期限まで。0 を「timeout 無し」として渡さない）。
+
+        丸めは `core.deadline.bounded_timeout`（解析の期限と同じ 1 つの規則）。呼ぶ前に
+        `interruption()` で期限切れを確かめておくこと（ここで期限を過ぎていたら 1 ms を返し、
+        solver はすぐ timeout で返る: その unknown は `interruption_after_unknown` が期限切れに数える）。
+        """
+
+        granted = bounded_timeout(
+            float("inf"), self.deadline, TimeUnit.MILLISECONDS, now=time.monotonic(),
+        )
+        return 1 if granted is None else granted
 
     def interruption(self) -> Optional[str]:
         """今この実行が中断されているならその種類（中止を優先）。されていなければ None。"""
@@ -54,6 +123,36 @@ class ExecutionBudget:
         if token is not None and token.is_cancelled():
             return CANCELLED
         if time.monotonic() >= self.deadline:
+            return BUDGET_EXHAUSTED
+        return None
+
+    def used_up(self) -> bool:
+        """与えた時間を ms の丸めの範囲で使い切ったか（backend は終わりの最大 1 ms 手前で止まる）。"""
+
+        return self.deadline - time.monotonic() <= TIMEOUT_ROUNDING_SECONDS
+
+    def interruption_after_exception(
+        self, *, signalled: bool, stop_requested: bool = False,
+    ) -> Optional[str]:
+        """例外で止まった実行が中断によるものならその種類（Issue #106 PR-106-A）。
+
+        #206 では「例外の時点で中断されていれば（中止・時計が期限を過ぎた）中断」としていたが、
+        時計が期限を過ぎていることは例外の原因の証拠ではない（独立した故障を時間切れに
+        分類してしまう）。中断と見なすのは、中断の仕組みが実際に働いた証拠があるときだけ:
+
+        1. 明示の中止（token）→ CANCELLED（呼び出し側の意思が優先: #206 の契約のまま。例外が
+           中断の合図でなければ、独立した故障の事実は行の `observed_failure` に残す）
+        2. backend が中断の合図を出した（``signalled``: z3 なら ``Z3Exception('canceled')``）
+           うえで、停止を求めていた → CANCELLED、与えた時間を使い切っていた → BUDGET_EXHAUSTED
+        3. それ以外 → None（独立した故障: ERROR）
+        """
+
+        token = self._cancellation_token
+        if token is not None and token.is_cancelled():
+            return CANCELLED
+        if signalled and stop_requested:
+            return CANCELLED
+        if signalled and self.used_up():
             return BUDGET_EXHAUSTED
         return None
 
@@ -71,5 +170,11 @@ class ExecutionBudget:
             return BUDGET_EXHAUSTED
         return None
 
+    def unknown_end(self, reason: str) -> ExecutionEnd:
+        """この実行の問いが返した、中断ではない unknown の終了原因（規則は module の `unknown_end`。
+        問いには期限までの残りを与えるので、使い切ったかは期限までの残りで見る）。"""
 
-__all__ = ["BUDGET_EXHAUSTED", "CANCELLED", "ExecutionBudget"]
+        return unknown_end(str(reason), remaining_seconds=self.deadline - time.monotonic())
+
+
+__all__ = ["BUDGET_EXHAUSTED", "CANCELLED", "TIMEOUT_ROUNDING_SECONDS", "ExecutionBudget", "unknown_end"]
