@@ -1070,6 +1070,8 @@ _PROPORTIONAL_WORK_OWNERS = {
         "transition_counts", "validate_legacy_cause_key",
     )},
     ("checker.diagnostics", "_mapping_copy"): _A_FIXED,
+    # Issue #219: witness の token の型の登録表（再利用の owner が発行した型だけ。入力に比例しない）
+    ("proof.obligations.snapshot", "_is_witness_token_type"): _A_FIXED,
     ("checker.diagnostics", "unknown_reason_ids"): _B_SCHEMA_ROWS,
     **{("checker.output_preparation", name): _A_FIXED for name in (
         "AuthorityDecisionEnvelope.prepare", "ComposedPreimage.truncated_fields", "OutputMetadata.prepare",

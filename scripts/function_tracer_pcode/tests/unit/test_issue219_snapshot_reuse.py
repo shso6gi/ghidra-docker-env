@@ -787,7 +787,8 @@ def test_t_b16_a_witness_failure_the_body_does_not_share_is_an_internal_error(mo
     def broken(*_args, **_kwargs):
         raise TypeError("a bug in the reuse layer")
 
-    monkeypatch.setattr(snapshot_reuse, "_freeze_witness", broken)
+    # witness の側だけが読む参照（本体の `create` は schema の module の `retained_form` を呼ぶ）
+    monkeypatch.setattr(snapshot_reuse, "retained_form", broken)
     with pair_failure_scope(("pair", 1), None) as ledger, budget_policy_scope(BudgetPolicy()), snapshot_reuse_scope():
         with pytest.raises(InternalError) as caught:
             AnalysisSnapshot.from_function_analysis(analysis)

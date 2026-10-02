@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 from types import MappingProxyType
-from typing import Any, Dict, Mapping, NamedTuple, Tuple
+from typing import Any, Dict, List, Mapping, NamedTuple, Tuple
 
 from scripts.function_tracer_pcode.core import json_encoding
 from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
@@ -37,7 +37,6 @@ from scripts.function_tracer_pcode.core.live_values import (
     json_scalar,
     plain_scalar,
     size,
-    type_attribute,
     type_name,
 )
 from scripts.function_tracer_pcode.proof.obligations.model import SemanticFactProvenance
@@ -328,8 +327,9 @@ class SnapshotFingerprintCodec:
         digest は snapshot のたびに値全体を写すので、数える経路の分岐・helper を通さない
         （`test_the_unmetered_freeze_equals_the_metered_copy` が同じ値であることを固定）。
 
-        `witness` が真のときだけ、型に `WITNESS_TOKEN_MARKER` を真と宣言した値（snapshot の再利用の
-        witness の token）をそのまま写しに置く。偽（digest・本体）では token も opaque な値として拒む。
+        `witness` が真のときだけ、再利用の owner が登録した token の型 **そのもの**（`register_witness_token_type`）
+        の値を写しにそのまま置く。入力の型が自分で何を宣言しても token にはならない。偽（digest・本体）では
+        token も opaque な値として拒む。
         """
 
         if value is None:
@@ -363,7 +363,7 @@ class SnapshotFingerprintCodec:
             return tuple(freeze(v, witness) for v in elements_of(value))
         if builtin_set(value):
             return _set_members(tuple(freeze(v, witness) for v in elements_of(value)))
-        if witness and type_attribute(kind, WITNESS_TOKEN_MARKER) is True:
+        if witness and _is_witness_token_type(kind):
             return value
         name = type_name(kind)
         has_key, identity_key = identity_key_of(value)
@@ -528,9 +528,51 @@ class _FreezeMeter:
         self._policy.count_into(value, self.budget, mode=LEGACY)
 
 
-#: 型の class 属性でこの名前を真と宣言した値は、snapshot の再利用の witness の token（`_freeze_unmetered`
-#: の `witness` が真のときだけ写しにそのまま置く。token の型は再利用の owner が持つ）
-WITNESS_TOKEN_MARKER = "__snapshot_witness_token__"
+#: snapshot の再利用の witness の token の型（`_freeze_unmetered` の `witness` が真のときだけ、この型
+#: **そのもの** の値を写しにそのまま置く）。登録するのは再利用の owner だけ（静的 test）
+_WITNESS_TOKEN_TYPES: List[type] = []
+
+
+def register_witness_token_type(kind: type) -> type:
+    """再利用の owner が発行する token の型を登録する（その module の読み込み時に 1 回）。"""
+
+    if not any(kind is known for known in _WITNESS_TOKEN_TYPES):
+        _WITNESS_TOKEN_TYPES.append(kind)
+    return kind
+
+
+def _is_witness_token_type(kind: type) -> bool:
+    """`kind` が登録した token の型 **そのもの** か（型の比較は identity だけ: metaclass の `__eq__` を呼ばない）。"""
+
+    for known in _WITNESS_TOKEN_TYPES:
+        if kind is known:
+            return True
+    return False
+
+
+#: `AnalysisSnapshot.create` の既定の抽出 schema の版
+SNAPSHOT_EXTRACTION_SCHEMA_VERSION = 1
+
+
+def fingerprint_payload(snapshot_id: Any, semantic_fields: Any, extraction_schema_version: int) -> Tuple[Any, ...]:
+    """snapshot の fingerprint が digest する値（**fingerprint の唯一の材料**。`create` と再利用が共有する）。"""
+
+    return (extraction_schema_version, snapshot_id, semantic_fields)
+
+
+def retained_form(snapshot_id: Any, semantic_fields: Any, diagnostic_refs: Any) -> Tuple[Any, Any, Any]:
+    """`create` が snapshot に置く値（**保持の契約**。`create` と再利用が共有する）。
+
+    `snapshot_id` は浅い tuple にするだけで、要素は渡された object のまま置く（後で変われば snapshot の
+    `snapshot_id` も変わる）。`semantic_fields` / `diagnostic_refs` は `deep_freeze` が容器を写し、容器でない
+    値は参照のまま置く。
+    """
+
+    return (
+        tuple(snapshot_id),
+        deep_freeze(dict(semantic_fields)),
+        deep_freeze(dict(diagnostic_refs or {})),
+    )
 
 #: snapshot 1 つ分の直列化の作業量を数える観測点。
 SNAPSHOT_SERIALIZATION_SITE = "proof.obligations.snapshot.from_function_analysis"
@@ -551,18 +593,19 @@ class AnalysisSnapshot:
         semantic_fields: Mapping[str, Any],
         *,
         diagnostic_refs: Mapping[str, Any] | None = None,
-        extraction_schema_version: int = 1,
+        extraction_schema_version: int = SNAPSHOT_EXTRACTION_SCHEMA_VERSION,
     ) -> "AnalysisSnapshot":
-        payload = (extraction_schema_version, snapshot_id, semantic_fields)
         # fingerprint を先に求める（opaque な値・上書きした容器は digest が拒む。拒まれた値を写さない）
-        fingerprint = SnapshotFingerprintCodec.digest(payload)
-        # 保持の規則（`snapshot_id` は浅い tuple、残りは `deep_freeze`）は `snapshot_references` と一緒に変える
+        fingerprint = SnapshotFingerprintCodec.digest(
+            fingerprint_payload(snapshot_id, semantic_fields, extraction_schema_version)
+        )
+        held_id, held_fields, held_refs = retained_form(snapshot_id, semantic_fields, diagnostic_refs)
         return cls(
-            snapshot_id=tuple(snapshot_id),
-            semantic_fields=deep_freeze(dict(semantic_fields)),
+            snapshot_id=held_id,
+            semantic_fields=held_fields,
             semantic_fingerprint=fingerprint,
             extraction_schema_version=extraction_schema_version,
-            diagnostic_refs=deep_freeze(dict(diagnostic_refs or {})),
+            diagnostic_refs=held_refs,
         )
 
     @property
@@ -626,18 +669,6 @@ class SnapshotMaterial(NamedTuple):
     snapshot_id: Tuple[Any, ...]
     semantic_fields: Dict[str, Any]
     diagnostic_refs: Dict[str, Any]
-
-
-def snapshot_references(material: SnapshotMaterial) -> Tuple[Any, ...]:
-    """`AnalysisSnapshot.create` が写さずに snapshot へそのまま置く値（**保持の契約**）。
-
-    `create` は `snapshot_id` を浅い tuple にするだけで、要素は解析の object のまま置く（後で変われば
-    snapshot の `snapshot_id` も変わる）。`semantic_fields` / `diagnostic_refs` は `deep_freeze` が容器を
-    写し、容器でない値だけを参照で置く。ここは「何を参照で置くか」だけを述べ、その値をどう比べてよいか
-    （値で同一視できるか）は述べない。保持の規則を変えるときは `create` とこの関数を一緒に変える。
-    """
-
-    return tuple(material.snapshot_id)
 
 
 def snapshot_serialization_target(analysis: Any) -> Tuple[Any, ...]:

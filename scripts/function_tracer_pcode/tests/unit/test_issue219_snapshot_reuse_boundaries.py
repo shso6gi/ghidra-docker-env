@@ -26,7 +26,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 OWNER = PACKAGE_ROOT / "proof" / "obligations" / "snapshot_reuse.py"
 #: 置き換えを次へ渡すだけの core の仕組み（同名の引数をそのまま渡す）
 FORWARDER = PACKAGE_ROOT / "core" / "budget_policy.py"
-OWNER_NAMES = frozenset({"ElidedSemanticValue", "_Witness", "_SameObject", "_LeafSubstitution"})
+OWNER_NAMES = frozenset({"ElidedSemanticValue", "_Witness", "_Retained", "_Pending", "_LeafSubstitution"})
 #: witness の材料を写す口（`witness` が真のときだけ token を通す）。真を渡すのは owner だけ
 WITNESS_FLAG_CALLEES = frozenset({
     "snapshot_material", "_semantic_effect_summary_projection", "freeze", "_freeze_unmetered", "_FreezeMeter",
@@ -168,3 +168,25 @@ def test_the_live_flow_audit_follows_the_leaf_substitution_protocol():
 
     _violations, analyzed, _index, _missing = flow.audit(PACKAGE_ROOT)
     assert (flow.PKG + ".proof.obligations.snapshot_reuse", "_LeafSubstitution.__leaf_substitute__") in analyzed
+
+
+def test_only_the_reuse_owner_registers_witness_token_types():
+    """codec が witness の中でそのまま通す型は、再利用の owner が発行して登録した型だけ（入力の自己宣言は無い）。"""
+
+    offenders: List[str] = []
+    for path, tree in _production_modules():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                func = node.func
+                name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+                if name == "register_witness_token_type" and path != OWNER:
+                    offenders.append(f"{path.relative_to(PACKAGE_ROOT)}:{node.lineno}")
+            # 型の属性で token を名乗る仕組み（class 属性の宣言）を codec が読まない
+            if isinstance(node, ast.Constant) and node.value == "__snapshot_witness_token__":
+                offenders.append(f"{path.relative_to(PACKAGE_ROOT)}:{node.lineno}: self-declared token marker")
+    assert offenders == []
+
+    from scripts.function_tracer_pcode.proof.obligations import snapshot as snapshot_module
+    from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse
+
+    assert set(snapshot_module._WITNESS_TOKEN_TYPES) == {snapshot_reuse.ElidedSemanticValue, snapshot_reuse._Pending}

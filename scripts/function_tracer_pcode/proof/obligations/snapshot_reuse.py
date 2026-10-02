@@ -7,10 +7,12 @@ read-set の解析に対して pair の中で作り直さない。再利用の�
 契約（計画 v2 §4 の C-RS1〜C-RS8。C-RS2 は `core/semantic_freeze` / `core/semantic_lifecycle`）:
 
 * **C-RS1 再利用の唯一の根拠**: 呼び出しのたびに witness を作り、保存済みの witness と等しい
-  ときだけ保存済みの snapshot を返す。witness は本体と **同じ抽出**（`snapshot.snapshot_material`）
-  を、serialization-closed な検証済みの意味値だけを identity token（`ElidedSemanticValue`。強参照
-  を持つ）に置き換えて作り、残りは値の複製（live な容器を残さない、型と順序を保つ）にする。
-  writer を列挙せず、invalidate の hook も置かない（書き換えは witness の値の差になる）。
+  ときだけ保存済みの snapshot を返す。保証は「同じ witness なら、その時点の通常の build と、全 field・
+  fingerprint・参照の保持の意味・予算の成功 / 失敗と種類が一致する」。witness は本体の **投影そのもの**:
+  同じ抽出（`snapshot.snapshot_material`）を、serialization-closed な検証済みの意味値だけを identity token
+  （`ElidedSemanticValue`。強参照を持つ）に置き換えて行い、fingerprint が digest する値（`fingerprint_payload`）
+  の codec の写しと、`create` が置く値（`retained_form`）を、同じ関数で作る。比べ方は 1 つの規則
+  （`_same`。snapshot の等しさと保持から導く）。writer を列挙せず、invalidate の hook も置かない。
 * **sealing**（C-RS2 の接続）: closed かどうかは読むだけ（`serialization_closed`）。runtime ref の
   写しを待つ値（pending）は、抽出の外で `seal_serialization` を明示的に呼んで確定させてから
   witness を作り直す。sealing は memo の on / off に依らず、scope の中の入れ子でない呼び出しで
@@ -40,6 +42,7 @@ from __future__ import annotations
 
 import threading
 import time
+from types import MappingProxyType
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -59,13 +62,6 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     JsonValueRejected,
     active_walk_work,
 )
-from scripts.function_tracer_pcode.core.live_values import (
-    builtin_mapping,
-    builtin_sequence,
-    builtin_set,
-    elements_of,
-    items_of,
-)
 from scripts.function_tracer_pcode.core.semantic_freeze import seal_serialization
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     serialization_closed,
@@ -73,10 +69,12 @@ from scripts.function_tracer_pcode.core.semantic_lifecycle import (
 )
 from scripts.function_tracer_pcode.core.stage_journal import journal_note
 from scripts.function_tracer_pcode.proof.obligations.snapshot import (
-    WITNESS_TOKEN_MARKER,
+    SNAPSHOT_EXTRACTION_SCHEMA_VERSION,
     SnapshotFingerprintCodec,
+    fingerprint_payload,
+    register_witness_token_type,
+    retained_form,
     snapshot_material,
-    snapshot_references,
     snapshot_serialization_target,
 )
 
@@ -121,53 +119,33 @@ class ElidedSemanticValue:
         return id(self.value)
 
 
-#: witness の材料を写す codec だけが token をそのまま置く（`SnapshotFingerprintCodec` の `witness`）
-setattr(ElidedSemanticValue, WITNESS_TOKEN_MARKER, True)
+register_witness_token_type(ElidedSemanticValue)
 
 
-class _SameObject:
-    """snapshot が参照で持つ object（`diagnostic_refs` の値など）の identity（強参照）。"""
+class _Pending:
+    """抽出の 1 回目で、写しを待つ値の代わりに置く印（その抽出の材料は witness にしない）。"""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<witness:pending>"
+
+
+register_witness_token_type(_Pending)
+_PENDING = _Pending()
+
+
+class _Retained:
+    """witness の中で、snapshot が写さずに参照で置く値（`retained_form` の `snapshot_id`）の印。
+
+    比べ方だけを変える: 中の変わり得る object（不変な tuple / frozenset と scalar 以外）は同じ object で
+    あることを求める。
+    """
 
     __slots__ = ("value",)
 
     def __init__(self, value: Any) -> None:
         self.value = value
-
-    def __eq__(self, other: Any) -> bool:
-        return type(other) is _SameObject and other.value is self.value
-
-    def __ne__(self, other: Any) -> bool:
-        return not self.__eq__(other)
-
-    def __hash__(self) -> int:
-        return id(self.value)
-
-
-class _Tag:
-    """witness の値の複製の区切り（identity で比べる印）。"""
-
-    __slots__ = ("name",)
-
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-    def __repr__(self) -> str:
-        return f"<witness:{self.name}>"
-
-
-setattr(_Tag, WITNESS_TOKEN_MARKER, True)
-
-_TRUE = _Tag("true")
-_FALSE = _Tag("false")
-_FLOAT = _Tag("float")
-_MAPPING = _Tag("mapping")
-_SEQUENCE = _Tag("sequence")
-_SET = _Tag("set")
-_OBJECT = _Tag("object")
-_OPAQUE = _Tag("opaque")
-_NAN = _Tag("nan")
-#: 抽出の 1 回目で、写しを待つ値の代わりに置く印（その抽出の材料は witness にしない）
-_PENDING = _Tag("pending")
 
 
 class _LeafSubstitution(LeafSubstitution):
@@ -200,81 +178,116 @@ class _LeafSubstitution(LeafSubstitution):
 # ---------------------------------------------------------------------------
 
 
-def _freeze_witness(value: Any) -> Any:
-    """witness の値の複製。組み込みの型 **そのもの** ごとに区別し、順序を保つ。
+# ---------------------------------------------------------------------------
+# witness の比べ方（snapshot の等しさと保持から導く。1 つの規則）
+# ---------------------------------------------------------------------------
+#
+# witness は本体の投影そのもの（fingerprint の codec の写しと、`create` が置く値）。比べ方は、返す snapshot が
+# 等しいこと（容器は要素を `a is b or a == b` で比べる）と、参照の保持が同じことから導く:
+#
+# * 型は同じ型 **そのもの**（`True` / `1`、list / tuple を畳まない）
+# * 値で比べるのは、同じ値なら返す値どうしが `==` になる組み込みの型だけ（`str` / `int` / `bytes`、NaN で
+#   ない `float` は表現まで: `0.0` / `-0.0` は fingerprint が違う）。NaN は同じ object だけ
+# * token は包んだ値が同じ object
+# * 本体の投影が新しく作る容器（tuple / mapping / frozenset）は中身で比べる
+# * それ以外の object は同じ object だけ（その状態が fingerprint に効くなら、codec の写しが状態を値として持つ）
+# * 参照で置かれる値（`_Retained`）の中の変わり得る容器は同じ object だけ（不変な tuple / frozenset は辿る）
+#
+# hash は同じ規則に合わせる（等しいなら同じ hash）。利用者の code（`__eq__` / `__hash__`）を呼ばない。
 
-    値で比べてよいのは **値で同一視できる** 葉だけ: 同じ印なら、返す snapshot の中の値どうしが `==`
-    になる組み込みの型そのもの（`str` / `int` / `bool` / `None`、NaN でない `float`。型ごとに区別し、
-    `True` / `1` / `1.0` / `-0.0` を畳まない）。不変でも値で同一視できない葉（NaN）と、容器でない object は
-    identity（`_SameObject`）で持ち、object は digest が読む値（codec の写し。作れなければ印）も持つ。
-    容器は値として辿る（mapping は挿入順、set は要素の集合）。容器の型の違い・参照で置かれる変わり得る
-    object は `_retained_identities` が持つ（`snapshot_id` の要素）。
-    """
+def _same(a: Any, b: Any, retained: bool = False) -> bool:
+    if a is b:
+        return True
+    kind = type(a)
+    if kind is not type(b):
+        return False
+    if kind is str or kind is int or kind is bytes:
+        return a == b
+    if kind is float:
+        return a == a and float.__repr__(a) == float.__repr__(b)
+    if kind is ElidedSemanticValue:
+        return a.value is b.value
+    if kind is _Retained:
+        return _same(a.value, b.value, True)
+    if kind is tuple:
+        return len(a) == len(b) and all(_same(x, y, retained) for x, y in zip(a, b))
+    if kind is frozenset:
+        return _same_set(a, b, retained)
+    if retained:
+        # 参照で置かれる変わり得る値・object: 同じ object だけ（上の `is`）
+        return False
+    if kind is list:
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    if kind is dict or kind is MappingProxyType:
+        if len(a) != len(b):
+            return False
+        return all(
+            _same(key_a, key_b) and _same(item_a, item_b)
+            for (key_a, item_a), (key_b, item_b) in zip(a.items(), b.items())
+        )
+    if kind is set:
+        return _same_set(a, b, False)
+    return False
 
+
+def _same_set(a: Any, b: Any, retained: bool) -> bool:
+    if len(a) != len(b):
+        return False
+    buckets: Dict[int, List[Any]] = {}
+    for item in b:
+        buckets.setdefault(_hash(item, retained), []).append(item)
+    for item in a:
+        candidates = buckets.get(_hash(item, retained))
+        if not candidates:
+            return False
+        for index, candidate in enumerate(candidates):
+            if _same(item, candidate, retained):
+                del candidates[index]
+                break
+        else:
+            return False
+    return True
+
+
+def _hash(value: Any, retained: bool = False) -> int:
     kind = type(value)
-    if kind is str or kind is int or value is None:
-        return value
-    if kind is bool:
-        return _TRUE if value else _FALSE
+    if kind is str or kind is int or kind is bytes:
+        return hash((kind.__name__, value))
+    if value is None or kind is bool:
+        return hash(("scalar", value is True, value is None))
     if kind is float:
         if value != value:
-            # NaN は不変だが値で同一視できない（別の NaN どうしは `==` でない。snapshot の容器の等しさは
-            # 要素の `is` か `==`）: identity で持つ
-            return (_OBJECT, _SameObject(value), _NAN)
-        return (_FLOAT, float.__repr__(value))
-    if kind is ElidedSemanticValue or value is _PENDING:
-        return value
-    if kind is dict:
-        return (_MAPPING, tuple((_freeze_witness(key), _freeze_witness(item)) for key, item in dict.items(value)))
-    if kind is tuple or kind is list:
-        return (_SEQUENCE, tuple(_freeze_witness(item) for item in value))
-    if kind is frozenset or kind is set:
-        return (_SET, frozenset(_freeze_witness(item) for item in value))
-    mapping = builtin_mapping(value)
-    if mapping is not None:
-        return (_MAPPING, tuple((_freeze_witness(key), _freeze_witness(item)) for key, item in items_of(mapping)))
-    if builtin_sequence(value):
-        return (_SEQUENCE, tuple(_freeze_witness(item) for item in elements_of(value)))
-    if builtin_set(value):
-        return (_SET, frozenset(_freeze_witness(item) for item in elements_of(value)))
-    try:
-        frozen = SnapshotFingerprintCodec._freeze_unmetered(value, True)
-    except (TypeError, ValueError):
-        # digest が拒む値（本体で同じ値を digest すれば同じ拒否。参照で持つだけの値なら identity で足りる）
-        frozen = _OPAQUE
-    # codec が値そのものを写しに置く object（mixin の enum の member: 値は class の定義）は identity で足りる
-    payload = _OPAQUE if frozen is value or frozen is _OPAQUE else _freeze_witness(frozen)
-    return (_OBJECT, _SameObject(value), payload)
-
-
-def _retained_identities(value: Any) -> Any:
-    """snapshot が参照で置く値の中の、後で変わり得る object の identity（位置ごと）。
-
-    不変な容器（tuple / frozenset）と scalar は辿るだけで identity を持たない（変わらないので、等しさは
-    値の複製が持つ）。それ以外（list / dict / set・任意の object）は同じ object であることが要る。
-    """
-
-    kind = type(value)
-    if value is None or kind is str or kind is int or kind is bool or kind is float or kind is bytes:
-        return None
+            return hash(("nan", id(value)))
+        return hash(("float", float.__repr__(value)))
+    if kind is ElidedSemanticValue:
+        return hash(("token", id(value.value)))
+    if kind is _Retained:
+        return hash(("retained", _hash(value.value, True)))
     if kind is tuple:
-        return (_SEQUENCE, tuple(_retained_identities(item) for item in value))
+        return hash(("tuple", tuple(_hash(item, retained) for item in value)))
     if kind is frozenset:
-        return (_SET, frozenset(_retained_identities(item) for item in value))
-    return _SameObject(value)
+        return hash(("frozenset", sum(_hash(item, retained) for item in value) & 0xFFFFFFFFFFFFFFFF, len(value)))
+    if not retained:
+        if kind is list:
+            return hash(("list", tuple(_hash(item) for item in value)))
+        if kind is dict or kind is MappingProxyType:
+            return hash((kind.__name__, tuple((_hash(k), _hash(v)) for k, v in value.items())))
+        if kind is set:
+            return hash(("set", sum(_hash(item) for item in value) & 0xFFFFFFFFFFFFFFFF, len(value)))
+    return hash(("object", id(value)))
 
 
 class _Witness:
-    """store の key（hash を 1 回だけ求める。比べるのは値の複製と token だけ = 利用者の code を呼ばない）。"""
+    """store の key（hash を 1 回だけ求める。比べるのは `_same`: 利用者の code を呼ばない）。"""
 
     __slots__ = ("parts", "_hash")
 
     def __init__(self, parts: Tuple[Any, ...]) -> None:
         self.parts = parts
-        self._hash = hash(parts)
+        self._hash = _hash(parts)
 
     def __eq__(self, other: Any) -> bool:
-        return type(other) is _Witness and other._hash == self._hash and other.parts == self.parts
+        return type(other) is _Witness and other._hash == self._hash and _same(self.parts, other.parts)
 
     def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
@@ -304,24 +317,29 @@ def _extract(analysis: Any, *, collect: bool) -> Tuple[Optional[Tuple[Any, ...]]
         material = snapshot_material(analysis, work, True)
         if substitution.pending:
             return None, substitution.pending
-        # 抽出の量（値の複製の前に読む: 複製の storage の読みは本体の抽出には無い）
+        # 抽出の量（投影の前に読む: 投影の storage の読みは本体の抽出には無い）
         extracted = (work.consumed, work.distinct_nodes)
-        # witness が等しければ本体の結果（返す snapshot の全 field と、予算で止まるか）が等しい、を
-        # 次の材料で言う（どれも本体が読むもの）:
-        # * 材料の値（型・順序まで）と、closed な値の identity（token）
-        # * この抽出の作業量の量。置き換えた葉も本体と同じく数え、同じ上限で止まる
-        #   （`SerializationWork.tree`）。distinct な node は DAG の共有・object の identity で決まり、
-        #   見積もりの作業量も distinct な ref ごとに数えるので、byte も値だけの関数とは言えない。
-        #   抽出の後の本体（`create`）は材料だけの関数なので、本体の量が等しいことはこの組で言える
-        # * snapshot が写さずに参照で置く値（`snapshot_references`）の中の、変わり得る object の identity
-        # * 予算の scope と policy（本体が限界になるかを決める上限）
-        # 値の複製も同じ作業量の中で作る（値の storage の読みは本体と同じくこの作業量へ数える）
+        # witness は本体の投影そのもの（同じ関数）: fingerprint が digest する値の codec の写しと、`create` が
+        # snapshot に置く値。closed な値は token のまま（token の型は owner が codec に登録したものだけ）
+        fingerprint_form = SnapshotFingerprintCodec._freeze_unmetered(
+            fingerprint_payload(material.snapshot_id, material.semantic_fields, SNAPSHOT_EXTRACTION_SCHEMA_VERSION),
+            True,
+        )
+        held_id, held_fields, held_refs = retained_form(
+            material.snapshot_id, material.semantic_fields, material.diagnostic_refs,
+        )
+        # 本体の結果（全 field・fingerprint・保持・予算）を決めるのは、この組と予算の scope / policy:
+        # * fingerprint の codec の写し（set の並び・object の今の状態は、codec が値として写す）
+        # * `create` が置く値（型・容器・参照で置く object の identity）
+        # * この抽出の作業量の量（置き換えた葉も本体と同じく数え、同じ上限で止まる）
         parts = (
             _WITNESS_FORMAT,
             budget_scope_is_active(),
-            _freeze_witness(policy.to_diagnostic()),
-            _freeze_witness(tuple(material)),
-            tuple(_retained_identities(item) for item in snapshot_references(material)),
+            policy.to_diagnostic(),
+            fingerprint_form,
+            _Retained(held_id),
+            held_fields,
+            held_refs,
             extracted,
         )
     return parts, []
@@ -522,7 +540,12 @@ def reuse_or_build(analysis: Any, build: Callable[[Any], Any]) -> Any:
     if witness is None:
         store.count("bypass:disabled")
         return _run_body(store, analysis, build)
-    cached = store.lookup(witness)
+    try:
+        cached = store.lookup(witness)
+    except RecursionError as failure:
+        # 比べる途中で再帰の深さに当たった: 判断できないので本体へ
+        store.count(f"bypass:witness_failed:{type(failure).__name__}")
+        return _run_body(store, analysis, build)
     if cached is not None:
         store.count("hits")
         return cached
@@ -533,7 +556,11 @@ def reuse_or_build(analysis: Any, build: Callable[[Any], Any]) -> Any:
     except _WITNESS_UNBUILDABLE + _WITNESS_PREDICTED_FAILURES:
         store.count("unstable")
         return snapshot
-    if after != witness:
+    try:
+        stable = after == witness
+    except RecursionError:
+        stable = False
+    if not stable:
         # 本体の間に読む値が変わった（同じ thread の書き換え）: どちらの状態の snapshot か
         # 言えないので保存しない
         store.count("unstable")
