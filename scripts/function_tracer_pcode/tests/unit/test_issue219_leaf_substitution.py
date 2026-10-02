@@ -22,7 +22,6 @@ from scripts.function_tracer_pcode.core import json_encoding
 from scripts.function_tracer_pcode.core.budget_policy import (
     NO_SUBSTITUTION,
     LeafSubstitution,
-    SUBSTITUTED_LEAF_BYTES,
     BudgetPolicy,
     SerializationWork,
     budget_observations,
@@ -105,16 +104,44 @@ def test_without_a_substitution_the_work_is_unchanged():
     assert plain_bytes == explicit_bytes
 
 
-def test_the_leaves_an_outer_build_places_are_substituted_and_counted_as_one_byte():
-    expr = _expr()
+def _measured(source: Any, **scope: Any):
+    with serialization_scope(site="test.leaf", target_parts=("t",), **scope) as work:
+        built = RESULT_JSON_POLICY.materialize(source, budget=work)
+        return built, work.consumed, work.distinct_nodes
+
+
+def test_a_substituted_leaf_is_placed_but_counted_exactly_like_a_built_one():
+    """置き換えが変えるのは置く値だけ: 数えた byte と distinct な node は、置き換えない作業量と同じ。"""
+
+    shared = _expr()
+    other = _expr(5)
+    source = _Fields(a=shared, b=Expression.binary_op("INT_AND", shared, other), c=other)
     asked = _Asked()
     with budget_policy_scope(BudgetPolicy()):
-        built, consumed = _materialized(_Fields(a=expr, b=expr), terminal=False, leaf_substitution=asked)
-        _plain, plain_bytes = _materialized(_Fields(a=None, b=None), terminal=False)
-    assert [type(item) for item in built.values()] == [_Marker, _Marker]
-    assert asked.leaves == [expr, expr]
-    # 置き換えた葉は見積もらず 1 byte（`null` の 4 byte から 3 ずつ少ない）
-    assert consumed == plain_bytes - 2 * (4 - SUBSTITUTED_LEAF_BYTES)
+        built, consumed, nodes = _measured(source, terminal=False, leaf_substitution=asked)
+        plain, plain_bytes, plain_nodes = _measured(source, terminal=False)
+    assert [type(item) for item in built.values()] == [_Marker, _Marker, _Marker]
+    assert len(asked.leaves) == 3
+    assert (consumed, nodes) == (plain_bytes, plain_nodes)
+
+
+@pytest.mark.parametrize("offset", [-1, 0, 1])
+def test_a_substituting_work_stops_at_the_same_node_limit_as_a_plain_work(offset):
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted
+
+    shared = _expr()
+    source = _Fields(a=shared, b=Expression.binary_op("INT_AND", shared, _expr(5)))
+    with budget_policy_scope(BudgetPolicy()):
+        _built, _bytes, nodes = _measured(source, terminal=False)
+    outcomes = []
+    with budget_policy_scope(BudgetPolicy(serialization_nodes=nodes + offset)):
+        for scope in ({"leaf_substitution": _Asked()}, {}):
+            try:
+                _measured(source, terminal=False, **scope)
+                outcomes.append("ok")
+            except JsonBudgetExhausted:
+                outcomes.append("exhausted")
+    assert outcomes[0] == outcomes[1] == ("exhausted" if offset < 0 else "ok")
 
 
 def test_no_substitution_answer_keeps_the_leaf():
