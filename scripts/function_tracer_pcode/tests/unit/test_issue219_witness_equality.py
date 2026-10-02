@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import dataclasses
+import enum
 import math
 import random
 from typing import Any, List
@@ -27,6 +28,18 @@ from scripts.function_tracer_pcode.tests.unit import _snapshot_oracle as oracle
 from scripts.function_tracer_pcode.tests.unit.test_issue219_witness_fidelity import _analysis, _closed_root
 
 _RAW_BUILD = AnalysisSnapshot.__dict__["_build_from_function_analysis"].__func__
+
+
+class _Level(enum.IntEnum):
+    A = 1
+
+
+class _Mode(str, enum.Enum):
+    A = "a"
+
+
+class _Text(str):
+    """`str` の subclass（codec は基底の文字列として写し、snapshot は object のまま置く）。"""
 
 
 @pytest.fixture(autouse=True, params=["hash", "collide"])
@@ -135,9 +148,12 @@ def test_a_non_reflexive_value_is_reused_only_as_the_same_object(where, name):
         (0.0, -0.0), (1, 1.0), (1, True), ("1", 1), (["a"], ("a",)), ({"a": 1}, (("a", 1),)),
         (frozenset({"a"}), ("a",)), ((("a",),), (["a"],)), ([["a"]], [("a",)]), (float("inf"), float("inf")),
         ({1: "v"}, {True: "v"}), ({1: "v"}, {1.0: "v"}), ({0.0: "v"}, {-0.0: "v"}), ({"a": 1, "b": 2}, {"b": 2, "a": 1}),
+        ({_Level.A: "v"}, {1: "v"}), ({_Mode.A: "v"}, {"a": "v"}), ({"k": _Level.A}, {"k": 1}),
+        ({_Text("a"): "v"}, {"a": "v"}), ({"k": _Text("a")}, {"k": "a"}),
     ],
     ids=["zero_sign", "int_float", "int_bool", "str_int", "list_tuple", "dict_pairs", "frozenset_tuple",
-         "nested_tuple_list", "inner_list_tuple", "inf", "key_int_bool", "key_int_float", "key_zero_sign", "key_order"],
+         "nested_tuple_list", "inner_list_tuple", "inf", "key_int_bool", "key_int_float", "key_zero_sign", "key_order",
+         "key_intenum_int", "key_strenum_str", "value_intenum_int", "key_str_subclass", "value_str_subclass"],
 )
 def test_values_that_equality_or_type_tell_apart_follow_the_body(where, before, after):
     prime = _with_field(_analysis([_closed_root()]), where, before)

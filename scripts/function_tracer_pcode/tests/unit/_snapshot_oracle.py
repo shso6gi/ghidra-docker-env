@@ -4,7 +4,8 @@
 production の witness・正規化・digest を使わず、snapshot そのものの比べ方から決める:
 
 * field の値は、snapshot の等しさ（dataclass の `==`。容器は要素ごとに `a is b or a == b`）で比べる。
-  そのうえで、`==` が隠す型の違い（list / tuple、bool / int、容器の型）も違いとする
+  そのうえで、`==` が隠す型の違い（list / tuple、bool / int、容器の型、mapping の key の型）と、mapping の
+  反復の順（`deep_freeze` は挿入の順を保つ）も違いとする
 * snapshot が参照で持つ値（`snapshot_id` の要素。`create` は写さない）は、後で変わり得るなら、同じ
   object であることまで求める。変わらない値は等しさで足りる（NaN は等しさの側で、同じ object でなければ違う）
 * `diagnostic_refs` の値（`function_ref` などの object）は同じ object であること
@@ -84,12 +85,10 @@ def _same_leaves(a: Any, b: Any, path: str, problems: List[str]) -> None:
             _same_leaves(left, right, f"{path}[{index}]", problems)
         return
     if isinstance(a, (dict, MappingProxyType)):
-        # key も参照のまま置かれる（本体は scalar の key だけを受ける）: 等しい key の対応を取り、両方を確かめる
-        keys_b = {key: key for key in b}
-        for key, left in a.items():
-            if key in keys_b:
-                _same_leaves(key, keys_b[key], f"{path}.key({key!r})", problems)
-                _same_leaves(left, b[key], f"{path}[{key!r}]", problems)
+        # key も参照のまま置かれる（順と型は same_value が比べる）: 順に対応させて確かめる
+        for (key_a, left), (key_b, right) in zip(a.items(), b.items()):
+            _same_leaves(key_a, key_b, f"{path}.key({key_a!r})", problems)
+            _same_leaves(left, right, f"{path}[{key_a!r}]", problems)
         return
     if isinstance(a, (set, frozenset)):
         if not retained_equal(a, b):
@@ -120,11 +119,10 @@ def same_value(a: Any, b: Any, path: str, problems: List[str]) -> None:
         if len(a) != len(b):
             problems.append(f"{path}: size {len(a)} != {len(b)}")
             return
-        for key, left in a.items():
-            if key not in b:
-                problems.append(f"{path}: key {key!r} missing")
-                continue
-            same_value(left, b[key], f"{path}[{key!r}]", problems)
+        # `deep_freeze` は挿入の順を保つ（field の反復の順は読める）: 順に、key も型まで比べる
+        for index, ((key_a, left), (key_b, right)) in enumerate(zip(a.items(), b.items())):
+            same_value(key_a, key_b, f"{path}.key#{index}", problems)
+            same_value(left, right, f"{path}[{key_a!r}]", problems)
         return
     if isinstance(a, (set, frozenset)):
         if a != b:

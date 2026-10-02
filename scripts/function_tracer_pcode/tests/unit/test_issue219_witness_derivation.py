@@ -346,6 +346,14 @@ def test_the_oracle_accepts_correct_sharing_and_rejects_wrong_sharing():
         other = _RAW_BUILD(AnalysisSnapshot, _with_field(base, "return_abi_facts", Box(1)))
     assert oracle.snapshot_problems(first, again) == []
     assert oracle.snapshot_problems(first, other) != []
+    # mapping の反復の順（`deep_freeze` は挿入の順を保つ）と key の型も違い
+    with budget_policy_scope(BudgetPolicy()):
+        ordered = _RAW_BUILD(AnalysisSnapshot, _with_field(base, "return_abi_facts", {"a": 1, "b": 2}))
+        reordered = _RAW_BUILD(AnalysisSnapshot, _with_field(base, "return_abi_facts", {"b": 2, "a": 1}))
+        int_key = _RAW_BUILD(AnalysisSnapshot, _with_field(base, "return_abi_facts", {1: "v"}))
+        enum_key = _RAW_BUILD(AnalysisSnapshot, _with_field(base, "return_abi_facts", {Level.A: "v"}))
+    assert oracle.snapshot_problems(ordered, reordered) != []
+    assert oracle.snapshot_problems(int_key, enum_key) != []
 
 
 @pytest.mark.parametrize("where", WHERE)
