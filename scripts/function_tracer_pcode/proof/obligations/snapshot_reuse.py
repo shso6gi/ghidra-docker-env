@@ -12,7 +12,9 @@ read-set の解析に対して pair の中で作り直さない。再利用の�
   同じ抽出（`snapshot.snapshot_material`）を、serialization-closed な検証済みの意味値だけを identity token
   （`ElidedSemanticValue`。強参照を持つ）に置き換えて行い、fingerprint が digest する値（`fingerprint_payload`）
   の codec の写しと、`create` が置く値（`retained_form`）を、同じ関数で作る。比べ方は 1 つの規則
-  （`_same`。snapshot の等しさと保持から導く）。writer を列挙せず、invalidate の hook も置かない。
+  （`_same`。snapshot の等しさと保持から導く）。予算の成功 / 失敗と種類は、この抽出が呼び出しごとに本体と
+  同じ量を数えて同じ上限で止まることで決まる（量そのものは snapshot に入らないので witness に入れない）。
+  writer を列挙せず、invalidate の hook も置かない。
 * **sealing**（C-RS2 の接続）: closed かどうかは読むだけ（`serialization_closed`）。runtime ref の
   写しを待つ値（pending）は、抽出の外で `seal_serialization` を明示的に呼んで確定させてから
   witness を作り直す。sealing は memo の on / off に依らず、scope の中の入れ子でない呼び出しで
@@ -33,7 +35,7 @@ read-set の解析に対して pair の中で作り直さない。再利用の�
 * **C-RS8 並行性**: store の get / put は lock で linearize する（lock の中で利用者の code を呼ばない）。
   同時の初回 build は両方が作り、残るのは 1 つ。解析の並行 writer は前提の外。
 
-witness を作れないとき（作業量の上限・凍結できない値・閉路の深さ）は本体へ回す。凍結できない値・
+witness を作れないとき（作業量の上限・閉路の深さ・codec が token を並べる位置）は本体へ回す。凍結できない値・
 walker の拒否は本体でも同じ規則で失敗するはずなので、本体が成功したら再利用の側の誤りとして
 内部エラーにする（fallback に紛れさせない）。
 """
@@ -71,6 +73,7 @@ from scripts.function_tracer_pcode.core.stage_journal import journal_note
 from scripts.function_tracer_pcode.proof.obligations.snapshot import (
     SNAPSHOT_EXTRACTION_SCHEMA_VERSION,
     SnapshotFingerprintCodec,
+    WitnessOrderUnavailable,
     fingerprint_payload,
     register_witness_token_type,
     retained_form,
@@ -99,24 +102,16 @@ _WITNESS_FORMAT = 1
 class ElidedSemanticValue:
     """witness の中で、serialization-closed な検証済みの意味値の代わりに置く identity token。
 
-    `value` への強参照を持つ（witness が生きている間 `id` は再利用されない）。等しさは同じ
-    object であることだけ。codec が読む protocol（`stable_key` / `to_key` / `json_items` /
-    `__json_tree__`）を持たず dataclass でもないので、本体の digest に入れば `TypeError`（C-RS7）。
+    `value` への強参照を持つ（witness が生きている間 `id` は再利用されない）。witness の比べ方は
+    `_same` / `_hash` だけが決める（`value` が同じ object であること）: この型は等しさを定義しない。
+    codec が読む protocol（`stable_key` / `to_key` / `json_items` / `__json_tree__`）を持たず
+    dataclass でもないので、本体の digest に入れば `TypeError`（C-RS7）。
     """
 
     __slots__ = ("value",)
 
     def __init__(self, value: Any) -> None:
         self.value = value
-
-    def __eq__(self, other: Any) -> bool:
-        return type(other) is ElidedSemanticValue and other.value is self.value
-
-    def __ne__(self, other: Any) -> bool:
-        return not self.__eq__(other)
-
-    def __hash__(self) -> int:
-        return id(self.value)
 
 
 register_witness_token_type(ElidedSemanticValue)
@@ -317,8 +312,6 @@ def _extract(analysis: Any, *, collect: bool) -> Tuple[Optional[Tuple[Any, ...]]
         material = snapshot_material(analysis, work, True)
         if substitution.pending:
             return None, substitution.pending
-        # 抽出の量（投影の前に読む: 投影の storage の読みは本体の抽出には無い）
-        extracted = (work.consumed, work.distinct_nodes)
         # witness は本体の投影そのもの（同じ関数）: fingerprint が digest する値の codec の写しと、`create` が
         # snapshot に置く値。closed な値は token のまま（token の型は owner が codec に登録したものだけ）
         fingerprint_form = SnapshotFingerprintCodec._freeze_unmetered(
@@ -331,7 +324,8 @@ def _extract(analysis: Any, *, collect: bool) -> Tuple[Optional[Tuple[Any, ...]]
         # 本体の結果（全 field・fingerprint・保持・予算）を決めるのは、この組と予算の scope / policy:
         # * fingerprint の codec の写し（set の並び・object の今の状態は、codec が値として写す）
         # * `create` が置く値（型・容器・参照で置く object の identity）
-        # * この抽出の作業量の量（置き換えた葉も本体と同じく数え、同じ上限で止まる）
+        # 予算の成功 / 失敗と種類は witness に入れない: この抽出が呼び出しごとに本体と同じ量を数え、同じ
+        # 上限で止まる（置き換えた葉も数える）。snapshot は作業量を持たないので、量は結果を決めない
         parts = (
             _WITNESS_FORMAT,
             budget_scope_is_active(),
@@ -340,7 +334,6 @@ def _extract(analysis: Any, *, collect: bool) -> Tuple[Optional[Tuple[Any, ...]]
             _Retained(held_id),
             held_fields,
             held_refs,
-            extracted,
         )
     return parts, []
 
@@ -453,8 +446,9 @@ def snapshot_reuse_metrics() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-#: witness を作れない理由のうち、本体に任せればよいもの（witness の上限・Python の再帰の深さ）
-_WITNESS_UNBUILDABLE = (JsonBudgetExhausted, RecursionError)
+#: witness を作れない理由のうち、本体に任せればよいもの（witness の上限・Python の再帰の深さ・
+#: token の並びを codec が決められない位置）
+_WITNESS_UNBUILDABLE = (JsonBudgetExhausted, RecursionError, WitnessOrderUnavailable)
 #: 本体の抽出・digest も同じ規則で失敗するはずの理由（本体が成功したら再利用の側の誤り）
 _WITNESS_PREDICTED_FAILURES = (TypeError, ValueError, JsonValueRejected)
 

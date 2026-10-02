@@ -28,7 +28,7 @@ from scripts.function_tracer_pcode.core.errors import pair_failure_scope, reset_
 from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
 from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import snapshot_reuse_metrics, snapshot_reuse_scope
 from scripts.function_tracer_pcode.tests.unit import _snapshot_oracle as oracle
-from scripts.function_tracer_pcode.tests.unit.test_issue219_witness_fidelity import _analysis, _closed_root
+from scripts.function_tracer_pcode.tests.unit.test_issue219_witness_fidelity import _analysis, _closed_root, _with_values
 
 _RAW_BUILD = AnalysisSnapshot.__dict__["_build_from_function_analysis"].__func__
 WHERE = ["analysis_scope_key", "return_abi_facts"]
@@ -88,6 +88,13 @@ class Marked:
 
     value: Any
     __snapshot_witness_token__ = True
+
+
+@dataclasses.dataclass(unsafe_hash=True)
+class ValueHashBox:
+    """変わり得る、値で等しく値で hash する object（`==` も hash も別の object を区別しない）。"""
+
+    value: Any
 
 
 @dataclasses.dataclass(eq=False)
@@ -244,8 +251,9 @@ def test_an_unchanged_value_is_reused_and_matches_the_body(where, make):
 @pytest.mark.parametrize(
     "make",
     [lambda: Box(1), lambda: HashableBox(1), lambda: Record(1), lambda: Keyed(1), lambda: Marked(1), lambda: (Box(1),),
-     lambda: frozenset({HashableBox(1)})],
-    ids=["dataclass", "hashable", "record", "stable_key", "marked", "dataclass_in_tuple", "hashable_in_frozenset"],
+     lambda: frozenset({HashableBox(1)}), lambda: frozenset({ValueHashBox(1)})],
+    ids=["dataclass", "hashable", "record", "stable_key", "marked", "dataclass_in_tuple", "hashable_in_frozenset",
+         "value_hashed_in_frozenset"],
 )
 def test_an_equal_but_other_mutable_object_is_another_retained_value(where, make):
     """snapshot は object を参照のまま置く（`snapshot_id` の要素・`deep_freeze` の葉）: 内容が等しくても別の object
@@ -258,6 +266,64 @@ def test_an_equal_but_other_mutable_object_is_another_retained_value(where, make
         reused = oracle.outcome(lambda: AnalysisSnapshot.from_function_analysis(target))
         built = oracle.outcome(lambda: _RAW_BUILD(AnalysisSnapshot, target))
     assert oracle.outcome_problems(reused, built) == []
+
+
+@pytest.mark.parametrize("seeds", [(1, 2), (1, 1)], ids=["other_constant", "equal_constant"])
+def test_another_closed_root_is_another_token(seeds):
+    """closed な root は token（同じ object であること）で比べる: 別の root は、内容が同じでも hit しない
+    （hash が衝突しても `_same` が区別する）。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import snapshot_reuse_metrics
+
+    prime = _analysis([_closed_root(seeds[0])])
+    target = _with_values(prime, [_closed_root(seeds[1])])
+    with pair_failure_scope(("pair", 1), None), budget_policy_scope(BudgetPolicy()), snapshot_reuse_scope():
+        oracle.outcome(lambda: AnalysisSnapshot.from_function_analysis(prime))
+        reused = oracle.outcome(lambda: AnalysisSnapshot.from_function_analysis(target))
+        built = oracle.outcome(lambda: _RAW_BUILD(AnalysisSnapshot, target))
+        assert snapshot_reuse_metrics()["counts"].get("hits", 0) == 0
+    assert oracle.outcome_problems(reused, built) == []
+
+
+@dataclasses.dataclass(frozen=True)
+class Effect:
+    """効果要約の代わり（frozen な dataclass。codec が field を写す）。"""
+
+    members: Any
+
+
+_ORDERED_BY_THE_CODEC = {
+    "set_of_closed": lambda root: frozenset({root}),
+    "set_of_tuple_of_closed": lambda root: frozenset({("tag", root), ("other", 1)}),
+    "set_mixed": lambda root: frozenset({root, "plain", 3}),
+    "record_key_of_closed": lambda root: {Record(root): 1},
+    "list_of_closed": lambda root: [root],
+}
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=["memo_on", "kill_switch"])
+@pytest.mark.parametrize("where", ["effect_summary", *WHERE])
+@pytest.mark.parametrize("name", sorted(_ORDERED_BY_THE_CODEC))
+def test_a_closed_value_the_codec_must_order_is_built_like_the_body(where, name, enabled, monkeypatch):
+    """codec が並べる位置（set の要素・mapping の key）の closed な値: token の並びは codec に分からないので、
+    witness は作れず本体へ回る（通常の build と同じ snapshot・同じ例外。内部エラーにしない）。"""
+
+    from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse
+
+    monkeypatch.setattr(snapshot_reuse, "_SNAPSHOT_REUSE_ENABLED", enabled)
+    root = _closed_root()
+    value = _ORDERED_BY_THE_CODEC[name](root)
+    base = _analysis([root])
+    if where == "effect_summary":
+        analysis = dataclasses.replace(base, effect_summary=Effect(value))
+    else:
+        analysis = _with_field(base, where, value)
+    with pair_failure_scope(("pair", 1), None), budget_policy_scope(BudgetPolicy()), snapshot_reuse_scope():
+        first = oracle.outcome(lambda: AnalysisSnapshot.from_function_analysis(analysis))
+        again = oracle.outcome(lambda: AnalysisSnapshot.from_function_analysis(analysis))
+        built = oracle.outcome(lambda: _RAW_BUILD(AnalysisSnapshot, analysis))
+    assert oracle.outcome_problems(first, built) == []
+    assert oracle.outcome_problems(again, built) == []
 
 
 def test_the_oracle_accepts_correct_sharing_and_rejects_wrong_sharing():

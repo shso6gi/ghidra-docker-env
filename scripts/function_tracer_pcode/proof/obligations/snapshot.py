@@ -273,7 +273,12 @@ def _frozen_repr(value: Any) -> str:
                 if index:
                     pending.append(_Text(", "))
         else:
-            pieces.append(as_repr(item))
+            try:
+                pieces.append(as_repr(item))
+            except TypeError:
+                if _is_witness_token_type(kind):
+                    raise WitnessOrderUnavailable("a witness token is a set member") from None
+                raise
     return "".join(pieces)
 
 
@@ -467,7 +472,12 @@ class SnapshotFingerprintCodec:
         # 位置は数えながら持つ（組ごとに列の長さを読み直さない）
         count = 0
         for key, _item in items:
-            keyed.append((_fingerprint_json(key), count))
+            try:
+                keyed.append((_fingerprint_json(key), count))
+            except TypeError:
+                if _holds_witness_token(key):
+                    raise WitnessOrderUnavailable("a witness token is in a mapping key") from None
+                raise
             count += 1
         keyed.sort()
         for index in range(1, count):
@@ -546,6 +556,33 @@ def _is_witness_token_type(kind: type) -> bool:
 
     for known in _WITNESS_TOKEN_TYPES:
         if kind is known:
+            return True
+    return False
+
+
+class WitnessOrderUnavailable(Exception):
+    """witness の凍結で、codec が並べる位置（set の要素・mapping の key）に token がある。
+
+    本体の並びは、token が代わりに置かれた値の写しで決まる。token はその写しを持たないので、
+    並びは witness からは決まらない（witness を作れない: 再利用の owner は本体へ回す）。token は
+    witness の凍結にしか無いので、本体の codec からは上がらない。
+    """
+
+
+def _holds_witness_token(frozen: Any) -> bool:
+    """凍結した値（tuple・scalar・enum の値の写しの list / dict）の中に token があるか。"""
+
+    pending = [frozen]
+    while pending:
+        item = pending.pop()
+        kind = type(item)
+        if kind is tuple or kind is list:
+            pending.extend(item)
+        elif kind is dict:
+            for key, child in items_of(item):
+                pending.append(key)
+                pending.append(child)
+        elif _is_witness_token_type(kind):
             return True
     return False
 

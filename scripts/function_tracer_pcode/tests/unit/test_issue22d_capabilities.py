@@ -1124,6 +1124,7 @@ _PROPORTIONAL_WORK_OWNERS = {
     ("proof.obligations.snapshot", "SnapshotFingerprintCodec.sorted_mapping_items"): _B_FROZEN,
     ("proof.obligations.snapshot", "_frozen_repr"): _B_FROZEN,
     ("proof.obligations.snapshot", "_set_members"): _B_FROZEN,
+    ("proof.obligations.snapshot", "_holds_witness_token"): _B_FROZEN,
     ("proof.unknown_reason", "UnknownRecoveryPlan.json_items"): _C_LAZY,
     ("proof.unknown_reason", "UnknownRecoveryProofObligation.json_items"): _C_LAZY,
     **{("proof.unknown_reason", name): _B_COUNTED_RECORD for name in (

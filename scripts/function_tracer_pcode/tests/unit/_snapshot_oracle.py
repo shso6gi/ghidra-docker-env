@@ -84,8 +84,11 @@ def _same_leaves(a: Any, b: Any, path: str, problems: List[str]) -> None:
             _same_leaves(left, right, f"{path}[{index}]", problems)
         return
     if isinstance(a, (dict, MappingProxyType)):
+        # key も参照のまま置かれる（本体は scalar の key だけを受ける）: 等しい key の対応を取り、両方を確かめる
+        keys_b = {key: key for key in b}
         for key, left in a.items():
-            if key in b:
+            if key in keys_b:
+                _same_leaves(key, keys_b[key], f"{path}.key({key!r})", problems)
                 _same_leaves(left, b[key], f"{path}[{key!r}]", problems)
         return
     if isinstance(a, (set, frozenset)):

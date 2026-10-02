@@ -134,9 +134,10 @@ def test_a_non_reflexive_value_is_reused_only_as_the_same_object(where, name):
     [
         (0.0, -0.0), (1, 1.0), (1, True), ("1", 1), (["a"], ("a",)), ({"a": 1}, (("a", 1),)),
         (frozenset({"a"}), ("a",)), ((("a",),), (["a"],)), ([["a"]], [("a",)]), (float("inf"), float("inf")),
+        ({1: "v"}, {True: "v"}), ({1: "v"}, {1.0: "v"}), ({0.0: "v"}, {-0.0: "v"}), ({"a": 1, "b": 2}, {"b": 2, "a": 1}),
     ],
     ids=["zero_sign", "int_float", "int_bool", "str_int", "list_tuple", "dict_pairs", "frozenset_tuple",
-         "nested_tuple_list", "inner_list_tuple", "inf"],
+         "nested_tuple_list", "inner_list_tuple", "inf", "key_int_bool", "key_int_float", "key_zero_sign", "key_order"],
 )
 def test_values_that_equality_or_type_tell_apart_follow_the_body(where, before, after):
     prime = _with_field(_analysis([_closed_root()]), where, before)
