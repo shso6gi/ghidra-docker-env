@@ -886,6 +886,77 @@ def format_validation_unknown_diff_unavailable(
     return "\n".join(lines)
 
 
+#: Issue #106 PR-106-B: the run-health name for the UNKNOWN results whose final
+#: reasons include ``analysis_budget_exceeded``, and how each one was stopped.
+#: The reason id is shared by three limits (the runner's analysis deadline, the
+#: fixed read bound, the authority event contract), so the deadline is told
+#: apart by the pair's stop state -- never by the reason id alone.
+ANALYSIS_BUDGET_UNKNOWN_KEY = "analysis_budget_unknown"
+ANALYSIS_BUDGET_UNKNOWN_BY_KIND_KEY = "analysis_budget_unknown_by_kind"
+#: UNKNOWN results whose pair the analysis deadline stopped, whatever their
+#: primary reason.  A unit counts one primary reason, so a deadline pair whose
+#: primary reason is another blocking reason is in this count but not in
+#: ``analysis_budget_unknown`` -- the two are reported side by side.
+ANALYSIS_DEADLINE_STOPPED_KEY = "analysis_deadline_stopped"
+ANALYSIS_BUDGET_KIND_DEADLINE = "deadline"
+ANALYSIS_BUDGET_KIND_LIMITATION = "limitation"
+#: the result carries no pair stop state (no diagnostics, or a producer that
+#: predates them) -- counted, never guessed into one of the two kinds above
+ANALYSIS_BUDGET_KIND_UNCLASSIFIED = "unclassified"
+ANALYSIS_BUDGET_KINDS = (
+    ANALYSIS_BUDGET_KIND_DEADLINE,
+    ANALYSIS_BUDGET_KIND_LIMITATION,
+    ANALYSIS_BUDGET_KIND_UNCLASSIFIED,
+)
+
+
+def _analysis_budget_kind(payload: Mapping[str, Any]) -> str:
+    from scripts.function_tracer_pcode.core.errors import PairStopState
+
+    diagnostics = payload.get("diagnostics")
+    failures = diagnostics.get("failures") if isinstance(diagnostics, Mapping) else None
+    stop_state = failures.get("pair_stop_state") if isinstance(failures, Mapping) else None
+    if stop_state == PairStopState.PAIR_TERMINAL_DEADLINE.value:
+        return ANALYSIS_BUDGET_KIND_DEADLINE
+    if stop_state == PairStopState.PAIR_TERMINAL_LIMITATION.value:
+        return ANALYSIS_BUDGET_KIND_LIMITATION
+    return ANALYSIS_BUDGET_KIND_UNCLASSIFIED
+
+
+def summarize_analysis_budget_unknowns(result_payloads: Iterable[Any]) -> Dict[str, Any]:
+    """``analysis_budget_exceeded`` among the final reasons, split by how the pair stopped.
+
+    Counted with the same final-reason view and the same UNKNOWN predicate as
+    ``summarize_validation_unknowns``, so the kinds always add up to that
+    summary's ``unknown_by_reason["analysis_budget_exceeded"]``.  A process
+    ``TIMEOUT`` (the supervisor's wall clock) has no result payload and is never
+    counted here: it stays in the ``TIMEOUT`` final result count.
+
+    Returns ``{ANALYSIS_BUDGET_UNKNOWN_BY_KIND_KEY: {...}, ANALYSIS_DEADLINE_STOPPED_KEY: n}``.
+    """
+
+    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+        ANALYSIS_BUDGET_REASON_ID,
+    )
+
+    by_kind = {kind: 0 for kind in ANALYSIS_BUDGET_KINDS}
+    deadline_stopped = 0
+    for raw_payload in result_payloads:
+        payload = _coerce_payload(raw_payload)
+        if not _payload_is_unknown(payload):
+            continue
+        if _analysis_budget_kind(payload) == ANALYSIS_BUDGET_KIND_DEADLINE:
+            deadline_stopped += 1
+        view, _source = _final_reason_view(payload)
+        count = int((view.get("by_reason") or {}).get(ANALYSIS_BUDGET_REASON_ID, 0))
+        if count:
+            by_kind[_analysis_budget_kind(payload)] += count
+    return {
+        ANALYSIS_BUDGET_UNKNOWN_BY_KIND_KEY: by_kind,
+        ANALYSIS_DEADLINE_STOPPED_KEY: deadline_stopped,
+    }
+
+
 def extract_result_payloads_from_text(text: str) -> Tuple[Mapping[str, Any], ...]:
     payloads = []
     current_lines = []

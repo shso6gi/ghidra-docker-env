@@ -13,6 +13,12 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 
+from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+    ANALYSIS_BUDGET_REASON_ID,
+)
+from scripts.function_tracer_pcode.reporting.unknown_reason_summary import (
+    ANALYSIS_BUDGET_UNKNOWN_KEY,
+)
 from scripts.function_tracer_pcode.reporting.result_summary import (
     FAILURE_EVIDENCE_KEY,
     FAILURE_INTERNAL_BY_SITE_KEY,
@@ -216,6 +222,14 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
                     count_match.group("count")
                 )
 
+    health_extra: Dict[str, Any] = {}
+    # Issue #106 PR-106-B: the alias of the reason count.  The overall summary
+    # has no per-pair stop state, so the kind split is left out rather than
+    # guessed, and a reason section whose evidence is missing gives no count.
+    if "unknown_by_reason" not in evidence_missing_sections:
+        health_extra[ANALYSIS_BUDGET_UNKNOWN_KEY] = int(
+            sections["unknown_by_reason"].get(ANALYSIS_BUDGET_REASON_ID, 0)
+        )
     return {
         "source": "overall_summary_txt",
         "source_path": str(path),
@@ -235,6 +249,7 @@ def parse_overall_summary_health(path: Path) -> Dict[str, Any]:
         FAILURE_SWALLOWED_TOTAL_KEY: swallowed_exact_total,
         FAILURE_SWALLOWED_OBSERVED_TOTAL_KEY: swallowed_observed_total,
         **sections,
+        **health_extra,
     }
 
 
