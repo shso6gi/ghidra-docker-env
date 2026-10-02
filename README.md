@@ -404,21 +404,26 @@ the supervisor's wall clock, the fallback for anything that does not stop by its
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ANALYSIS_TIMEOUT` | full runs `475`, fixed subset `115s` (`eqbench_subset.json`) | seconds (`475` or `475s`); `0` turns the deadline off |
-| `ANALYSIS_TIMEOUT_MARGIN` | `125` | positive seconds kept between the deadline and `PAIR_PROCESS_TIMEOUT` |
+| `ANALYSIS_TIMEOUT` | full runs `410`, fixed subset `110s` (`eqbench_subset.json`) | seconds (`410` or `410s`); `0` turns the deadline off |
+| `ANALYSIS_TIMEOUT_MARGIN` | full runs `190`, fixed subset `130s` | positive seconds kept between the deadline and `PAIR_PROCESS_TIMEOUT` |
 | `PAIR_PROCESS_TIMEOUT` | full runs `600s`, fixed subset `240s` | unchanged; **never set or raised automatically** |
 
 With the deadline on, `ANALYSIS_TIMEOUT + ANALYSIS_TIMEOUT_MARGIN <= PAIR_PROCESS_TIMEOUT`
 must hold (equality is allowed). The Eq runner, the Neq runner, the subset runner and
 the CI workflow all check it with the same rule (`reporting/runner_timeout_policy.py`)
 before anything is compiled or scheduled, `DRY_RUN=1` included; a violation, another
-unit (`5m`), a sign, an exponent or a zero margin stops the run with exit 1 and names
-the variables. An unset or empty variable takes the default. The margin covers what a
-pair cut at the deadline still does before its process ends -- start-up outside the
-deadline, the last stretch without a checkpoint, finalisation and output, teardown
-and the supervisor's stack-dump lead -- and its measured basis is in
-`docs/profiling_timeout_pairs.md` (section 10); re-measure a run with
-`python3 -B -m scripts.function_tracer_pcode.reporting.deadline_margin_summary <run>/eq <run>/neq`.
+unit (`5m`), a sign, an exponent, a zero margin, or a value the pair process would read
+as `0` or infinity (the policy and the CLI share `core.deadline.parse_budget_seconds`)
+stops the run with exit 1 and names the variables. An unset or empty variable takes the
+profile's default (the fixed subset's comes from `eqbench_subset.json`). The margin
+covers what a pair cut at the deadline still does before its child exits -- start-up
+outside the deadline, the last stretch without a checkpoint, finalisation and output,
+teardown -- plus the supervisor's stack-dump lead (SIGUSR1 before the deadline; the
+SIGTERM kill-after grace comes after the deadline and is not part of it). It is measured
+per profile on the supervisor's clock; the formula, the run lists and the numbers are in
+`docs/profiling_timeout_pairs.md` (section 10), and
+`python3 -B -m scripts.function_tracer_pcode.reporting.deadline_margin_summary <profile runs> --load-root <run> --pre-root <run> --margin <seconds>`
+re-measures it.
 
 The effective values are recorded as `analysis_timeout` / `analysis_timeout_enabled` /
 `analysis_timeout_margin` in each `run_manifest.txt` and in `subset_manifest.txt`, and
@@ -448,7 +453,7 @@ Eq + Neq subset (8 Eq sources and 10 Neq sources, one function and 8 pairs each)
 checker behaviour before and after a change. `eqbench_run_subset.sh` runs it
 with the settings stored in the manifest (`PARALLEL_JOBS=32`,
 `EQBENCH_RESOURCE_ADMISSION=0`, `EQBENCH_BUILD_POLICY=PREBUILT_ONLY`,
-`PAIR_PROCESS_TIMEOUT=240s`, `ANALYSIS_TIMEOUT=115s`), running the Eq half and then the Neq half (each runner
+`PAIR_PROCESS_TIMEOUT=240s`, `ANALYSIS_TIMEOUT=110s`, `ANALYSIS_TIMEOUT_MARGIN=130s`), running the Eq half and then the Neq half (each runner
 already fills `PARALLEL_JOBS` slots on its own):
 
 ```bash
@@ -521,8 +526,8 @@ themselves.
 | `subset_scope` | `all` | which halves run *and* which halves are verified (`eq` / `neq` / `all`) |
 | `pair_process_timeout` | `240s` | `PAIR_PROCESS_TIMEOUT` for both halves |
 | `identical_fast_path` | `1` | Issue #15 fast path; `0` runs the oracle path |
-| `analysis_timeout` | empty (the subset manifest's `115s`) | Issue #106 analysis deadline; `0` runs without it |
-| `analysis_timeout_margin` | empty (the runner default) | margin checked against `pair_process_timeout` |
+| `analysis_timeout` | empty (the subset manifest's `110s`) | Issue #106 analysis deadline; `0` runs without it |
+| `analysis_timeout_margin` | empty (the subset manifest's `130s`) | margin checked against `pair_process_timeout` |
 | `eqbench_ref` | `3724fce5b287cc63165028444daf904f25b0158b` | the EqBench commit to check out |
 
 Two of the manifest's own `run_settings` are overridden, because a hosted
@@ -567,7 +572,7 @@ python3 -B -m scripts.eqbench.ci_subset verify \
     --run-dir logs/EqBench/ci_subset --scope all --profile full \
     --working-root /workspace/tmp/eqbench-work/benchmarks \
     --pair-process-timeout 240s --identical-fast-path 1 \
-    --analysis-timeout 115 --analysis-timeout-margin 125 --runner-exit-status 0
+    --analysis-timeout 110 --analysis-timeout-margin 130 --runner-exit-status 0
 ```
 
 - the subset runner exited 0 and `subset_manifest.txt` records `exit_status=0`,

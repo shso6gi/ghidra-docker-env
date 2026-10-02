@@ -271,7 +271,7 @@ ANALYSIS_TIMEOUT=0 PAIR_PROCESS_TIMEOUT=60s OUTPUT_BASE_DIR=logs/EqBench/subset_
 ```
 
 `ANALYSIS_TIMEOUT=0` が要る（Issue #106 PR-106-B 以降）。固定 subset の既定の解析の期限
-（115 s）と余裕は 60 s の process timeout に収まらないので、指定しないと runner は pair を
+（110 s）と余裕（130 s）は 60 s の process timeout に収まらないので、指定しないと runner は pair を
 始めずに exit 1 する。また期限があると pair は process TIMEOUT の前に理由付き UNKNOWN で
 終わり、この run が作りたい TIMEOUT 経路を通らない。
 
@@ -298,63 +298,81 @@ authority の finalize 区間（`_profiled_finish`）だけを見たいときは
 `diagnostics.timings`（`stages` / `regions` / `phases` / `boundary_seconds`）にも
 入っているので、まずそちらを見てから profile を取ると当たりが早い。
 
-## 10. 解析の期限（`ANALYSIS_TIMEOUT`）と margin の実測（Issue #106 PR-106-B）
+## 10. 解析の期限（`ANALYSIS_TIMEOUT`）と margin（Issue #106 PR-106-B）
 
 runner は pair に解析の期限（`--analysis-timeout`）を渡し、`ANALYSIS_TIMEOUT +
-ANALYSIS_TIMEOUT_MARGIN <= PAIR_PROCESS_TIMEOUT` を run の開始前に確かめる
-（規則は `reporting/runner_timeout_policy.py`、使い方は README の
-"Analysis deadline (Issue #106)"）。margin は「期限で打ち切った pair が、process の期限
-（と supervisor の stack dump の先行時間）より前に終わる」ための余裕で、その根拠は次の
-道具で run の出力から測る:
+ANALYSIS_TIMEOUT_MARGIN <= PAIR_PROCESS_TIMEOUT` を run の開始前に確かめる（規則は
+`reporting/runner_timeout_policy.py`、使い方は README の "Analysis deadline (Issue #106)"）。
+margin は「期限で打ち切った pair の child が、process の期限の lead window（SIGUSR1 の送信）
+より前に終わる」ための余裕。測り方と採用式の owner は `reporting/deadline_margin_summary.py`。
 
-```bash
-python3 -B -m scripts.function_tracer_pcode.reporting.deadline_margin_summary \
-  logs/EqBench/<run>/eq logs/EqBench/<run>/neq --json /tmp/margin.json
-```
+### 区間（supervisor の時計）
 
-期限で打ち切った pair 1 件を、重ならない連続した区間に分ける（二重計上しない。
-`needed = wall − 期限 = pre + overrun + post_trip + tail` が恒等式で成り立つ）:
+process の期限に数えられるのは、supervisor が barrier を外してから child の終了を観測する
+まで。端点は supervisor の診断 sidecar（`<pair>.stack-dump.status.json` の
+`deadline_monotonic` / `timeout_seconds` / `lead_seconds` / `cancel_linearized_offset_seconds`）と
+child の journal（同じ monotonic 時計）から取る。Eq / Neq の両方の runner が sidecar を書くので、
+Neq の pair も同じように測れる（per-pair の runtime receipt が無いこと（#160）は影響しない）。
+GNU time の wall は使わない（supervisor の起動と child の終了後の durable write を含み、process の
+期限に数えない時間まで足してしまう）。
 
 | 区間 | 内容 | 端点 |
 |---|---|---|
-| `pre` | 解析の外の固定費（supervisor・CLI の起動、JVM、project open、import、auto analyze） | supervisor の開始 → 期限の起点 |
-| `overrun` | checkpoint の無い区間・止まるまで戻らない処理（協調的な solver の停止と join を含む）。負の値は「期限まで sub-operation の余裕 0.5 s を切ったので始めなかった」 | 期限 → trip |
-| `post_trip` | 限界の帰属・結果の組み立て・出力の準備（`unwind`）、`connector.finish`・receipt（`authority_finalize`）、conditional lane、`close_programs`、結果 JSON（`result_emit`） | trip → 最後の journal event |
-| `tail` | JVM の停止・process の終了・supervisor の pair status の durable write・回収 | 最後の journal event → runner が終わりを観測 |
+| `pre` | CLI の起動・JVM・project open・import・auto analyze | process の期限の起点 → 解析の期限の起点 |
+| `overrun` | checkpoint の無い区間・止まるまで戻らない処理（協調的な solver の停止と join を含む）。負の値は「残りが sub-operation の余裕 0.5 s を切ったので始めなかった」 | 解析の期限 → trip |
+| `post_trip` | 限界の帰属・組み立て・出力の準備・`connector.finish`・conditional lane・`close_programs`・結果 JSON | trip → journal の最後の event |
+| `tail` | JVM の停止・interpreter の終了 | journal の最後の event → supervisor が child の終了を観測 |
 
-Neq の runner は per-pair の runtime receipt を書かない（#160）ので、Neq の pair は
-`overrun` / `post_trip` / `pre_child`（child の journal の開始から）だけを持ち、`pre` /
-`tail` / `needed` には入らない。
+`needed = pre + overrun + post_trip + tail`（恒等式）。`post_trip` の内訳は stage の区間と
+trip 後の窓の交差を、各瞬間を最も内側の stage へ 1 回だけ割り当てて求める（各値 0 以上、和は
+`post_trip`。trip より前に始まった stage・入れ子・順序に依らない）。TIMEOUT の pair は
+`timeout_kind`（`timeout_hotspot_summary`）で分類し、process の kill（`process_wall_clock` /
+`both_signals`）だけを process TIMEOUT と数える。checker 自身の solver の terminal timeout は
+`solver_timeouts`。child の終了より先に SIGUSR1 の送信が始まった pair は `entered_lead_window`。
 
-### 採用値の根拠（PR-106-B、commit `aa06b462`、2026-10-02）
+### 採用式（profile ごと）
 
-条件: 固定 subset（`PAIR_PROCESS_TIMEOUT=240s`、P=20、identical fast path 1）を期限 30 s
-（診断）と 120 s、P-ell（ell `B12_B16`、600 s、P=6）を期限 480 s で 1 本ずつ。他 session の
-run と一部重なった（host の load average は最大 41.7）。
+```text
+margin(profile) = ceil5( max_{P∪L∪F} pre + max_{P∪L} overrun + max_P post_trip + max_P tail + lead )
+```
 
-| 区間 | 30 s subset（trip 43、うち receipt あり 23） | 120 s subset（trip 5 / 2） | 480 s P-ell（trip 6 / 6） | 最大 |
-|---|---|---|---|---|
-| `pre` | median 19.6 / p90 24.7 / max 30.4 | max 29.5 | median 7.7 / max 9.6 | **30.4** |
-| `overrun` | median 0.18 / p90 2.1 / max 5.1 | max 1.1 | max 6.9 | **6.9** |
-| `post_trip` | median 0.47 / p90 1.8 / max 11.8 | max 18.9 | max 56.5（CheckCond: `authority_finalize` 38.9 + `result_emit` 17.5） | **56.5** |
-| `tail` | median 1.5 / p90 2.5 / max 2.8 | max 5.5 | max 27.8 | **27.8** |
-| `needed`（実際の合計） | max 32.9 | max 53.9 | max 85.1 | 85.1 |
+| 項 | 何で決まるか | どの run から最大を取るか |
+|---|---|---|
+| `pre` | 負荷（JVM / import の競合）。期限の code に依らない | `F`: この host で観測した期限つきの run すべて（期限の機構が違う code を含む） |
+| `overrun` | 負荷と、checkpoint の無い区間の長さ | `L`: 期限の機構（`core/deadline.py`・solver の停止・checkpoint の配置）が対象と同じ code の run すべて（profile・負荷を問わない） |
+| `post_trip` / `tail` | 打ち切るまでに作った状態の大きさ（期限の長さ） | `P`: その profile の設定で、期限がその profile の値以下の run |
+| `lead` | supervisor が stack dump の SIGUSR1 を送る先行時間（`PAIR_STACK_DUMP_LEAD`、既定 2 s） | 設定値 |
 
-margin = 区間ごとの最大の和 121.6 s + stack dump の先行時間 2 s = 123.6 s を 5 s 単位に
-切り上げた **125 s**。既定の期限はそこから決まる: full は 600 − 125 = **475 s**、固定 subset は
-240 − 125 = **115 s**（計画の暫定値 480 / 120 s はこの和を収められなかった）。
+- **SIGUSR1 の lead と SIGTERM の grace は別物。** lead（deadline の 2 s 前）は process の期限
+  より **前**: child がその窓の中で終わると #204 の経路（`PAIR_STATUS_AUTHORITY_INVALID`）に入るので、
+  margin の中に取る。grace（`PAIR_PROCESS_KILL_AFTER`、SIGTERM から SIGKILL まで）は process の
+  期限の **後** で、その時点で pair は TIMEOUT と決まっているので margin には使えない（入れない）。
+- 共有 host では runner が負荷を制限しない（評価 slot は未実装）。観測した高負荷の値は **除かない**:
+  `pre` は期限の code に依らないので、PR-106-A の計測（2 つの run を同時に流した高負荷）も `F` に入る。
+  `overrun` は期限の機構が今と同じ code（PR-106-A の review 5 `c3b533b0` 以降）の run だけを使う。
+  それより前の round（停止・採否の実装が違う）は `overrun` の根拠にしない（`pre` には使う）。
+- 止められない worker（能力を宣言しない backend）の join には上限が無い: その pair は supervisor の
+  TIMEOUT（fallback）になり、margin には入れない（Class B。production の backend は z3 だけ）。
+- 区間の最大は別の pair・別の run の値を足している（1 pair の実際の合計より保守的）。
+- 観測した最大は保証ではない。margin を越えた pair は process TIMEOUT として記録され、別の結果に
+  化けない。区間が増えたとき・`PAIR_STACK_DUMP_LEAD` を変えたときは取り直す。
 
-- 区間の最大は別の pair・別の run の値を足している（同時に起きた値ではない）ので、1 pair の
-  実際の合計の最大（85.1 s）より大きい。full run は高負荷（固定費が大きい）と長い期限
-  （確定処理が重い）が同時に起き得るので、和を採った。
-- 協調的な worker の停止・join は `overrun` に含まれる（PR-106-A の実測で z3 の
-  interrupt 後の戻りは最大 0.12 s）。足し直していない。止められない worker（能力を宣言
-  しない backend）の join は有限の上限が無いので margin に入れない: その pair は
-  supervisor の TIMEOUT（fallback）になり、保証の対象外（Class B）。
-- PR-106-A の候補値との照合: 固定費 ~50 s（高負荷）→ 今回 30.4 s、`connector.finish`
-  最大 25 s → 今回 38.9 s（大きくなった）、出力最大 12 s → 17.5 s、checkpoint の無い区間の越え
-  28.8 s（`61a51f5`、高負荷）→ 今回の最大 6.9 s（再現せず。margin には入れていない）。
-- **観測した最大は保証ではない。** 件数が少なく（p99 は n ≥ 100 の区間だけ）、full run と
-  高負荷（load > 50）の profile は測っていない。margin を越えた pair は process TIMEOUT
-  （`Outcome.TIMEOUT`、exit 3）として記録され、別の結果に化けない。`PAIR_STACK_DUMP_LEAD` を
-  大きくしたとき、または上の区間が増えたときは、この表を取り直して margin を見直す。
+### 採用値（PR-106-B review 1、2026-10-02）
+
+run の一覧は先に決め、後から除かない（`deadline_margin_summary` に `P` を位置引数、`L` を
+`--load-root`、`F` を `--pre-root` で渡す。一覧は PR #237 の本文）。
+
+| 項 | full matrix（P=32、600 s。`P`: P=32 の Eq / Neq 30 s 診断、ell の 475 / 480 s run） | 固定 subset（P=20、240 s。`P`: 期限 120 s 以下の subset run） |
+|---|---|---|
+| `pre` | 73.2（`F`: PR-106-A round 2 の subset 診断、同時 run の高負荷） | 73.2（同じ） |
+| `overrun` | 25.5（`L`: PR-106-A review 5 の ell 480 s） | 25.5（同じ） |
+| `post_trip` | 56.8（ell CheckCond、475 s） | 21.9 |
+| `tail` | 28.1（ell CheckCond） | 3.0 |
+| lead | 2 | 2 |
+| 和 | 185.6 | 125.6 |
+| **margin** | **190 s** → 既定の期限 600 − 190 = **410 s** | **130 s** → 既定の期限 240 − 130 = **110 s** |
+
+- 1 pair の実際の合計の最大（`needed` + lead）は full 79.0 s、subset 70.9 s。
+- 計画の暫定値（480 / 120 s）と、初版 PR の 475 / 115 s（margin 125 s）は、この式の和を収められない。
+- 未計測: full matrix そのもの（147 source / 49,320 pair）、ell の heavy pair を P=32 で流す run（33 pair ×
+  最大 5.9 GB で host の memory を越えるため P=11）、評価 slot で排他にした低負荷 profile（P-low）。
