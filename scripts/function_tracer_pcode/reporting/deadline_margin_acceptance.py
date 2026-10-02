@@ -38,9 +38,21 @@ run 単位の規則。満たさない run を pool に渡すと判定不能に�
 * ``violated``: margin が足りない証拠がある: ``P`` / ``L`` に process の TIMEOUT（supervisor の
   wall clock、`timeout_kind`）、lead window に入った pair、``required > margin``、margin を越えた
   ``P`` の pair。
-* ``undetermined``: 証拠が足りない: profile の情報の欠け、適格でない run、``P`` / ``L`` の
-  `timeout_kind` が確かめられない TIMEOUT や終了の証拠の壊れた pair、打ち切ったかどうか読めない
-  pair、区間の欠測、打ち切った pair の無い pool、標本の無い項。
+* ``undetermined``: 証拠が足りない: profile の情報の欠け、適格でない run（run の事実の出所どうしの
+  食い違いを含む）、``P`` / ``L`` の `timeout_kind` が確かめられない TIMEOUT や 5 値に無い outcome、
+  打ち切ったかどうか読めない pair（不完全な journal を含む）、区間の欠測（有限でない・値域に
+  入らない数値を含む）、``P`` / ``L`` で期限の機構の規則より早い trip（負の overrun が
+  `core.deadline.earliest_start_refusal_seconds` を越える）、打ち切った pair の無い pool、標本の
+  無い項、有限でない和。
+
+## 証拠の契約（観測側 `deadline_margin_summary` が持ち、ここは結果だけを読む）
+
+* 完全性: journal は `JournalRead.incomplete_reasons` が空のときだけ「打ち切った / 打ち切って
+  いない」を読む。
+* 数値: 有限で値域に入る値だけが値（`RunFacts` / `PairObservation` / `MarginProfile` は有限で
+  ない数を作る時点で拒む。CLI の秒は `core.deadline.parse_budget_seconds`）。
+* 整合: 同じ事実の出所（manifest と trip・sidecar）が食い違えば ``RunFacts.conflicts``。
+* 終了: `authority.contracts.Outcome` の 5 値だけ。
 
 違反の理由（``violations``）と証拠の足りない理由（``undetermined``）は、件数を潰さずにすべて返す。checker 自身の
 solver の terminal timeout（`child_solver_timeout`）は process の TIMEOUT と区別して扱う（margin の
@@ -52,6 +64,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+from scripts.function_tracer_pcode.core.deadline import earliest_start_refusal_seconds
 
 POOL_P = "P"
 POOL_L = "L"
@@ -71,6 +85,10 @@ def pool_intervals(pool: str) -> Tuple[str, ...]:
     """``pool`` が使う区間（= その pool の打ち切った pair で観測が必須の区間）。`TERM_POOLS` から引く。"""
 
     return tuple(term for term, pools in TERM_POOLS.items() if pool in pools)
+
+#: trip の note の ``elapsed_seconds`` は 6 桁に丸めて書かれる（`core.deadline`）。観測の
+#: overrun は 3 桁に丸めるので、境界の比較はその分だけ緩める
+_ELAPSED_ROUNDING_SECONDS = 1e-3
 
 #: ``P`` の pair ごとに観測が必須な、採用式の和に入る区間以外の項（stack dump の lead）
 LEAD = "lead"
@@ -221,6 +239,13 @@ def _pair_findings(
         undetermined.append(f"{where}: cannot tell whether the deadline cut it ({pair.cut_unknown_reason})")
         return violations, undetermined
     if pair.cut:
+        overrun = pair.values.get("overrun")
+        bound = earliest_start_refusal_seconds()
+        if (pool in (POOL_P, POOL_L) and overrun is not None
+                and overrun < -(bound + _ELAPSED_ROUNDING_SECONDS)):
+            undetermined.append(
+                f"{where}: overrun {overrun:g}s is earlier than the deadline under evaluation "
+                f"may refuse a start ({bound:g}s before it)")
         for interval in pool_intervals(pool):
             if interval in pair.missing:
                 undetermined.append(f"{where}: {interval} unobserved ({pair.missing[interval]})")

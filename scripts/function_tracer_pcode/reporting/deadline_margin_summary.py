@@ -56,6 +56,12 @@ commit・sample の母集団）と、pair ごとの終了の分類・期限で�
 violated / undetermined）は `reporting/deadline_margin_acceptance.py` だけが決める（集計の
 前に決まる規則で、結果を見て標本を除かない）。
 
+* **値が「ある・変換できる」ことと、証拠が「完全・妥当・整合」であることは別。** journal は
+  完全に読めたとき（`JournalRead.incomplete_reasons` が空）だけ「trip が無い = 期限内に終わった」
+  と読む。数値は有限で値域に入るときだけ値にする（trip の note は全体として、sidecar は項目ごと、
+  ``pre`` / ``tail`` は負にならない）。同じ事実の出所（manifest の期限と各 trip の budget、process の
+  期限・lead と各 sidecar）は照合し、食い違えば ``RunFacts.conflicts`` に両方を残す（片方で上書き
+  しない）。終了は authority の 5 値の `Outcome` だけ（他の綴りは ``termination_invalid``）。
 * 観測した最大は保証ではない（負荷・入力が変われば越え得る）。
 * ``lead`` は supervisor が SIGUSR1 を送る先行時間。child がその窓の中で終わると #204 の経路に
   入るので、margin の中に取る。SIGTERM の後の grace（kill-after）は process の期限の **後** なので
@@ -76,10 +82,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.authority.contracts import Outcome
-from scripts.function_tracer_pcode.core.deadline import (
-    DEFAULT_SUB_OPERATION_MARGIN_SECONDS,
-    parse_budget_seconds,
-)
+from scripts.function_tracer_pcode.core.deadline import parse_budget_seconds
 from scripts.function_tracer_pcode.core.stage_journal_reader import (
     SUMMARY_READ_LIMIT_BYTES,
     JournalSegment,
@@ -261,10 +264,6 @@ def _read_key_values(path: Path) -> Dict[str, str]:
 # 証拠の検証（値が「ある・変換できる」ことと「完全・妥当・整合」は別）
 # ---------------------------------------------------------------------------
 
-#: trip の note の ``elapsed_seconds`` は 6 桁に丸めて書かれる（`core.deadline`）
-_ELAPSED_ROUNDING_SECONDS = 1e-6
-
-
 def _measured(value: Any, name: str, *, positive: bool = False,
               nonnegative: bool = False) -> Tuple[Optional[float], str]:
     """記録された数値を、有限で値域に入るときだけ値にする（入らなければ理由）。"""
@@ -317,8 +316,8 @@ class _Trip:
 def _trip_note(row: Any) -> Tuple[Optional[_Trip], str]:
     """trip の note を、全体として妥当なときだけ読む（1 つでも欠ければ note 全体を使わない）。
 
-    期限は sub-operation を ``DEFAULT_SUB_OPERATION_MARGIN_SECONDS`` までしか早く断らない
-    （`core.deadline`）ので、負の overrun はその範囲だけが妥当。
+    負の overrun（期限の前に始めるのを断った）の範囲は期限の機構の規則なので、ここでは
+    決めない（機構が評価対象と同じ pool だけに `deadline_margin_acceptance` が当てる）。
     """
 
     if row.t_monotonic is None:
@@ -331,10 +330,6 @@ def _trip_note(row: Any) -> Tuple[Optional[_Trip], str]:
                                  "deadline_tripped elapsed_seconds", nonnegative=True)
     if problem:
         return None, problem
-    reserve = DEFAULT_SUB_OPERATION_MARGIN_SECONDS
-    if elapsed - budget < -(reserve + _ELAPSED_ROUNDING_SECONDS):
-        return None, (f"trip {budget - elapsed:g}s before the deadline, more than the "
-                      f"{reserve:g}s the deadline may refuse a start early")
     stage = row.payload.get("stage")
     return _Trip(at=row.t_monotonic, budget=budget, elapsed=elapsed,
                  stage=stage if isinstance(stage, str) else "?"), ""

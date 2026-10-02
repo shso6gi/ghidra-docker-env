@@ -190,7 +190,7 @@ def test_a_sidecar_number_that_is_not_finite_or_in_range_is_unobserved(
     assert verdict["violations"] == []
 
 
-@pytest.mark.parametrize("overrun, expected", [(-0.5, "holds"), (-0.51, "undetermined")])
+@pytest.mark.parametrize("overrun, expected", [(-1.5, "holds"), (-1.51, "undetermined")])
 def test_the_negative_overrun_boundary_is_the_deadlines_start_refusal_reserve(
     tmp_path, overrun, expected,
 ):
@@ -355,3 +355,17 @@ def test_the_termination_vocabulary_is_the_authority_outcome():
     }
     assert margin.termination_of("MISSING", None) == "termination_invalid"
     assert margin.termination_of("INVALID", None) == "termination_invalid"
+
+
+def test_the_start_refusal_bound_follows_every_time_unit():
+    """The bound comes from the deadline's own rounding rule: every unit has a length,
+    and a start is refused at most the margin plus the coarsest unit early."""
+
+    from scripts.function_tracer_pcode.core import deadline
+
+    assert set(deadline.UNIT_SECONDS) == set(deadline.TimeUnit)
+    assert deadline.earliest_start_refusal_seconds() == 1.5
+    assert deadline.earliest_start_refusal_seconds(0.25) == 1.25
+    # the rounding rule itself: a seconds API with 0.999 s left before the margin is not started
+    assert deadline.bounded_timeout(10.0, 100.999, deadline.TimeUnit.SECONDS, now=100.0) is None
+    assert deadline.bounded_timeout(10.0, 101.0, deadline.TimeUnit.SECONDS, now=100.0) == 1

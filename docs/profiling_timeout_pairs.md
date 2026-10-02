@@ -374,6 +374,18 @@ margin(profile) = ceil5( max_{P∪L∪F} pre + max_{P∪L} overrun + max_P post_
   標本の無い項。checker 自身の solver の terminal timeout（`child_solver_timeout`）は margin の事象では
   ないので、どちらにも数えない。`F` は別の code の run なので、その終了の分類は判定に使わない。
 
+### 証拠の契約（review 3）
+
+値が「ある・変換できる」ことを、証拠が「完全・妥当・整合」であることと取り違えない。
+
+| 契約 | owner | 守れないとき |
+|---|---|---|
+| journal の完全性: 上限で切った・書きかけの最終行・壊れた行・型の合わない field（`NaN` の時刻を含む）は `JournalRead.incomplete_reasons` に残る | `core/stage_journal_reader.py` | margin は「打ち切ったかどうか読めない」（`undetermined`）。stage / hotspot の診断は従来どおり読む |
+| 数値の妥当性: 有限で値域に入る値だけ（trip の note は全体として: budget > 0・elapsed ≥ 0。sidecar の timeout > 0・lead ≥ 0。`pre` / `tail` は負にならない） | `deadline_margin_summary`（観測）。record（`RunFacts` / `PairObservation` / `MarginProfile`）は有限でない数を拒む。CLI の秒は `core.deadline.parse_budget_seconds` | 区間の欠測（`undetermined`）。CLI は exit 2 |
+| 負の overrun の範囲: 期限は `期限 − 余裕` までの残りを単位へ直して 0 なら始めないので、最大 `余裕 + 最も粗い単位の 1`（既定 0.5 + 1 = 1.5 s）早く trip する | `core.deadline.earliest_start_refusal_seconds` | `P` / `L`（評価対象と同じ機構）で越えれば `undetermined`。`F`（別の機構）には当てない |
+| 事実の整合: manifest の `analysis_timeout` と各 trip の `budget_seconds`、`pair_process_timeout_seconds` / `pair_stack_dump_lead` と各 sidecar | `deadline_margin_summary.observe_run`（`RunFacts.conflicts`） | 値は持たず、両方の値を理由に残す（`undetermined`） |
+| 終了の分類: `authority.contracts.Outcome` の 5 値だけ | `deadline_margin_summary.termination_of` | `termination_invalid`（`P` / `L` で `undetermined`） |
+
 - **SIGUSR1 の lead と SIGTERM の grace は別物。** lead（deadline の 2 s 前）は process の期限
   より **前**: child がその窓の中で終わると #204 の経路（`PAIR_STATUS_AUTHORITY_INVALID`）に入るので、
   margin の中に取る。grace（`PAIR_PROCESS_KILL_AFTER`、SIGTERM から SIGKILL まで）は process の
@@ -392,7 +404,7 @@ margin(profile) = ceil5( max_{P∪L∪F} pre + max_{P∪L} overrun + max_P post_
 
 pool の割り当ては上の規則を run の事実（manifest と trip の note）だけに当てて機械的に決めた
 （この host の Issue #106 の run すべてが対象。区間の値は割り当てに使っていない）。期限の機構が同じ
-commit: `c3b533b0` `c883ba9a` `06aed6f0` `aa06b462` `6244a1c5` `d98c4975` `747ad633`（`c3b533b0` との差は
+commit: `c3b533b0` `c883ba9a` `06aed6f0` `aa06b462` `6244a1c5` `d98c4975` `747ad633` `a6cf3b20`（`c3b533b0` との差は
 `core/deadline.py` の `parse_budget_seconds`・`stage_journal_reader` の読み取り helper・CLI の引数検査で、
 停止・checkpoint・solver の停止は同一）。割り当てと値の一覧は PR #237 の本文。
 
@@ -406,6 +418,9 @@ commit: `c3b533b0` `c883ba9a` `06aed6f0` `aa06b462` `6244a1c5` `d98c4975` `747ad
 | 和 | 174.5 → **holds**（margin 190） | 109.7 → **holds**（margin 130） |
 | 参考: dirty な review 5 の run を `L` に入れた場合（review 1 の数え方） | `overrun` 25.5 → 185.6、holds | 120.8、holds |
 
+- review 3 の証拠の契約（上の表）で同じ run を評価し直しても値は同じで、どちらも holds（不完全な
+  journal・区間の欠測・事実の食い違い・期限の機構の規則より早い trip は `P` / `L` / `F` とも 0。
+  `P` / `L` の最も早い trip は期限の 1.37 s 前で、1.5 s の範囲内）。
 - 既定値は変えない: full **190 s / 410 s**、固定 subset **130 s / 110 s**（どちらも規則どおりの集合で
   holds。下げると review 1 の数え方では越えるので下げない）。
 - review 1 の一覧は `P` に期限 30 s の run を含め（期限 **以上** の規則に反する）、subset の `P` に

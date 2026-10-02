@@ -95,7 +95,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Iterator, NoReturn, Optional, Tuple
+from typing import Any, Callable, Iterator, Mapping, NoReturn, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.errors import (
     DeadlineExceeded,
@@ -180,6 +180,23 @@ def bounded_timeout(
         return max(1, int(granted * 1000))
     whole = int(granted)
     return whole if whole >= 1 else None
+
+
+#: 各単位の 1 の長さ（秒）。`bounded_timeout` はこの単位未満の残りでは始めない
+UNIT_SECONDS: Mapping[TimeUnit, float] = {TimeUnit.MILLISECONDS: 0.001, TimeUnit.SECONDS: 1.0}
+
+
+def earliest_start_refusal_seconds(
+    sub_operation_margin_seconds: float = DEFAULT_SUB_OPERATION_MARGIN_SECONDS,
+) -> float:
+    """期限の何秒前から sub-operation を始めないことがあるか（上限）。
+
+    `begin_execution` は ``期限 − 余裕`` までの残りを `bounded_timeout` で単位へ直し、0 になる
+    なら始めない。最も粗い単位（秒）の API では残りが 1 単位未満で始めないので、期限より
+    ``余裕 + 最も粗い単位の 1`` 前までの trip（負の overrun）はこの規則どおり。
+    """
+
+    return float(sub_operation_margin_seconds) + max(UNIT_SECONDS.values())
 
 
 def unbounded_timeout(configured_seconds: float, unit: TimeUnit) -> int:
@@ -830,6 +847,8 @@ __all__ = [
     "UNBOUNDED_WINDOW",
     "active_deadline",
     "bounded_timeout",
+    "earliest_start_refusal_seconds",
+    "UNIT_SECONDS",
     "checkpoint",
     "deadline_query",
     "deadline_scope",

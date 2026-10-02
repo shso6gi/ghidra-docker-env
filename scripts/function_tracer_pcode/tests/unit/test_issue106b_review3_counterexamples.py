@@ -227,7 +227,7 @@ def test_a_journal_row_without_a_finite_time_after_the_trip_is_not_measured(tmp_
 
 
 def test_an_overrun_below_the_start_refusal_reserve_is_inconsistent(tmp_path):
-    """The deadline refuses to start a sub-operation at most 0.5 s early; 30 s early
+    """The deadline refuses to start a sub-operation at most 1.5 s early; 30 s early
     contradicts the deadline's own rule."""
 
     profile = _tree(tmp_path)
@@ -237,8 +237,10 @@ def test_an_overrun_below_the_start_refusal_reserve_is_inconsistent(tmp_path):
     verdict = _verdict(tmp_path, [profile])
 
     assert verdict["status"] == "undetermined", verdict
-    assert (f"pool P: pair {KEY_2}: overrun unobserved (trip 30s before the deadline, more "
-            "than the 0.5s the deadline may refuse a start early)") in verdict["undetermined"]
+    assert verdict["undetermined"] == [
+        f"pool P: pair {KEY_2}: overrun -30s is earlier than the deadline under evaluation may "
+        "refuse a start (1.5s before it)"
+    ]
 
 
 # --------------------------------------------------------------------------
