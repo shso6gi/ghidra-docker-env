@@ -11,7 +11,8 @@ record の protocol・`stable_key`・runtime ref の表現）の回数と順が�
 **根拠（単一の読み）**: canonical な生成経路（`snapshot.canonical_generation_path`）の呼び出しは、本体と同じ読みを
 同じ順に **1 回だけ** 行う（`snapshot.read_snapshot_inputs`。本体と同じ scope・上限・観測）。違いは 1 つだけ:
 意味の view の木の中の serialization-closed な検証済みの値（C-RS2: 不変で、直列化は写しから描く純粋な処理）を、
-その値への identity token に置いたまま読む。snapshot は読んだ値の **純粋な関数**（`snapshot.assemble_snapshot`:
+その値への identity token に置いたまま読む（view が owner の `FunctionReturnAnalysis` の定義のままで、walk の結果を
+そのまま返すときだけ。それ以外の view では token を置かない: 置いた葉を view 自身の code が受け取り得る）。snapshot は読んだ値の **純粋な関数**（`snapshot.assemble_snapshot`:
 token を戻し、digest を求め、`retained_form` の写しを作る）で、witness はその関数の入力そのもの（codec の写しと
 `retained_form` の写し。token は値の identity）。等しい witness からは等しい snapshot が出るので、hit は純粋な部分
 だけを省く。入力に対して走る code は hit / miss / on / off で変わらない（読みは毎回 1 回、hit が省くのは純粋な部分）。
@@ -24,7 +25,9 @@ token を戻し、digest を求め、`retained_form` の写しを作る）で、
 
 **sealing**（C-RS2 の接続）: closed かどうかは読むだけ。単一の読みの中で pending だった値（runtime ref の写しを
 待つ値）は、読みの後で、**その読みが描いた ref の表現** から写す（`seal_serialization(observed=...)`。表現を作る
-code を走らせない）。on / off で同じ値を同じように写す。
+code を走らせない）。on / off で同じ値を同じように写す。写した値は以後、写しから描く（C-RS2 の契約: 検証済みの
+値の runtime ref の表現は写した時点の表現。main は写さないので、ref の表現を作る code が外の状態を読むときだけ、
+写した後の表現が main と違い得る。production の runtime ref は field だけを読む frozen dataclass）。
 
 C-RS3〜C-RS8 は計画 v2 のとおり（寿命・失敗の原子性・透過性・入れ子・token の封じ込め・並行性）。本体の例外は
 そのまま上がり、store を変えない（読みが上げれば witness も snapshot も作らない）。
@@ -46,7 +49,6 @@ from scripts.function_tracer_pcode.core.budget_policy import (
     active_serialization_work,
     budget_scope_is_active,
 )
-from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression
 from scripts.function_tracer_pcode.core.json_encoding import active_walk_work, protocol_method
 from scripts.function_tracer_pcode.core.semantic_freeze import NOT_OBSERVED, seal_serialization
@@ -137,8 +139,8 @@ class _ReadHook(LeafSubstitution):
         self._tokens: Dict[int, ElidedSemanticValue] = {}
 
     def __leaf_substitute__(self, leaf: Any) -> Any:
-        kind = type(leaf)
-        if kind is not Expression and kind is not Condition:
+        # sized leaf（`__json_tree__` を持つ型）は式だけ（条件は record として walk される）
+        if type(leaf) is not Expression:
             return NO_SUBSTITUTION
         if serialization_closed(leaf):
             if not self.elide:
