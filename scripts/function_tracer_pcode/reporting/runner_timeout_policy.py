@@ -30,7 +30,8 @@ module を呼ぶだけにする（Eq / Neq / full / subset / CI で規則を書�
   pair を始める前に拒まれる。比較・記録・CLI へ渡す綴りは、その double の最短の 10 進表現
   （`Decimal`）で行い、2 進の丸めで境界の判定が揺れない。
 * 期限の意味（起点・checkpoint・打ち切り後の扱い）は `core/deadline.py` が持ち、ここでは決めない。
-  既定の margin の測り方と採用式は `reporting/deadline_margin_summary.py`。
+  既定の margin の観測は `reporting/deadline_margin_summary.py`、計測集合・採用式・判定は
+  `reporting/deadline_margin_acceptance.py`。
 
 記録（`manifest_fields`）: 実効値を run manifest / subset manifest へ書く key の唯一の一覧。
 `analysis_timeout` と `analysis_timeout_margin` は解析の設定の identity（`execution_receipt` の
@@ -52,7 +53,7 @@ from typing import Dict, Optional, Sequence, Tuple
 #: 余裕。固定 subset の profile は `eqbench_subset.json` の `run_settings`（240 s − その profile の余裕）。
 FULL_RUN_DEFAULT_ANALYSIS_TIMEOUT = "410"
 
-#: full matrix の profile の既定の余裕（秒）。`reporting/deadline_margin_summary.py` の採用式
+#: full matrix の profile の既定の余裕（秒）。`reporting/deadline_margin_acceptance.py` の採用式
 #: （固定費・checkpoint の無い区間の越え・打ち切り後の確定処理と出力・後片付けの区間ごとの観測最大の和
 #: + stack dump の lead、5 s 単位に切り上げ）を、`docs/profiling_timeout_pairs.md` §10 の run の一覧に
 #: 当てた値。観測した最大の和であって保証ではない（越えた pair は supervisor の TIMEOUT になる）。
