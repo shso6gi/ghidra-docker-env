@@ -426,12 +426,14 @@ the deadline and margin are part of the analysis config identity
 (`analysis_config_schema=eqbench-analysis-config-v4`, also kept in the publication
 manifest's `analysis_config`), so runs with different deadlines never reuse each
 other's pair statuses. `run_health_summary.txt` reports
-`analysis_budget_unknown: N (deadline=a limitation=b unclassified=c); deadline_stopped_unknown=D process_timeout=T`.
+`analysis_budget_unknown: N (deadline=a limitation=b unclassified=c); deadline_stopped_unknown=D`.
 `N` is the reason count `unknown_by_reason["analysis_budget_exceeded"]` (one primary
 reason per UNKNOWN result), split by stop state because the same reason id is also used
 by the fixed read bound and the authority event contract. `D` counts every UNKNOWN pair
-the deadline stopped, including those whose primary reason is another blocking reason,
-and `T` the process `TIMEOUT`s -- a process `TIMEOUT` is never part of `N` or `D`.
+the deadline stopped, including those whose primary reason is another blocking reason.
+A `TIMEOUT` is never part of `N` or `D`: it stays in `final_results`, and `timeout_kind`
+tells the supervisor's wall-clock kill (`process_wall_clock`) apart from the checker's
+own solver timeout (`child_solver_timeout`).
 
 **Rollback:** `ANALYSIS_TIMEOUT=0` runs every pair without the deadline -- the pair
 command is exactly the one before Issue #106 (no `--analysis-timeout` at all) -- and

@@ -893,8 +893,8 @@ def format_validation_unknown_diff_unavailable(
 #: apart by the pair's stop state -- never by the reason id alone.
 ANALYSIS_BUDGET_UNKNOWN_KEY = "analysis_budget_unknown"
 ANALYSIS_BUDGET_UNKNOWN_BY_KIND_KEY = "analysis_budget_unknown_by_kind"
-#: UNKNOWN results whose pair the analysis deadline stopped, whatever their
-#: primary reason.  A unit counts one primary reason, so a deadline pair whose
+#: UNKNOWN results (final outcome UNKNOWN, never TIMEOUT) whose pair the
+#: analysis deadline stopped, whatever their primary reason.  A unit counts one primary reason, so a deadline pair whose
 #: primary reason is another blocking reason is in this count but not in
 #: ``analysis_budget_unknown`` -- the two are reported side by side.
 ANALYSIS_DEADLINE_STOPPED_KEY = "analysis_deadline_stopped"
@@ -928,9 +928,11 @@ def summarize_analysis_budget_unknowns(result_payloads: Iterable[Any]) -> Dict[s
 
     Counted with the same final-reason view and the same UNKNOWN predicate as
     ``summarize_validation_unknowns``, so the kinds always add up to that
-    summary's ``unknown_by_reason["analysis_budget_exceeded"]``.  A process
-    ``TIMEOUT`` (the supervisor's wall clock) has no result payload and is never
-    counted here: it stays in the ``TIMEOUT`` final result count.
+    summary's ``unknown_by_reason["analysis_budget_exceeded"]``.  A ``TIMEOUT``
+    is never a deadline pair: the supervisor's wall-clock kill leaves no result
+    payload, and the checker's own terminal timeout (a solver timeout event,
+    exit 3) is a ``TIMEOUT`` outcome, not an UNKNOWN the deadline stopped.  Both
+    stay in the ``TIMEOUT`` final count and are told apart by ``timeout_kind``.
 
     Returns ``{ANALYSIS_BUDGET_UNKNOWN_BY_KIND_KEY: {...}, ANALYSIS_DEADLINE_STOPPED_KEY: n}``.
     """
@@ -945,7 +947,10 @@ def summarize_analysis_budget_unknowns(result_payloads: Iterable[Any]) -> Dict[s
         payload = _coerce_payload(raw_payload)
         if not _payload_is_unknown(payload):
             continue
-        if _analysis_budget_kind(payload) == ANALYSIS_BUDGET_KIND_DEADLINE:
+        if (
+            _analysis_budget_kind(payload) == ANALYSIS_BUDGET_KIND_DEADLINE
+            and _payload_final_result(payload) == "UNKNOWN"
+        ):
             deadline_stopped += 1
         view, _source = _final_reason_view(payload)
         count = int((view.get("by_reason") or {}).get(ANALYSIS_BUDGET_REASON_ID, 0))

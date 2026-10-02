@@ -1478,8 +1478,10 @@ def build_run_health_summary(
         "proof_backlog_by_proof_kind": dict(unknown_summary.proof_backlog_by_proof_kind),
         "operational_unknown_by_reason": dict(unknown_summary.operational_unknown_by_reason),
         # Issue #106 PR-106-B: `unknown_by_reason["analysis_budget_exceeded"]` の別名と、
-        # その内訳（解析の期限 / その他の限界 / 停止状態の無い結果）。process の TIMEOUT
-        # （supervisor の wall clock）は final_result_counts の TIMEOUT に残り、ここへは入らない。
+        # その内訳（解析の期限 / その他の限界 / 停止状態の無い結果）、期限で止めた UNKNOWN の
+        # pair 数。TIMEOUT（supervisor の wall clock の kill も、checker 自身の solver の
+        # timeout event も）は final_result_counts の TIMEOUT に残り、ここへは入らない
+        # （どちらの TIMEOUT かは `timeout_kind`）。
         **analysis_budget_health(unknown_summary.unknown_by_reason, payloads),
         # Issue #125 PR-125-B: 診断専用の次元。canonical unknown reason の集計
         # 契約とは独立で、decision authority へは接続しない。
@@ -1546,11 +1548,9 @@ def format_analysis_budget_health_line(health: Mapping[str, Any]) -> Optional[st
         ) + ")"
     stopped = health.get(ANALYSIS_DEADLINE_STOPPED_KEY)
     if isinstance(stopped, int) and not isinstance(stopped, bool):
-        # pairs the deadline stopped (any primary reason), next to the process
-        # TIMEOUTs the supervisor's wall clock ended -- never one count
-        counts = health.get("final_result_counts")
-        timeouts = counts.get(STATUS_TIMEOUT, 0) if isinstance(counts, Mapping) else 0
-        line += f"; deadline_stopped_unknown={stopped} process_timeout={timeouts}"
+        # UNKNOWN pairs the deadline stopped (any primary reason).  TIMEOUTs are
+        # not here: they are in final_results, split by `timeout_kind`.
+        line += f"; deadline_stopped_unknown={stopped}"
     return line
 
 

@@ -6,8 +6,9 @@
 stopped.  The reason id is shared by three limits (the runner's analysis
 deadline, the fixed read bound, the authority event contract), so the split
 reads the pair's stop state and never infers the deadline from the reason id.
-A process ``TIMEOUT`` (the supervisor's wall clock) has no result payload; it
-stays in the ``TIMEOUT`` final count and is never an ``analysis_budget_unknown``.
+A ``TIMEOUT`` -- the supervisor's wall-clock kill (no result payload) or the
+checker's own terminal timeout (a TIMEOUT outcome) -- stays in the ``TIMEOUT``
+final count and is never counted as a deadline-stopped UNKNOWN.
 """
 from __future__ import annotations
 
@@ -138,7 +139,7 @@ def test_the_text_shows_the_alias_and_its_split(tmp_path):
     text = format_run_health_summary(health)
 
     assert ("  analysis_budget_unknown: 4 (deadline=2 limitation=1 unclassified=1); "
-            "deadline_stopped_unknown=3 process_timeout=1") in text
+            "deadline_stopped_unknown=3\n") in text + "\n"
     assert "TIMEOUT=1" in text
 
 
@@ -178,3 +179,20 @@ def test_the_kind_comes_from_the_stop_state_only(stop_state, kind):
 
     assert counts[kind] == 1
     assert sum(counts.values()) == 1
+
+
+def test_a_checker_timeout_is_never_a_deadline_stopped_unknown(tmp_path):
+    """The checker's own terminal timeout (a solver timeout event, exit 3) has a
+    result payload but its outcome is TIMEOUT -- it is not an UNKNOWN the
+    deadline stopped, even if the pair's stop state says deadline."""
+
+    deadline = PairStopState.PAIR_TERMINAL_DEADLINE.value
+    logs = [
+        _log(tmp_path, "f_B1_B2.log", _payload("f", [BUDGET], deadline)),
+        _log(tmp_path, "f_B3_B4.log", _payload("f", ["solver_timeout"], deadline, is_timeout=True),
+             human="Result: TIMEOUT"),
+    ]
+    health = build_run_health_summary(aggregate_validation_logs_by_function(logs))
+
+    assert health["final_result_counts"]["TIMEOUT"] == 1
+    assert health[ANALYSIS_DEADLINE_STOPPED_KEY] == 1
