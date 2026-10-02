@@ -392,6 +392,53 @@ the decision is a durable `ERROR` that keeps the superseded decision receipt. Th
 budgets are safety bounds against exponential growth: do not lower them to turn a
 `TIMEOUT` into `UNKNOWN`.
 
+### Analysis deadline (Issue #106)
+
+Every pair the runners start gets a cooperative analysis deadline
+(`--analysis-timeout`, counted from `check_from_binaries`). A pair that reaches it
+starts no further analysis or solver query and ends as `UNKNOWN` with the registered
+reason `analysis_budget_exceeded` (stop state `PAIR_TERMINAL_DEADLINE`), with the
+stack at the trip saved next to the pair. `PAIR_PROCESS_TIMEOUT` stays what it was:
+the supervisor's wall clock, the fallback for anything that does not stop by itself
+(`TIMEOUT`, exit 3).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ANALYSIS_TIMEOUT` | full runs `475`, fixed subset `115s` (`eqbench_subset.json`) | seconds (`475` or `475s`); `0` turns the deadline off |
+| `ANALYSIS_TIMEOUT_MARGIN` | `125` | positive seconds kept between the deadline and `PAIR_PROCESS_TIMEOUT` |
+| `PAIR_PROCESS_TIMEOUT` | full runs `600s`, fixed subset `240s` | unchanged; **never set or raised automatically** |
+
+With the deadline on, `ANALYSIS_TIMEOUT + ANALYSIS_TIMEOUT_MARGIN <= PAIR_PROCESS_TIMEOUT`
+must hold (equality is allowed). The Eq runner, the Neq runner, the subset runner and
+the CI workflow all check it with the same rule (`reporting/runner_timeout_policy.py`)
+before anything is compiled or scheduled, `DRY_RUN=1` included; a violation, another
+unit (`5m`), a sign, an exponent or a zero margin stops the run with exit 1 and names
+the variables. An unset or empty variable takes the default. The margin covers what a
+pair cut at the deadline still does before its process ends -- start-up outside the
+deadline, the last stretch without a checkpoint, finalisation and output, teardown
+and the supervisor's stack-dump lead -- and its measured basis is in
+`docs/profiling_timeout_pairs.md` (section 10); re-measure a run with
+`python3 -B -m scripts.function_tracer_pcode.reporting.deadline_margin_summary <run>/eq <run>/neq`.
+
+The effective values are recorded as `analysis_timeout` / `analysis_timeout_enabled` /
+`analysis_timeout_margin` in each `run_manifest.txt` and in `subset_manifest.txt`, and
+the deadline and margin are part of the analysis config identity
+(`analysis_config_schema=eqbench-analysis-config-v4`, also kept in the publication
+manifest's `analysis_config`), so runs with different deadlines never reuse each
+other's pair statuses. `run_health_summary.txt` reports
+`analysis_budget_unknown: N (deadline=a limitation=b unclassified=c); deadline_stopped_unknown=D process_timeout=T`.
+`N` is the reason count `unknown_by_reason["analysis_budget_exceeded"]` (one primary
+reason per UNKNOWN result), split by stop state because the same reason id is also used
+by the fixed read bound and the authority event contract. `D` counts every UNKNOWN pair
+the deadline stopped, including those whose primary reason is another blocking reason,
+and `T` the process `TIMEOUT`s -- a process `TIMEOUT` is never part of `N` or `D`.
+
+**Rollback:** `ANALYSIS_TIMEOUT=0` runs every pair without the deadline -- the pair
+command is exactly the one before Issue #106 (no `--analysis-timeout` at all) -- and
+such a run reads as the pre-deadline analysis config, so it can resume a tree written
+before the deadline existed (`rerun_eqbench_errors.sh` passes `ANALYSIS_TIMEOUT` through
+to both runners; use `ANALYSIS_TIMEOUT=0` to rerun the ERROR pairs of such a tree).
+
 ### Measurement subset
 
 `scripts/function_tracer_pcode/reporting/eqbench_subset.json` fixes a small
@@ -399,7 +446,7 @@ Eq + Neq subset (8 Eq sources and 10 Neq sources, one function and 8 pairs each)
 checker behaviour before and after a change. `eqbench_run_subset.sh` runs it
 with the settings stored in the manifest (`PARALLEL_JOBS=32`,
 `EQBENCH_RESOURCE_ADMISSION=0`, `EQBENCH_BUILD_POLICY=PREBUILT_ONLY`,
-`PAIR_PROCESS_TIMEOUT=240s`), running the Eq half and then the Neq half (each runner
+`PAIR_PROCESS_TIMEOUT=240s`, `ANALYSIS_TIMEOUT=115s`), running the Eq half and then the Neq half (each runner
 already fills `PARALLEL_JOBS` slots on its own):
 
 ```bash
@@ -438,7 +485,7 @@ Nothing about the run itself changed with the cadence: the same subset, the
 same per-pair timeout, the same soundness gate and the same per-half benchmark
 validation gate. When a particular merge needs real-binary evidence sooner than
 the next scheduled run, dispatch it by hand — `workflow_dispatch` takes a ref
-and the four inputs below, and is not part of the weekly budget.
+and the six inputs below, and is not part of the weekly budget.
 
 The other heavy workflow, `recorded-full`, is weekly too (Mondays 03:20 UTC);
 the two are on different days so they never queue against each other. The cheap
@@ -472,6 +519,8 @@ themselves.
 | `subset_scope` | `all` | which halves run *and* which halves are verified (`eq` / `neq` / `all`) |
 | `pair_process_timeout` | `240s` | `PAIR_PROCESS_TIMEOUT` for both halves |
 | `identical_fast_path` | `1` | Issue #15 fast path; `0` runs the oracle path |
+| `analysis_timeout` | empty (the subset manifest's `115s`) | Issue #106 analysis deadline; `0` runs without it |
+| `analysis_timeout_margin` | empty (the runner default) | margin checked against `pair_process_timeout` |
 | `eqbench_ref` | `3724fce5b287cc63165028444daf904f25b0158b` | the EqBench commit to check out |
 
 Two of the manifest's own `run_settings` are overridden, because a hosted
@@ -487,7 +536,11 @@ normalised once**, in the first step, with `${VAR:-default}` — not with a GitH
 expression `||`, whose truthiness rules would quietly turn
 `identical_fast_path=0` into `1`. No later step has a default of its own; the
 normalised values, the raw ones and which of them the event actually carried
-are saved as `normalized_inputs.json`.
+are saved as `normalized_inputs.json`. The analysis deadline is normalised the
+same way and then resolved by the runners' own rule (`runner_timeout_policy
+resolve`): an inconsistent `analysis_timeout` / `analysis_timeout_margin` /
+`pair_process_timeout` fails this first step, and the *effective* values are what
+every later step passes to the container and verifies.
 
 **Canonical checkout and working copy are separate trees.** EqBench is cloned
 to `$RUNNER_TEMP/eqbench-canonical`, *outside* the repository, and is only ever
@@ -511,7 +564,8 @@ Success is decided in one place, `scripts/eqbench/ci_subset.py`:
 python3 -B -m scripts.eqbench.ci_subset verify \
     --run-dir logs/EqBench/ci_subset --scope all --profile full \
     --working-root /workspace/tmp/eqbench-work/benchmarks \
-    --pair-process-timeout 240s --identical-fast-path 1 --runner-exit-status 0
+    --pair-process-timeout 240s --identical-fast-path 1 \
+    --analysis-timeout 115 --analysis-timeout-margin 125 --runner-exit-status 0
 ```
 
 - the subset runner exited 0 and `subset_manifest.txt` records `exit_status=0`,

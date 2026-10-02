@@ -266,9 +266,14 @@ python3 -B -m scripts.function_tracer_pcode.reporting.timeout_hotspot_summary \
 （registration → 送信 → 観測 → 退避 → 分類 → hotspot）を確かめるための run。
 
 ```bash
-PAIR_PROCESS_TIMEOUT=60s OUTPUT_BASE_DIR=logs/EqBench/subset_issue124_t60 \
+ANALYSIS_TIMEOUT=0 PAIR_PROCESS_TIMEOUT=60s OUTPUT_BASE_DIR=logs/EqBench/subset_issue124_t60 \
   bash eqbench_run_subset.sh
 ```
+
+`ANALYSIS_TIMEOUT=0` が要る（Issue #106 PR-106-B 以降）。固定 subset の既定の解析の期限
+（115 s）と余裕は 60 s の process timeout に収まらないので、指定しないと runner は pair を
+始めずに exit 1 する。また期限があると pair は process TIMEOUT の前に理由付き UNKNOWN で
+終わり、この run が作りたい TIMEOUT 経路を通らない。
 
 **これは評価ではない。** 60s は本番の予算（既定 600s、固定 subset は 240s）より
 ずっと短いので、ここで出た TIMEOUT 件数・outcome 分布・reason 集合を
@@ -292,3 +297,64 @@ authority の finalize 区間（`_profiled_finish`）だけを見たいときは
 （`authority/lifecycle/production_boundary.py`）。区間ごとの秒数は結果 JSON の
 `diagnostics.timings`（`stages` / `regions` / `phases` / `boundary_seconds`）にも
 入っているので、まずそちらを見てから profile を取ると当たりが早い。
+
+## 10. 解析の期限（`ANALYSIS_TIMEOUT`）と margin の実測（Issue #106 PR-106-B）
+
+runner は pair に解析の期限（`--analysis-timeout`）を渡し、`ANALYSIS_TIMEOUT +
+ANALYSIS_TIMEOUT_MARGIN <= PAIR_PROCESS_TIMEOUT` を run の開始前に確かめる
+（規則は `reporting/runner_timeout_policy.py`、使い方は README の
+"Analysis deadline (Issue #106)"）。margin は「期限で打ち切った pair が、process の期限
+（と supervisor の stack dump の先行時間）より前に終わる」ための余裕で、その根拠は次の
+道具で run の出力から測る:
+
+```bash
+python3 -B -m scripts.function_tracer_pcode.reporting.deadline_margin_summary \
+  logs/EqBench/<run>/eq logs/EqBench/<run>/neq --json /tmp/margin.json
+```
+
+期限で打ち切った pair 1 件を、重ならない連続した区間に分ける（二重計上しない。
+`needed = wall − 期限 = pre + overrun + post_trip + tail` が恒等式で成り立つ）:
+
+| 区間 | 内容 | 端点 |
+|---|---|---|
+| `pre` | 解析の外の固定費（supervisor・CLI の起動、JVM、project open、import、auto analyze） | supervisor の開始 → 期限の起点 |
+| `overrun` | checkpoint の無い区間・止まるまで戻らない処理（協調的な solver の停止と join を含む）。負の値は「期限まで sub-operation の余裕 0.5 s を切ったので始めなかった」 | 期限 → trip |
+| `post_trip` | 限界の帰属・結果の組み立て・出力の準備（`unwind`）、`connector.finish`・receipt（`authority_finalize`）、conditional lane、`close_programs`、結果 JSON（`result_emit`） | trip → 最後の journal event |
+| `tail` | JVM の停止・process の終了・supervisor の pair status の durable write・回収 | 最後の journal event → runner が終わりを観測 |
+
+Neq の runner は per-pair の runtime receipt を書かない（#160）ので、Neq の pair は
+`overrun` / `post_trip` / `pre_child`（child の journal の開始から）だけを持ち、`pre` /
+`tail` / `needed` には入らない。
+
+### 採用値の根拠（PR-106-B、commit `aa06b462`、2026-10-02）
+
+条件: 固定 subset（`PAIR_PROCESS_TIMEOUT=240s`、P=20、identical fast path 1）を期限 30 s
+（診断）と 120 s、P-ell（ell `B12_B16`、600 s、P=6）を期限 480 s で 1 本ずつ。他 session の
+run と一部重なった（host の load average は最大 41.7）。
+
+| 区間 | 30 s subset（trip 43、うち receipt あり 23） | 120 s subset（trip 5 / 2） | 480 s P-ell（trip 6 / 6） | 最大 |
+|---|---|---|---|---|
+| `pre` | median 19.6 / p90 24.7 / max 30.4 | max 29.5 | median 7.7 / max 9.6 | **30.4** |
+| `overrun` | median 0.18 / p90 2.1 / max 5.1 | max 1.1 | max 6.9 | **6.9** |
+| `post_trip` | median 0.47 / p90 1.8 / max 11.8 | max 18.9 | max 56.5（CheckCond: `authority_finalize` 38.9 + `result_emit` 17.5） | **56.5** |
+| `tail` | median 1.5 / p90 2.5 / max 2.8 | max 5.5 | max 27.8 | **27.8** |
+| `needed`（実際の合計） | max 32.9 | max 53.9 | max 85.1 | 85.1 |
+
+margin = 区間ごとの最大の和 121.6 s + stack dump の先行時間 2 s = 123.6 s を 5 s 単位に
+切り上げた **125 s**。既定の期限はそこから決まる: full は 600 − 125 = **475 s**、固定 subset は
+240 − 125 = **115 s**（計画の暫定値 480 / 120 s はこの和を収められなかった）。
+
+- 区間の最大は別の pair・別の run の値を足している（同時に起きた値ではない）ので、1 pair の
+  実際の合計の最大（85.1 s）より大きい。full run は高負荷（固定費が大きい）と長い期限
+  （確定処理が重い）が同時に起き得るので、和を採った。
+- 協調的な worker の停止・join は `overrun` に含まれる（PR-106-A の実測で z3 の
+  interrupt 後の戻りは最大 0.12 s）。足し直していない。止められない worker（能力を宣言
+  しない backend）の join は有限の上限が無いので margin に入れない: その pair は
+  supervisor の TIMEOUT（fallback）になり、保証の対象外（Class B）。
+- PR-106-A の候補値との照合: 固定費 ~50 s（高負荷）→ 今回 30.4 s、`connector.finish`
+  最大 25 s → 今回 38.9 s（大きくなった）、出力最大 12 s → 17.5 s、checkpoint の無い区間の越え
+  28.8 s（`61a51f5`、高負荷）→ 今回の最大 6.9 s（再現せず。margin には入れていない）。
+- **観測した最大は保証ではない。** 件数が少なく（p99 は n ≥ 100 の区間だけ）、full run と
+  高負荷（load > 50）の profile は測っていない。margin を越えた pair は process TIMEOUT
+  （`Outcome.TIMEOUT`、exit 3）として記録され、別の結果に化けない。`PAIR_STACK_DUMP_LEAD` を
+  大きくしたとき、または上の区間が増えたときは、この表を取り直して margin を見直す。
