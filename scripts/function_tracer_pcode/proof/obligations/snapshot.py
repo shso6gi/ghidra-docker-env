@@ -556,6 +556,7 @@ class AnalysisSnapshot:
         payload = (extraction_schema_version, snapshot_id, semantic_fields)
         # fingerprint を先に求める（opaque な値・上書きした容器は digest が拒む。拒まれた値を写さない）
         fingerprint = SnapshotFingerprintCodec.digest(payload)
+        # 保持の規則（`snapshot_id` は浅い tuple、残りは `deep_freeze`）は `snapshot_references` と一緒に変える
         return cls(
             snapshot_id=tuple(snapshot_id),
             semantic_fields=deep_freeze(dict(semantic_fields)),
@@ -625,6 +626,32 @@ class SnapshotMaterial(NamedTuple):
     snapshot_id: Tuple[Any, ...]
     semantic_fields: Dict[str, Any]
     diagnostic_refs: Dict[str, Any]
+
+
+def snapshot_references(material: SnapshotMaterial) -> Tuple[Any, ...]:
+    """`AnalysisSnapshot.create` が写さずに snapshot へ置く、変わり得る object（snapshot の一部になる identity）。
+
+    `create` は `snapshot_id` を浅い tuple にするだけで、要素は参照のまま置く。そのうち組み込みの不変な
+    値（scalar と、それだけから成る tuple / frozenset）でない要素は、置いた object が後で変われば snapshot
+    も変わる。`semantic_fields` / `diagnostic_refs` は `deep_freeze` が容器を写し、容器でない値だけを参照で
+    置く（その値は `deep_freeze` の葉）。保持の規則を変えるときは `create` とこの関数を一緒に変える。
+    """
+
+    return tuple(item for item in material.snapshot_id if not _immutable_builtin(item))
+
+
+def _immutable_builtin(value: Any) -> bool:
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        kind = type(item)
+        if item is None or kind is str or kind is int or kind is bool or kind is float or kind is bytes:
+            continue
+        if kind is tuple or kind is frozenset:
+            pending.extend(item)
+            continue
+        return False
+    return True
 
 
 def snapshot_serialization_target(analysis: Any) -> Tuple[Any, ...]:

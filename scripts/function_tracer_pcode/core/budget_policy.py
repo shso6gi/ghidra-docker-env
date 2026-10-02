@@ -585,20 +585,24 @@ class SerializationWork:
         `substitutable` は、作った葉を受け取るのが置き換えを頼んだ呼ぶ側だけのとき（walk の外から
         始めた LEGACY の構築が置く葉。`core/json_encoding._Walk`）。そのときだけ `leaf_substitution`
         に尋ねる: walk の中の code が読む値・`Expression.to_dict()` の返り値は置き換えない。
+
+        **置き換えが変えるのは置く値だけで、数える量は変えない**: 置き換えた葉も、置き換えない葉と
+        同じく大きさを見積もって足し、distinct な node を数え、上限と比べる（作らないだけ）。この作業量の
+        量（`consumed` / `distinct_nodes`）と、超過で止まるかは、置き換えの有無に依らない。
         """
 
         from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, protocol_method
 
+        substitute = NO_SUBSTITUTION
         substitution = self.leaf_substitution if substitutable else None
         if substitution is not None:
             # 置き換えは package の `LeafSubstitution` の protocol（型の関数を直接呼ぶ）
             substitute = protocol_method(substitution, "__leaf_substitute__")(substitution, leaf)
-            if substitute is not NO_SUBSTITUTION:
-                # 置き換えた葉は見積もらず・数えず・作らない（1 歩 1 byte 以上の規則だけを守る）
-                self.charge(SUBSTITUTED_LEAF_BYTES)
-                return (substitute if build else None), SUBSTITUTED_LEAF_BYTES
+        substituted = substitute is not NO_SUBSTITUTION
         # sized leaf の protocol は package の型の関数を直接呼ぶ（instance の属性を引かない）
         if not self.enabled:
+            if substituted:
+                return (substitute if build else None), 0
             return (protocol_method(leaf, "__json_tree__")(leaf) if build else None), 0
         # 見積もりの作業量（runtime ref を辿る分）もこの作業量へ数える（byte の大きさとは分ける）
         size = protocol_method(leaf, "__json_tree_bytes__")(leaf, RESULT_JSON_POLICY, self.remaining(), self)
@@ -628,6 +632,8 @@ class SerializationWork:
                 target_key=self.target_key(),
                 limit=self._policy.serialization_nodes,
             )
+        if substituted:
+            return (substitute if build else None), size
         if build and built is None:
             built = protocol_method(leaf, "__json_tree__")(leaf)
         return (built if build else None), size
@@ -700,10 +706,6 @@ class LeafSubstitution:
         return NO_SUBSTITUTION
 
 
-#: 置き換えた葉 1 つに数える byte（走査の 1 歩を 1 byte 以上に数える規則の下限）
-SUBSTITUTED_LEAF_BYTES = 1
-
-
 def active_serialization_work() -> Optional[SerializationWork]:
     """今開いている直列化の作業量（無ければ `None`）。"""
 
@@ -731,9 +733,10 @@ def serialization_scope(
     別 thread の直列化と合算しない）。
 
     `leaf_substitution` は sized leaf（`SerializationWork.tree`）を作る前に呼ばれ、
-    `NO_SUBSTITUTION` 以外を返すとその値を葉として置く（見積もり・数え・木の構築をしない）。
-    置き換えた量は表現の大きさではないので、置き換えを持つ scope は terminal でなく、外側へ
-    合流も合算もしない。`record_observations=False` の scope は量を観測値へ残さない。
+    `NO_SUBSTITUTION` 以外を返すとその値を葉として置く（木を作らない。大きさの見積もり・node の
+    数え・上限との比較は置き換えない葉と同じ）。置き換えを持つ scope は別の直列化の結果を作らない
+    ので、terminal でなく（超過は `JsonBudgetExhausted`）、外側へ合流も合算もしない。
+    `record_observations=False` の scope は量を観測値へ残さない。
     """
 
     stack = getattr(_SERIALIZATION, "stack", None)
@@ -834,5 +837,4 @@ __all__ = [
     "active_serialization_work",
     "LeafSubstitution",
     "NO_SUBSTITUTION",
-    "SUBSTITUTED_LEAF_BYTES",
 ]

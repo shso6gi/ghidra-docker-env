@@ -76,6 +76,7 @@ from scripts.function_tracer_pcode.proof.obligations.snapshot import (
     WITNESS_TOKEN_MARKER,
     SnapshotFingerprintCodec,
     snapshot_material,
+    snapshot_references,
     snapshot_serialization_target,
 )
 
@@ -142,6 +143,12 @@ class _SameObject:
         return id(self.value)
 
 
+def _SameKind(kind: type) -> "_SameObject":
+    """容器の型（list / tuple / dict / mapping の別）の identity。"""
+
+    return _SameObject(kind)
+
+
 class _Tag:
     """witness の値の複製の区切り（identity で比べる印）。"""
 
@@ -199,12 +206,13 @@ class _LeafSubstitution(LeafSubstitution):
 
 
 def _freeze_witness(value: Any) -> Any:
-    """witness の値の複製（`snapshot.deep_freeze` と同じ容器の読み方で、型と順序を保つ）。
+    """witness の値の複製。組み込みの型 **そのもの** ごとに区別し、順序を保つ。
 
-    本体が返す snapshot（`deep_freeze` の写しと digest）より細かい同値で比べる: 組み込みの scalar は
-    型ごとに区別し（`True` / `1` / `1.0` / `-0.0` を `==` で畳まない）、mapping は挿入順、set は
-    要素の集合。容器でない object は snapshot が参照で持つので identity（`_SameObject`）と、
-    digest が読む値（codec の写し。作れなければ印）の両方。
+    本体が返す snapshot のどの field より細かい同値で比べる: scalar は型ごと（`True` / `1` / `1.0` /
+    `-0.0` を `==` で畳まない）、容器も型ごと（`snapshot_id` の要素は `create` が型のまま置くので、
+    list と tuple・dict と mapping を区別する）、mapping は挿入順、set は要素の集合。容器でない object は
+    snapshot が参照で持ち得るので identity（`_SameObject`）と、digest が読む値（codec の写し。作れなければ
+    印）の両方。
     """
 
     kind = type(value)
@@ -217,18 +225,18 @@ def _freeze_witness(value: Any) -> Any:
     if kind is ElidedSemanticValue or value is _PENDING:
         return value
     if kind is dict:
-        return (_MAPPING, tuple((_freeze_witness(key), _freeze_witness(item)) for key, item in dict.items(value)))
+        return (_MAPPING, _SameKind(dict), tuple((_freeze_witness(key), _freeze_witness(item)) for key, item in dict.items(value)))
     if kind is tuple or kind is list:
-        return (_SEQUENCE, tuple(_freeze_witness(item) for item in value))
+        return (_SEQUENCE, _SameKind(kind), tuple(_freeze_witness(item) for item in value))
     if kind is frozenset or kind is set:
-        return (_SET, frozenset(_freeze_witness(item) for item in value))
+        return (_SET, _SameKind(kind), frozenset(_freeze_witness(item) for item in value))
     mapping = builtin_mapping(value)
     if mapping is not None:
-        return (_MAPPING, tuple((_freeze_witness(key), _freeze_witness(item)) for key, item in items_of(mapping)))
+        return (_MAPPING, _SameKind(kind), tuple((_freeze_witness(key), _freeze_witness(item)) for key, item in items_of(mapping)))
     if builtin_sequence(value):
-        return (_SEQUENCE, tuple(_freeze_witness(item) for item in elements_of(value)))
+        return (_SEQUENCE, _SameKind(kind), tuple(_freeze_witness(item) for item in elements_of(value)))
     if builtin_set(value):
-        return (_SET, frozenset(_freeze_witness(item) for item in elements_of(value)))
+        return (_SET, _SameKind(kind), frozenset(_freeze_witness(item) for item in elements_of(value)))
     try:
         frozen = SnapshotFingerprintCodec._freeze_unmetered(value, True)
     except (TypeError, ValueError):
@@ -279,14 +287,22 @@ def _extract(analysis: Any, *, collect: bool) -> Tuple[Optional[Tuple[Any, ...]]
         material = snapshot_material(analysis, work, True)
         if substitution.pending:
             return None, substitution.pending
-        # 本体の出力は材料だけの関数。予算の scope と policy は本体が限界になるかを決める（hit は
-        # 成功した本体の snapshot なので、限界になり得る呼び出しへ渡さない）。値の複製も同じ作業量の
-        # 中で作る（値の storage の読みは本体と同じくこの作業量へ数える）
+        # witness が等しければ本体の結果（返す snapshot の全 field と、予算で止まるか）が等しい、を
+        # 次の材料で言う（どれも本体が読むもの）:
+        # * 材料の値（型・順序まで）と、closed な値の identity（token）
+        # * この抽出の作業量の量。置き換えた葉も本体と同じく数える（`SerializationWork.tree`）ので、
+        #   byte と distinct な node（DAG の共有・object の identity で決まる）は本体の抽出と同じ値
+        # * snapshot が写さずに参照で置く、変わり得る object の identity（`snapshot_references`）
+        # * 予算の scope と policy（本体が限界になるかを決める上限）
+        # 値の複製も同じ作業量の中で作る（値の storage の読みは本体と同じくこの作業量へ数える）
         parts = (
             _WITNESS_FORMAT,
             budget_scope_is_active(),
             _freeze_witness(policy.to_diagnostic()),
             _freeze_witness(tuple(material)),
+            tuple(_SameObject(item) for item in snapshot_references(material)),
+            work.consumed,
+            work.distinct_nodes,
         )
     return parts, []
 
