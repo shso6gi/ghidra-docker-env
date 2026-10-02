@@ -246,3 +246,62 @@ def test_random_values_follow_the_body(seed):
     prime = _with_field(_analysis([_closed_root()]), where, before)
     target = _with_field(prime, where, after)
     assert _reuse_and_body(prime, target) == [], (seed, where, before, after)
+
+
+# ---------------------------------------------------------------------------
+# witness の hash: `_same` で等しい組は同じ hash（候補を絞るだけ。読む node の数は上限まで）
+# ---------------------------------------------------------------------------
+
+
+def _colliding_strings(count: int) -> List[str]:
+    """同じ hash の bucket に入りやすい文字列（frozenset の反復の順が作り方で変わる）。"""
+
+    return ["k%d" % i for i in range(count)]
+
+
+def test_the_witness_hash_agrees_with_the_comparison_rule():
+    from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse as reuse
+
+    items = _colliding_strings(64)
+    forward = frozenset(items)
+    backward = frozenset(reversed(items))
+    grown = set(items[:1])
+    for item in items[1:]:
+        grown.add(item)
+    pairs = [
+        ((forward, 1), (backward, 1)),
+        ((reuse._Retained((forward,)),), (reuse._Retained((frozenset(grown),)),)),
+        (({"a": [1, (2.5, "x")]},), ({"a": [1, (2.5, "x")]},)),
+        ((_NAN,), (_NAN,)),
+    ]
+    for left, right in pairs:
+        assert reuse._same(left, right)
+        assert reuse._witness_hash(left) == reuse._witness_hash(right)
+
+
+def test_the_witness_hash_reads_a_bounded_prefix_and_the_comparison_decides_the_rest():
+    from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse as reuse
+
+    wide = tuple(range(reuse._WITNESS_HASH_NODES * 4))
+    changed = wide[:-1] + (-1,)
+    # 上限の外の違いは hash に出ない（同じ候補）が、`_same` が区別する
+    assert reuse._witness_hash((wide,)) == reuse._witness_hash((changed,))
+    assert not reuse._same((wide,), (changed,))
+    assert reuse._Witness((wide,)) != reuse._Witness((changed,))
+    assert reuse._Witness((wide,)) == reuse._Witness((tuple(wide),))
+
+
+def test_a_large_unchanged_value_is_still_reused():
+    """hash の上限を超える大きさの値も、同じなら hit する（hash の上限は hit を止めない）。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import snapshot_reuse_metrics
+
+    big = tuple(("entry", i, frozenset({"a%d" % i, "b%d" % i})) for i in range(3000))
+    prime = _with_field(_analysis([_closed_root()]), "return_abi_facts", big)
+    target = _with_field(prime, "return_abi_facts", tuple(tuple(item) for item in big))
+    with pair_failure_scope(("pair", 1), None), budget_policy_scope(BudgetPolicy()), snapshot_reuse_scope():
+        oracle.outcome(lambda: AnalysisSnapshot.from_function_analysis(prime))
+        reused = oracle.outcome(lambda: AnalysisSnapshot.from_function_analysis(target))
+        built = oracle.outcome(lambda: _RAW_BUILD(AnalysisSnapshot, target))
+        assert snapshot_reuse_metrics()["counts"].get("hits", 0) == 1
+    assert oracle.outcome_problems(reused, built) == []

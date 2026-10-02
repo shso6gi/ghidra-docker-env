@@ -205,21 +205,31 @@ def _same(a: Any, b: Any, retained: bool = False) -> bool:
     if kind is _Retained:
         return _same(a.value, b.value, True)
     if kind is tuple:
-        return len(a) == len(b) and all(_same(x, y, retained) for x, y in zip(a, b))
+        if len(a) != len(b):
+            return False
+        for x, y in zip(a, b):
+            if not _same(x, y, retained):
+                return False
+        return True
     if kind is frozenset:
         return _same_set(a, b, retained)
     if retained:
         # 参照で置かれる変わり得る値・object: 同じ object だけ（上の `is`）
         return False
     if kind is list:
-        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+        if len(a) != len(b):
+            return False
+        for x, y in zip(a, b):
+            if not _same(x, y):
+                return False
+        return True
     if kind is dict or kind is MappingProxyType:
         if len(a) != len(b):
             return False
-        return all(
-            _same(key_a, key_b) and _same(item_a, item_b)
-            for (key_a, item_a), (key_b, item_b) in zip(a.items(), b.items())
-        )
+        for (key_a, item_a), (key_b, item_b) in zip(a.items(), b.items()):
+            if not (_same(key_a, key_b) and _same(item_a, item_b)):
+                return False
+        return True
     if kind is set:
         return _same_set(a, b, False)
     return False
@@ -272,6 +282,48 @@ def _hash(value: Any, retained: bool = False) -> int:
     return hash(("object", id(value)))
 
 
+#: witness の hash が読む node の数の上限（幅優先: 浅い node から。比べるのは `_same` なので、hash は
+#: 候補を絞るだけ。上限の外の違いは `_same` が見つける）
+_WITNESS_HASH_NODES = 2048
+
+
+def _witness_hash(parts: Tuple[Any, ...]) -> int:
+    """`_hash` と同じ規則の、読む node の数を抑えた hash（`_same` で等しい組は同じ hash）。
+
+    容器は型と長さ、葉は `_hash` を、幅優先の順に上限まで畳む。set / frozenset は要素の順が
+    決まらないので、長さだけを畳む（中へ入らない）。
+    """
+
+    folded: List[int] = []
+    queue: List[Tuple[Any, bool]] = [(parts, False)]
+    index = 0
+    while index < len(queue):
+        value, retained = queue[index]
+        index += 1
+        kind = type(value)
+        room = _WITNESS_HASH_NODES - len(queue)
+        if kind is _Retained:
+            if room > 0:
+                queue.append((value.value, True))
+        elif kind is tuple or (not retained and kind is list):
+            folded.append(hash((kind.__name__, len(value))))
+            if room > 0:
+                queue.extend((item, retained) for item in value[:room])
+        elif not retained and (kind is dict or kind is MappingProxyType):
+            folded.append(hash((kind.__name__, len(value))))
+            for key, item in value.items():
+                if room < 2:
+                    break
+                queue.append((key, False))
+                queue.append((item, False))
+                room -= 2
+        elif kind is frozenset or (not retained and kind is set):
+            folded.append(hash((kind.__name__, len(value))))
+        else:
+            folded.append(_hash(value, retained))
+    return hash(tuple(folded))
+
+
 class _Witness:
     """store の key（hash を 1 回だけ求める。比べるのは `_same`: 利用者の code を呼ばない）。"""
 
@@ -279,7 +331,7 @@ class _Witness:
 
     def __init__(self, parts: Tuple[Any, ...]) -> None:
         self.parts = parts
-        self._hash = _hash(parts)
+        self._hash = _witness_hash(parts)
 
     def __eq__(self, other: Any) -> bool:
         return type(other) is _Witness and other._hash == self._hash and _same(self.parts, other.parts)
@@ -291,11 +343,11 @@ class _Witness:
         return self._hash
 
 
-def _extract(analysis: Any, *, collect: bool) -> Tuple[Optional[Tuple[Any, ...]], List[Any]]:
+def _extract(analysis: Any, *, collect: bool, parts: bool = True) -> Tuple[Optional[Tuple[Any, ...]], List[Any]]:
     """本体と同じ抽出を、closed な値を token に置き換えて行う（witness の部品と、写しを待つ値の列）。
 
     `collect` の回に写しを待つ値があれば、部品は作らずに値の列だけを返す（印を含む材料を
-    witness にしない）。
+    witness にしない）。`parts` が偽なら写しを待つ値だけを集める（部品を作らない）。
     """
 
     policy = active_budget_policy()
@@ -310,7 +362,7 @@ def _extract(analysis: Any, *, collect: bool) -> Tuple[Optional[Tuple[Any, ...]]
         record_observations=False,
     ) as work:
         material = snapshot_material(analysis, work, True)
-        if substitution.pending:
+        if substitution.pending or not parts:
             return None, substitution.pending
         # witness は本体の投影そのもの（同じ関数）: fingerprint が digest する値の codec の写しと、`create` が
         # snapshot に置く値。closed な値は token のまま（token の型は owner が codec に登録したものだけ）
@@ -471,7 +523,7 @@ def _witness(store: SnapshotReuse, analysis: Any, *, complete: bool) -> Optional
     """写しを待つ値を確定させ、`complete` なら witness を返す。"""
 
     started = time.perf_counter()
-    parts, pending = _extract(analysis, collect=True)
+    parts, pending = _extract(analysis, collect=True, parts=complete)
     store.add_seconds("witness", time.perf_counter() - started)
     if pending:
         _seal_pending(store, pending)
