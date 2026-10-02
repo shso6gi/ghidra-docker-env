@@ -31,7 +31,8 @@ runner.
     neither gate's verdict is ever read from the other's file.
 
     *env propagation* -- the values the workflow normalised once
-    (``pair_process_timeout``, ``identical_fast_path``, the working root) are
+    (``pair_process_timeout``, ``identical_fast_path``, the effective analysis
+    deadline and its margin, the working root) are
     checked against what each half's run manifest says it actually ran with,
     which is the far end of ``workflow input -> shell env -> container env ->
     eqbench_run_subset.sh -> child runner``.
@@ -96,7 +97,7 @@ BENCHMARK_GATE_PASS = "PASS"
 BINARY_MANIFEST_HEADER = "# eqbench-binary-manifest-v1"
 PAIR_STATUS_SUFFIX = ".pair-status.json"
 
-DEFAULT_ANALYSIS_CONFIG_SCHEMA = "eqbench-analysis-config-v3"
+DEFAULT_ANALYSIS_CONFIG_SCHEMA = "eqbench-analysis-config-v4"
 
 #: ``subset_manifest.txt``'s ``pr`` field when ``SUBSET_PR`` was never set.
 #: The CI workflow leaves it that way on purpose: that field says which pull
@@ -531,6 +532,14 @@ def _verify_env_propagation(
             GATE_ENV_PROPAGATION, manifest_path, manifest,
             "identical_fast_path", str(expected["identical_fast_path"]),
         )
+        # Issue #106 PR-106-B: the effective deadline and margin each half
+        # recorded, against the values the workflow resolved once with the
+        # runners' own rule (`runner_timeout_policy resolve`).
+        for key in ("analysis_timeout", "analysis_timeout_margin"):
+            _check_manifest_value(
+                report, run_dir, f"env.{half}.{key}", GATE_ENV_PROPAGATION,
+                manifest_path, manifest, key, str(expected[key]),
+            )
         _check_manifest_value(
             report, run_dir, f"env.{half}.analysis_config_schema",
             GATE_ENV_PROPAGATION, manifest_path, manifest,
@@ -1006,6 +1015,8 @@ def verify(
     working_root: str,
     pair_process_timeout: str,
     identical_fast_path: str,
+    analysis_timeout: str,
+    analysis_timeout_margin: str,
     analysis_config_schema: str = DEFAULT_ANALYSIS_CONFIG_SCHEMA,
     profile: str = PROFILE_FULL,
     runner_exit_status: Optional[int] = None,
@@ -1018,6 +1029,8 @@ def verify(
         "working_root": working_root,
         "pair_process_timeout": pair_process_timeout,
         "identical_fast_path": identical_fast_path,
+        "analysis_timeout": analysis_timeout,
+        "analysis_timeout_margin": analysis_timeout_margin,
         "analysis_config_schema": analysis_config_schema,
         "subset_definition": str(subset_definition),
     }
@@ -1208,6 +1221,15 @@ def build_parser() -> argparse.ArgumentParser:
     verify_command.add_argument("--pair-process-timeout", required=True)
     verify_command.add_argument("--identical-fast-path", required=True)
     verify_command.add_argument(
+        "--analysis-timeout", required=True,
+        help="the effective ANALYSIS_TIMEOUT every half must have recorded "
+             "(seconds as `runner_timeout_policy resolve` prints it; 0 = off)",
+    )
+    verify_command.add_argument(
+        "--analysis-timeout-margin", required=True,
+        help="the effective ANALYSIS_TIMEOUT_MARGIN every half must have recorded",
+    )
+    verify_command.add_argument(
         "--analysis-config-schema", default=DEFAULT_ANALYSIS_CONFIG_SCHEMA,
     )
     verify_command.add_argument(
@@ -1244,6 +1266,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 working_root=args.working_root,
                 pair_process_timeout=args.pair_process_timeout,
                 identical_fast_path=args.identical_fast_path,
+                analysis_timeout=args.analysis_timeout,
+                analysis_timeout_margin=args.analysis_timeout_margin,
                 analysis_config_schema=args.analysis_config_schema,
                 profile=args.profile,
                 runner_exit_status=args.runner_exit_status,

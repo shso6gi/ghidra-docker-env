@@ -5,8 +5,10 @@
 # Eq results go to $OUTPUT_BASE_DIR/eq and Neq results to $OUTPUT_BASE_DIR/neq;
 # the runner console output of each half is kept in $OUTPUT_BASE_DIR/<half>.log.
 # All settings come from the manifest; override individual ones through the
-# environment (PARALLEL_JOBS, PAIR_PROCESS_TIMEOUT, EQBENCH_RESOURCE_ADMISSION,
+# environment (PARALLEL_JOBS, PAIR_PROCESS_TIMEOUT, ANALYSIS_TIMEOUT, EQBENCH_RESOURCE_ADMISSION,
 # EQBENCH_BUILD_POLICY). SUBSET_SCOPE=eq|neq|all selects the halves to run.
+# ANALYSIS_TIMEOUT=0 runs both halves without the analysis deadline (Issue #106);
+# ANALYSIS_TIMEOUT_MARGIN passes through to the halves unchanged.
 #
 # Issue #123: the run records its own provenance.  SUBSET_BEFORE=<run dir> names
 # the run this one is compared against; it is checked against the halves this
@@ -110,6 +112,16 @@ export EQBENCH_BUILD_POLICY="${EQBENCH_BUILD_POLICY:-$(manifest_value setting EQ
 # Issue #15: passed through to both halves so the two run in the same mode
 # and the manifest below can say which one it was.
 export EQBENCH_IDENTICAL_FAST_PATH="${EQBENCH_IDENTICAL_FAST_PATH:-1}"
+# Issue #106 PR-106-B: the subset's analysis deadline comes from the manifest unless
+# the environment names one (0 = off).  It is exported so both halves run with the
+# same value, and checked here with the runners' own rule before either half
+# starts: an inconsistent combination fails before any pair, not in the second half.
+if [[ -z "${ANALYSIS_TIMEOUT:-}" ]]; then
+    ANALYSIS_TIMEOUT="$(manifest_value setting ANALYSIS_TIMEOUT)" \
+        || { echo "Error: $MANIFEST has no run_settings.ANALYSIS_TIMEOUT" >&2; exit 1; }
+fi
+export ANALYSIS_TIMEOUT
+validation_resolve_analysis_timeout_policy "$PYTHON_BIN" "" "$SCRIPT_DIR" || exit 1
 
 mkdir -p "$OUTPUT_BASE_DIR"
 OUTPUT_BASE_DIR="$(realpath -m "$OUTPUT_BASE_DIR")"
@@ -120,7 +132,7 @@ RUN_GIT_STATE_LINES="$(validation_run_git_state_lines "$PYTHON_BIN" "$SCRIPT_DIR
 echo "Subset manifest: $MANIFEST"
 echo "Output base: $OUTPUT_BASE_DIR"
 echo "Before run: ${SUBSET_BEFORE:-none}"
-echo "PARALLEL_JOBS=$PARALLEL_JOBS PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT EQBENCH_RESOURCE_ADMISSION=$EQBENCH_RESOURCE_ADMISSION EQBENCH_BUILD_POLICY=$EQBENCH_BUILD_POLICY"
+echo "PARALLEL_JOBS=$PARALLEL_JOBS PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT ANALYSIS_TIMEOUT=${ANALYSIS_TIMEOUT_SECONDS}s (margin ${ANALYSIS_TIMEOUT_MARGIN_SECONDS}s) EQBENCH_RESOURCE_ADMISSION=$EQBENCH_RESOURCE_ADMISSION EQBENCH_BUILD_POLICY=$EQBENCH_BUILD_POLICY"
 
 run_half() {
     local half="$1" start ec=0
@@ -230,6 +242,10 @@ ELAPSED=$(( $(date +%s) - START_EPOCH ))
     echo "pairwise_timeout=$(half_setting pairwise_timeout)"
     echo "pairwise_timeout_hard=$(half_setting pairwise_timeout_hard)"
     echo "pair_process_kill_after=$(half_setting pair_process_kill_after)"
+    # Issue #106 PR-106-B: the effective values the halves recorded (never re-derived here)
+    while IFS='=' read -r key _; do
+        echo "$key=$(half_setting "$key")"
+    done <<< "$ANALYSIS_TIMEOUT_MANIFEST_LINES"
     echo "identical_fast_path=$(half_setting identical_fast_path)"
     echo "analysis_config_schema=$(half_setting analysis_config_schema)"
     echo "$RUN_GIT_STATE_LINES"

@@ -54,6 +54,14 @@ on:
         type: choice
         options: ["1", "0"]
         default: "1"
+      analysis_timeout:
+        description: "Issue #106 analysis deadline in seconds (empty = the subset manifest's; 0 = off)"
+        type: string
+        default: ""
+      analysis_timeout_margin:
+        description: "Issue #106 margin between the analysis deadline and the pair timeout (empty = the runner default)"
+        type: string
+        default: ""
       eqbench_ref:
         description: "EqBench commit or ref to check out"
         type: string
@@ -88,6 +96,8 @@ jobs:
       RAW_SUBSET_SCOPE: ${{ inputs.subset_scope }}
       RAW_PAIR_PROCESS_TIMEOUT: ${{ inputs.pair_process_timeout }}
       RAW_IDENTICAL_FAST_PATH: ${{ inputs.identical_fast_path }}
+      RAW_ANALYSIS_TIMEOUT: ${{ inputs.analysis_timeout }}
+      RAW_ANALYSIS_TIMEOUT_MARGIN: ${{ inputs.analysis_timeout_margin }}
       RAW_EQBENCH_REF: ${{ inputs.eqbench_ref }}
     steps:
       # No `ref:`.  A schedule event checks out the default branch's head,
@@ -150,6 +160,31 @@ jobs:
           [[ "$EQBENCH_REF" =~ ^[A-Za-z0-9._/-]+$ ]] \
             || fail "eqbench_ref is not a plausible git ref: '$EQBENCH_REF'"
 
+          # Issue #106 PR-106-B: the analysis deadline.  An empty input takes the
+          # subset manifest's value (the same default eqbench_run_subset.sh
+          # applies), and the deadline, its margin and PAIR_PROCESS_TIMEOUT are
+          # then checked and resolved by the runners' own rule
+          # (reporting/runner_timeout_policy.py) -- an inconsistent combination
+          # fails here, before the container is even built.  The EFFECTIVE values
+          # are what every later step passes on and verifies, so the runners
+          # never apply a default of their own in CI.
+          ANALYSIS_TIMEOUT_REQUESTED="${RAW_ANALYSIS_TIMEOUT:-}"
+          if [[ -z "$ANALYSIS_TIMEOUT_REQUESTED" ]]; then
+            ANALYSIS_TIMEOUT_REQUESTED="$(python3 -B -c \
+              'import json, sys; print(json.load(open(sys.argv[1]))["run_settings"]["ANALYSIS_TIMEOUT"])' \
+              scripts/function_tracer_pcode/reporting/eqbench_subset.json)"
+          fi
+          policy_lines="$(python3 -B -m scripts.function_tracer_pcode.reporting.runner_timeout_policy \
+            resolve \
+            --analysis-timeout "$ANALYSIS_TIMEOUT_REQUESTED" \
+            --analysis-timeout-margin "${RAW_ANALYSIS_TIMEOUT_MARGIN:-}" \
+            --pair-process-timeout "$PAIR_PROCESS_TIMEOUT")" \
+            || fail "analysis_timeout / analysis_timeout_margin / pair_process_timeout were rejected (see the error above)"
+          ANALYSIS_TIMEOUT="$(printf '%s\n' "$policy_lines" | awk -F= '$1 == "analysis_timeout" {print $2}')"
+          ANALYSIS_TIMEOUT_MARGIN="$(printf '%s\n' "$policy_lines" | awk -F= '$1 == "analysis_timeout_margin" {print $2}')"
+          [[ -n "$ANALYSIS_TIMEOUT" && -n "$ANALYSIS_TIMEOUT_MARGIN" ]] \
+            || fail "the analysis timeout policy printed no effective values"
+
           # The scope -> halves mapping has one owner (scripts/eqbench/
           # ci_subset.py), so the shell loops below and the verification
           # cannot drift apart.
@@ -175,6 +210,8 @@ jobs:
             echo "SUBSET_HALVES=$SUBSET_HALVES"
             echo "PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT"
             echo "EQBENCH_IDENTICAL_FAST_PATH=$EQBENCH_IDENTICAL_FAST_PATH"
+            echo "ANALYSIS_TIMEOUT=$ANALYSIS_TIMEOUT"
+            echo "ANALYSIS_TIMEOUT_MARGIN=$ANALYSIS_TIMEOUT_MARGIN"
             echo "EQBENCH_REF=$EQBENCH_REF"
             echo "PARALLEL_JOBS=$PARALLEL_JOBS"
             echo "ARTIFACT_DIR=$ARTIFACT_DIR"
@@ -191,13 +228,15 @@ jobs:
 
           export SUBSET_SCOPE SUBSET_HALVES PAIR_PROCESS_TIMEOUT \
                  EQBENCH_IDENTICAL_FAST_PATH EQBENCH_REF PARALLEL_JOBS \
-                 WORK_ROOT_CONTAINER
+                 WORK_ROOT_CONTAINER ANALYSIS_TIMEOUT ANALYSIS_TIMEOUT_MARGIN
           python3 -B - <<'PY' > "$ARTIFACT_DIR/normalized_inputs.json"
           import json, os
           raw = {
               "subset_scope": os.environ.get("RAW_SUBSET_SCOPE", ""),
               "pair_process_timeout": os.environ.get("RAW_PAIR_PROCESS_TIMEOUT", ""),
               "identical_fast_path": os.environ.get("RAW_IDENTICAL_FAST_PATH", ""),
+              "analysis_timeout": os.environ.get("RAW_ANALYSIS_TIMEOUT", ""),
+              "analysis_timeout_margin": os.environ.get("RAW_ANALYSIS_TIMEOUT_MARGIN", ""),
               "eqbench_ref": os.environ.get("RAW_EQBENCH_REF", ""),
           }
           print(json.dumps({
@@ -212,6 +251,8 @@ jobs:
                   "subset_halves": os.environ["SUBSET_HALVES"].split(),
                   "pair_process_timeout": os.environ["PAIR_PROCESS_TIMEOUT"],
                   "identical_fast_path": os.environ["EQBENCH_IDENTICAL_FAST_PATH"],
+                  "analysis_timeout": os.environ["ANALYSIS_TIMEOUT"],
+                  "analysis_timeout_margin": os.environ["ANALYSIS_TIMEOUT_MARGIN"],
                   "eqbench_ref": os.environ["EQBENCH_REF"],
                   "parallel_jobs": os.environ["PARALLEL_JOBS"],
                   "eqbench_working_root_container": os.environ["WORK_ROOT_CONTAINER"],
@@ -299,6 +340,8 @@ jobs:
             SUBSET_SCOPE="$SUBSET_SCOPE" \
             PAIR_PROCESS_TIMEOUT="$PAIR_PROCESS_TIMEOUT" \
             EQBENCH_IDENTICAL_FAST_PATH="$EQBENCH_IDENTICAL_FAST_PATH" \
+            ANALYSIS_TIMEOUT="$ANALYSIS_TIMEOUT" \
+            ANALYSIS_TIMEOUT_MARGIN="$ANALYSIS_TIMEOUT_MARGIN" \
             EQBENCH_ROOT="$WORK_ROOT_CONTAINER" \
             NEQ_ROOT="$WORK_ROOT_CONTAINER" \
             PARALLEL_JOBS="$PARALLEL_JOBS" \
@@ -306,6 +349,8 @@ jobs:
               "SUBSET_SCOPE=$SUBSET_SCOPE" \
               "PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT" \
               "EQBENCH_IDENTICAL_FAST_PATH=$EQBENCH_IDENTICAL_FAST_PATH" \
+              "ANALYSIS_TIMEOUT=$ANALYSIS_TIMEOUT" \
+              "ANALYSIS_TIMEOUT_MARGIN=$ANALYSIS_TIMEOUT_MARGIN" \
               "EQBENCH_ROOT=$EQBENCH_ROOT" \
               "NEQ_ROOT=$NEQ_ROOT" \
               "PARALLEL_JOBS=$PARALLEL_JOBS"' \
@@ -314,6 +359,8 @@ jobs:
             echo "SUBSET_SCOPE=$SUBSET_SCOPE"
             echo "PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT"
             echo "EQBENCH_IDENTICAL_FAST_PATH=$EQBENCH_IDENTICAL_FAST_PATH"
+            echo "ANALYSIS_TIMEOUT=$ANALYSIS_TIMEOUT"
+            echo "ANALYSIS_TIMEOUT_MARGIN=$ANALYSIS_TIMEOUT_MARGIN"
             echo "EQBENCH_ROOT=$WORK_ROOT_CONTAINER"
             echo "NEQ_ROOT=$WORK_ROOT_CONTAINER"
             echo "PARALLEL_JOBS=$PARALLEL_JOBS"
@@ -335,6 +382,8 @@ jobs:
             SUBSET_SCOPE="$SUBSET_SCOPE" \
             PAIR_PROCESS_TIMEOUT="$PAIR_PROCESS_TIMEOUT" \
             EQBENCH_IDENTICAL_FAST_PATH="$EQBENCH_IDENTICAL_FAST_PATH" \
+            ANALYSIS_TIMEOUT="$ANALYSIS_TIMEOUT" \
+            ANALYSIS_TIMEOUT_MARGIN="$ANALYSIS_TIMEOUT_MARGIN" \
             EQBENCH_ROOT="$WORK_ROOT_CONTAINER" \
             NEQ_ROOT="$WORK_ROOT_CONTAINER" \
             EQBENCH_BUILD_POLICY=REUSE_OR_COMPILE \
@@ -355,6 +404,8 @@ jobs:
             --working-root "$WORK_ROOT_CONTAINER" \
             --pair-process-timeout "$PAIR_PROCESS_TIMEOUT" \
             --identical-fast-path "$EQBENCH_IDENTICAL_FAST_PATH" \
+            --analysis-timeout "$ANALYSIS_TIMEOUT" \
+            --analysis-timeout-margin "$ANALYSIS_TIMEOUT_MARGIN" \
             --json "$ARTIFACT_DIR/propagation_verification.json" \
             --text "$ARTIFACT_DIR/propagation_verification.txt"
 
@@ -373,6 +424,8 @@ jobs:
             SUBSET_SCOPE="$SUBSET_SCOPE" \
             PAIR_PROCESS_TIMEOUT="$PAIR_PROCESS_TIMEOUT" \
             EQBENCH_IDENTICAL_FAST_PATH="$EQBENCH_IDENTICAL_FAST_PATH" \
+            ANALYSIS_TIMEOUT="$ANALYSIS_TIMEOUT" \
+            ANALYSIS_TIMEOUT_MARGIN="$ANALYSIS_TIMEOUT_MARGIN" \
             EQBENCH_ROOT="$WORK_ROOT_CONTAINER" \
             NEQ_ROOT="$WORK_ROOT_CONTAINER" \
             EQBENCH_BUILD_POLICY=REUSE_OR_COMPILE \
@@ -434,6 +487,8 @@ jobs:
             --working-root "$WORK_ROOT_CONTAINER" \
             --pair-process-timeout "$PAIR_PROCESS_TIMEOUT" \
             --identical-fast-path "$EQBENCH_IDENTICAL_FAST_PATH" \
+            --analysis-timeout "$ANALYSIS_TIMEOUT" \
+            --analysis-timeout-margin "$ANALYSIS_TIMEOUT_MARGIN" \
             --runner-exit-status "$SUBSET_RUNNER_STATUS" \
             --json "$ARTIFACT_DIR/subset_verification.json" \
             --text "$ARTIFACT_DIR/subset_verification.txt"
@@ -509,6 +564,8 @@ jobs:
                   "subset_halves": (os.environ.get("SUBSET_HALVES") or "").split(),
                   "pair_process_timeout": value("PAIR_PROCESS_TIMEOUT"),
                   "identical_fast_path": value("EQBENCH_IDENTICAL_FAST_PATH"),
+                  "analysis_timeout": value("ANALYSIS_TIMEOUT"),
+                  "analysis_timeout_margin": value("ANALYSIS_TIMEOUT_MARGIN"),
                   "parallel_jobs": value("PARALLEL_JOBS"),
                   "eqbench_working_root_container": value("WORK_ROOT_CONTAINER"),
               },
