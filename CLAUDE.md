@@ -37,7 +37,8 @@ python3 -B -m scripts.function_tracer_pcode.cli.main \
           targets/EqBench/benchmarks/REVE/barthe2big/Eq/source/new-mips64-clang-O1 \
   -f f --emit-result-json -d
 # Other useful flags: --binary-ids A B, --equiv-timeout, --timeout (decompile), --pairwise-timeout[-hard],
-# --strategy, --list-functions, --assume-fp-non-nan, --no-retry-phases
+# --strategy, --list-functions, --assume-fp-non-nan, --no-retry-phases,
+# --analysis-timeout SECONDS (cooperative pair deadline, off by default; core/deadline.py)
 
 # Record a Ghidra P-code fixture (needs PyGhidra; see tests/fixtures/pcode/SCHEMA.md).
 # Binaries must come from a writable working root, not from targets/EqBench.

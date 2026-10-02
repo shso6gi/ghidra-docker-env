@@ -28,6 +28,10 @@ from scripts.function_tracer_pcode.core.signature import (
     is_unsigned_data_type,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+from scripts.function_tracer_pcode.core.deadline import hot_checkpoint as deadline_hot_checkpoint
+
+#: Issue #106 PR-106-A: PcodeOp の trace の checkpoint の stage
+TRACE_PCODE_STAGE = "trace_pcode"
 from scripts.function_tracer_pcode.core.semantic_freeze import freeze_expression
 from scripts.function_tracer_pcode.config.settings import MAX_TRACE_DEPTH
 from scripts.function_tracer_pcode.analysis.debug.unknown_trace import (
@@ -620,6 +624,8 @@ class PcodeTracer(CallRecoveryMixin, ParameterStorageMixin, AddressRefMixin):
                                     depth=depth, note=f"Key {op_key} already in stack")
             return Expression.unknown("circular_reference")
         
+        # Issue #106 PR-106-A: 1 つの PcodeOp の trace を始める境界（頻繁なので時計は間引く）
+        deadline_hot_checkpoint(TRACE_PCODE_STAGE)
         self._trace_stack.add(op_key)
         
         try:

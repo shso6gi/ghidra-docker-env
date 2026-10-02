@@ -45,7 +45,16 @@ from scripts.function_tracer_pcode.core.render_smt import (
     smt_logic_name,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
-from scripts.function_tracer_pcode.smt.solvers.z3 import isolated_solver
+from scripts.function_tracer_pcode.smt.solvers.z3 import isolated_check_end, isolated_solver
+from scripts.function_tracer_pcode.core.deadline import (
+    NOT_STARTED_FACT,
+    ExecutionFact,
+    TimeUnit,
+    deadline_query,
+)
+
+#: Issue #106 PR-106-A: 条件 oracle の問いの checkpoint の stage
+CONDITION_ORACLE_STAGE = "condition_oracle"
 from scripts.function_tracer_pcode.core.semantic_freeze import publish, validated
 from scripts.function_tracer_pcode.core.semantic_snapshot import walk_dag_nodes
 
@@ -281,8 +290,23 @@ class ConditionSMTOracle:
         z3 = cls._z3
 
         try:
+            # Issue #106 PR-106-A: 問いを始める境界。期限を過ぎていれば発行しない（限界を
+            # raise）。実行の窓（終わりと、期限が時間を決めたか）はこの実行を始める瞬間に求め、
+            # z3 の timeout（ミリ秒）はその窓までに切る（規則と丸めは `core.deadline`）
+            configured = cls.QUERY_TIMEOUT_MS / 1000.0
+            query_deadline = deadline_query(CONDITION_ORACLE_STAGE)
+            if not query_deadline.begin(configured, TimeUnit.MILLISECONDS):
+                return None
+            window = query_deadline.bound.window(configured, TimeUnit.MILLISECONDS)
+            timeout_ms = (
+                None if window is None
+                else window.timeout(configured, TimeUnit.MILLISECONDS, now=query_deadline.bound.now())
+            )
+            if window is None or timeout_ms is None:
+                query_deadline.settle([NOT_STARTED_FACT])
+                return None
             # Issue #161: query ごとに専用の solver context（他の query の履歴を持ち込まない）
-            solver = isolated_solver(z3, script, int(cls.QUERY_TIMEOUT_MS))
+            solver = isolated_solver(z3, script, timeout_ms)
             # 予算を 1 つ使うのは発行の直前（`oracle.queries` と同じ地点）
             if not budget.take():
                 note_budget_fallback(
@@ -292,7 +316,18 @@ class ConditionSMTOracle:
             note("oracle.queries")
             started = time.monotonic()
             result = solver.check()
-            observe("oracle.check_ms", int((time.monotonic() - started) * 1000))
+            elapsed = time.monotonic() - started
+            observe("oracle.check_ms", int(elapsed * 1000))
+            # 返った直後: 期限を過ぎていれば・期限が決めた上限で止まったなら答えを採らない
+            # （覚えもしない）。上限の前に返った unknown は通常の unknown のまま
+            query_deadline.settle([
+                ExecutionFact(
+                    end=isolated_check_end(
+                        z3, result, solver, remaining_seconds=timeout_ms / 1000.0 - elapsed,
+                    ),
+                    limited=window.limited,
+                )
+            ])
             if result == z3.unsat:
                 verdict: Optional[bool] = True
             elif result == z3.sat:

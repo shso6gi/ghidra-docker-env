@@ -3,12 +3,29 @@
 With no active UNKNOWN-taxonomy pilot this is a transparent legacy call.  With
 an explicitly registered Phase 6.6 route it dual-writes typed operational
 authority while preserving the original result behavior.
+
+Production callers enter through ``decompile_within_deadline`` (Issue #106
+PR-106-A), which admits the call against the pair's analysis deadline, clamps
+Ghidra's whole-second timeout to it and checks the deadline again after the
+broker has finished its authority bookkeeping.  Without a deadline it is
+``decompile_function`` unchanged.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from scripts.function_tracer_pcode.core.deadline import (
+    NOT_STARTED_FACT,
+    ExecutionEnd,
+    ExecutionFact,
+    TimeUnit,
+    deadline_query,
+)
+
+
+#: Issue #106 PR-106-A: decompile の checkpoint の stage（限界の site）
+DECOMPILE_STAGE = "decompile"
 
 TOP_LEVEL_SOURCE_CONTRACT = "return-analyzer-top-level-decompile-v2"
 LIFECYCLE_HELPER_SOURCE_CONTRACT = "return-analyzer-lifecycle-helper-decompile-v2"
@@ -433,6 +450,63 @@ def _subordinate_decompile(
     except Exception as exc:
         _record_shadow_error(exc)
     return result
+
+
+def _decompile_flag(results: Any, name: str) -> bool:
+    member = getattr(results, name, None)
+    return bool(member()) if callable(member) else False
+
+
+def decompile_execution_end(results: Any) -> ExecutionEnd:
+    """**decompile の結果 → 観測された終了原因の唯一の写像**（Issue #106 PR-106-A）。
+
+    Ghidra の `DecompileResults` の flag（authority の `DecompilationDisposition` と同じ 4 つ）:
+    完了 → ANSWERED、`isTimedOut` → TIME_LIMIT、`isCancelled` → CANCELLED、それ以外
+    （`failedToStart`・異常終了・authority が止めた結果）→ FAILED。完了したときは他の flag を
+    読まない（記録済みの P-code の再生が観測していない呼び出しを足さない）。
+    """
+
+    if _decompile_flag(results, "decompileCompleted"):
+        return ExecutionEnd.ANSWERED
+    if _decompile_flag(results, "isTimedOut"):
+        return ExecutionEnd.TIME_LIMIT
+    if _decompile_flag(results, "isCancelled"):
+        return ExecutionEnd.CANCELLED
+    return ExecutionEnd.FAILED
+
+
+def decompile_within_deadline(
+    analyzer: Any,
+    function: Any,
+    timeout: int,
+    monitor: Any = None,
+    **kwargs: Any,
+) -> Any:
+    """解析の期限の中で 1 回 decompile する（Issue #106 PR-106-A。production の入口）。
+
+    始める前に owner の thread で `begin`（過ぎていれば限界を raise して decompile しない）、
+    この実行の窓を始める瞬間に求め、Ghidra の秒単位の timeout を窓までに切る（規則と丸めは
+    `core.deadline`: 0 秒を渡さない）。返った後（authority の記録を終えた後）に `settle`
+    （終了原因は `decompile_execution_end`。期限を過ぎた・期限が決めた上限で止まったなら限界を
+    raise。時間切れ以外の失敗は期限にしない）。期限が無ければ `decompile_function` と同じ。
+    """
+
+    query = deadline_query(DECOMPILE_STAGE)
+    window = (
+        query.bound.window(timeout, TimeUnit.SECONDS)
+        if query.begin(timeout, TimeUnit.SECONDS) else None
+    )
+    granted = None if window is None else window.timeout(timeout, TimeUnit.SECONDS, now=query.bound.now())
+    if granted is None:
+        results = _AuthorityBlockedDecompileResults(
+            diagnostic=None, error_kind="analysis_deadline_not_started",
+        )
+        query.settle([NOT_STARTED_FACT])
+        return results
+    results = decompile_function(analyzer, function, granted, monitor, **kwargs)
+    if query.bounded:
+        query.settle([ExecutionFact(end=decompile_execution_end(results), limited=window.limited)])
+    return results
 
 
 def decompile_function(

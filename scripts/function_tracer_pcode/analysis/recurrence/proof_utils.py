@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
+from scripts.function_tracer_pcode.smt.parallel import run_backend_query
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     ConditionSMTOracle,
     _expressions_equivalent_under_conditions,
@@ -77,7 +78,7 @@ def _impl__implied_counter_constant_expression(
         if not usable or not script:
             continue
         try:
-            result = Z3Solver(timeout=2, debug=False).check_equivalence_direct(script)
+            result = run_backend_query(Z3Solver(timeout=2, debug=False), script)
         except Exception:
             continue
         if result.status == SolverStatus.UNSAT:

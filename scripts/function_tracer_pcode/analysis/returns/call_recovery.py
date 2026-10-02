@@ -1838,10 +1838,10 @@ def _impl__resolve_local_code_target_expansions(
 
     from scripts.function_tracer_pcode.ghidra.decompilation_broker import (
         INLINE_REGION_SOURCE_CONTRACT,
-        decompile_function,
+        decompile_within_deadline,
     )
     with stage_region("decompile"):
-        results = decompile_function(
+        results = decompile_within_deadline(
             self, containing, 60, None,
             source_contract_id=INLINE_REGION_SOURCE_CONTRACT,
             semantic_owner="subordinate",

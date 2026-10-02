@@ -42,6 +42,7 @@ from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysi
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.smt import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
+from scripts.function_tracer_pcode.smt.parallel import run_backend_query
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     ExpressionSafetyChecker,
     QueryResult,
@@ -2131,7 +2132,7 @@ def _impl__case_pair_conditions_unsat_under_shared_inputs(
         param_replace_fn2,
         pair_id,
     )
-    result = Z3Solver(timeout=1, debug=False).check_equivalence_direct(query)
+    result = run_backend_query(Z3Solver(timeout=1, debug=False), query)
     return result.status == SolverStatus.UNSAT
 
 

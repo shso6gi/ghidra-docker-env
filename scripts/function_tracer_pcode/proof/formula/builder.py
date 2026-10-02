@@ -17,6 +17,7 @@ from scripts.function_tracer_pcode.core import (
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.core.signature import is_floating_data_type
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
+from scripts.function_tracer_pcode.core.deadline import checkpoint as deadline_checkpoint
 from scripts.function_tracer_pcode.core.render_smt import (
     CallDeclarationConflict,
     call_smt_declaration_lines,
@@ -413,6 +414,8 @@ class FormulaBuilder:
             FormulaBuilderResult: 構築結果（詳細情報付き）
         """
         # Issue #124: monolithic 等価式の構築を計測する。
+        # Issue #106 PR-106-A: query を組み始める境界
+        deadline_checkpoint("query_build")
         with stage_region("query_build"):
             correspondence = _require_input_correspondence(input_correspondence)
             analysis1, analysis2, _, _ = self._normalize_analyses(

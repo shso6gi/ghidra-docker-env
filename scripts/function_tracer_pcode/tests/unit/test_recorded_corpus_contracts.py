@@ -121,6 +121,8 @@ REPLAY_ENTRY_POINTS = {
     "test_recorded_pairs.py": "validate_replay",
     # Issue #22 PR-22-D: M-3 の出力 schema 局所性（診断 field あり / なしで再生）
     "test_issue22d_output_schema_locality.py": "_replay_with_query_log",
+    # Issue #106 PR-106-A: 解析の期限つきの再生（E1 / E2）
+    "test_issue106a_pair_deadline.py": "_replay_with_deadline",
 }
 RECORDED_REPLAY_MARKER = "recorded_replay"
 
