@@ -74,6 +74,30 @@ def same_retained(a: Any, b: Any, path: str, problems: List[str]) -> None:
         problems.append(f"{path}: a retained {type(a).__name__} is not the same retained value")
 
 
+def _same_leaves(a: Any, b: Any, path: str, problems: List[str]) -> None:
+    """`deep_freeze` の写しの中で、参照のまま置かれた葉（scalar でない値）が同じ object か。"""
+
+    if type(a) is not type(b):
+        return  # 型の違いは same_value が報告する
+    if isinstance(a, (tuple, list)):
+        for index, (left, right) in enumerate(zip(a, b)):
+            _same_leaves(left, right, f"{path}[{index}]", problems)
+        return
+    if isinstance(a, (dict, MappingProxyType)):
+        for key, left in a.items():
+            if key in b:
+                _same_leaves(left, b[key], f"{path}[{key!r}]", problems)
+        return
+    if isinstance(a, (set, frozenset)):
+        if not retained_equal(a, b):
+            problems.append(f"{path}: a retained set holds other objects")
+        return
+    if a is None or type(a) in _PLAIN or type(a) is float:
+        return
+    if a is not b:
+        problems.append(f"{path}: a retained {type(a).__name__} is another object")
+
+
 def same_value(a: Any, b: Any, path: str, problems: List[str]) -> None:
     """snapshot の等しさ（容器の要素は `is` か `==`）に、型の厳しさを足した比べ方。"""
 
@@ -116,12 +140,15 @@ def snapshot_problems(hit: Any, built: Any) -> List[str]:
         # `create` は `snapshot_id` の要素を写さない: 後で変わり得る object は同じ object であること
         same_retained(left, right, f"snapshot_id[{index}]", problems)
     same_value(dict(hit.semantic_fields), dict(built.semantic_fields), "semantic_fields", problems)
+    # `deep_freeze` は容器を写し、容器でない値（object）を参照のまま置く: その object は同じ object であること
+    _same_leaves(hit.semantic_fields, built.semantic_fields, "semantic_fields", problems)
     for name in ("semantic_fingerprint", "comparison_fingerprint", "extraction_schema_version"):
         same_value(getattr(hit, name), getattr(built, name), name, problems)
     hit_refs, built_refs = dict(hit.diagnostic_refs), dict(built.diagnostic_refs)
     if hit_refs.get("function_ref") is not built_refs.get("function_ref"):
         problems.append("diagnostic_refs['function_ref']: another object")
     same_value(hit_refs, built_refs, "diagnostic_refs", problems)
+    _same_leaves(hit_refs, built_refs, "diagnostic_refs", problems)
     if not (hit == built):
         problems.append("the snapshots are not == (dataclass equality)")
     return problems

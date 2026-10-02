@@ -34,6 +34,17 @@ _RAW_BUILD = AnalysisSnapshot.__dict__["_build_from_function_analysis"].__func__
 WHERE = ["analysis_scope_key", "return_abi_facts"]
 
 
+@pytest.fixture(autouse=True, params=["hash", "collide"])
+def _witness_hash_mode(request, monkeypatch):
+    """`collide` は witness の hash を定数にして、比べ方（`_same`）だけで決めさせる（hash の衝突で誤らない）。"""
+
+    if request.param == "collide":
+        from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse
+
+        monkeypatch.setattr(snapshot_reuse, "_hash", lambda value, retained=False: 0)
+    yield request.param
+
+
 @pytest.fixture(autouse=True)
 def _clean_ledger_stack():
     reset_pair_failure_scopes()
@@ -229,6 +240,26 @@ def test_an_unchanged_value_is_reused_and_matches_the_body(where, make):
             assert oracle.outcome(lambda: _RAW_BUILD(AnalysisSnapshot, analysis))[0] == "raised", "an accepted value never hit"
 
 
+@pytest.mark.parametrize("where", WHERE)
+@pytest.mark.parametrize(
+    "make",
+    [lambda: Box(1), lambda: HashableBox(1), lambda: Record(1), lambda: Keyed(1), lambda: Marked(1), lambda: (Box(1),),
+     lambda: frozenset({HashableBox(1)})],
+    ids=["dataclass", "hashable", "record", "stable_key", "marked", "dataclass_in_tuple", "hashable_in_frozenset"],
+)
+def test_an_equal_but_other_mutable_object_is_another_retained_value(where, make):
+    """snapshot は object を参照のまま置く（`snapshot_id` の要素・`deep_freeze` の葉）: 内容が等しくても別の object
+    なら別の snapshot（後でその object が変われば snapshot も変わる）。"""
+
+    prime = _with_field(_analysis([_closed_root()]), where, make())
+    target = _with_field(prime, where, make())
+    with pair_failure_scope(("pair", 1), None), budget_policy_scope(BudgetPolicy()), snapshot_reuse_scope():
+        oracle.outcome(lambda: AnalysisSnapshot.from_function_analysis(prime))
+        reused = oracle.outcome(lambda: AnalysisSnapshot.from_function_analysis(target))
+        built = oracle.outcome(lambda: _RAW_BUILD(AnalysisSnapshot, target))
+    assert oracle.outcome_problems(reused, built) == []
+
+
 def test_the_oracle_accepts_correct_sharing_and_rejects_wrong_sharing():
     shared = HashableBox(1)
     assert oracle.retained_equal(frozenset({shared, 1}), frozenset({shared, 1}))
@@ -240,6 +271,15 @@ def test_the_oracle_accepts_correct_sharing_and_rejects_wrong_sharing():
     nan = float("nan")
     assert oracle.retained_equal((nan,), (nan,))
     assert not oracle.retained_equal((nan,), (float("nan"),))
+    # snapshot の field に参照で置かれた object: 同じ object なら同じ、等しい別の object なら違い
+    base = _analysis([_closed_root()])
+    box = Box(1)
+    with budget_policy_scope(BudgetPolicy()):
+        first = _RAW_BUILD(AnalysisSnapshot, _with_field(base, "return_abi_facts", box))
+        again = _RAW_BUILD(AnalysisSnapshot, _with_field(base, "return_abi_facts", box))
+        other = _RAW_BUILD(AnalysisSnapshot, _with_field(base, "return_abi_facts", Box(1)))
+    assert oracle.snapshot_problems(first, again) == []
+    assert oracle.snapshot_problems(first, other) != []
 
 
 @pytest.mark.parametrize("where", WHERE)

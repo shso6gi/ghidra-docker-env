@@ -45,6 +45,17 @@ from scripts.function_tracer_pcode.tests.unit import _snapshot_oracle as oracle
 _RAW_BUILD = AnalysisSnapshot.__dict__["_build_from_function_analysis"].__func__
 
 
+@pytest.fixture(autouse=True, params=["hash", "collide"])
+def _witness_hash_mode(request, monkeypatch):
+    """`collide` は witness の hash を定数にして、比べ方（`_same`）だけで決めさせる（hash の衝突で誤らない）。"""
+
+    if request.param == "collide":
+        from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse
+
+        monkeypatch.setattr(snapshot_reuse, "_hash", lambda value, retained=False: 0)
+    yield request.param
+
+
 @pytest.fixture(autouse=True)
 def _clean_ledger_stack():
     reset_pair_failure_scopes()
