@@ -101,7 +101,10 @@ def _with_values(base: Any, values: List[Expression]) -> Any:
 def _fields(snapshot: AnalysisSnapshot) -> Tuple[Any, ...]:
     refs = dict(snapshot.diagnostic_refs)
     function_ref = refs.pop("function_ref", None)
+    # snapshot が写さずに参照で持つ、変わり得る要素は identity でも比べる（後で変わると snapshot も変わる）
+    retained = tuple(id(item) for item in snapshot.snapshot_id if not _deeply_immutable(item))
     return (
+        retained,
         _typed(snapshot.snapshot_id),
         _typed(dict(snapshot.semantic_fields)),
         snapshot.semantic_fingerprint,
@@ -110,6 +113,14 @@ def _fields(snapshot: AnalysisSnapshot) -> Tuple[Any, ...]:
         _typed(refs),
         id(function_ref),
     )
+
+
+def _deeply_immutable(value: Any) -> bool:
+    if value is None or type(value) in (str, int, float, bool, bytes):
+        return True
+    if type(value) in (tuple, frozenset):
+        return all(_deeply_immutable(item) for item in value)
+    return False
 
 
 def _typed(value: Any) -> Any:
@@ -276,12 +287,20 @@ def test_the_open_shapes_are_open_and_the_closed_shapes_are_closed():
         (("scope", ("nested",)), ("scope", ["nested"])),
         (("scope", 1), ("scope", True)),
         (("scope", {"k": 1}), ("scope", (("k", 1),))),
+        (("scope", frozenset({"a"})), ("scope", ("a",))),
     ],
-    ids=["list_to_tuple", "tuple_to_list", "int_to_bool", "dict_to_pairs"],
+    ids=["list_to_tuple", "tuple_to_list", "int_to_bool", "dict_to_pairs", "frozenset_to_tuple"],
 )
 def test_a_snapshot_id_with_other_container_types_is_never_served_from_the_store(before, after):
     prime = _analysis([_closed_root()], scope_key=before)
     target = dataclasses.replace(prime, analysis_scope_key=after)
+    reused, oracle = _reuse_matches_the_body([prime], target, BudgetPolicy())
+    assert reused == oracle
+
+
+def test_a_snapshot_id_holding_an_equal_but_other_mutable_object_is_not_served():
+    prime = _analysis([_closed_root()], scope_key=("scope", ["nested"]))
+    target = dataclasses.replace(prime, analysis_scope_key=("scope", ["nested"]))
     reused, oracle = _reuse_matches_the_body([prime], target, BudgetPolicy())
     assert reused == oracle
 
@@ -347,3 +366,70 @@ def test_a_failure_stores_nothing_and_a_later_success_does_not_hide_a_later_fail
             reused = _outcome(lambda: AnalysisSnapshot.from_function_analysis(analysis))
             oracle = _outcome(lambda: _RAW_BUILD(AnalysisSnapshot, analysis))
     assert reused == oracle and reused[0] == "raised"
+
+
+# ---------------------------------------------------------------------------
+# property: ランダムな DAG・共有・scalar・予算の境界
+# ---------------------------------------------------------------------------
+
+
+def _random_value(rng, pool: List[Expression], depth: int) -> Expression:
+    if pool and rng.random() < 0.5:
+        return rng.choice(pool)
+    if depth <= 0:
+        size = _BOXED_FOUR if rng.random() < 0.5 else 4
+        node = rng.choice((
+            lambda: Expression.constant(rng.randrange(8), size=size),
+            lambda: Expression.parameter("p%d" % rng.randrange(3), rng.randrange(3), size=4),
+        ))()
+    else:
+        node = Expression.binary_op(
+            rng.choice(("INT_ADD", "INT_AND", "INT_SUB")),
+            _random_value(rng, pool, depth - 1), _random_value(rng, pool, depth - 1),
+        )
+    pool.append(node)
+    return node
+
+
+def _rebuild(value: Expression) -> Expression:
+    operands = getattr(value, "operands", None) or ()
+    if operands:
+        return Expression.binary_op(value.operator, *[_rebuild(item) for item in operands])
+    if value.expr_type.name == "CONSTANT":
+        return Expression.constant(value.value, size=value.size)
+    return Expression.parameter(value.name, value.value, size=value.size)
+
+
+@pytest.mark.parametrize("seed", range(150))
+def test_random_shapes_follow_the_body_at_every_budget_boundary(seed):
+    """closed な root と、それを子に持ち得る open な root のランダムな組。target は root ごとに、同じ
+    object・同じ内容の別 object（共有関係も作り直す）・他の root の object のどれかにする。"""
+
+    import random
+
+    rng = random.Random(seed)
+    pool: List[Expression] = []
+    closed = []
+    for _ in range(rng.randrange(1, 3)):
+        root = Expression.binary_op("INT_ADD", _param("p%d" % rng.randrange(2), 0), Expression.constant(rng.randrange(8), size=4))
+        pool.append(root)
+        closed.append(root)
+    opened = [_random_value(rng, pool, rng.randrange(1, 3)) for _ in range(rng.randrange(1, 3))]
+    opened = [Expression.binary_op("INT_AND", value, Expression.constant(1, size=_BOXED_FOUR)) for value in opened]
+    values = closed + opened
+    prime = _analysis(values)
+    choices = list(closed)
+    for value in opened:
+        pick = rng.randrange(3)
+        choices.append(value if pick == 0 else _rebuild(value) if pick == 1 else rng.choice(values))
+    if all(choice is value for choice, value in zip(choices, values)):
+        choices[-1] = _rebuild(values[-1])
+    target = _with_values(prime, choices)
+    budget = rng.choice(("nodes", "bytes"))
+    offset = rng.choice((-1, 0, 1))
+    if budget == "nodes":
+        policy = BudgetPolicy(serialization_nodes=max(1, _measured_nodes(target) + offset))
+    else:
+        policy = BudgetPolicy(serialization_bytes=max(1, _measured_bytes(target) + offset))
+    reused, oracle = _reuse_matches_the_body([prime], target, policy)
+    assert reused == oracle, (seed, budget, offset)
