@@ -35,19 +35,43 @@ def _deeply_immutable(value: Any) -> bool:
     return False
 
 
-def same_retained(a: Any, b: Any, path: str, problems: List[str]) -> None:
-    """参照で持つ値: 変わり得る object（不変な tuple / frozenset と scalar 以外）は同じ object であること。
+def retained_equal(a: Any, b: Any) -> bool:
+    """参照で持つ値どうしが「同じ保持」か: 変わり得る object は同じ object、不変な容器は要素ごと、scalar は等しさ。
 
-    不変な容器は要素ごとに辿る（中の変わり得る object が同じなら、外の tuple は別の object でよい）。
+    不変な容器（tuple / frozenset）は作り直してよい（中の変わり得る object が同じなら、snapshot は同じ
+    ものを指す）。frozenset は要素の対応を探して比べる（順序が無い）。
     """
 
-    if a is b or _deeply_immutable(a):
-        return
-    if type(a) is tuple and type(b) is tuple and len(a) == len(b):
-        for index, (left, right) in enumerate(zip(a, b)):
-            same_retained(left, right, f"{path}[{index}]", problems)
-        return
-    problems.append(f"{path}: a retained {type(a).__name__} is another object")
+    if a is b:
+        return True
+    if type(a) is not type(b):
+        return False
+    if a is None or type(a) in _PLAIN or type(a) is float:
+        problems: List[str] = []
+        same_value(a, b, "", problems)
+        return not problems
+    if type(a) is tuple:
+        return len(a) == len(b) and all(retained_equal(x, y) for x, y in zip(a, b))
+    if type(a) is frozenset:
+        if len(a) != len(b):
+            return False
+        unmatched = list(b)
+        for item in a:
+            for index, candidate in enumerate(unmatched):
+                if retained_equal(item, candidate):
+                    del unmatched[index]
+                    break
+            else:
+                return False
+        return True
+    return False
+
+
+def same_retained(a: Any, b: Any, path: str, problems: List[str]) -> None:
+    """参照で持つ値: 変わり得る object（不変な tuple / frozenset と scalar 以外）は同じ object であること。"""
+
+    if not retained_equal(a, b):
+        problems.append(f"{path}: a retained {type(a).__name__} is not the same retained value")
 
 
 def same_value(a: Any, b: Any, path: str, problems: List[str]) -> None:
@@ -100,6 +124,16 @@ def snapshot_problems(hit: Any, built: Any) -> List[str]:
     same_value(hit_refs, built_refs, "diagnostic_refs", problems)
     if not (hit == built):
         problems.append("the snapshots are not == (dataclass equality)")
+    return problems
+
+
+def fingerprint_problems(hit: Any, built: Any) -> List[str]:
+    """fingerprint だけの違い（field の違いと別に確かめる）。"""
+
+    problems: List[str] = []
+    for name in ("semantic_fingerprint", "comparison_fingerprint"):
+        if getattr(hit, name) != getattr(built, name):
+            problems.append(f"{name} differs")
     return problems
 
 
