@@ -40,6 +40,7 @@ from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSna
 from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import snapshot_reuse_scope
 from scripts.function_tracer_pcode.tests.conftest import create_mock_analysis
 from scripts.function_tracer_pcode.tests.unit._publication import published
+from scripts.function_tracer_pcode.tests.unit import _snapshot_oracle as oracle
 
 _RAW_BUILD = AnalysisSnapshot.__dict__["_build_from_function_analysis"].__func__
 
@@ -98,64 +99,19 @@ def _with_values(base: Any, values: List[Expression]) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _fields(snapshot: AnalysisSnapshot) -> Tuple[Any, ...]:
-    refs = dict(snapshot.diagnostic_refs)
-    function_ref = refs.pop("function_ref", None)
-    # snapshot が写さずに参照で持つ、変わり得る要素は identity でも比べる（後で変わると snapshot も変わる）
-    retained = tuple(id(item) for item in snapshot.snapshot_id if not _deeply_immutable(item))
-    return (
-        retained,
-        _typed(snapshot.snapshot_id),
-        _typed(dict(snapshot.semantic_fields)),
-        snapshot.semantic_fingerprint,
-        snapshot.comparison_fingerprint,
-        snapshot.extraction_schema_version,
-        _typed(refs),
-        id(function_ref),
-    )
-
-
-def _deeply_immutable(value: Any) -> bool:
-    if value is None or type(value) in (str, int, float, bool, bytes):
-        return True
-    if type(value) in (tuple, frozenset):
-        return all(_deeply_immutable(item) for item in value)
-    return False
-
-
-def _typed(value: Any) -> Any:
-    """`==` が隠す型の違い（list / tuple、bool / int、容器の型）も比べる形にする。"""
-
-    kind = type(value)
-    if kind in (list, tuple):
-        return (kind.__name__, tuple(_typed(item) for item in value))
-    if kind is dict or kind.__name__ == "mappingproxy":
-        return (kind.__name__, tuple((_typed(k), _typed(v)) for k, v in value.items()))
-    if kind in (set, frozenset):
-        return (kind.__name__, frozenset(_typed(item) for item in value))
-    if value is None or kind in (str, int, float, bool):
-        return (kind.__name__, repr(value))
-    return ("object", kind.__name__, id(value))
-
-
 def _outcome(call: Callable[[], AnalysisSnapshot]) -> Tuple[Any, ...]:
-    try:
-        return ("ok", _fields(call()))
-    except AnalysisFailureError as exc:
-        evidence = tuple(item for item in getattr(exc, "evidence_refs", ()) if item.startswith("budget="))
-        return ("raised", type(exc).__name__, evidence)
+    return oracle.outcome(call)
 
 
-def _reuse_matches_the_body(prime: List[Any], target: Any, policy: BudgetPolicy) -> Tuple[Any, Any]:
-    """`prime` で store を温めてから `target` を呼ぶ。再利用の結果と、直後の本体の結果。"""
+def _reuse_matches_the_body(prime: List[Any], target: Any, policy: BudgetPolicy) -> List[str]:
+    """`prime` で store を温めてから `target` を呼び、直後の同じ sealing の状態の本体と比べた違い。"""
 
     with pair_failure_scope(("pair", 1), None), budget_policy_scope(policy), snapshot_reuse_scope():
         for item in prime:
             _outcome(lambda item=item: AnalysisSnapshot.from_function_analysis(item))
         reused = _outcome(lambda: AnalysisSnapshot.from_function_analysis(target))
-        # 再利用の呼び出しが sealing を済ませた状態の本体（同じ sealing 前提の通常の build）
-        oracle = _outcome(lambda: _RAW_BUILD(AnalysisSnapshot, target))
-    return reused, oracle
+        built = _outcome(lambda: _RAW_BUILD(AnalysisSnapshot, target))
+    return oracle.outcome_problems(reused, built)
 
 
 def _measured_nodes(analysis: Any) -> int:
@@ -257,8 +213,7 @@ def test_reuse_has_the_same_fields_and_budget_outcome_as_the_body(name, make, bu
         policy = BudgetPolicy(serialization_nodes=max(1, _measured_nodes(target) + offset))
     else:
         policy = BudgetPolicy(serialization_bytes=max(1, _measured_bytes(target) + offset))
-    reused, oracle = _reuse_matches_the_body([prime], target, policy)
-    assert reused == oracle, (name, budget, offset)
+    assert _reuse_matches_the_body([prime], target, policy) == [], (name, budget, offset)
 
 
 def test_the_open_shapes_are_open_and_the_closed_shapes_are_closed():
@@ -294,15 +249,13 @@ def test_the_open_shapes_are_open_and_the_closed_shapes_are_closed():
 def test_a_snapshot_id_with_other_container_types_is_never_served_from_the_store(before, after):
     prime = _analysis([_closed_root()], scope_key=before)
     target = dataclasses.replace(prime, analysis_scope_key=after)
-    reused, oracle = _reuse_matches_the_body([prime], target, BudgetPolicy())
-    assert reused == oracle
+    assert _reuse_matches_the_body([prime], target, BudgetPolicy()) == []
 
 
 def test_a_snapshot_id_holding_an_equal_but_other_mutable_object_is_not_served():
     prime = _analysis([_closed_root()], scope_key=("scope", ["nested"]))
     target = dataclasses.replace(prime, analysis_scope_key=("scope", ["nested"]))
-    reused, oracle = _reuse_matches_the_body([prime], target, BudgetPolicy())
-    assert reused == oracle
+    assert _reuse_matches_the_body([prime], target, BudgetPolicy()) == []
 
 
 def test_the_same_object_changed_in_place_is_rebuilt_with_its_budget_outcome():
@@ -318,8 +271,8 @@ def test_the_same_object_changed_in_place_is_rebuilt_with_its_budget_outcome():
             published(replacement)
             analysis.returns[1].value = replacement
             reused = _outcome(lambda: AnalysisSnapshot.from_function_analysis(analysis))
-            oracle = _outcome(lambda: _RAW_BUILD(AnalysisSnapshot, analysis))
-    assert reused == oracle
+            built = _outcome(lambda: _RAW_BUILD(AnalysisSnapshot, analysis))
+    assert oracle.outcome_problems(reused, built) == []
 
 
 # ---------------------------------------------------------------------------
@@ -335,8 +288,8 @@ def test_a_nested_scope_with_a_stricter_policy_follows_the_body():
         AnalysisSnapshot.from_function_analysis(analysis)
         with budget_policy_scope(BudgetPolicy(serialization_nodes=limit - 1)), snapshot_reuse_scope():
             reused = _outcome(lambda: AnalysisSnapshot.from_function_analysis(analysis))
-            oracle = _outcome(lambda: _RAW_BUILD(AnalysisSnapshot, analysis))
-    assert reused == oracle and reused[0] == "raised"
+            built = _outcome(lambda: _RAW_BUILD(AnalysisSnapshot, analysis))
+    assert oracle.outcome_problems(reused, built) == [] and reused[0] == "raised"
 
 
 def test_a_call_inside_another_serialization_follows_the_body():
@@ -347,8 +300,8 @@ def test_a_call_inside_another_serialization_follows_the_body():
         with serialization_scope(site="outer", target_parts=("o",)):
             reused = _outcome(lambda: AnalysisSnapshot.from_function_analysis(analysis))
         with serialization_scope(site="outer", target_parts=("o",)):
-            oracle = _outcome(lambda: _RAW_BUILD(AnalysisSnapshot, analysis))
-    assert reused == oracle
+            built = _outcome(lambda: _RAW_BUILD(AnalysisSnapshot, analysis))
+    assert oracle.outcome_problems(reused, built) == []
 
 
 def test_a_failure_stores_nothing_and_a_later_success_does_not_hide_a_later_failure():
@@ -364,8 +317,8 @@ def test_a_failure_stores_nothing_and_a_later_success_does_not_hide_a_later_fail
             assert _outcome(lambda: AnalysisSnapshot.from_function_analysis(analysis))[0] == "ok"
         with budget_policy_scope(strict):
             reused = _outcome(lambda: AnalysisSnapshot.from_function_analysis(analysis))
-            oracle = _outcome(lambda: _RAW_BUILD(AnalysisSnapshot, analysis))
-    assert reused == oracle and reused[0] == "raised"
+            built = _outcome(lambda: _RAW_BUILD(AnalysisSnapshot, analysis))
+    assert oracle.outcome_problems(reused, built) == [] and reused[0] == "raised"
 
 
 # ---------------------------------------------------------------------------
@@ -431,5 +384,4 @@ def test_random_shapes_follow_the_body_at_every_budget_boundary(seed):
         policy = BudgetPolicy(serialization_nodes=max(1, _measured_nodes(target) + offset))
     else:
         policy = BudgetPolicy(serialization_bytes=max(1, _measured_bytes(target) + offset))
-    reused, oracle = _reuse_matches_the_body([prime], target, policy)
-    assert reused == oracle, (seed, budget, offset)
+    assert _reuse_matches_the_body([prime], target, policy) == [], (seed, budget, offset)
