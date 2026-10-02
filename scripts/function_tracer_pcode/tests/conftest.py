@@ -124,6 +124,32 @@ def _pair_condition_cache_scope(request):
     with condition_cache_scope():
         yield
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    """test の本体（call）の間だけ、それより前から在る object を GC の世代から外す（Issue #239）。
+
+    wall-clock の上限を持つ test は、被測定 code の仕事だけで時間が決まるべきで、先に走った test が
+    残した session の値（共有の AST の台帳など、数百万 object）の full collection が測定の区間に入ると
+    落ちる。call の前に `gc.freeze()` で既存の object を永続の世代へ移し、call の後に `gc.unfreeze()` で
+    最も古い世代へ戻す（世代の list のつなぎ替えだけで、費用は object の数に依らない）。
+
+    * call の中で作った object は今と同じく GC される（被測定 code が作る値の GC の時間は測定に入る）
+    * call より前（fixture の setup・前の test）から在る循環は call の間は集められず、call の後で集められる
+    * GC の有効 / 無効・閾値は変えない。外で既に freeze されていれば何もしない（他の freeze を解かない）
+    """
+
+    import gc
+
+    if gc.get_freeze_count():
+        yield
+        return
+    gc.freeze()
+    try:
+        yield
+    finally:
+        gc.unfreeze()
+
+
 yaml = cast(Any, importlib.import_module("yaml"))
 from dataclasses import dataclass, field
 from unittest.mock import Mock
