@@ -32,7 +32,8 @@ print(_positive_int_setting(name, int(sys.argv[2]), {name: sys.argv[1]}))
 #
 # 規則（書式・既定・OFF・`ANALYSIS_TIMEOUT + ANALYSIS_TIMEOUT_MARGIN <= PAIR_PROCESS_TIMEOUT`）は
 # `reporting/runner_timeout_policy.py` にだけあり、ここは呼んで結果を変数へ移すだけ。
-# 未指定・空の ANALYSIS_TIMEOUT は第 2 引数の既定（空なら module の full 既定）になる。
+# 未指定・空の ANALYSIS_TIMEOUT / ANALYSIS_TIMEOUT_MARGIN は profile の既定になる: 第 2 引数に
+# profile の manifest（固定 subset の eqbench_subset.json）を渡せばその run_settings、空なら full。
 # 失敗（不正値・不整合・Python を呼べない）は 1 を返す: 呼び出し側は pair を始めずに exit 1 する
 # （`validation_positive_int_setting` と違って既定値へ戻さない。期限の取り違えは静かに直さない）。
 #
@@ -43,11 +44,11 @@ print(_positive_int_setting(name, int(sys.argv[2]), {name: sys.argv[1]}))
 #   ANALYSIS_TIMEOUT_CLI_ARGS        pair の CLI へ足す引数（OFF なら空の配列）
 validation_resolve_analysis_timeout_policy() {
     local python_bin="$1"
-    local default_analysis_timeout="${2-}"
+    local profile_manifest="${2-}"
     local repo_root="${3:-${SCRIPT_DIR:-.}}"
     local -a default_args=()
-    if [[ -n "$default_analysis_timeout" ]]; then
-        default_args=(--default-analysis-timeout "$default_analysis_timeout")
+    if [[ -n "$profile_manifest" ]]; then
+        default_args=(--profile-manifest "$profile_manifest")
     fi
     local lines
     lines="$(

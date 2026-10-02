@@ -29,6 +29,7 @@ from scripts.function_tracer_pcode.reporting.runner_timeout_policy import (
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 COMMON = REPO_ROOT / "scripts" / "validation_matrix_common.sh"
+SUBSET_MANIFEST = REPO_ROOT / "scripts/function_tracer_pcode/reporting/eqbench_subset.json"
 
 
 def _resolve(analysis_timeout="", margin="", process="600s", **kwargs):
@@ -59,7 +60,7 @@ def test_an_empty_value_is_unset_not_zero():
 
 
 def test_a_runner_can_name_its_own_default():
-    resolved = _resolve(process="240s", default_analysis_timeout="115s")
+    resolved = _resolve(process="240s", default_analysis_timeout="115s", default_margin="100")
 
     assert resolved.analysis_timeout == Decimal(115)
     assert resolved.manifest_fields()["analysis_timeout"] == "115"
@@ -173,7 +174,8 @@ def test_the_manifest_keys_have_one_owner():
 def test_the_cli_prints_the_effective_values_or_exits_1():
     ok = subprocess.run(
         [sys.executable, "-B", "-m", "scripts.function_tracer_pcode.reporting.runner_timeout_policy",
-         "resolve", "--analysis-timeout", "100s", "--pair-process-timeout", "240s"],
+         "resolve", "--analysis-timeout", "100s", "--analysis-timeout-margin", "100",
+         "--pair-process-timeout", "240s"],
         cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
     )
     bad = subprocess.run(
@@ -185,7 +187,7 @@ def test_the_cli_prints_the_effective_values_or_exits_1():
     assert ok.returncode == 0, ok.stderr
     assert ok.stdout.splitlines() == [
         "analysis_timeout=100", "analysis_timeout_enabled=1",
-        f"analysis_timeout_margin={policy.DEFAULT_ANALYSIS_TIMEOUT_MARGIN}",
+        "analysis_timeout_margin=100",
     ]
     assert bad.returncode == 1
     assert bad.stdout == ""
@@ -210,13 +212,15 @@ def _shell_resolve(env_lines: str) -> subprocess.CompletedProcess:
 def test_the_shell_function_sets_the_runner_variables():
     on = _shell_resolve('ANALYSIS_TIMEOUT=300; ANALYSIS_TIMEOUT_MARGIN=50; PAIR_PROCESS_TIMEOUT=600s')
     off = _shell_resolve('ANALYSIS_TIMEOUT=0; PAIR_PROCESS_TIMEOUT=600s')
-    default = _shell_resolve('PAIR_PROCESS_TIMEOUT=240s; DEFAULT_AT=115')
+    default = _shell_resolve(f'PAIR_PROCESS_TIMEOUT=240s; DEFAULT_AT={SUBSET_MANIFEST}')
 
     assert "seconds=300\nmargin=50\nargs=--analysis-timeout 300|" in on.stdout, on
     assert "analysis_timeout_enabled=1" in on.stdout
     assert "seconds=0\n" in off.stdout and "args=|" in off.stdout, off
     assert "analysis_timeout_enabled=0" in off.stdout
-    assert "seconds=115\n" in default.stdout, default
+    subset_timeout = json.loads(SUBSET_MANIFEST.read_text(encoding="utf-8"))[
+        "run_settings"]["ANALYSIS_TIMEOUT"].rstrip("s")
+    assert f"seconds={subset_timeout}\n" in default.stdout, default
 
 
 def test_the_shell_function_fails_closed():
@@ -254,16 +258,48 @@ def test_the_full_run_defaults_fit_the_full_run_process_timeout(runner):
 
 
 def test_the_subset_defaults_fit_the_subset_process_timeout():
-    settings = json.loads(
-        (REPO_ROOT / "scripts/function_tracer_pcode/reporting/eqbench_subset.json")
-        .read_text(encoding="utf-8")
-    )["run_settings"]
+    settings = json.loads(SUBSET_MANIFEST.read_text(encoding="utf-8"))["run_settings"]
+    timeout, margin_value = policy.profile_defaults(SUBSET_MANIFEST)
     resolved = _resolve(
-        analysis_timeout=settings["ANALYSIS_TIMEOUT"], process=settings["PAIR_PROCESS_TIMEOUT"],
+        process=settings["PAIR_PROCESS_TIMEOUT"],
+        default_analysis_timeout=timeout, default_margin=margin_value,
     )
 
+    assert (timeout, margin_value) == (settings["ANALYSIS_TIMEOUT"], settings["ANALYSIS_TIMEOUT_MARGIN"])
     assert resolved.enabled
     assert resolved.analysis_timeout < Decimal(policy.FULL_RUN_DEFAULT_ANALYSIS_TIMEOUT)
+
+
+def test_the_full_profile_is_the_module_default():
+    assert policy.profile_defaults(None) == (
+        policy.FULL_RUN_DEFAULT_ANALYSIS_TIMEOUT, policy.DEFAULT_ANALYSIS_TIMEOUT_MARGIN,
+    )
+
+
+@pytest.mark.parametrize("settings", [
+    {"ANALYSIS_TIMEOUT": "115s"},
+    {"ANALYSIS_TIMEOUT_MARGIN": "125s"},
+    {"ANALYSIS_TIMEOUT": 115, "ANALYSIS_TIMEOUT_MARGIN": "125s"},
+])
+def test_a_profile_manifest_without_both_defaults_is_refused(tmp_path, settings):
+    path = tmp_path / "subset.json"
+    path.write_text(json.dumps({"run_settings": settings}), encoding="utf-8")
+
+    with pytest.raises(TimeoutPolicyError):
+        policy.profile_defaults(path)
+
+
+def test_the_cli_takes_the_profile_from_the_manifest():
+    done = subprocess.run(
+        [sys.executable, "-B", "-m", "scripts.function_tracer_pcode.reporting.runner_timeout_policy",
+         "resolve", "--pair-process-timeout", "240s", "--profile-manifest", str(SUBSET_MANIFEST)],
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
+    )
+    settings = json.loads(SUBSET_MANIFEST.read_text(encoding="utf-8"))["run_settings"]
+
+    assert done.returncode == 0, done.stderr
+    assert f"analysis_timeout={settings['ANALYSIS_TIMEOUT'].rstrip('s')}" in done.stdout
+    assert f"analysis_timeout_margin={settings['ANALYSIS_TIMEOUT_MARGIN'].rstrip('s')}" in done.stdout
 
 
 # --------------------------------------------------------------------------
@@ -281,7 +317,7 @@ def _manifest(**overrides: str) -> dict:
         "pair_process_kill_after_seconds": "30",
         "prefilter_source_census_digest": "0" * 64, "skip_completed_results": "1",
         "analysis_config_schema": "eqbench-analysis-config-v4", "identical_fast_path": "1",
-        **_resolve(analysis_timeout="100", process="240s").manifest_fields(),
+        **_resolve(analysis_timeout="100", margin="100", process="240s").manifest_fields(),
     }
     run.update(overrides)
     return run
@@ -299,7 +335,7 @@ def test_the_deadline_and_margin_are_part_of_the_analysis_identity():
     assert config["schema"] == ANALYSIS_CONFIG_V4_SCHEMA
     assert set(config) == ANALYSIS_CONFIG_V4_FIELDS
     assert config["analysis_timeout_seconds"] == "100"
-    assert config["analysis_timeout_margin_seconds"] == policy.DEFAULT_ANALYSIS_TIMEOUT_MARGIN
+    assert config["analysis_timeout_margin_seconds"] == "100"
     digests = {
         authority_digest(analysis_config_from_run(_manifest(**change)))
         for change in ({}, {"analysis_timeout": "90"}, {"analysis_timeout_margin": "99"},
@@ -424,7 +460,7 @@ def test_the_workflow_normalises_with_the_runners_rule_before_anything_runs():
     normalise = steps[names.index("Normalise the inputs")]["run"]
 
     assert "scripts.function_tracer_pcode.reporting.runner_timeout_policy" in normalise
-    assert '"run_settings"]["ANALYSIS_TIMEOUT"]' in normalise
+    assert "--profile-manifest scripts/function_tracer_pcode/reporting/eqbench_subset.json" in normalise
     assert names.index("Normalise the inputs") < names.index("Build the analysis container")
 
 

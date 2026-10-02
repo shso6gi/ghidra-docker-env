@@ -59,7 +59,7 @@ on:
         type: string
         default: ""
       analysis_timeout_margin:
-        description: "Issue #106 margin between the analysis deadline and the pair timeout (empty = the runner default)"
+        description: "Issue #106 margin between the analysis deadline and the pair timeout (empty = the subset manifest's)"
         type: string
         default: ""
       eqbench_ref:
@@ -161,24 +161,20 @@ jobs:
             || fail "eqbench_ref is not a plausible git ref: '$EQBENCH_REF'"
 
           # Issue #106 PR-106-B: the analysis deadline.  An empty input takes the
-          # subset manifest's value (the same default eqbench_run_subset.sh
-          # applies), and the deadline, its margin and PAIR_PROCESS_TIMEOUT are
-          # then checked and resolved by the runners' own rule
+          # subset profile's value from the manifest (the same defaults
+          # eqbench_run_subset.sh applies, read by the same module), and the
+          # deadline, its margin and PAIR_PROCESS_TIMEOUT are checked and
+          # resolved by the runners' own rule
           # (reporting/runner_timeout_policy.py) -- an inconsistent combination
           # fails here, before the container is even built.  The EFFECTIVE values
           # are what every later step passes on and verifies, so the runners
           # never apply a default of their own in CI.
-          ANALYSIS_TIMEOUT_REQUESTED="${RAW_ANALYSIS_TIMEOUT:-}"
-          if [[ -z "$ANALYSIS_TIMEOUT_REQUESTED" ]]; then
-            ANALYSIS_TIMEOUT_REQUESTED="$(python3 -B -c \
-              'import json, sys; print(json.load(open(sys.argv[1]))["run_settings"]["ANALYSIS_TIMEOUT"])' \
-              scripts/function_tracer_pcode/reporting/eqbench_subset.json)"
-          fi
           policy_lines="$(python3 -B -m scripts.function_tracer_pcode.reporting.runner_timeout_policy \
             resolve \
-            --analysis-timeout "$ANALYSIS_TIMEOUT_REQUESTED" \
+            --analysis-timeout "${RAW_ANALYSIS_TIMEOUT:-}" \
             --analysis-timeout-margin "${RAW_ANALYSIS_TIMEOUT_MARGIN:-}" \
-            --pair-process-timeout "$PAIR_PROCESS_TIMEOUT")" \
+            --pair-process-timeout "$PAIR_PROCESS_TIMEOUT" \
+            --profile-manifest scripts/function_tracer_pcode/reporting/eqbench_subset.json)" \
             || fail "analysis_timeout / analysis_timeout_margin / pair_process_timeout were rejected (see the error above)"
           ANALYSIS_TIMEOUT="$(printf '%s\n' "$policy_lines" | awk -F= '$1 == "analysis_timeout" {print $2}')"
           ANALYSIS_TIMEOUT_MARGIN="$(printf '%s\n' "$policy_lines" | awk -F= '$1 == "analysis_timeout_margin" {print $2}')"

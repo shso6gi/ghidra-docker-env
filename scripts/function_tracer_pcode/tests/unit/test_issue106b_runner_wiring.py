@@ -99,9 +99,9 @@ def _pair_command(argv: str) -> str:
 
 @pytest.mark.parametrize("runner", RUNNERS)
 def test_the_deadline_reaches_the_pair_command(tmp_path, runner):
-    command = _pair_command(_run_pair_argv(tmp_path, runner, "100"))
+    command = _pair_command(_run_pair_argv(tmp_path, runner, "40"))
 
-    assert f"{FLAG} 100" in command, command
+    assert f"{FLAG} 40" in command, command
     assert command.count(FLAG) == 1, command
 
 
@@ -114,10 +114,10 @@ def test_off_hands_the_pair_exactly_the_pre_deadline_command(tmp_path, runner):
         return re.sub(r"pair\.\w+", "pair.X", command.replace(str(root), "ROOT"))
 
     off = normalised(tmp_path / "off", _pair_command(_run_pair_argv(tmp_path / "off", runner, "0")))
-    on = normalised(tmp_path / "on", _pair_command(_run_pair_argv(tmp_path / "on", runner, "100")))
+    on = normalised(tmp_path / "on", _pair_command(_run_pair_argv(tmp_path / "on", runner, "40")))
 
     assert FLAG not in off, off
-    assert on.replace(f" {FLAG} 100", "") == off
+    assert on.replace(f" {FLAG} 40", "") == off
 
 
 # --------------------------------------------------------------------------
@@ -264,4 +264,7 @@ def test_the_subset_records_what_the_halves_recorded():
 
     assert 'echo "$key=$(half_setting "$key")"' in source
     assert '<<< "$ANALYSIS_TIMEOUT_MANIFEST_LINES"' in source
-    assert "manifest_value setting ANALYSIS_TIMEOUT" in source
+    # the subset profile's defaults are read by the policy module, not by the script
+    assert 'validation_resolve_analysis_timeout_policy "$PYTHON_BIN" "$MANIFEST"' in source
+    assert 'export ANALYSIS_TIMEOUT="$ANALYSIS_TIMEOUT_SECONDS"' in source
+    assert 'export ANALYSIS_TIMEOUT_MARGIN="$ANALYSIS_TIMEOUT_MARGIN_SECONDS"' in source

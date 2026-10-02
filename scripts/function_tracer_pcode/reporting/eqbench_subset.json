@@ -13,9 +13,10 @@
   "EQBENCH_RESOURCE_ADMISSION": 0,
   "EQBENCH_BUILD_POLICY": "PREBUILT_ONLY",
   "PAIR_PROCESS_TIMEOUT": "240s",
-  "ANALYSIS_TIMEOUT": "115s",
+  "ANALYSIS_TIMEOUT": "110s",
+  "ANALYSIS_TIMEOUT_MARGIN": "130s",
   "note": "Full runs use PAIR_PROCESS_TIMEOUT=600s. The subset uses 240s so that TIMEOUT-prone pairs stay inside the 10 minute budget; a pair reported as TIMEOUT by the subset is therefore not directly comparable with the full-run outcome of the same pair.",
-  "analysis_timeout_note": "Issue #106 PR-106-B: the analysis deadline every pair of the subset gets (eqbench_run_subset.sh exports it to both halves unless ANALYSIS_TIMEOUT is set; 0 = off). ANALYSIS_TIMEOUT + ANALYSIS_TIMEOUT_MARGIN must not exceed PAIR_PROCESS_TIMEOUT; the margin default and its measured basis live in reporting/runner_timeout_policy.py."
+  "analysis_timeout_note": "Issue #106 PR-106-B: the analysis deadline and margin of the subset profile (eqbench_run_subset.sh exports both to the halves unless the environment sets them; ANALYSIS_TIMEOUT=0 = off). ANALYSIS_TIMEOUT + ANALYSIS_TIMEOUT_MARGIN must not exceed PAIR_PROCESS_TIMEOUT; the margin is measured for this profile (P=20, 240 s) with reporting/deadline_margin_summary.py, see docs/profiling_timeout_pairs.md section 10."
  },
  "eq": {
   "runner": "eqbench_run_all_32jobs.sh",

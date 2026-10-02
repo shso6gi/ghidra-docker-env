@@ -8,7 +8,7 @@
 # environment (PARALLEL_JOBS, PAIR_PROCESS_TIMEOUT, ANALYSIS_TIMEOUT, EQBENCH_RESOURCE_ADMISSION,
 # EQBENCH_BUILD_POLICY). SUBSET_SCOPE=eq|neq|all selects the halves to run.
 # ANALYSIS_TIMEOUT=0 runs both halves without the analysis deadline (Issue #106);
-# ANALYSIS_TIMEOUT_MARGIN passes through to the halves unchanged.
+# ANALYSIS_TIMEOUT / ANALYSIS_TIMEOUT_MARGIN default to the manifest's subset profile.
 #
 # Issue #123: the run records its own provenance.  SUBSET_BEFORE=<run dir> names
 # the run this one is compared against; it is checked against the halves this
@@ -116,12 +116,13 @@ export EQBENCH_IDENTICAL_FAST_PATH="${EQBENCH_IDENTICAL_FAST_PATH:-1}"
 # the environment names one (0 = off).  It is exported so both halves run with the
 # same value, and checked here with the runners' own rule before either half
 # starts: an inconsistent combination fails before any pair, not in the second half.
-if [[ -z "${ANALYSIS_TIMEOUT:-}" ]]; then
-    ANALYSIS_TIMEOUT="$(manifest_value setting ANALYSIS_TIMEOUT)" \
-        || { echo "Error: $MANIFEST has no run_settings.ANALYSIS_TIMEOUT" >&2; exit 1; }
-fi
-export ANALYSIS_TIMEOUT
-validation_resolve_analysis_timeout_policy "$PYTHON_BIN" "" "$SCRIPT_DIR" || exit 1
+# The subset profile has its own deadline and margin (the margin is measured per
+# profile: its terms depend on the load and on the deadline itself), read from the
+# manifest by the policy module.  The halves get the EFFECTIVE values, so both
+# run with exactly what was checked here and record the same thing.
+validation_resolve_analysis_timeout_policy "$PYTHON_BIN" "$MANIFEST" "$SCRIPT_DIR" || exit 1
+export ANALYSIS_TIMEOUT="$ANALYSIS_TIMEOUT_SECONDS"
+export ANALYSIS_TIMEOUT_MARGIN="$ANALYSIS_TIMEOUT_MARGIN_SECONDS"
 
 mkdir -p "$OUTPUT_BASE_DIR"
 OUTPUT_BASE_DIR="$(realpath -m "$OUTPUT_BASE_DIR")"
