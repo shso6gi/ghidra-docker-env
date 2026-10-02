@@ -6,15 +6,18 @@ cut into consecutive intervals on the supervisor's clock (the deadline origin
 and the child exit the supervisor observed, from its status sidecar).  These
 tests pin that the intervals add up to the time charged against
 ``PAIR_PROCESS_TIMEOUT`` minus the budget, that only the current execution of a
-journal is read, that the formula needs every interval, and that pairs which
-cannot be measured are counted apart instead of being folded into the numbers.
-(The reviewer's regressions are in ``test_issue106b_review1_regressions.py``.)
+journal is read, that each interval is measured on its own (one that cannot be
+measured keeps its reason and does not erase the others), and which pool feeds
+which term of the formula.  (The reviewers' regressions are in
+``test_issue106b_review1_regressions.py`` and the verdict matrix in
+``test_issue106b_margin_acceptance.py``.)
 """
 from __future__ import annotations
 
 import pytest
 
 from scripts.function_tracer_pcode.core.stage_journal_reader import JournalRow, JournalSegment
+from scripts.function_tracer_pcode.reporting import deadline_margin_acceptance as acceptance
 from scripts.function_tracer_pcode.reporting import deadline_margin_summary as margin
 from scripts.function_tracer_pcode.tests.unit.test_issue106b_review1_regressions import (
     _resolved_unknown,
@@ -51,47 +54,77 @@ def _journal(origin_at=20.0, budget=100.0, overrun=1.5, finalize=0.4, emit=0.3):
     return rows, finalize_start + finalize + 0.1 + emit
 
 
+def _observe(rows, sidecar, outcome="UNKNOWN"):
+    return margin.observe_pair(
+        "k", outcome, termination="resolved", timeout_kind=None,
+        segment=_segment(rows), segment_reason=None, sidecar=sidecar,
+    )
+
+
+def _profile(margin_seconds=140.0):
+    return acceptance.MarginProfile(
+        name="t", deadline_seconds=100.0, margin_seconds=margin_seconds,
+        pair_process_timeout_seconds=240.0, machinery_commits=frozenset({"a" * 40}),
+    )
+
+
+def _run(root):
+    (root / "run_manifest.txt").write_text(
+        "analysis_timeout=100\npair_process_timeout_seconds=240\n"
+        f"git_commit={'a' * 40}\ngit_dirty=0\n", encoding="utf-8")
+    return margin.observe_run(root)
+
+
 def test_the_intervals_add_up_to_the_time_charged_minus_the_budget():
     rows, last_at = _journal()
-    pair = margin.pair_margin("k", "UNKNOWN", _segment(rows), _sidecar(last_at + 2.5))
+    pair = _observe(rows, _sidecar(last_at + 2.5))
 
-    assert pair.pre == pytest.approx(20.0)
-    assert pair.overrun == pytest.approx(1.5)
-    assert pair.tail == pytest.approx(2.5)
+    assert pair.cut is True and pair.missing == {}
+    assert pair.values["pre"] == pytest.approx(20.0)
+    assert pair.values["overrun"] == pytest.approx(1.5)
+    assert pair.values["tail"] == pytest.approx(2.5)
     assert pair.needed == pytest.approx(last_at + 2.5 - 100.0)
-    assert pair.pre + pair.overrun + pair.post_trip + pair.tail == pytest.approx(pair.needed)
-    assert sum(pair.post_trip_parts.values()) == pytest.approx(pair.post_trip)
+    assert sum(pair.values.values()) == pytest.approx(pair.needed)
+    assert sum(pair.post_trip_parts.values()) == pytest.approx(pair.values["post_trip"])
 
 
-def test_a_pair_that_did_not_trip_has_no_margin_row():
+def test_a_pair_that_did_not_trip_is_not_cut_and_has_no_intervals():
     rows = [_row(1, "note", 0.0, payload={"note": "pair_journal_opened"})]
+    pair = _observe(rows, _sidecar(10.0), outcome="EQUIVALENT")
 
-    assert margin.pair_margin("k", "EQUIVALENT", _segment(rows), _sidecar(10.0)) is None
+    assert pair.cut is False
+    assert pair.values == {} and pair.missing == {}
 
 
-def test_a_sidecar_without_the_deadline_is_unmeasurable_not_zero():
+def test_a_sidecar_without_the_deadline_loses_only_the_intervals_that_need_it():
     rows, last_at = _journal()
     sidecar = _sidecar(last_at + 1.0)
     del sidecar["deadline_monotonic"]
+    pair = _observe(rows, sidecar)
 
-    with pytest.raises(ValueError):
-        margin.pair_margin("k", "UNKNOWN", _segment(rows), sidecar)
+    assert sorted(pair.values) == ["overrun", "post_trip"]
+    assert pair.missing == {
+        "pre": "sidecar has no usable deadline_monotonic",
+        "tail": "sidecar has no usable deadline_monotonic",
+    }
+    assert pair.needed is None
 
 
-def test_a_journal_with_two_executions_and_no_child_identity_is_not_measured(tmp_path):
+def test_a_journal_with_two_executions_and_no_child_identity_is_not_read(tmp_path):
     root = _root(tmp_path)
     old, _ = _journal(overrun=40.0)
     new, last_at = _journal(overrun=0.5)
     _write_pair(root, "f_B1_B2", _resolved_unknown(), journal=old + new,
                 sidecar=_sidecar(last_at + 1.0))
-    payload = margin.report_dict(margin.summarize_roots([root]))
+    (pair,) = margin.observe_run(root).pairs
 
     # the old execution's 40 s overrun is never read as the current one's
-    assert payload["tripped_pairs"] == 0
-    assert [row[0] for row in payload["unreadable"]] == ["REVE/sample/Eq/new/f/f_B1_B2"]
+    assert pair.cut is None
+    assert pair.cut_unknown_reason == "journal: ambiguous_multi_execution"
+    assert pair.values == {}
 
 
-def test_a_run_tree_is_summarised_and_the_unmeasurable_pairs_are_counted_apart(tmp_path):
+def test_a_run_tree_keeps_every_pair_and_its_reason(tmp_path):
     root = _root(tmp_path)
     rows, last_at = _journal()
     _write_pair(root, "f_B1_B2", _resolved_unknown(), journal=rows, sidecar=_sidecar(last_at + 2.0))
@@ -100,48 +133,45 @@ def test_a_run_tree_is_summarised_and_the_unmeasurable_pairs_are_counted_apart(t
                 sidecar=_sidecar(10.0))
     _write_pair(root, "f_B5_B6", _resolved_unknown(), journal=rows)          # no sidecar
     _write_pair(root, "f_B7_B8", _resolved_unknown())                        # no journal
+    pairs = {pair.key[-7:]: pair for pair in margin.observe_run(root).pairs}
 
-    payload = margin.report_dict(margin.summarize_roots([root]), margin_seconds=125.0)
-
-    assert payload["tripped_pairs"] == 1
-    assert payload["finished_before_deadline"] == 1
-    assert sorted(row[0] for row in payload["unreadable"]) == [
-        "REVE/sample/Eq/new/f/f_B5_B6", "REVE/sample/Eq/new/f/f_B7_B8",
-    ]
-    assert payload["lead_seconds"] == 2.0
-    assert "p99" not in payload["intervals"]["needed"]
-    one = payload["pairs"][0]
-    assert payload["required_margin_seconds"] == pytest.approx(
-        one["pre"] + one["overrun"] + one["post_trip"] + one["tail"] + 2.0
-    )
-    assert payload["margin_holds"] is False      # an unmeasurable pair is not a pass
-    assert "Deadline margin summary:" in margin.format_report(payload)
+    assert sorted(pairs) == ["f_B1_B2", "f_B3_B4", "f_B5_B6", "f_B7_B8"]
+    assert pairs["f_B1_B2"].cut is True and pairs["f_B1_B2"].missing == {}
+    assert pairs["f_B3_B4"].cut is False
+    assert pairs["f_B5_B6"].missing == {
+        "pre": "no stack-dump status sidecar", "tail": "no stack-dump status sidecar",
+    }
+    assert pairs["f_B7_B8"].cut is None
+    assert pairs["f_B7_B8"].cut_unknown_reason.startswith("journal: ")
 
 
-def test_the_margin_holds_only_when_every_pair_fits(tmp_path):
-    root = _root(tmp_path)
-    rows, last_at = _journal()
-    _write_pair(root, "f_B1_B2", _resolved_unknown(), journal=rows, sidecar=_sidecar(last_at + 2.0))
-    report = margin.summarize_roots([root])
-    needed = report.pairs[0].needed
+def test_the_run_facts_come_from_the_manifest(tmp_path):
+    root = tmp_path / "eq"
+    root.mkdir()
+    _write_pair(root, "f_B1_B2", {"canonical_outcome": "EQUIVALENT"},
+                journal=[_row(1, "note", 0.0, payload={"note": "pair_journal_opened"})])
+    (root / "run_manifest.txt").write_text(
+        "analysis_timeout=410\npair_process_timeout_seconds=600\nparallel_jobs=32\n"
+        "git_commit=abc\ngit_dirty=0\n", encoding="utf-8")
+    facts = margin.observe_run(root).facts
 
-    assert margin.report_dict(report, margin_seconds=needed + 102.0)["margin_holds"] is True
-    tight = margin.report_dict(report, margin_seconds=needed + 1.0)
-    assert tight["margin_holds"] is False
-    assert tight["pairs_over_margin"] == ["REVE/sample/Eq/new/f/f_B1_B2"]
-
-
-def test_a_run_without_a_deadline_is_not_measured(tmp_path):
-    root = _root(tmp_path)
+    assert (facts.deadline_seconds, facts.pair_process_timeout_seconds, facts.parallel_jobs,
+            facts.git_commit, facts.git_dirty) == (410.0, 600.0, 32, "abc", False)
+    assert facts.samples == frozenset({"REVE/sample/Eq/new"})
     (root / "run_manifest.txt").write_text("analysis_timeout=0\n", encoding="utf-8")
+    assert margin.observe_run(root).facts.deadline_off is True
+
+
+def test_a_manifest_without_the_deadline_takes_the_single_trip_budget(tmp_path):
+    root = tmp_path / "eq"
+    root.mkdir()
     rows, last_at = _journal()
     _write_pair(root, "f_B1_B2", _resolved_unknown(), journal=rows, sidecar=_sidecar(last_at))
+    (root / "run_manifest.txt").write_text("git_commit=abc\n", encoding="utf-8")
+    facts = margin.observe_run(root).facts
 
-    payload = margin.report_dict(margin.summarize_roots([root]))
-
-    assert payload["tripped_pairs"] == 0
-    assert payload["without_deadline"] == 1
-    assert payload["required_margin_seconds"] is None   # no samples: no formula
+    assert facts.deadline_seconds == 100.0
+    assert facts.deadline_note.startswith("deadline_tripped budget_seconds")
 
 
 def test_percentiles_are_nearest_rank_and_p99_needs_enough_samples():
@@ -157,24 +187,21 @@ def test_the_load_pool_feeds_pre_and_overrun_only(tmp_path):
     ``tail`` only from the profile's runs (they grow with the deadline)."""
 
     profile = _root(tmp_path / "profile")
-    rows, last_at = _journal(origin_at=20.0, overrun=1.0)
+    rows, last_at = _journal(origin_at=20.0, overrun=1.0)      # post_trip 1.0, tail 2.0
     _write_pair(profile, "f_B1_B2", _resolved_unknown(), journal=rows, sidecar=_sidecar(last_at + 2.0))
     load = _root(tmp_path / "load")
     heavy, heavy_last = _journal(origin_at=50.0, overrun=9.0, finalize=30.0)
     _write_pair(load, "f_B1_B2", _resolved_unknown(), journal=heavy,
                 sidecar=_sidecar(heavy_last + 20.0))
 
-    alone = margin.report_dict(margin.summarize_roots([profile]))
-    pooled = margin.report_dict(
-        margin.summarize_roots([profile]), load_report=margin.summarize_roots([load]),
-    )
-    p = alone["pairs"][0]
+    alone = acceptance.evaluate_margin(_profile(), {"P": [_run(profile)]})
+    pooled = acceptance.evaluate_margin(_profile(), {"P": [_run(profile)], "L": [_run(load)]})
 
-    assert alone["required_margin_seconds"] == pytest.approx(
-        p["pre"] + p["overrun"] + p["post_trip"] + p["tail"] + 2.0)
+    assert alone.status == "holds", alone
+    assert alone.required_margin_seconds == pytest.approx(20.0 + 1.0 + 1.0 + 2.0 + 2.0)
     # the load run's pre (50) and overrun (9) count; its post_trip (30.6) and tail (20) do not
-    assert pooled["required_margin_seconds"] == pytest.approx(
-        50.0 + 9.0 + p["post_trip"] + p["tail"] + 2.0)
+    assert pooled.status == "holds", pooled
+    assert pooled.required_margin_seconds == pytest.approx(50.0 + 9.0 + 1.0 + 2.0 + 2.0)
 
 
 def test_the_fixed_cost_pool_feeds_pre_only(tmp_path):
@@ -185,11 +212,8 @@ def test_the_fixed_cost_pool_feeds_pre_only(tmp_path):
     heavy, heavy_last = _journal(origin_at=70.0, overrun=30.0)
     _write_pair(other, "f_B1_B2", _resolved_unknown(), journal=heavy, sidecar=_sidecar(heavy_last + 1.0))
 
-    pooled = margin.report_dict(
-        margin.summarize_roots([profile]), pre_report=margin.summarize_roots([other]),
-    )
-    p = pooled["pairs"][0]
+    pooled = acceptance.evaluate_margin(_profile(), {"P": [_run(profile)], "F": [_run(other)]})
 
     # the other run's pre (70) counts; its overrun (30) does not
-    assert pooled["required_margin_seconds"] == pytest.approx(
-        70.0 + p["overrun"] + p["post_trip"] + p["tail"] + 2.0)
+    assert pooled.status == "holds", pooled
+    assert pooled.required_margin_seconds == pytest.approx(70.0 + 1.0 + 1.0 + 2.0 + 2.0)

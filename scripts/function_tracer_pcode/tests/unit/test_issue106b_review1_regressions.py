@@ -104,6 +104,10 @@ def _root(tmp_path: Path) -> Path:
     return root
 
 
+def _terminations(root):
+    return {pair.key: pair.termination for pair in margin.observe_run(root).pairs}
+
+
 def _runtime(exit_at):
     # GNU time's view (supervisor start 3 s before the barrier, 1 s of supervisor work after)
     return {"elapsed_seconds": exit_at + 4.0, "finished_at_epoch": EPOCH + exit_at + 1.0}
@@ -120,20 +124,19 @@ def test_a_solver_timeout_resolved_by_the_checker_is_not_a_process_timeout(tmp_p
                 sidecar=_child_timeout_sidecar())
     _write_pair(root, "f_B3_B4", _process_timeout_status())
 
-    payload = margin.report_dict(margin.summarize_roots([root]))
+    terminations = _terminations(root)
 
-    assert payload["process_timeouts"] == ["REVE/sample/Eq/new/f/f_B3_B4"]
-    assert payload["solver_timeouts"] == ["REVE/sample/Eq/new/f/f_B1_B2"]
+    assert terminations == {
+        "REVE/sample/Eq/new/f/f_B1_B2": "solver_timeout",
+        "REVE/sample/Eq/new/f/f_B3_B4": "process_timeout",
+    }
 
 
 def test_a_timeout_without_evidence_is_unclassified_not_a_process_timeout(tmp_path):
     root = _root(tmp_path)
     _write_pair(root, "f_B1_B2", _resolved_timeout_status())  # rc 3 alone proves nothing
 
-    payload = margin.report_dict(margin.summarize_roots([root]))
-
-    assert payload["process_timeouts"] == []
-    assert payload["timeouts_unclassified"] == ["REVE/sample/Eq/new/f/f_B1_B2"]
+    assert _terminations(root) == {"REVE/sample/Eq/new/f/f_B1_B2": "timeout_unclassified"}
 
 
 # --------------------------------------------------------------------------
@@ -150,9 +153,11 @@ def _pair_parts(tmp_path, journal, exit_at):
     root = _root(tmp_path)
     _write_pair(root, "f_B1_B2", _resolved_unknown(), journal=journal,
                 sidecar=_sidecar(exit_at), runtime=_runtime(exit_at))
-    payload = margin.report_dict(margin.summarize_roots([root]))
-    assert payload["tripped_pairs"] == 1, payload
-    return payload["pairs"][0]
+    pairs = [pair for pair in margin.observe_run(root).pairs if pair.cut]
+    assert len(pairs) == 1, pairs
+    assert pairs[0].missing == {}, pairs[0]
+    return {**pairs[0].values, "needed": pairs[0].needed,
+            "post_trip_parts": pairs[0].post_trip_parts}
 
 
 def test_a_trip_inside_the_conditional_lane_counts_only_what_followed_the_trip(tmp_path):
@@ -257,9 +262,9 @@ def test_a_pair_without_a_runtime_receipt_is_still_measured(tmp_path):
     ]
     _write_pair(root, "f_B1_B2", _resolved_unknown(), journal=journal,
                 sidecar=_sidecar(121.0))
-    payload = margin.report_dict(margin.summarize_roots([root]))
+    (pair,) = margin.observe_run(root).pairs
 
-    assert payload["pairs"][0]["needed"] == pytest.approx(21.0)
+    assert pair.needed == pytest.approx(21.0)
 
 
 def test_a_child_still_running_in_the_lead_window_is_a_margin_failure(tmp_path):
@@ -270,9 +275,10 @@ def test_a_child_still_running_in_the_lead_window_is_a_margin_failure(tmp_path):
     ]
     _write_pair(root, "f_B1_B2", _resolved_unknown(), journal=journal,
                 sidecar=_sidecar(239.0, signal_sent=True))
-    payload = margin.report_dict(margin.summarize_roots([root]))
+    (pair,) = margin.observe_run(root).pairs
 
-    assert payload["entered_lead_window"] == ["REVE/sample/Eq/new/f/f_B1_B2"]
+    assert pair.entered_lead_window is True
+    assert pair.missing == {"tail": "the child exit was not observed before the stack-dump send"}
 
 
 # --------------------------------------------------------------------------

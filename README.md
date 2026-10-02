@@ -422,8 +422,11 @@ teardown -- plus the supervisor's stack-dump lead (SIGUSR1 before the deadline; 
 SIGTERM kill-after grace comes after the deadline and is not part of it). It is measured
 per profile on the supervisor's clock; the formula, the run lists and the numbers are in
 `docs/profiling_timeout_pairs.md` (section 10), and
-`python3 -B -m scripts.function_tracer_pcode.reporting.deadline_margin_summary <profile runs> --load-root <run> --pre-root <run> --margin <seconds>`
-re-measures it.
+`python3 -B -m scripts.function_tracer_pcode.reporting.deadline_margin_summary <profile runs> --load-root <run> --pre-root <run> --margin <seconds> --profile-deadline <seconds> --pair-process-timeout <seconds> --machinery-commit <sha> [--population-manifest <subset json>]`
+re-measures it. The verdict is `holds`, `violated` or `undetermined`
+(`reporting/deadline_margin_acceptance.py`): a run that does not fit its pool, a TIMEOUT
+whose kind is not established, a pair whose journal or interval is missing, or a pool
+with no pair the deadline cut is `undetermined`, never a pass.
 
 The effective values are recorded as `analysis_timeout` / `analysis_timeout_enabled` /
 `analysis_timeout_margin` in each `run_manifest.txt` and in `subset_manifest.txt`, and
