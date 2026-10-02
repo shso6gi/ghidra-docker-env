@@ -629,29 +629,15 @@ class SnapshotMaterial(NamedTuple):
 
 
 def snapshot_references(material: SnapshotMaterial) -> Tuple[Any, ...]:
-    """`AnalysisSnapshot.create` が写さずに snapshot へ置く、変わり得る object（snapshot の一部になる identity）。
+    """`AnalysisSnapshot.create` が写さずに snapshot へそのまま置く値（**保持の契約**）。
 
-    `create` は `snapshot_id` を浅い tuple にするだけで、要素は参照のまま置く。そのうち組み込みの不変な
-    値（scalar と、それだけから成る tuple / frozenset）でない要素は、置いた object が後で変われば snapshot
-    も変わる。`semantic_fields` / `diagnostic_refs` は `deep_freeze` が容器を写し、容器でない値だけを参照で
-    置く（その値は `deep_freeze` の葉）。保持の規則を変えるときは `create` とこの関数を一緒に変える。
+    `create` は `snapshot_id` を浅い tuple にするだけで、要素は解析の object のまま置く（後で変われば
+    snapshot の `snapshot_id` も変わる）。`semantic_fields` / `diagnostic_refs` は `deep_freeze` が容器を
+    写し、容器でない値だけを参照で置く。ここは「何を参照で置くか」だけを述べ、その値をどう比べてよいか
+    （値で同一視できるか）は述べない。保持の規則を変えるときは `create` とこの関数を一緒に変える。
     """
 
-    return tuple(item for item in material.snapshot_id if not _immutable_builtin(item))
-
-
-def _immutable_builtin(value: Any) -> bool:
-    pending = [value]
-    while pending:
-        item = pending.pop()
-        kind = type(item)
-        if item is None or kind is str or kind is int or kind is bool or kind is float or kind is bytes:
-            continue
-        if kind is tuple or kind is frozenset:
-            pending.extend(item)
-            continue
-        return False
-    return True
+    return tuple(material.snapshot_id)
 
 
 def snapshot_serialization_target(analysis: Any) -> Tuple[Any, ...]:

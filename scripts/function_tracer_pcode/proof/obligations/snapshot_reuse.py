@@ -165,6 +165,7 @@ _SEQUENCE = _Tag("sequence")
 _SET = _Tag("set")
 _OBJECT = _Tag("object")
 _OPAQUE = _Tag("opaque")
+_NAN = _Tag("nan")
 #: 抽出の 1 回目で、写しを待つ値の代わりに置く印（その抽出の材料は witness にしない）
 _PENDING = _Tag("pending")
 
@@ -202,11 +203,12 @@ class _LeafSubstitution(LeafSubstitution):
 def _freeze_witness(value: Any) -> Any:
     """witness の値の複製。組み込みの型 **そのもの** ごとに区別し、順序を保つ。
 
-    返す snapshot の field と同じか細かい同値で比べる: scalar は型ごと（`True` / `1` / `1.0` / `-0.0` を
-    `==` で畳まない）、mapping は挿入順、set は要素の集合。容器の型の違い（list / tuple など）が snapshot に
-    残るのは `snapshot_id` の要素だけで、そのうち変わり得る容器は identity で持つ（`snapshot_references`）。
-    残りの field は `deep_freeze` が容器の型を揃える。容器でない object は snapshot が参照で持ち得るので
-    identity（`_SameObject`）と、digest が読む値（codec の写し。作れなければ印）の両方。
+    値で比べてよいのは **値で同一視できる** 葉だけ: 同じ印なら、返す snapshot の中の値どうしが `==`
+    になる組み込みの型そのもの（`str` / `int` / `bool` / `None`、NaN でない `float`。型ごとに区別し、
+    `True` / `1` / `1.0` / `-0.0` を畳まない）。不変でも値で同一視できない葉（NaN）と、容器でない object は
+    identity（`_SameObject`）で持ち、object は digest が読む値（codec の写し。作れなければ印）も持つ。
+    容器は値として辿る（mapping は挿入順、set は要素の集合）。容器の型の違い・参照で置かれる変わり得る
+    object は `_retained_identities` が持つ（`snapshot_id` の要素）。
     """
 
     kind = type(value)
@@ -215,6 +217,10 @@ def _freeze_witness(value: Any) -> Any:
     if kind is bool:
         return _TRUE if value else _FALSE
     if kind is float:
+        if value != value:
+            # NaN は不変だが値で同一視できない（別の NaN どうしは `==` でない。snapshot の容器の等しさは
+            # 要素の `is` か `==`）: identity で持つ
+            return (_OBJECT, _SameObject(value), _NAN)
         return (_FLOAT, float.__repr__(value))
     if kind is ElidedSemanticValue or value is _PENDING:
         return value
@@ -239,6 +245,23 @@ def _freeze_witness(value: Any) -> Any:
     # codec が値そのものを写しに置く object（mixin の enum の member: 値は class の定義）は identity で足りる
     payload = _OPAQUE if frozen is value or frozen is _OPAQUE else _freeze_witness(frozen)
     return (_OBJECT, _SameObject(value), payload)
+
+
+def _retained_identities(value: Any) -> Any:
+    """snapshot が参照で置く値の中の、後で変わり得る object の identity（位置ごと）。
+
+    不変な容器（tuple / frozenset）と scalar は辿るだけで identity を持たない（変わらないので、等しさは
+    値の複製が持つ）。それ以外（list / dict / set・任意の object）は同じ object であることが要る。
+    """
+
+    kind = type(value)
+    if value is None or kind is str or kind is int or kind is bool or kind is float or kind is bytes:
+        return None
+    if kind is tuple:
+        return (_SEQUENCE, tuple(_retained_identities(item) for item in value))
+    if kind is frozenset:
+        return (_SET, frozenset(_retained_identities(item) for item in value))
+    return _SameObject(value)
 
 
 class _Witness:
@@ -290,7 +313,7 @@ def _extract(analysis: Any, *, collect: bool) -> Tuple[Optional[Tuple[Any, ...]]
         #   （`SerializationWork.tree`）。distinct な node は DAG の共有・object の identity で決まり、
         #   見積もりの作業量も distinct な ref ごとに数えるので、byte も値だけの関数とは言えない。
         #   抽出の後の本体（`create`）は材料だけの関数なので、本体の量が等しいことはこの組で言える
-        # * snapshot が写さずに参照で置く、変わり得る object の identity（`snapshot_references`）
+        # * snapshot が写さずに参照で置く値（`snapshot_references`）の中の、変わり得る object の identity
         # * 予算の scope と policy（本体が限界になるかを決める上限）
         # 値の複製も同じ作業量の中で作る（値の storage の読みは本体と同じくこの作業量へ数える）
         parts = (
@@ -298,7 +321,7 @@ def _extract(analysis: Any, *, collect: bool) -> Tuple[Optional[Tuple[Any, ...]]
             budget_scope_is_active(),
             _freeze_witness(policy.to_diagnostic()),
             _freeze_witness(tuple(material)),
-            tuple(_SameObject(item) for item in snapshot_references(material)),
+            tuple(_retained_identities(item) for item in snapshot_references(material)),
             extracted,
         )
     return parts, []
