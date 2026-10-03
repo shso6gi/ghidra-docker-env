@@ -25,9 +25,8 @@ from scripts.function_tracer_pcode.core.live_values import (
     dataclass_field_names,
     elements_of,
     enum_name,
+    exact_scalar,
     field_value,
-    float_value,
-    int_value,
     is_kind,
     items_of,
     json_scalar,
@@ -141,22 +140,14 @@ SCALAR_SEMANTIC_FIELDS = frozenset({"value", "operator", "size", "name", "data_t
 
 
 def _exact_scalar(value: Any) -> Any:
-    """scalar の subclass（JPype の `JInt` / `JLong` / `JString` など外の runtime の型）を、基底型の値へ写す。
+    """scalar の意味 field の値を組み込みの型そのものへ写す（`core/live_values.exact_scalar`）。
 
-    基底型の slot で読む（subclass の `__int__` / `__str__` を呼ばない: `core/live_values`）。値と意味
-    （整数値・文字列）は変えず、JSON・digest・式の文字列が読む基底型の値と同じ。bool・enum の member・
-    scalar でない値はそのまま。式の意味 field の scalar を組み込みの型そのものにするのは、検証済みの値の
-    直列化の不変性（#219 C-RS2）が組み込みの不変な型だけを受けるため（subclass は外の code へ dispatch し得る）。
+    式の意味 field の scalar を組み込みの型そのものにするのは、検証済みの値の直列化の不変性（#219 C-RS2）が
+    組み込みの不変な型だけを受けるため（subclass は外の code へ dispatch し得る）。
     """
 
-    kind = type(value)
-    if value is None or kind is int or kind is str or kind is float or kind is bool:
-        return value
-    for convert in (int_value, str_value, float_value):
-        exact = convert(value)
-        if exact is not NOT_PLAIN:
-            return exact
-    return value
+    return exact_scalar(value)
+
 
 class Expression:
     """

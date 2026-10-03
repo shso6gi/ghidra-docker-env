@@ -415,7 +415,8 @@ def _with_raw_value(expr: Expression, value: Any) -> Expression:
 
 def _storage_with_a_scalar_subclass():
     storage = _storage("x0")
-    storage.offset = _SlottedInt(8)
+    # `StorageInfo` の構築と代入の入口は scalar の subclass を基底型へ写す（#235）: 入口を通らずに置く
+    object.__setattr__(storage, "offset", _SlottedInt(8))
     return _parameter("a", storage=storage)
 
 

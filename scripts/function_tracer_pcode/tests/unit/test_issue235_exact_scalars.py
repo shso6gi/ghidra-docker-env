@@ -156,3 +156,32 @@ def test_a_validated_value_built_from_boxed_scalars_is_serialization_closed(scal
     injected = published(_inject(_build(), scalar))
     assert seal_serialization(built)
     assert not seal_serialization(injected)
+
+
+def test_storage_info_writes_builtin_scalars_at_construction_and_assignment():
+    """式の storage（`storage_info`）の scalar も組み込みの型（実 run の register の offset・size は JPype の整数）。"""
+
+    from scripts.function_tracer_pcode.core.storage import StorageInfo
+
+    storage = StorageInfo(
+        is_register=True, space_name=JString("register"), offset=JInt(8), size=JInt(4),
+        register_name=JString("x0"), base_register_name=JString("x0"),
+        base_register_offset=JLong(16), base_register_size=JInt(8),
+    )
+    storage.register_offset = JInt(24)
+    for name, value in vars(storage).items():
+        assert value is None or type(value) in (int, str, float, bool), (name, type(value))
+    assert CALLS == []
+
+
+def test_a_validated_value_with_a_boxed_storage_is_serialization_closed():
+    from scripts.function_tracer_pcode.core.storage import StorageInfo
+
+    def storage(scalar):
+        return StorageInfo(is_register=True, space_name="register", offset=scalar(8), size=scalar(4),
+                           register_name="x0", base_register_name="x0")
+
+    boxed = published(Expression.parameter("a", 0, size=4, storage_info=storage(JInt)))
+    plain = published(Expression.parameter("a", 0, size=4, storage_info=storage(int)))
+    assert seal_serialization(boxed)
+    assert boxed.to_dict() == plain.to_dict()
