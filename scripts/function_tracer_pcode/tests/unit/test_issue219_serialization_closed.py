@@ -406,6 +406,13 @@ def _node_missing_a_represented_field():
     return partial
 
 
+def _with_raw_value(expr: Expression, value: Any) -> Expression:
+    """構築と代入の入口（`_exact_scalar`）を通らずに意味 field へ置く（入口の外から来た値の模擬）。"""
+
+    expr.__dict__["value"] = value
+    return expr
+
+
 def _storage_with_a_scalar_subclass():
     storage = _storage("x0")
     storage.offset = _SlottedInt(8)
@@ -418,8 +425,9 @@ _NOT_CLOSED = {
     "tuple_valued_enum_value": lambda: Expression(ExpressionType.LITERAL, value=_TupleValuedEnum.MEMBER, size=4),
     "enum_member_with_attached_state": lambda: Expression(ExpressionType.LITERAL, value=_AttachedStateEnum.MEMBER, size=4),
     "int_enum_value": lambda: Expression(ExpressionType.LITERAL, value=_Flavor.SWEET, size=4),
-    "stateful_int_value": lambda: Expression(ExpressionType.CONSTANT, value=_StatefulInt(3), size=4),
-    "slotted_int_value": lambda: Expression(ExpressionType.CONSTANT, value=_SlottedInt(3), size=4),
+    # 構築と代入の入口は scalar の subclass を基底型へ写す（#235）: 入口を通らずに置かれた値で、規則そのものを確かめる
+    "stateful_int_value": lambda: _with_raw_value(Expression(ExpressionType.CONSTANT, value=3, size=4), _StatefulInt(3)),
+    "slotted_int_value": lambda: _with_raw_value(Expression(ExpressionType.CONSTANT, value=3, size=4), _SlottedInt(3)),
     "tuple_subclass_value": lambda: Expression(ExpressionType.LITERAL, value=_TupleSubclass((1, 2)), size=4),
     "opaque_value": _opaque_value,
     "mutable_container_value": _unclosed_leaf,
