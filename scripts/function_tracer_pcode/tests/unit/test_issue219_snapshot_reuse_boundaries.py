@@ -208,4 +208,4 @@ def test_only_the_reuse_owner_registers_witness_token_types():
     from scripts.function_tracer_pcode.proof.obligations import snapshot as snapshot_module
     from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse
 
-    assert [kind for kind, _tree_of in snapshot_module._WITNESS_TOKEN_TYPES] == [snapshot_reuse.ElidedSemanticValue]
+    assert [entry[0] for entry in snapshot_module._WITNESS_TOKEN_TYPES] == [snapshot_reuse.ElidedSemanticValue]

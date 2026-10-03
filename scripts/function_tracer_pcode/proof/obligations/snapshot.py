@@ -531,28 +531,59 @@ class _FreezeMeter:
 
 #: snapshot の再利用の token の型と、token が代わりに置かれた値の LEGACY の木を作る関数（`_freeze_unmetered` の
 #: `witness` が真のときだけ、この型 **そのもの** の値を写しにそのまま置く）。登録するのは再利用の owner だけ（静的 test）
-_WITNESS_TOKEN_TYPES: List[Tuple[type, Callable[[Any], Any]]] = []
+_WITNESS_TOKEN_TYPES: List[Tuple[type, Callable[[Any], Any], Callable[[Any], int]]] = []
 
 
-def register_witness_token_type(kind: type, tree_of: Callable[[Any], Any]) -> type:
-    """再利用の owner が発行する token の型と、その展開を登録する（その module の読み込み時に 1 回）。
+def register_witness_token_type(kind: type, tree_of: Callable[[Any], Any], identity_of: Callable[[Any], int]) -> type:
+    """再利用の owner が発行する token の型と、その展開・identity を登録する（その module の読み込み時に 1 回）。
 
     `tree_of(token)` は、token が代わりに置かれた葉を walker が置くはずだった LEGACY の木（組み込みの値だけ。
-    入力の code を呼ばない純粋な関数）。
+    入力の code を呼ばない純粋な関数）。`identity_of(token)` は、token が代わりに置かれた値の identity（同じ値の
+    token どうしで同じ整数。token が値を生かしている間は別の値と重ならない）。
     """
 
-    if not any(kind is known for known, _tree_of in _WITNESS_TOKEN_TYPES):
-        _WITNESS_TOKEN_TYPES.append((kind, tree_of))
+    if not any(kind is known for known, _tree_of, _identity_of in _WITNESS_TOKEN_TYPES):
+        _WITNESS_TOKEN_TYPES.append((kind, tree_of, identity_of))
     return kind
 
 
 def _witness_token_tree(kind: type) -> Optional[Callable[[Any], Any]]:
     """`kind` が登録した token の型 **そのもの** ならその展開（型の比較は identity だけ: metaclass の `__eq__` を呼ばない）。"""
 
-    for known, tree_of in _WITNESS_TOKEN_TYPES:
+    for known, tree_of, _identity_of in _WITNESS_TOKEN_TYPES:
         if kind is known:
             return tree_of
     return None
+
+
+def _witness_token_identity(kind: type) -> Optional[Callable[[Any], int]]:
+    for known, _tree_of, identity_of in _WITNESS_TOKEN_TYPES:
+        if kind is known:
+            return identity_of
+    return None
+
+
+#: token の印の key（凍結した写しの JSON に object（`{...}`）を書くのは enum の値の写しだけで、その key がこの
+#: 文字列と重なっても、同じ位置の `retained_form` の写し（token か enum の member か）が違う）
+_WITNESS_TOKEN_MARK = "\u0000witness_token"
+
+
+def witness_fingerprint_digest(frozen: Any) -> str:
+    """codec の写し（token を含み得る）の fingerprint の digest。token は、代わりに置かれた値の identity の印で書く。
+
+    token の無い写しでは `digest_frozen(frozen)` と同じ。token の位置が同じで同じ値を指す写しどうしは、展開した
+    写しの digest（snapshot の fingerprint）も同じ: 印の外の JSON が同じなら、展開した JSON も同じ。token の位置は
+    意味の view の木の中だけで、`retained_form` の写しの同じ位置にも同じ token がある（再利用は両方を比べる）。
+    """
+
+    def mark(value: Any) -> Any:
+        identity_of = _witness_token_identity(type(value))
+        if identity_of is None:
+            raise TypeError(f"{type_name(type(value))} is not JSON serializable")
+        return {_WITNESS_TOKEN_MARK: identity_of(value)}
+
+    payload = json_encoding.JsonEncodingPolicy.dumps(_FINGERPRINT_JSON, frozen, default=mark)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _is_witness_token_type(kind: type) -> bool:

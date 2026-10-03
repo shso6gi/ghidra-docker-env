@@ -63,6 +63,7 @@ from scripts.function_tracer_pcode.proof.obligations.snapshot import (
     canonical_generation_path,
     read_snapshot_inputs,
     register_witness_token_type,
+    witness_fingerprint_digest,
 )
 
 #: 再利用を切る test の口（module の名前を monkeypatch で切る。DI は足さない）。切っても読みと sealing は
@@ -70,7 +71,7 @@ from scripts.function_tracer_pcode.proof.obligations.snapshot import (
 _SNAPSHOT_REUSE_ENABLED = True
 
 #: witness の形の版（形を変えたら上げる。pair をまたがないので互換は要らない）
-_WITNESS_FORMAT = 2
+_WITNESS_FORMAT = 3
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +107,13 @@ def _token_tree(token: ElidedSemanticValue) -> Any:
     return token.tree
 
 
-register_witness_token_type(ElidedSemanticValue, _token_tree)
+def _token_identity(token: ElidedSemanticValue) -> int:
+    """token が代わりに置かれた値の identity（token が値への強参照を持つ間は別の値と重ならない）。"""
+
+    return id(token.value)
+
+
+register_witness_token_type(ElidedSemanticValue, _token_tree, _token_identity)
 
 
 class _Retained:
@@ -436,13 +443,18 @@ def snapshot_reuse_metrics() -> Dict[str, Any]:
 
 
 def _witness_of(read: SnapshotRead) -> _Witness:
-    """`assemble_snapshot` の入力（codec の写しと `retained_form` の写し）と、予算の scope・policy。"""
+    """`assemble_snapshot` の入力と、予算の scope・policy。
+
+    codec の写しは、snapshot に効くのが fingerprint（写しの JSON の digest）だけなので、token を値の identity の印で
+    書いた JSON の digest で持つ（`witness_fingerprint_digest`）。`retained_form` の写しは型・順・object の identity
+    まで効くので、そのまま `_same` で比べる。token の位置は両方に同じく現れる。
+    """
 
     return _Witness((
         _WITNESS_FORMAT,
         budget_scope_is_active(),
         active_budget_policy().to_diagnostic(),
-        read.frozen_payload,
+        witness_fingerprint_digest(read.frozen_payload),
         _Retained(read.held_id),
         read.held_fields,
         read.held_refs,

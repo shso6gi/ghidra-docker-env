@@ -484,3 +484,22 @@ def test_a_hit_returns_a_new_snapshot_object_with_the_same_retained_values():
         built = AnalysisSnapshot._build_from_function_analysis(state.analysis)
     assert second is not first
     assert oracle.snapshot_problems(second, built) == []
+
+
+def test_the_witness_digest_of_the_codec_copy_follows_the_fingerprint_and_token_identity():
+    """codec の写しの witness の digest: token が無ければ fingerprint の digest と同じ。token は値の identity で書く。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec, witness_fingerprint_digest
+    from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import ElidedSemanticValue
+
+    plain = SnapshotFingerprintCodec.freeze({"a": [1, 2.5, "x", None, True]})
+    assert witness_fingerprint_digest(plain) == SnapshotFingerprintCodec.digest_frozen(plain)
+    value = published(Expression.binary_op("INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(7, size=4)))
+    twin = published(Expression.binary_op("INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(7, size=4)))
+    first = (("k", ElidedSemanticValue(value)),)
+    again = (("k", ElidedSemanticValue(value)),)
+    other = (("k", ElidedSemanticValue(twin)),)
+    assert witness_fingerprint_digest(first) == witness_fingerprint_digest(again)
+    assert witness_fingerprint_digest(first) != witness_fingerprint_digest(other)
+    with pytest.raises(TypeError):
+        witness_fingerprint_digest((("k", object()),))
