@@ -150,10 +150,14 @@ def test_a_non_reflexive_value_is_reused_only_as_the_same_object(where, name):
         ({1: "v"}, {True: "v"}), ({1: "v"}, {1.0: "v"}), ({0.0: "v"}, {-0.0: "v"}), ({"a": 1, "b": 2}, {"b": 2, "a": 1}),
         ({_Level.A: "v"}, {1: "v"}), ({_Mode.A: "v"}, {"a": "v"}), ({"k": _Level.A}, {"k": 1}),
         ({_Text("a"): "v"}, {"a": "v"}), ({"k": _Text("a")}, {"k": "a"}),
+        # 逆向き（保存した側が基底型の値、後の側が subclass・enum）: 比べ方は向きに依らない
+        ({1: "v"}, {_Level.A: "v"}), ({"k": 1}, {"k": _Level.A}), ({"a": "v"}, {_Mode.A: "v"}),
+        ({"k": "a"}, {"k": _Text("a")}), ({"a": "v"}, {_Text("a"): "v"}),
     ],
     ids=["zero_sign", "int_float", "int_bool", "str_int", "list_tuple", "dict_pairs", "frozenset_tuple",
          "nested_tuple_list", "inner_list_tuple", "inf", "key_int_bool", "key_int_float", "key_zero_sign", "key_order",
-         "key_intenum_int", "key_strenum_str", "value_intenum_int", "key_str_subclass", "value_str_subclass"],
+         "key_intenum_int", "key_strenum_str", "value_intenum_int", "key_str_subclass", "value_str_subclass",
+         "key_int_intenum", "value_int_intenum", "key_str_strenum", "value_str_subclass_reverse", "key_str_subclass_reverse"],
 )
 def test_values_that_equality_or_type_tell_apart_follow_the_body(where, before, after):
     prime = _with_field(_analysis([_closed_root()]), where, before)
