@@ -9,8 +9,9 @@
 * **writer**（解析・共有 list・共有要約・#191 の注記を、production と同じ書き方で書き換える）
 * **実際の scope 境界**（`snapshot_reuse_scope` と、production の pair 境界）
 
-本体の実行回数は、本体の関数を外から包んで数える（store の計測値は、その数と一致すること
-だけを確かめる）。store の型・counter の名前の詳細は assert しない。
+本体の実行回数は外から数える（canonical な経路は読んだ値から snapshot を作る `assemble_snapshot`、
+通常の本体へ回した経路は読みの外の `snapshot_material`。`BodyCounter`）。store の計測値は、その数と
+一致することだけを確かめる。
 """
 
 from __future__ import annotations
