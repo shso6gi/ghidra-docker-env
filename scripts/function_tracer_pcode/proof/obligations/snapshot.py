@@ -859,6 +859,8 @@ class SnapshotRead(NamedTuple):
     held_refs: Any
     #: この読みの直列化が描いた runtime ref の表現（`SerializationWork.observed_runtime_ref`）
     observed_runtime_ref: Callable[[Any, Any], Any]
+    #: この読みの直列化の作業量が数えた byte の大きさ（置き換えた葉も数える。数えない作業量では 0）
+    serialized_bytes: int
 
 
 def read_snapshot_inputs(analysis: Any, leaf_substitution: Any = None) -> SnapshotRead:
@@ -885,7 +887,9 @@ def read_snapshot_inputs(analysis: Any, leaf_substitution: Any = None) -> Snapsh
         held_id, held_fields, held_refs = retained_form(
             material.snapshot_id, material.semantic_fields, material.diagnostic_refs,
         )
-    return SnapshotRead(material, frozen, held_id, held_fields, held_refs, work.observed_runtime_ref)
+    return SnapshotRead(
+        material, frozen, held_id, held_fields, held_refs, work.observed_runtime_ref, work.consumed,
+    )
 
 
 def assemble_snapshot(read: SnapshotRead, *, has_tokens: bool = True) -> "AnalysisSnapshot":

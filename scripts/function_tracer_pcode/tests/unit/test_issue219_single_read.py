@@ -543,7 +543,7 @@ def test_a_pair_that_elides_most_keeps_reusing(monkeypatch):
     from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import _POLICY_READS
 
     def factory() -> State:
-        return State(["plain"], pending=False)
+        return _sized_state(closed_depth=80, closed_count=1, open_depth=1, open_count=0)
 
     metrics = _compare(factory, [("call", "canonical")] * (_POLICY_READS + 4), monkeypatch)
     counts = metrics["on"]["counts"]
@@ -574,7 +574,7 @@ def _sized_state(*, closed_depth: int, closed_count: int, open_depth: int, open_
 
 
 def test_the_policy_weighs_leaves_by_size_many_small_closed_and_one_large_open_stops(monkeypatch):
-    """closed な葉が数で多くても、大きさの大半が open な pair では elision を止める（比べる費用が上回る）。"""
+    """closed な葉が数で多くても、直列化の大きさの大半が open な pair では elision を止める（比べる費用が上回る）。"""
 
     from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import _POLICY_READS
 
@@ -585,7 +585,7 @@ def test_the_policy_weighs_leaves_by_size_many_small_closed_and_one_large_open_s
 
 
 def test_the_policy_weighs_leaves_by_size_one_large_closed_and_many_small_open_keeps(monkeypatch):
-    """open な葉が数で多くても、大きさの大半が closed な pair では再利用を続ける。"""
+    """open な葉が数で多くても、直列化の大きさの多くが closed な葉の pair では再利用を続ける。"""
 
     from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import _POLICY_READS
 
@@ -593,3 +593,19 @@ def test_the_policy_weighs_leaves_by_size_one_large_closed_and_many_small_open_k
     metrics = _compare(factory, [("call", "canonical")] * (_POLICY_READS + 2), monkeypatch)
     counts = metrics["on"]["counts"]
     assert "policy:elision_off" not in counts and counts["hits"] == _POLICY_READS + 1
+
+
+def test_the_policy_weighs_the_whole_read_all_leaves_closed_but_a_large_record_stops(monkeypatch):
+    """式の葉は全部 closed でも、読みが直列化する大きさの大半が葉でない record の pair では elision を止める
+    （実 run: 葉が直列化の 0.1 % しかない pair。葉の中の割合では量らない）。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import _POLICY_READS
+
+    def factory() -> State:
+        state = _sized_state(closed_depth=4, closed_count=2, open_depth=1, open_count=0)
+        state.objects["plain#0"].value = list(range(4000))
+        return state
+
+    metrics = _compare(factory, [("call", "canonical")] * (_POLICY_READS + 2), monkeypatch)
+    counts = metrics["on"]["counts"]
+    assert counts["policy:elision_off"] == 1 and counts["bypass:elision_policy"] == 2

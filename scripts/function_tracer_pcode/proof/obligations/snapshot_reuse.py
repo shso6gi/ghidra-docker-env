@@ -141,27 +141,24 @@ class _ReadHook(LeafSubstitution):
     token に置く（同じ値には同じ token）。pending な値は置き換えず（本体と同じく描く）、読みの後で写すために集める。
     """
 
-    __slots__ = ("elide", "pending", "_tokens", "leaves", "elided")
+    __slots__ = ("elide", "pending", "_tokens", "elided")
 
     def __init__(self, *, elide: bool) -> None:
         self.elide = elide
         self.pending: List[Any] = []
         self._tokens: Dict[int, ElidedSemanticValue] = {}
-        #: 問い合わせた式の葉の、作業量が見積もった大きさの和と、そのうち token に置いた分（再利用の得の
-        #: 目安: `_ElisionPolicy`）。大きさを数えない作業量では葉ごとに 1
-        self.leaves = 0
+        #: token に置いた葉の、作業量が見積もった大きさの和（再利用の得の目安: `_ElisionPolicy`）。大きさを
+        #: 数えない作業量では葉ごとに 1
         self.elided = 0
 
     def __leaf_substitute__(self, leaf: Any, size: Optional[int]) -> Any:
         # sized leaf（`__json_tree__` を持つ型）は式だけ（条件は record として walk される）
         if type(leaf) is not Expression:
             return NO_SUBSTITUTION
-        weight = 1 if size is None or size < 1 else size
-        self.leaves += weight
         if serialization_closed(leaf):
             if not self.elide:
                 return NO_SUBSTITUTION
-            self.elided += weight
+            self.elided += 1 if size is None or size < 1 else size
             token = self._tokens.get(id(leaf))
             if token is None:
                 token = self._tokens[id(leaf)] = ElidedSemanticValue(leaf)
@@ -398,33 +395,37 @@ class SnapshotReuse:
 class _ElisionPolicy:
     """pair の中で、token を置いて比べる（再利用する）かの方針（再利用の owner の判断。正しさに関わらない）。
 
-    hit が省くのは、token が代わりに置かれた値の組み立て（純粋な部分）で、比べる費用は token の外の部分に
-    比例する。どちらも値の大きさに比例するので、葉の数でなく、作業量が見積もった大きさで量る（小さな closed
-    な葉が多く、大きな木が open な pair は、数では得に見えて、比べる費用が上回る）。pair の最初の
-    `_POLICY_READS` 回の読みで、問い合わせた式の葉の大きさのうち token に置けた割合が半分に届かなければ、
-    その pair の残りでは token を置かず、witness も作らない（読みと組み立ては同じ 1 回: memo を切ったときと
-    同じ）。判断は数え上げだけで決まる（時間に依らない）。
+    token を置いた読みが省くのは、token が代わりに置かれた値を作る分（読みと組み立て）で、token に置いた葉の
+    大きさに比例する。比べる費用（witness の digest と `retained_form` の写しの比較）は、token の外の、読みが
+    直列化した残りの全部（式の葉でない record・効果の要約・条件を含む）に比例する。そこで、読みの作業量が
+    数えた byte の大きさ（`SnapshotRead.serialized_bytes`）のうち、token に置いた葉の大きさの割合で量る
+    （式の葉の中の割合では量らない: 実 run には、葉はほぼ全部 closed でも、葉が直列化の 0.1 % しかない pair
+    がある）。pair の最初の `_POLICY_READS` 回の読みで、その割合が `_POLICY_MIN_SHARE` に届かなければ、その
+    pair の残りでは token を置かず、witness も作らない（読みと組み立ては同じ 1 回: memo を切ったときと同じ）。
+    判断は数え上げだけで決まる（時間に依らない）。
     """
 
-    __slots__ = ("_lock", "reads", "leaves", "elided", "elide")
+    __slots__ = ("_lock", "reads", "serialized", "elided", "elide")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.reads = 0
-        self.leaves = 0
+        self.serialized = 0
         self.elided = 0
         self.elide = True
 
-    def observe(self, leaves: int, elided: int) -> bool:
-        """token を置いた読みの数え上げを足し、方針が「置かない」に変わったら真。"""
+    def observe(self, serialized: int, elided: int) -> bool:
+        """token を置いた読みの数え上げ（直列化した byte と、token に置いた葉の byte）を足し、方針が
+        「置かない」に変わったら真。"""
 
         with self._lock:
             if not self.elide:
                 return False
             self.reads += 1
-            self.leaves += leaves
+            self.serialized += serialized
             self.elided += elided
-            if self.reads >= _POLICY_READS and self.elided * 2 < self.leaves:
+            numerator, denominator = _POLICY_MIN_SHARE
+            if self.reads >= _POLICY_READS and self.elided * denominator < self.serialized * numerator:
                 self.elide = False
                 return True
             return False
@@ -432,6 +433,12 @@ class _ElisionPolicy:
 
 #: 方針を決めるまでに数える、token を置いた読みの数
 _POLICY_READS = 16
+
+#: token に置いた葉の大きさが、読みが直列化した大きさに占める割合の下限（分子, 分母）。recorded corpus の
+#: replay では、token が省く読みの費用は 1 MB あたり約 73〜86 ms、比べる費用は token の外の 1 MB あたり
+#: 約 26〜33 ms で、損益の分かれ目は割合 0.26〜0.28（得をする variant の割合は 0.30〜0.58、実 run の
+#: 損をする pair は 0.001）
+_POLICY_MIN_SHARE = (1, 4)
 
 
 _SCOPE_LOCK = threading.Lock()
@@ -560,7 +567,7 @@ def reuse_or_build(cls: Any, analysis: Any) -> Any:
     # 本体と同じ読み（1 回）。上げた例外はそのまま上げる（witness も snapshot も作らない）
     read = read_snapshot_inputs(analysis, hook)
     store.add_seconds("read", time.perf_counter() - started)
-    if enabled and store.policy.observe(hook.leaves, hook.elided):
+    if enabled and store.policy.observe(read.serialized_bytes, hook.elided):
         store.count("policy:elision_off")
     snapshot = None
     witness = None
