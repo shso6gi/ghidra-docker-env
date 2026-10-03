@@ -20,6 +20,8 @@ import ast
 from pathlib import Path
 from typing import Iterator, List, Tuple
 
+import pytest
+
 from scripts.function_tracer_pcode.tests.unit._package_sources import parse_source
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
@@ -89,18 +91,25 @@ def test_only_the_snapshot_material_turns_on_a_leaf_substitution_and_only_the_ow
 def test_only_the_single_read_asks_the_codec_to_pass_witness_tokens():
     """codec が token を通すのは、canonical な経路の単一の読み（`read_snapshot_inputs`）の digest の凍結だけ。"""
 
-    offenders: List[str] = []
+    sites: List[str] = []
     for path, tree in _production_modules():
         functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
         for function in functions:
             for node, name in _calls(function):
-                if name != "_freeze_unmetered":
-                    continue
-                values = list(node.args) + [keyword.value for keyword in node.keywords]
-                if any(isinstance(value, ast.Constant) and value.value is True for value in values):
-                    if not (path == SCHEMA and function.name == "read_snapshot_inputs"):
-                        offenders.append(f"{path.relative_to(PACKAGE_ROOT)}:{node.lineno}:{function.name}")
-    assert offenders == []
+                if name == "witness_tokens_pass":
+                    sites.append(f"{path.relative_to(PACKAGE_ROOT)}:{function.name}")
+    assert sites == [f"{SCHEMA.relative_to(PACKAGE_ROOT)}:read_snapshot_inputs"]
+    # 通すかは thread の状態（`_WITNESS_FREEZE`）だけで決まり、それを真にするのは `witness_tokens_pass` だけ
+    writers = [
+        node.lineno for node in ast.walk(parse_source(SCHEMA))
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Attribute) and target.attr == "active" for target in node.targets
+        )
+    ]
+    scope = next(
+        node for node in ast.walk(parse_source(SCHEMA)) if isinstance(node, ast.FunctionDef) and node.name == "witness_tokens_pass"
+    )
+    assert writers and all(scope.lineno <= line <= scope.end_lineno for line in writers)
 
 
 def test_the_reuse_owner_reads_the_input_only_through_the_single_read():
@@ -209,3 +218,25 @@ def test_only_the_reuse_owner_registers_witness_token_types():
     from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse
 
     assert [entry[0] for entry in snapshot_module._WITNESS_TOKEN_TYPES] == [snapshot_reuse.ElidedSemanticValue]
+
+
+def test_the_codec_passes_a_token_only_inside_the_single_reads_scope_and_restores_it():
+    """token の型の値は `witness_tokens_pass` の中でだけ写しに置かれ、外（digest・本体）では opaque として拒まれる。
+    例外で抜けても状態は戻り、入れ子にはできない。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec, witness_tokens_pass
+    from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import ElidedSemanticValue
+
+    token = ElidedSemanticValue(object())
+    with pytest.raises(TypeError):
+        SnapshotFingerprintCodec._freeze_unmetered({"k": token})
+    with witness_tokens_pass():
+        assert SnapshotFingerprintCodec._freeze_unmetered({"k": token}) == (("k", token),)
+        with pytest.raises(ValueError):
+            with witness_tokens_pass():
+                pass
+    with pytest.raises(RuntimeError):
+        with witness_tokens_pass():
+            raise RuntimeError("boom")
+    with pytest.raises(TypeError):
+        SnapshotFingerprintCodec._freeze_unmetered({"k": token})

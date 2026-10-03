@@ -66,7 +66,6 @@ from scripts.function_tracer_pcode.proof.obligations.snapshot import (
     canonical_generation_path,
     read_snapshot_inputs,
     register_witness_token_type,
-    witness_fingerprint_digest,
 )
 
 #: 再利用を切る test の口（module の名前を monkeypatch で切る。DI は足さない）。切っても読みと sealing は
@@ -155,9 +154,8 @@ class _ReadHook(LeafSubstitution):
         # sized leaf（`__json_tree__` を持つ型）は式だけ（条件は record として walk される）
         if type(leaf) is not Expression:
             return NO_SUBSTITUTION
-        if serialization_closed(leaf):
-            if not self.elide:
-                return NO_SUBSTITUTION
+        # `serialization_pending` は closed な値に偽を返す: 置かないときは pending だけを読む
+        if self.elide and serialization_closed(leaf):
             self.elided += 1 if size is None or size < 1 else size
             token = self._tokens.get(id(leaf))
             if token is None:
@@ -503,7 +501,7 @@ def _witness_of(read: SnapshotRead) -> _Witness:
     """`assemble_snapshot` の入力と、予算の scope・policy。
 
     codec の写しは、snapshot に効くのが fingerprint（写しの JSON の digest）だけなので、token を値の identity の印で
-    書いた JSON の digest で持つ（`witness_fingerprint_digest`）。`retained_form` の写しは型・順・object の identity
+    書いた JSON の digest で持つ（読みが求めた `SnapshotRead.frozen_digest`）。`retained_form` の写しは型・順・object の identity
     まで効くので、そのまま `_same` で比べる。token の位置は両方に同じく現れる。
     """
 
@@ -511,7 +509,7 @@ def _witness_of(read: SnapshotRead) -> _Witness:
         _WITNESS_FORMAT,
         budget_scope_is_active(),
         active_budget_policy().to_diagnostic(),
-        witness_fingerprint_digest(read.frozen_payload),
+        read.frozen_digest,
         _Retained(read.held_id),
         read.held_fields,
         read.held_refs,

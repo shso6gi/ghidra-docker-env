@@ -609,3 +609,24 @@ def test_the_policy_weighs_the_whole_read_all_leaves_closed_but_a_large_record_s
     metrics = _compare(factory, [("call", "canonical")] * (_POLICY_READS + 2), monkeypatch)
     counts = metrics["on"]["counts"]
     assert counts["policy:elision_off"] == 1 and counts["bypass:elision_policy"] == 2
+
+
+def test_the_read_keeps_the_codec_copy_only_when_it_holds_tokens():
+    """`create` と同じく、codec の写しは digest にしてから `retained_form` の写しを作る: token の無い読みは写しを
+    持ち越さず（大きな写しが次の写しの間に生き残ると、GC の世代へ昇格して pair 全体が遅くなる）、digest は
+    `create` の fingerprint そのもの。token のある読みだけが、miss の組み立てのために写しを持つ。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import assemble_snapshot, read_snapshot_inputs
+
+    state = _sized_state(closed_depth=6, closed_count=2, open_depth=3, open_count=1)
+    with budget_policy_scope(BudgetPolicy()):
+        plain = read_snapshot_inputs(state.analysis, snapshot_reuse._ReadHook(elide=False))
+        body = AnalysisSnapshot._build_from_function_analysis(state.analysis)
+        hook = snapshot_reuse._ReadHook(elide=True)
+        tokens = read_snapshot_inputs(state.analysis, hook)
+    assert plain.frozen_payload is None
+    assert plain.frozen_digest == body.semantic_fingerprint
+    assert hook.elided > 0 and tokens.frozen_payload is not None
+    assert tokens.frozen_digest != body.semantic_fingerprint
+    assert assemble_snapshot(tokens, has_tokens=True).semantic_fingerprint == body.semantic_fingerprint
+    assert assemble_snapshot(plain, has_tokens=False).semantic_fingerprint == body.semantic_fingerprint
