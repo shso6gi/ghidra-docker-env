@@ -419,15 +419,21 @@ def test_a_fixed_scalar_record_keeps_int_subclasses_like_the_old_to_dict():
     # 出力（CANONICAL）では基底型へ直す。exact type で比べて落としてはいけない。
     from scripts.function_tracer_pcode.core.storage import StorageInfo
 
+    # `StorageInfo` の構築と代入の入口は scalar の subclass を基底型へ写す（Issue #235）。固定形の scalar record の
+    # 仕組みそのものは、入口を通らずに置いた subclass の値で確かめる
     storage = StorageInfo(is_register=True, space_name="register", offset=8, size=8,
                           register_name="x1")
-    storage.register_offset = _JavaPrimitiveInt(8)
+    object.__setattr__(storage, "register_offset", _JavaPrimitiveInt(8))
     legacy = storage.to_dict()
     assert legacy["register_offset"] == 8
     assert type(legacy["register_offset"]) is _JavaPrimitiveInt
     prepared = RESULT_JSON_POLICY.prepare(storage).value()
     assert type(prepared["register_offset"]) is int
     assert prepared == json.loads(json.dumps(legacy))
+    # 入口を通る代入は基底型の値を置く（表現は同じ）
+    storage.register_offset = _JavaPrimitiveInt(8)
+    assert type(storage.to_dict()["register_offset"]) is int
+    assert RESULT_JSON_POLICY.prepare(storage).value() == prepared
 
 
 class _JavaPrimitiveStr(str):
