@@ -124,23 +124,54 @@ def _pair_condition_cache_scope(request):
     with condition_cache_scope():
         yield
 
-#: 壁時計で時間を測る test の module か（module の source の判定を path ごとに 1 回だけ）
-_MEASURES_WALL_CLOCK: Dict[str, bool] = {}
-_WALL_CLOCK_CALL = __import__("re").compile(r"\b(?:perf_counter|monotonic)(?:_ns)?\s*\(")
+#: 壁時計を読む関数の名前（module の path ごとに 1 回だけ求める）
+_WALL_CLOCK_FUNCTIONS: Dict[str, frozenset] = {}
+_WALL_CLOCK_NAMES = frozenset({"perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns"})
+
+
+def _wall_clock_functions(path: str) -> frozenset:
+    """module の中で壁時計を読む関数の名前（直接読む関数と、それを module の中で呼ぶ関数の閉包）。"""
+
+    known = _WALL_CLOCK_FUNCTIONS.get(path)
+    if known is not None:
+        return known
+    import ast
+
+    try:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        tree = None
+    calls: Dict[str, set] = {}
+    reading = set()
+    for node in ast.walk(tree) if tree is not None else ():
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        names = set()
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Call):
+                func = inner.func
+                name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+                if name is not None:
+                    names.add(name)
+        calls.setdefault(node.name, set()).update(names)
+        if names & _WALL_CLOCK_NAMES:
+            reading.add(node.name)
+    changed = True
+    while changed:
+        changed = False
+        for name, called in calls.items():
+            if name not in reading and called & reading:
+                reading.add(name)
+                changed = True
+    known = _WALL_CLOCK_FUNCTIONS[path] = frozenset(reading)
+    return known
 
 
 def _measures_wall_clock(item) -> bool:
-    """`item` の module が壁時計を読むか（`time.perf_counter()` / `time.monotonic()` を呼ぶ source）。"""
+    """`item` の test 関数が壁時計を読むか（その module の中の関数の閉包。`_wall_clock_functions`）。"""
 
-    path = str(getattr(item, "fspath", "") or "")
-    known = _MEASURES_WALL_CLOCK.get(path)
-    if known is None:
-        try:
-            known = bool(_WALL_CLOCK_CALL.search(Path(path).read_text(encoding="utf-8")))
-        except OSError:
-            known = False
-        _MEASURES_WALL_CLOCK[path] = known
-    return known
+    name = getattr(item, "originalname", None) or getattr(item, "name", "")
+    return name in _wall_clock_functions(str(getattr(item, "fspath", "") or ""))
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -154,8 +185,9 @@ def pytest_runtest_call(item):
 
     * call の中で作った object は今と同じく GC される（被測定 code が作る値の GC の時間は測定に入る）
     * call より前（fixture の setup・前の test）から在る循環は call の間は集められず、call の後で集められる
-    * 対象は壁時計を読む module の test だけ（`_measures_wall_clock`）。それ以外の test の間は今と同じ GC で、
-      古い循環の回収（full collection）を先送りし続けない（session の memory を増やさない）
+    * 対象は壁時計を読む test 関数だけ（直接読むか、module の中の読む関数を呼ぶ: `_measures_wall_clock`）。
+      それ以外の test の間は今と同じ GC で、古い循環の回収（full collection）を先送りし続けない（session の
+      memory を増やさない）
     * GC の有効 / 無効・閾値は変えない。外で既に freeze されていれば何もしない（他の freeze を解かない）
     """
 

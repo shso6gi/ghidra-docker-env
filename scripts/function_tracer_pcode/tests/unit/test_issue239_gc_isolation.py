@@ -41,11 +41,13 @@ def gc_state():
 
 
 def test_objects_made_before_the_call_are_frozen_during_it(gc_state):
+    time.perf_counter()  # 壁時計を読む test（hook の対象）
     assert gc.get_freeze_count() > 0
     assert (gc.isenabled(), gc.get_threshold()) == gc_state[:2]
 
 
 def test_a_cycle_made_during_the_call_is_collected_during_it(gc_state):
+    time.perf_counter()  # 壁時計を読む test（hook の対象）
     strong, ref = _cycle()
     del strong
     gc.collect()
@@ -65,6 +67,7 @@ def cycle_made_in_setup():
 
 
 def test_a_cycle_made_before_the_call_is_left_for_after_it(cycle_made_in_setup, gc_state):
+    time.perf_counter()  # 壁時計を読む test（hook の対象）
     holder, ref = cycle_made_in_setup
     holder.clear()
     gc.collect()
@@ -105,3 +108,16 @@ def test_no_test_changes_the_freeze_state_itself():
                     if path != Path(__file__).resolve():
                         offenders.append(f"{path.relative_to(TESTS_ROOT)}:{node.lineno}")
     assert offenders == []
+
+
+def _read_clock():
+    return time.perf_counter()
+
+
+def test_a_test_that_reads_the_clock_through_a_module_helper_is_frozen(gc_state):
+    _read_clock()
+    assert gc.get_freeze_count() > 0
+
+
+def test_a_test_in_a_clock_module_that_does_not_read_the_clock_is_not_frozen(gc_state):
+    assert gc.get_freeze_count() == 0
