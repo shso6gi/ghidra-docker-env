@@ -178,8 +178,12 @@ def test_a_validated_value_with_a_boxed_storage_is_serialization_closed():
     from scripts.function_tracer_pcode.core.storage import StorageInfo
 
     def storage(scalar):
-        return StorageInfo(is_register=True, space_name="register", offset=scalar(8), size=scalar(4),
-                           register_name="x0", base_register_name="x0")
+        # 実 run の `tracer_storage` は構築の後で register の offset・size を代入する（JPype の整数）
+        built = StorageInfo(is_register=True, space_name="register", offset=8, size=4,
+                            register_name="x0", base_register_name="x0")
+        built.register_offset = scalar(24)
+        built.register_size = scalar(4)
+        return built
 
     boxed = published(Expression.parameter("a", 0, size=4, storage_info=storage(JInt)))
     plain = published(Expression.parameter("a", 0, size=4, storage_info=storage(int)))
