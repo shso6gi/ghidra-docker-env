@@ -44,14 +44,16 @@ class _Marker:
 
 
 class _Asked(LeafSubstitution):
-    __slots__ = ("leaves", "answer")
+    __slots__ = ("leaves", "sizes", "answer")
 
     def __init__(self, answer: Any = None) -> None:
         self.leaves: List[Any] = []
+        self.sizes: List[Any] = []
         self.answer = answer
 
-    def __leaf_substitute__(self, leaf: Any) -> Any:
+    def __leaf_substitute__(self, leaf: Any, size: Any) -> Any:
         self.leaves.append(leaf)
+        self.sizes.append(size)
         return _Marker(leaf) if self.answer is None else self.answer
 
 
@@ -221,3 +223,37 @@ def test_the_substitution_is_asked_even_outside_a_budget_scope():
     asked = _Asked()
     built, _consumed, _nodes = _measured(_Fields(a=_expr()), asked)
     assert type(built["a"]) is _Marker
+
+
+def test_the_substitution_receives_the_size_the_work_charged_for_the_leaf():
+    """尋ねるのは見積もりの後で、作業量がその葉に数えた大きさを渡す（数えない作業量では `None`）。"""
+
+    small = _expr()
+    large = small
+    for index in range(20):
+        large = Expression.binary_op("INT_ADD", large, Expression.constant(index, size=4))
+    asked = _Asked()
+    with budget_policy_scope(BudgetPolicy()):
+        _measured(_Fields(a=small), asked)
+        _built, small_only, _nodes = _measured(_Fields(a=small))
+        _built, large_only, _nodes = _measured(_Fields(a=large))
+        _measured(_Fields(a=large), asked)
+    wrapper = small_only - asked.sizes[0]
+    assert asked.leaves == [small, large]
+    assert asked.sizes[0] > 0 and asked.sizes[1] == large_only - wrapper
+    outside = _Asked()
+    _measured(_Fields(a=small), outside)
+    assert outside.sizes == [None]
+
+
+def test_the_leaf_that_exceeds_the_limit_is_not_asked():
+    from scripts.function_tracer_pcode.core.json_encoding import JsonBudgetExhausted
+
+    expr = _expr()
+    with budget_policy_scope(BudgetPolicy()):
+        _built, _bytes, nodes = _measured(_Fields(a=expr))
+    asked = _Asked()
+    with budget_policy_scope(BudgetPolicy(serialization_nodes=nodes - 1)):
+        with pytest.raises(JsonBudgetExhausted):
+            _measured(_Fields(a=expr), asked, terminal=False)
+    assert asked.leaves == []

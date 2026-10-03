@@ -147,19 +147,21 @@ class _ReadHook(LeafSubstitution):
         self.elide = elide
         self.pending: List[Any] = []
         self._tokens: Dict[int, ElidedSemanticValue] = {}
-        #: 問い合わせた sized leaf の数と、token に置いた数（再利用の得の目安: `_ElisionPolicy`）
+        #: 問い合わせた式の葉の、作業量が見積もった大きさの和と、そのうち token に置いた分（再利用の得の
+        #: 目安: `_ElisionPolicy`）。大きさを数えない作業量では葉ごとに 1
         self.leaves = 0
         self.elided = 0
 
-    def __leaf_substitute__(self, leaf: Any) -> Any:
+    def __leaf_substitute__(self, leaf: Any, size: Optional[int]) -> Any:
         # sized leaf（`__json_tree__` を持つ型）は式だけ（条件は record として walk される）
         if type(leaf) is not Expression:
             return NO_SUBSTITUTION
-        self.leaves += 1
+        weight = 1 if size is None or size < 1 else size
+        self.leaves += weight
         if serialization_closed(leaf):
             if not self.elide:
                 return NO_SUBSTITUTION
-            self.elided += 1
+            self.elided += weight
             token = self._tokens.get(id(leaf))
             if token is None:
                 token = self._tokens[id(leaf)] = ElidedSemanticValue(leaf)
@@ -397,9 +399,11 @@ class _ElisionPolicy:
     """pair の中で、token を置いて比べる（再利用する）かの方針（再利用の owner の判断。正しさに関わらない）。
 
     hit が省くのは、token が代わりに置かれた値の組み立て（純粋な部分）で、比べる費用は token の外の部分に
-    比例する。pair の最初の `_POLICY_READS` 回の読みで、問い合わせた sized leaf のうち token に置けた割合が
-    半分に届かなければ、その pair の残りでは token を置かず、witness も作らない（読みと組み立ては同じ 1 回:
-    memo を切ったときと同じ）。判断は数え上げだけで決まる（時間に依らない）。
+    比例する。どちらも値の大きさに比例するので、葉の数でなく、作業量が見積もった大きさで量る（小さな closed
+    な葉が多く、大きな木が open な pair は、数では得に見えて、比べる費用が上回る）。pair の最初の
+    `_POLICY_READS` 回の読みで、問い合わせた式の葉の大きさのうち token に置けた割合が半分に届かなければ、
+    その pair の残りでは token を置かず、witness も作らない（読みと組み立ては同じ 1 回: memo を切ったときと
+    同じ）。判断は数え上げだけで決まる（時間に依らない）。
     """
 
     __slots__ = ("_lock", "reads", "leaves", "elided", "elide")

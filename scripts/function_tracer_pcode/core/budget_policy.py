@@ -574,7 +574,9 @@ class SerializationWork:
 
         `substitutable` は、作った葉を受け取るのが置き換えを頼んだ呼ぶ側だけのとき（walk の外から
         始めた LEGACY の構築が置く葉。`core/json_encoding._Walk`）。そのときだけ `leaf_substitution`
-        に尋ねる: walk の中の code が読む値・`Expression.to_dict()` の返り値は置き換えない。
+        に尋ねる: walk の中の code が読む値・`Expression.to_dict()` の返り値は置き換えない。尋ねるのは
+        見積もりの後で、見積もった大きさ（数えない作業量では `None`）を渡す（見積もりは置き換えの有無に
+        依らず走るので、尋ねるために走る code は無い）。
 
         **置き換えが変えるのは置く値だけで、数える量は変えない**: 置き換えた葉も、置き換えない葉と
         同じく大きさを見積もって足し、distinct な node を数え、上限と比べる（作らないだけ）。この作業量の
@@ -583,15 +585,14 @@ class SerializationWork:
 
         from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, protocol_method
 
-        substitute = NO_SUBSTITUTION
+        # 置き換えは package の `LeafSubstitution` の protocol（型の関数を直接呼ぶ）
         substitution = self.leaf_substitution if substitutable else None
-        if substitution is not None:
-            # 置き換えは package の `LeafSubstitution` の protocol（型の関数を直接呼ぶ）
-            substitute = protocol_method(substitution, "__leaf_substitute__")(substitution, leaf)
-        substituted = substitute is not NO_SUBSTITUTION
         # sized leaf の protocol は package の型の関数を直接呼ぶ（instance の属性を引かない）
         if not self.enabled:
-            if substituted:
+            substitute = NO_SUBSTITUTION
+            if substitution is not None:
+                substitute = protocol_method(substitution, "__leaf_substitute__")(substitution, leaf, None)
+            if substitute is not NO_SUBSTITUTION:
                 return (substitute if build else None), 0
             return (protocol_method(leaf, "__json_tree__")(leaf) if build else None), 0
         # 見積もりの作業量（runtime ref を辿る分）もこの作業量へ数える（byte の大きさとは分ける）
@@ -622,7 +623,10 @@ class SerializationWork:
                 target_key=self.target_key(),
                 limit=self._policy.serialization_nodes,
             )
-        if substituted:
+        substitute = NO_SUBSTITUTION
+        if substitution is not None:
+            substitute = protocol_method(substitution, "__leaf_substitute__")(substitution, leaf, size)
+        if substitute is not NO_SUBSTITUTION:
             return (substitute if build else None), size
         if build and built is None:
             built = protocol_method(leaf, "__json_tree__")(leaf)
@@ -696,14 +700,15 @@ NO_SUBSTITUTION = _NoSubstitution()
 class LeafSubstitution:
     """直列化の作業量の sized leaf の置き換え（`substituting_leaves`）の protocol。
 
-    `__leaf_substitute__(leaf)` は、作業量が sized leaf を作る **前** に呼ばれ、置く値か
-    `NO_SUBSTITUTION` を返す。何を置き換えるかは subclass（渡す側）が決める。呼ばれるのは walk の外
-    から始めた LEGACY の構築が置く葉だけ（`SerializationWork.tree`）。
+    `__leaf_substitute__(leaf, size)` は、作業量が sized leaf の大きさを見積もって数えた後、葉を作る
+    **前** に呼ばれ、置く値か `NO_SUBSTITUTION` を返す。`size` は見積もった byte の大きさ（数えない
+    作業量では `None`）。何を置き換えるかは subclass（渡す側）が決める。呼ばれるのは walk の外から始めた
+    LEGACY の構築が置く葉だけ（`SerializationWork.tree`）。上限を超えた葉には尋ねない（作業量が先に止まる）。
     """
 
     __slots__ = ()
 
-    def __leaf_substitute__(self, leaf: Any) -> Any:
+    def __leaf_substitute__(self, leaf: Any, size: Optional[int]) -> Any:
         return NO_SUBSTITUTION
 
 
