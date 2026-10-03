@@ -888,17 +888,21 @@ def read_snapshot_inputs(analysis: Any, leaf_substitution: Any = None) -> Snapsh
     return SnapshotRead(material, frozen, held_id, held_fields, held_refs, work.observed_runtime_ref)
 
 
-def assemble_snapshot(read: SnapshotRead) -> "AnalysisSnapshot":
+def assemble_snapshot(read: SnapshotRead, *, has_tokens: bool = True) -> "AnalysisSnapshot":
     """読んだ値から、`create` と同じ snapshot を作る（純粋: 入力の code を呼ばない）。
 
     token を、token が代わりに置かれた値の木に戻す: digest は凍結した写しの中で、snapshot に置く値は
-    `retained_form` の写しの中で。token の無い読み（置き換えなし）では `create` そのもの。
+    `retained_form` の写しの中で。`has_tokens` が偽（読みが token を置かなかった）なら戻す走査をしない:
+    `create` の残り（digest と、読みが作った `retained_form` の写し）そのもの。
     """
 
+    frozen, held = read.frozen_payload, read.held_fields
+    if has_tokens:
+        frozen, held = expand_witness_tokens(frozen), _expand_held_tokens(held)
     return AnalysisSnapshot._from_parts(
-        SnapshotFingerprintCodec.digest_frozen(expand_witness_tokens(read.frozen_payload)),
+        SnapshotFingerprintCodec.digest_frozen(frozen),
         read.held_id,
-        _expand_held_tokens(read.held_fields),
+        held,
         read.held_refs,
         SNAPSHOT_EXTRACTION_SCHEMA_VERSION,
     )

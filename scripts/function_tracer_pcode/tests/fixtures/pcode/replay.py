@@ -238,10 +238,10 @@ def _observe_snapshot_reuse(monkeypatch) -> Dict[str, Any]:
     assemble = reuse.assemble_snapshot
     release = reuse.SnapshotReuse.release
 
-    def counted_assemble(read):
+    def counted_assemble(read, **kwargs):
         if reuse.snapshot_reuse_metrics():
             observed["body_executions_in_scope"] += 1
-        return assemble(read)
+        return assemble(read, **kwargs)
 
     def observed_release(store):
         observed["stores"].append(store.metrics())

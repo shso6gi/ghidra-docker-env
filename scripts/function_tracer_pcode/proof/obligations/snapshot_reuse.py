@@ -23,6 +23,9 @@ token を戻し、digest を求め、`retained_form` の写しを作る）で、
 * 別の直列化（作業量・walk）の中からの呼び出し（外側の勘定を変えない）
 * canonical でない生成経路（派生の型、置き換えた `create` / 本体）: 単一の読みが再現する経路ではない
 
+**方針**（`_ElisionPolicy`。正しさに関わらない費用の判断）: pair の最初の 16 回の読みで、token に置けた sized leaf が
+半分に届かなければ、その pair の残りは token を置かず witness も作らない（memo を切ったときと同じ読みと組み立て）。
+
 **sealing**（C-RS2 の接続）: closed かどうかは読むだけ。単一の読みの中で pending だった値（runtime ref の写しを
 待つ値）は、読みの後で、**その読みが描いた ref の表現** から写す（`seal_serialization(observed=...)`。表現を作る
 code を走らせない）。on / off で同じ値を同じように写す。写した値は以後、写しから描く（C-RS2 の契約: 検証済みの
@@ -138,20 +141,25 @@ class _ReadHook(LeafSubstitution):
     token に置く（同じ値には同じ token）。pending な値は置き換えず（本体と同じく描く）、読みの後で写すために集める。
     """
 
-    __slots__ = ("elide", "pending", "_tokens")
+    __slots__ = ("elide", "pending", "_tokens", "leaves", "elided")
 
     def __init__(self, *, elide: bool) -> None:
         self.elide = elide
         self.pending: List[Any] = []
         self._tokens: Dict[int, ElidedSemanticValue] = {}
+        #: 問い合わせた sized leaf の数と、token に置いた数（再利用の得の目安: `_ElisionPolicy`）
+        self.leaves = 0
+        self.elided = 0
 
     def __leaf_substitute__(self, leaf: Any) -> Any:
         # sized leaf（`__json_tree__` を持つ型）は式だけ（条件は record として walk される）
         if type(leaf) is not Expression:
             return NO_SUBSTITUTION
+        self.leaves += 1
         if serialization_closed(leaf):
             if not self.elide:
                 return NO_SUBSTITUTION
+            self.elided += 1
             token = self._tokens.get(id(leaf))
             if token is None:
                 token = self._tokens[id(leaf)] = ElidedSemanticValue(leaf)
@@ -349,6 +357,7 @@ class SnapshotReuse:
         self._entries: Dict[_Witness, Any] = {}
         self._counts: Dict[str, int] = {}
         self._seconds: Dict[str, float] = {}
+        self.policy = _ElisionPolicy()
 
     def lookup(self, witness: _Witness) -> Any:
         with self._lock:
@@ -382,6 +391,43 @@ class SnapshotReuse:
 
         with self._lock:
             self._entries.clear()
+
+
+class _ElisionPolicy:
+    """pair の中で、token を置いて比べる（再利用する）かの方針（再利用の owner の判断。正しさに関わらない）。
+
+    hit が省くのは、token が代わりに置かれた値の組み立て（純粋な部分）で、比べる費用は token の外の部分に
+    比例する。pair の最初の `_POLICY_READS` 回の読みで、問い合わせた sized leaf のうち token に置けた割合が
+    半分に届かなければ、その pair の残りでは token を置かず、witness も作らない（読みと組み立ては同じ 1 回:
+    memo を切ったときと同じ）。判断は数え上げだけで決まる（時間に依らない）。
+    """
+
+    __slots__ = ("_lock", "reads", "leaves", "elided", "elide")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.reads = 0
+        self.leaves = 0
+        self.elided = 0
+        self.elide = True
+
+    def observe(self, leaves: int, elided: int) -> bool:
+        """token を置いた読みの数え上げを足し、方針が「置かない」に変わったら真。"""
+
+        with self._lock:
+            if not self.elide:
+                return False
+            self.reads += 1
+            self.leaves += leaves
+            self.elided += elided
+            if self.reads >= _POLICY_READS and self.elided * 2 < self.leaves:
+                self.elide = False
+                return True
+            return False
+
+
+#: 方針を決めるまでに数える、token を置いた読みの数
+_POLICY_READS = 16
 
 
 _SCOPE_LOCK = threading.Lock()
@@ -501,12 +547,17 @@ def reuse_or_build(cls: Any, analysis: Any) -> Any:
         store.count("bypass:generation_path")
         return cls._build_from_function_analysis(analysis)
     store.count("requests")
-    enabled = _SNAPSHOT_REUSE_ENABLED
+    enabled = _SNAPSHOT_REUSE_ENABLED and store.policy.elide
+    if _SNAPSHOT_REUSE_ENABLED and not enabled:
+        # pair の方針で token を置かない（読みと組み立ては同じ 1 回: memo を切ったときと同じ）
+        store.count("bypass:elision_policy")
     hook = _ReadHook(elide=enabled)
     started = time.perf_counter()
     # 本体と同じ読み（1 回）。上げた例外はそのまま上げる（witness も snapshot も作らない）
     read = read_snapshot_inputs(analysis, hook)
     store.add_seconds("read", time.perf_counter() - started)
+    if enabled and store.policy.observe(hook.leaves, hook.elided):
+        store.count("policy:elision_off")
     snapshot = None
     witness = None
     if enabled:
@@ -527,7 +578,7 @@ def reuse_or_build(cls: Any, analysis: Any) -> Any:
     if snapshot is None:
         started = time.perf_counter()
         store.count("body_executions")
-        snapshot = assemble_snapshot(read)
+        snapshot = assemble_snapshot(read, has_tokens=hook.elided > 0)
         store.add_seconds("body", time.perf_counter() - started)
         if witness is not None:
             try:

@@ -503,3 +503,49 @@ def test_the_witness_digest_of_the_codec_copy_follows_the_fingerprint_and_token_
     assert witness_fingerprint_digest(first) != witness_fingerprint_digest(other)
     with pytest.raises(TypeError):
         witness_fingerprint_digest((("k", object()),))
+
+
+# ---------------------------------------------------------------------------
+# 方針: token をほとんど置けない pair では再利用しない（費用の判断。結果は同じ）
+# ---------------------------------------------------------------------------
+
+
+class _BoxedInt(int):
+    """組み込みの `int` の subclass（closed の規則が受けない scalar。実 run の JPype の整数の代わり）。"""
+
+
+def _open_state() -> State:
+    """返す値の大半が closed にならない解析（入口を通らずに subclass の scalar を置く）。"""
+
+    state = State(["plain"], pending=False)
+    values = []
+    for index in range(6):
+        value = Expression.binary_op("INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(index, size=4))
+        value.operands[1].__dict__["size"] = _BoxedInt(4)
+        values.append(published(value))
+    state.analysis.returns = state.analysis.returns + [
+        ReturnInfo(address="0x%08x" % (0x402000 + 4 * i), conditions=[], value=v) for i, v in enumerate(values)
+    ]
+    return state
+
+
+def test_a_pair_that_elides_little_stops_eliding_and_still_matches_main(monkeypatch):
+    from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import _POLICY_READS
+
+    metrics = _compare(_open_state, [("call", "canonical")] * (_POLICY_READS + 4), monkeypatch)
+    counts = metrics["on"]["counts"]
+    assert counts["policy:elision_off"] == 1
+    assert counts["bypass:elision_policy"] == 4
+    assert counts["requests"] == _POLICY_READS + 4
+
+
+def test_a_pair_that_elides_most_keeps_reusing(monkeypatch):
+    from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import _POLICY_READS
+
+    def factory() -> State:
+        return State(["plain"], pending=False)
+
+    metrics = _compare(factory, [("call", "canonical")] * (_POLICY_READS + 4), monkeypatch)
+    counts = metrics["on"]["counts"]
+    assert "policy:elision_off" not in counts and "bypass:elision_policy" not in counts
+    assert counts["hits"] == _POLICY_READS + 3

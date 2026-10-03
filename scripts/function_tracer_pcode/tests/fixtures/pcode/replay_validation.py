@@ -517,9 +517,11 @@ def _assert_snapshot_bodies_match_distinct_witnesses(report: Mapping[str, Any], 
         where + ": the counted body executions are not the actual executions: "
         + json.dumps({"actual": observed["body_executions_in_scope"], **totals}, sort_keys=True)
     )
-    assert observed["body_executions_in_scope"] == entries, (
+    # pair の方針（token をほとんど置けない pair では再利用しない）で保存しない組み立ては理由つきで数える
+    unstored = totals.get("bypass:elision_policy", 0)
+    assert observed["body_executions_in_scope"] == entries + unstored, (
         where + ": a body ran for an already stored witness: "
-        + json.dumps({"actual": observed["body_executions_in_scope"], "entries": entries, **totals}, sort_keys=True)
+        + json.dumps({"actual": observed["body_executions_in_scope"], "entries": entries, "unstored": unstored, **totals}, sort_keys=True)
     )
 
 

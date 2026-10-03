@@ -139,13 +139,13 @@ class BodyCounter:
 
         read_analyses = {}
 
-        def counted_assemble(read):
+        def counted_assemble(read, **kwargs):
             analysis = read_analyses.pop(id(read), None)
             with lock:
                 self.calls.append(analysis)
             if self.hook is not None:
                 self.hook(analysis)
-            return original_assemble(read)
+            return original_assemble(read, **kwargs)
 
         def counted_material(analysis, *args, **kwargs):
             if not getattr(reading, "active", False) and not getattr(_ORACLE, "active", False):
