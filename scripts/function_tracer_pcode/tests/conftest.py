@@ -124,9 +124,28 @@ def _pair_condition_cache_scope(request):
     with condition_cache_scope():
         yield
 
+#: 壁時計で時間を測る test の module か（module の source の判定を path ごとに 1 回だけ）
+_MEASURES_WALL_CLOCK: Dict[str, bool] = {}
+_WALL_CLOCK_CALL = __import__("re").compile(r"\b(?:perf_counter|monotonic)(?:_ns)?\s*\(")
+
+
+def _measures_wall_clock(item) -> bool:
+    """`item` の module が壁時計を読むか（`time.perf_counter()` / `time.monotonic()` を呼ぶ source）。"""
+
+    path = str(getattr(item, "fspath", "") or "")
+    known = _MEASURES_WALL_CLOCK.get(path)
+    if known is None:
+        try:
+            known = bool(_WALL_CLOCK_CALL.search(Path(path).read_text(encoding="utf-8")))
+        except OSError:
+            known = False
+        _MEASURES_WALL_CLOCK[path] = known
+    return known
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_call(item):
-    """test の本体（call）の間だけ、それより前から在る object を GC の世代から外す（Issue #239）。
+    """壁時計で時間を測る test の本体（call）の間だけ、それより前から在る object を GC の世代から外す（Issue #239）。
 
     wall-clock の上限を持つ test は、被測定 code の仕事だけで時間が決まるべきで、先に走った test が
     残した session の値（共有の AST の台帳など、数百万 object）の full collection が測定の区間に入ると
@@ -135,12 +154,14 @@ def pytest_runtest_call(item):
 
     * call の中で作った object は今と同じく GC される（被測定 code が作る値の GC の時間は測定に入る）
     * call より前（fixture の setup・前の test）から在る循環は call の間は集められず、call の後で集められる
+    * 対象は壁時計を読む module の test だけ（`_measures_wall_clock`）。それ以外の test の間は今と同じ GC で、
+      古い循環の回収（full collection）を先送りし続けない（session の memory を増やさない）
     * GC の有効 / 無効・閾値は変えない。外で既に freeze されていれば何もしない（他の freeze を解かない）
     """
 
     import gc
 
-    if gc.get_freeze_count():
+    if gc.get_freeze_count() or not _measures_wall_clock(item):
         yield
         return
     gc.freeze()
