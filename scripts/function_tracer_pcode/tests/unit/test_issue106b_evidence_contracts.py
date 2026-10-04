@@ -521,7 +521,10 @@ def _segment_after(tmp_path: Path, change):
     rows = _written_journal(path)
     rows = change(rows) or rows
     path.write_text(_lines(rows), encoding="utf-8")
-    read = reader.read_stage_journal(path, max_bytes=reader.SUMMARY_READ_LIMIT_BYTES)
+    try:
+        read = reader.read_stage_journal(path, max_bytes=reader.SUMMARY_READ_LIMIT_BYTES)
+    except Exception as exc:                                    # the reader never raises (contract)
+        pytest.fail(f"the journal reader raised {type(exc).__name__}: {exc}")
     (segment,) = read.segments
     return segment
 
@@ -773,3 +776,26 @@ def test_a_manifest_count_that_is_not_a_count_is_unknown_not_a_crash(tmp_path, t
 
     assert margin.observe_run(profile).facts.parallel_jobs is None
     assert _verdict(tmp_path, [profile])["status"] == "holds"
+
+
+@pytest.mark.parametrize("sealed, expected", [(True, "holds"), (False, "undetermined")])
+def test_a_profile_run_whose_child_does_not_seal_is_not_a_profile_run(tmp_path, sealed, expected):
+    """``post_trip`` / ``tail`` need an attested end, so pool P takes only runs whose child seals
+    its journals (a run-level fact, fixed before any interval is read).  The same run is still a
+    load run: its ``pre`` / ``overrun`` need no end."""
+
+    profile = _tree(tmp_path, "profile")
+    _cut(profile)
+    old = _tree(tmp_path, "old")
+    rows = _cut_rows()
+    _write_pair(old, "f_B1_B2", _resolved_unknown(), journal=rows, sidecar=_sidecar(123.5),
+                sealed=sealed)
+    as_profile = _verdict(tmp_path, [profile, old])
+    as_load = _verdict(tmp_path, [profile], load=[old])
+
+    assert as_profile["status"] == expected, as_profile
+    if not sealed:
+        assert as_profile["undetermined"][0] == (
+            f"pool P: run {old}: its child does not seal the journals (sealing_writer=False), "
+            "so post_trip / tail cannot be attested")
+    assert as_load["status"] == "holds", as_load

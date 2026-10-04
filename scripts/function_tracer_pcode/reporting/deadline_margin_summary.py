@@ -56,12 +56,19 @@ commit・sample の母集団）と、pair ごとの終了の分類・期限で�
 violated / undetermined）は `reporting/deadline_margin_acceptance.py` だけが決める（集計の
 前に決まる規則で、結果を見て標本を除かない）。
 
-* **値が「ある・変換できる」ことと、証拠が「完全・妥当・整合」であることは別。** journal は
-  完全に読めたとき（`JournalRead.incomplete_reasons` が空）だけ「trip が無い = 期限内に終わった」
-  と読む。数値は有限で値域に入るときだけ値にする（trip の note は全体として、sidecar は項目ごと、
-  ``pre`` / ``tail`` は負にならない）。同じ事実の出所（manifest の期限と各 trip の budget、process の
-  期限・lead と各 sidecar）は照合し、食い違えば ``RunFacts.conflicts`` に両方を残す（片方で上書き
-  しない）。終了は authority の 5 値の `Outcome` だけ（他の綴りは ``termination_invalid``）。
+* **読めた行が妥当であることと、必要な観測が欠けていないことは別。** 打ち切ったか（`deadline_cut`）
+  は 2 つの出所を照合して決める: 結果 JSON の ``analysis_deadline``（期限の持ち主が scope の終わりに
+  書く最終記録）と journal の trip の行。trip が「無かった」と言えるのは、結果の記録が
+  ``tripped: false`` のときか、``journal_end`` で終わりまで証明された journal に trip の行が無いとき
+  だけ。区間は損失の無い current segment（`core.stage_journal_reader.select_verified_segment`: 欠番・
+  先頭の欠け・契約に合わない行・壊れた行・file 末尾の損失が無い）の trip の行からだけ求め、
+  ``post_trip`` / ``tail`` は終わりが証明された segment からだけ求める（`JournalView`）。
+* 数値は有限な double で値域に入るときだけ値にする（記録: trip の note は全体として、sidecar は項目
+  ごと、結果の記録も。派生値: 和・差が double を越えれば欠測）。外部の記録の不正は理由付きの欠測に
+  し、例外にしない。record の不変条件（有限でない数を拒む）は内部の bug の検出に残す。
+* 同じ事実の出所（manifest の期限と各 trip・各結果の budget、process の期限・lead と各 sidecar）は
+  照合し、食い違えば ``RunFacts.conflicts`` に両方を残す（片方で上書きしない）。終了は authority の
+  5 値の `Outcome` だけ（他の綴りは ``termination_invalid``）。
 * 観測した最大は保証ではない（負荷・入力が変われば越え得る）。
 * ``lead`` は supervisor が SIGUSR1 を送る先行時間。child がその窓の中で終わると #204 の経路に
   入るので、margin の中に取る。SIGTERM の後の grace（kill-after）は process の期限の **後** なので
@@ -83,6 +90,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.authority.contracts import Outcome
 from scripts.function_tracer_pcode.core.deadline import parse_budget_seconds
+from scripts.function_tracer_pcode.core.stage_journal import EVENT_JOURNAL_END
 from scripts.function_tracer_pcode.core.stage_journal_reader import (
     SUMMARY_READ_LIMIT_BYTES,
     JournalRow,
@@ -153,6 +161,9 @@ class RunFacts:
     samples: frozenset
     #: 出所どうしの食い違い・読めない記録（あれば、この run の事実は確定していない）
     conflicts: Tuple[str, ...] = ()
+    #: child が journal を seal する（``journal_end`` の行がある）run か。``False`` の run の journal は
+    #: 終わりを証明できない（review 4 より前の書き手）。``None`` は観測していない
+    sealing_writer: Optional[bool] = None
 
     def __post_init__(self) -> None:
         _require_finite("RunFacts", "deadline_seconds", self.deadline_seconds, positive=True)
@@ -169,7 +180,7 @@ class RunFacts:
             "stack_dump_lead_seconds": self.stack_dump_lead_seconds,
             "parallel_jobs": self.parallel_jobs, "git_commit": self.git_commit,
             "git_dirty": self.git_dirty, "samples": len(self.samples),
-            "conflicts": list(self.conflicts),
+            "conflicts": list(self.conflicts), "sealing_writer": self.sealing_writer,
         }
 
 
@@ -181,7 +192,7 @@ class PairObservation:
     termination: str
     timeout_kind: Optional[str]
     #: 期限で打ち切った（``True``）/ 打ち切らずに終わった（``False``）/ 読めない（``None``）。
-    #: ``False`` は「完全に読めた journal に trip が無い」ときだけ
+    #: ``False`` は結果の記録が trip を否定するか、終わりまで証明された journal に trip が無いときだけ
     cut: Optional[bool]
     cut_unknown_reason: Optional[str] = None
     #: 測れた区間（``MARGIN_INTERVALS`` の部分集合）と測れなかった区間の理由（打ち切った pair だけ）
@@ -398,10 +409,13 @@ class JournalView:
     problem: str = ""
     trips: Tuple[JournalRow, ...] = ()
     end_problem: Optional[str] = "no journal"
+    #: file に ``journal_end`` の行が 1 つでもある（書き手が seal する。run の事実 `RunFacts.sealing_writer`）
+    sealed_by_writer: bool = False
 
     @classmethod
     def read(cls, path: Any, sidecar: Optional[Mapping[str, Any]]) -> "JournalView":
         read = read_stage_journal(path, max_bytes=SUMMARY_READ_LIMIT_BYTES)
+        sealed = any(row.event == EVENT_JOURNAL_END for row in read.rows)
         segment, reason = select_verified_segment(
             read,
             pid=(sidecar or {}).get("child_pid"),
@@ -409,12 +423,13 @@ class JournalView:
         )
         if segment is None:
             text = reason if (reason or "").startswith("journal incomplete") else f"journal: {reason}"
-            return cls(segment=None, problem=text)
+            return cls(segment=None, problem=text, sealed_by_writer=sealed)
         trips = tuple(_tripped(segment))
         if len(trips) > 1:
-            return cls(segment=None, problem=(
+            return cls(segment=None, sealed_by_writer=sealed, problem=(
                 f"journal records {TRIP_NOTE} {len(trips)} times (the deadline writes it once)"))
-        return cls(segment=segment, trips=trips, end_problem=end_attestation_problem(segment))
+        return cls(segment=segment, trips=trips, end_problem=end_attestation_problem(segment),
+                   sealed_by_writer=sealed)
 
 
 @dataclass(frozen=True)
@@ -680,13 +695,16 @@ def observe_run(root: Path) -> RunObservation:
     root = Path(root)
     manifest = _read_key_values(root / "run_manifest.txt")
     pairs: List[PairObservation] = []
+    sealed = False
     for record in iter_pair_outcomes(root):
         key = str(Path(record.status_path).relative_to(root))[: -len(PAIR_STATUS_SUFFIX)]
         evidence = load_pair_evidence(record.status_path)
         kind = evidence.timeout_kind_report().kind if record.outcome == TIMEOUT_OUTCOME else None
+        journal = JournalView.read(evidence.paths.journal, evidence.sidecar)
+        sealed = sealed or journal.sealed_by_writer
         pairs.append(observe_pair(
             key, record.outcome, termination=termination_of(record.outcome, kind),
-            timeout_kind=kind, journal=JournalView.read(evidence.paths.journal, evidence.sidecar),
+            timeout_kind=kind, journal=journal,
             sidecar=evidence.sidecar, result_payload=evidence.result_payload,
         ))
     budgets = {
@@ -735,6 +753,7 @@ def observe_run(root: Path) -> RunObservation:
         git_dirty=None if dirty not in ("0", "1") else dirty == "1",
         samples=frozenset(_sample_of(pair.key) for pair in pairs),
         conflicts=tuple(conflicts),
+        sealing_writer=sealed,
     )
     return RunObservation(facts=facts, pairs=tuple(pairs))
 

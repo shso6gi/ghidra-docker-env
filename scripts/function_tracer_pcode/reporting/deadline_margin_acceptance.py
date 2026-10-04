@@ -12,8 +12,9 @@ run 単位の規則。満たさない run を pool に渡すと判定不能に�
 * ``P``（profile の計測。``pre`` ``overrun`` ``post_trip`` ``tail`` ``lead`` を使う）:
   期限の機構が評価対象と同じ code（`MarginProfile.machinery_commits` のどれかの commit の clean な
   tree）、process の期限が profile と同じ、解析の期限が profile の期限 **以上**、pair の sample が
-  profile の母集団（固定 subset なら `eqbench_subset.json` の Eq / Neq の source）の中。並列度は
-  問わない。
+  profile の母集団（固定 subset なら `eqbench_subset.json` の Eq / Neq の source）の中、child が
+  journal を seal する（`RunFacts.sealing_writer`: ``post_trip`` / ``tail`` は終わりの証明された
+  journal からだけ測れる）。並列度は問わない。
 * ``L``（負荷の pool。``pre`` ``overrun`` を使う）: 期限の機構が同じ code（clean な tree）の、
   期限つきの run。profile・期限の長さ・並列度・負荷は問わない。
 * ``F``（固定費の pool。``pre`` だけを使う）: 期限つきの run。code を問わない（``pre`` は期限の
@@ -47,11 +48,13 @@ run 単位の規則。満たさない run を pool に渡すと判定不能に�
 
 ## 証拠の契約（観測側 `deadline_margin_summary` が持ち、ここは結果だけを読む）
 
-* 完全性: journal は `JournalRead.incomplete_reasons` が空のときだけ「打ち切った / 打ち切って
-  いない」を読む。
-* 数値: 有限で値域に入る値だけが値（`RunFacts` / `PairObservation` / `MarginProfile` は有限で
-  ない数を作る時点で拒む。CLI の秒は `core.deadline.parse_budget_seconds`）。
-* 整合: 同じ事実の出所（manifest と trip・sidecar）が食い違えば ``RunFacts.conflicts``。
+* 完全性: 「打ち切っていない」は結果 JSON の期限の記録か、``journal_end`` で終わりまで証明された
+  journal からだけ。区間は損失の無い execution の journal からだけ（``post_trip`` / ``tail`` は終わり
+  の証明も要る）。読めなければ ``cut`` が ``None`` か区間の欠測で、ここでは判定不能になる。
+* 数値: 有限な double で値域に入る値だけが値（記録も派生値も。`RunFacts` / `PairObservation` /
+  `MarginProfile` は有限でない数を作る時点で拒む。CLI の秒は `core.deadline.parse_budget_seconds`）。
+* 整合: 同じ事実の出所（manifest と trip・結果の記録・sidecar、journal の trip と結果の記録）が
+  食い違えば ``RunFacts.conflicts`` か ``cut`` が ``None``。
 * 終了: `authority.contracts.Outcome` の 5 値だけ。
 
 違反の理由（``violations``）と証拠の足りない理由（``undetermined``）は、件数を潰さずにすべて返す。checker 自身の
@@ -209,6 +212,10 @@ def run_eligibility_problems(pool: str, run: Any, profile: MarginProfile) -> Lis
                     f"{where}: process timeout {facts.pair_process_timeout_seconds} is not the "
                     f"profile's {profile.pair_process_timeout_seconds:g}s"
                 )
+        if facts.sealing_writer is not True:
+            problems.append(
+                f"{where}: its child does not seal the journals (sealing_writer="
+                f"{facts.sealing_writer}), so post_trip / tail cannot be attested")
         if profile.population is not None:
             outside = sorted(set(facts.samples) - set(profile.population))
             if outside:
