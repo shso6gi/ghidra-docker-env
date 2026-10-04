@@ -17,6 +17,7 @@ oracle は `test_issue219_single_read` と同じ（同じ factory から作っ�
 
 from __future__ import annotations
 
+import random
 import threading
 from typing import Any, List
 
@@ -31,7 +32,7 @@ from scripts.function_tracer_pcode.core.budget_policy import (
     substituting_leaves,
 )
 from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot, SnapshotFingerprintCodec
-from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import ElidedSemanticValue
+from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import ElidedSemanticValue, snapshot_reuse_scope
 from scripts.function_tracer_pcode.tests.unit import test_issue219_single_read as oracle
 from scripts.function_tracer_pcode.tests.unit._publication import published
 from scripts.function_tracer_pcode.tests.unit.test_issue219_single_read import (  # noqa: F401 - fixtures
@@ -198,7 +199,18 @@ def _attempt_value(call) -> Any:
         return ("rejected", type(failure).__name__, str(failure))
 
 
+class OpensItsOwnScope(NestedSnapshot):
+    """`stable_key` が自分で再利用の scope を開き、その中で再入する（入れ子の scope は外側の読みに影響しない）。"""
+
+    def stable_key(self):
+        with snapshot_reuse_scope():
+            seen = _attempt(lambda: AnalysisSnapshot.from_function_analysis(self.inner).semantic_fingerprint)
+        self.calls.append(seen)
+        return ("own_scope", len(self.calls), seen[0])
+
+
 PRODUCERS = {
+    "opens_its_own_scope": OpensItsOwnScope,
     "walks_in_another_thread": WalksInAnotherThread,
     "arms_its_own_substitution": ArmsItsOwnSubstitution,
     "freezes_token": FreezesToken,
@@ -265,3 +277,23 @@ def test_after_a_read_the_normal_codec_rejects_a_token_in_every_mode(monkeypatch
                 AnalysisSnapshot.from_function_analysis(state.analysis)
         with pytest.raises(TypeError, match="opaque object ElidedSemanticValue"):
             SnapshotFingerprintCodec.freeze(ElidedSemanticValue(_closed()))
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_random_combinations_of_input_code_have_the_same_answers_as_main(seed, monkeypatch):
+    """token・codec・再入・入れ子・別 thread・例外の producer と、副作用のある既存の producer を混ぜ、置き場所
+    （意味の view / `snapshot_id`）と手順（生成経路・入れ子の直列化・書き換え）を無作為に組む。"""
+
+    rng = random.Random(1000 + seed)
+    pool = sorted(PRODUCERS) + ["counting", "counting_key", "writes_note", "plain"]
+    chosen = rng.sample(pool, rng.randint(1, 3))
+    in_id = [name for name in chosen if rng.random() < 0.5]
+
+    def factory() -> oracle.State:
+        state = oracle.State(["plain"] + chosen, pending=False)
+        moved = tuple(state.analysis.return_abi_facts.pop("p%d" % (1 + chosen.index(name))) for name in in_id)
+        if moved:
+            state.analysis.analysis_scope_key = ("scope", moved)
+        return state
+
+    oracle._compare(factory, oracle._random_steps(rng), monkeypatch)

@@ -23,8 +23,15 @@ token を戻し、digest を求め、`retained_form` の写しを作る）で、
 * 別の直列化（作業量・walk）の中からの呼び出し（外側の勘定を変えない）
 * canonical でない生成経路（派生の型、置き換えた `create` / 本体）: 単一の読みが再現する経路ではない
 
-**方針**（`_ElisionPolicy`。正しさに関わらない費用の判断）: pair の最初の 16 回の読みで、token に置けた sized leaf が
-半分に届かなければ、その pair の残りは token を置かず witness も作らない（memo を切ったときと同じ読みと組み立て）。
+**方針**（`_ElisionPolicy`。正しさに関わらない費用の判断）: pair の最初の `_POLICY_READS`（16）回の読みで、token に
+置いた葉の byte が、読みの作業量が数えた byte（`SnapshotRead.serialized_bytes`）の `_POLICY_MIN_SHARE`（1/4）に
+届かなければ、その pair の残りは token を置かず witness も作らない（memo を切ったときと同じ読みと組み立て）。
+
+**token の権限**（C-RS7）: token を扱えるのは、単一の読みが自分の hook で置いた token（`snapshot.PlacedTokens`、
+identity で照合）を、その読みの内部の凍結（`SnapshotFingerprintCodec._freeze_placing`）と展開に引数で渡すときだけ。
+通常の codec の入口は、呼ぶ側の文脈（読みの最中・入力の code の中・入れ子・別 thread・例外の後）によらず token を
+拒む。許可は thread や module の状態に置かない（入力の code へ伝わるため）。葉の置き換えも、効かせた thread の
+`with` の間だけ効く（`core/budget_policy.substituting_leaves`）。
 
 **sealing**（C-RS2 の接続）: closed かどうかは読むだけ。単一の読みの中で pending だった値（runtime ref の写しを
 待つ値）は、読みの後で、**その読みが描いた ref の表現** から写す（`seal_serialization(observed=...)`。表現を作る
@@ -86,7 +93,8 @@ class ElidedSemanticValue:
 
     `value` への強参照を持つ（witness が生きている間 `id` は再利用されない）。比べ方は `_same` / `_hash`
     だけが決める（`value` が同じ object であること）: この型は等しさを定義しない。codec が読む protocol を
-    持たず dataclass でもないので、本体の digest（`witness` の偽の codec）に入れば `TypeError`（C-RS7）。
+    持たず dataclass でもないので、通常の codec の入口に入れば `TypeError`（C-RS7）。この型の object であることは
+    token である理由にならない: token は読みの hook が置いた object そのもの（`snapshot.PlacedTokens`）だけ。
     `snapshot.assemble_snapshot` は、登録した展開（`_token_tree`）で、置かれるはずだった木に戻す。
     """
 

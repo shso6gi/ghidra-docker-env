@@ -710,8 +710,8 @@ class LeafSubstitution:
 
     `__leaf_substitute__(leaf, size)` は、作業量が sized leaf の大きさを見積もって数えた後、葉を作る
     **前** に呼ばれ、置く値か `NO_SUBSTITUTION` を返す。`size` は見積もった byte の大きさ（数えない
-    作業量では `None`）。何を置き換えるかは subclass（渡す側）が決める。呼ばれるのは walk の外から始めた
-    LEGACY の構築が置く葉だけ（`SerializationWork.tree`）。上限を超えた葉には尋ねない（作業量が先に止まる）。
+    作業量では `None`）。何を置き換えるかは subclass（渡す側）が決める。呼ばれるのは、効かせた thread が walk の
+    外から始めた LEGACY の構築が置く葉だけ（`SerializationWork.tree`）。上限を超えた葉には尋ねない（作業量が先に止まる）。
     """
 
     __slots__ = ()
@@ -732,7 +732,8 @@ def substituting_leaves(work: Optional[SerializationWork], substitution: Optiona
 
     置き換えは置く値だけを変え、数える量は変えない（`SerializationWork.tree`）: 作業量の量・上限の
     超過・観測値は、置き換えの有無に依らない。そのため terminal な作業量（意味の限界になる本体の直列化）
-    でも使える。置き換えた葉を受け取るのは呼ぶ側だけ（walk の外から始めた LEGACY の構築が置く葉）。
+    でも使える。置き換えた葉を受け取るのは呼ぶ側だけ（効かせた thread が walk の外から始めた LEGACY の構築が置く
+    葉）。入れ子にでき、内側が効き、抜けると外側へ戻る。別の thread の walk には効かない。
     """
 
     if substitution is None or work is None:
