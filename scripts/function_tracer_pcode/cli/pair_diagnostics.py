@@ -60,6 +60,9 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, Mapping, Optional
 
+from scripts.function_tracer_pcode.authority.process.stack_dump_diagnostic import (
+    DISPOSITION_AFTER_UNREGISTER_IGNORE,
+)
 from scripts.function_tracer_pcode.core.stage_journal import (
     EVENT_HANDLER_REGISTERED,
     StageJournal,
@@ -202,12 +205,20 @@ def register_stack_dump_handler(
         return state
 
     handle = None
+    previous: Any = None
     phase = "open_dump_file"
     try:
         directory = os.path.dirname(state.dump_path_tmp)
         if directory:
             os.makedirs(directory, exist_ok=True)
         handle = open(state.dump_path_tmp, "ab", buffering=0)
+        # Issue #204: faulthandler は登録の直前の disposition を覚え、interpreter の終了処理
+        # （`_PyFaulthandler_Fini`）でそれへ戻す。既定（terminate）のままだと、結果を出し終えて
+        # 終了処理の途中にいる child を supervisor の診断 signal が殺す（rc -SIGUSR1 → 結果と
+        # CLI code が join しない → INVALID）。先に無視へ変えておけば、登録中は handler が
+        # dump を書き、外れた後の signal は無視される（診断は終了の仕方を変えない）。
+        phase = "ignore_after_unregister"
+        previous = signal.signal(signal_number, signal.SIG_IGN)
         phase = "register"
         faulthandler.register(
             signal_number,
@@ -220,6 +231,11 @@ def register_stack_dump_handler(
             try:
                 handle.close()
             except OSError:
+                pass
+        if previous is not None:
+            try:
+                signal.signal(signal_number, previous)
+            except (OSError, ValueError, TypeError):
                 pass
         state.handler_registered = False
         state.registration_error = type(exc).__name__
@@ -258,6 +274,9 @@ def register_stack_dump_handler(
         "all_threads": True,
         "chain": False,
         "readiness_basis": "faulthandler_register_returned",
+        # Issue #204: handler が外れた後（interpreter の終了処理）の disposition。送信側は
+        # これが無視であることを readiness の条件にする（signal が child を殺さない根拠）
+        "disposition_after_unregister": DISPOSITION_AFTER_UNREGISTER_IGNORE,
         "sigcgt_probe": _sigcgt_probe(signal_number),
     }
     payload.update(_child_start_token())

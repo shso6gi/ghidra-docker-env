@@ -139,6 +139,37 @@ class Stop:
 
 
 @dataclass(frozen=True)
+class PairDiagnostics:
+    """Issue #204: production の ``cli.pair_diagnostics.install_pair_diagnostics`` で pair の
+    journal を開き、stack dump の handler（SIGUSR1）を登録する（supervisor の送信の readiness）。"""
+
+    journal: str
+    dump: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {"step": "pair_diagnostics", "journal": self.journal, "dump": self.dump}
+
+
+@dataclass(frozen=True)
+class AwaitDiagnosticSignal:
+    """Issue #204: 結果を出し終えた child が、終了処理の途中で supervisor の診断 signal を受ける。
+
+    ``finalized``: CPython の interpreter 終了処理（``_PyFaulthandler_Fini``）と同じく
+    ``faulthandler.unregister(SIGUSR1)`` で登録前の disposition へ戻してから、test が
+    ``records.directory / "finish_after_signal"`` を作るまで待ち、作られたら CLI code で終わる（終わる時刻を
+    ``records.directory / "exiting.json"`` に残す）。``False`` なら handler を残したまま待ち、
+    handler が dump を書いたのを見てから CLI code で終わる。
+    """
+
+    finalized: bool
+    #: handler の dump の書き出し先（``PairDiagnostics.dump`` と同じ）
+    dump: str
+
+    def to_json(self) -> dict[str, Any]:
+        return {"step": "await_diagnostic_signal", "finalized": self.finalized, "dump": self.dump}
+
+
+@dataclass(frozen=True)
 class ChildScript:
     steps: tuple[Any, ...]
     faults: tuple[Fault, ...] = field(default=())
@@ -514,6 +545,52 @@ def _step_stop(context: _ChildContext, step: Mapping[str, Any]) -> None:
     )
 
 
+def _step_pair_diagnostics(context: _ChildContext, step: Mapping[str, Any]) -> None:
+    import types
+
+    from scripts.function_tracer_pcode.cli.pair_diagnostics import install_pair_diagnostics
+
+    state = install_pair_diagnostics(types.SimpleNamespace(
+        stage_journal=step["journal"], stack_dump_file=step["dump"], stack_dump_artifact=None,
+    ))
+    if not state.handler_registered:
+        raise FixtureFailure(f"the stack dump handler was not registered: {state.registration_error}")
+
+
+def _cli_code(context: _ChildContext) -> int:
+    from scripts.function_tracer_pcode.authority.contracts import (
+        CLI_EXIT_CODE_BY_OUTCOME,
+        Outcome,
+    )
+
+    return (
+        0 if context.emitted_outcome is None
+        else CLI_EXIT_CODE_BY_OUTCOME[Outcome(context.emitted_outcome)]
+    )
+
+
+def _step_await_diagnostic_signal(context: _ChildContext, step: Mapping[str, Any]) -> None:
+    import faulthandler
+    import signal as signals
+    import time
+
+    sys.stdout.flush()
+    dump = Path(step["dump"])
+    if step["finalized"]:
+        faulthandler.unregister(signals.SIGUSR1)
+    write_json(context.records.stopped, {"pid": os.getpid(), "point": "await_diagnostic_signal",
+                                          "finalized": step["finalized"]})
+    if step["finalized"]:
+        # a signal ignored after the unload leaves no trace here: the test says when to end
+        while not (context.records.directory / "finish_after_signal").exists():
+            time.sleep(0.01)
+    else:
+        while not (dump.is_file() and dump.stat().st_size > 0):
+            signals.pause()
+    write_json(context.records.directory / "exiting.json", {"epoch": time.time()})
+    raise SystemExit(_cli_code(context))
+
+
 def _step_stuck_solver_worker(context: _ChildContext, step: Mapping[str, Any]) -> None:
     import threading
 
@@ -552,6 +629,8 @@ STEP_HANDLERS: dict[str, Callable[[_ChildContext, Mapping[str, Any]], None]] = {
     "exit": _step_exit,
     "stop": _step_stop,
     "stuck_solver_worker": _step_stuck_solver_worker,
+    "pair_diagnostics": _step_pair_diagnostics,
+    "await_diagnostic_signal": _step_await_diagnostic_signal,
 }
 
 
