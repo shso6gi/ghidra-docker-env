@@ -251,11 +251,23 @@ def test_only_a_placed_token_passes_and_only_through_the_internal_freeze():
     with pytest.raises(TypeError, match="opaque object ElidedSemanticValue"):
         SnapshotFingerprintCodec._freeze_placing({"k": ElidedSemanticValue(token.value)}, placed)
 
+    import dataclasses
+
     class Keyed:
         def stable_key(self):
             return ("key", token)
 
-    with pytest.raises(TypeError, match="opaque object ElidedSemanticValue"):
-        SnapshotFingerprintCodec._freeze_placing({"k": Keyed()}, placed)
+    class Record:
+        def json_items(self):
+            yield "held", [token]
+
+    @dataclasses.dataclass(frozen=True)
+    class Fields:
+        held: object
+
+    # 置いた token そのものでも、入力の値（identity key・record の表現・dataclass の field）の中では token ではない
+    for value in (Keyed(), Record(), Fields(token)):
+        with pytest.raises(TypeError, match="ElidedSemanticValue"):
+            SnapshotFingerprintCodec._freeze_placing({"k": value}, placed)
     with pytest.raises(TypeError):
         PlacedTokens([object()])

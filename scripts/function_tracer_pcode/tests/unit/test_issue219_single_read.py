@@ -434,7 +434,7 @@ def test_a_view_that_reads_its_own_walk_never_receives_a_token(monkeypatch):
     _compare(factory, [("call", "canonical")] * 3, monkeypatch)
 
 
-@pytest.mark.parametrize("name", ["digest", "freeze", "_freeze_unmetered"])
+@pytest.mark.parametrize("name", ["digest", "freeze", "_freeze_unmetered", "_freeze_placing", "digest_frozen"])
 def test_a_replaced_codec_entry_is_not_the_canonical_path(monkeypatch, name):
     from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec
 
