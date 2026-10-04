@@ -79,9 +79,21 @@ def _closed_root(seed: int = 1) -> Expression:
     return Expression.binary_op("INT_ADD", _param(), Expression.constant(seed, size=4))
 
 
+def _constant(value: int, *, boxed: bool) -> Expression:
+    """大きさ 4 の定数。`boxed` なら `size` に subclass の scalar（`_BOXED_FOUR`）を置く。
+
+    置くのは構築の後で、入口を通さない: 構築と代入の入口は scalar の subclass を基底型へ写す（#235）ので、
+    入口を通すと closed になり、open な形の前提が崩れる。実 run の JPype の整数が残った状態と同じ形。
+    """
+
+    node = Expression.constant(value, size=4)
+    if boxed:
+        node.__dict__["size"] = _BOXED_FOUR
+    return node
+
+
 def _open_root(child: Expression, *, boxed: bool = True) -> Expression:
-    size = _BOXED_FOUR if boxed else 4
-    return Expression.binary_op("INT_AND", child, Expression.constant(3, size=size))
+    return Expression.binary_op("INT_AND", child, _constant(3, boxed=boxed))
 
 
 def _analysis(values: List[Expression], *, scope_key: Any = None) -> Any:
@@ -341,9 +353,9 @@ def _random_value(rng, pool: List[Expression], depth: int) -> Expression:
     if pool and rng.random() < 0.5:
         return rng.choice(pool)
     if depth <= 0:
-        size = _BOXED_FOUR if rng.random() < 0.5 else 4
+        boxed = rng.random() < 0.5
         node = rng.choice((
-            lambda: Expression.constant(rng.randrange(8), size=size),
+            lambda: _constant(rng.randrange(8), boxed=boxed),
             lambda: Expression.parameter("p%d" % rng.randrange(3), rng.randrange(3), size=4),
         ))()
     else:
@@ -360,7 +372,7 @@ def _rebuild(value: Expression) -> Expression:
     if operands:
         return Expression.binary_op(value.operator, *[_rebuild(item) for item in operands])
     if value.expr_type.name == "CONSTANT":
-        return Expression.constant(value.value, size=value.size)
+        return _constant(value.value, boxed=type(value.size) is _BoxedInt)
     return Expression.parameter(value.name, value.value, size=value.size)
 
 
@@ -379,7 +391,7 @@ def test_random_shapes_follow_the_body_at_every_budget_boundary(seed):
         pool.append(root)
         closed.append(root)
     opened = [_random_value(rng, pool, rng.randrange(1, 3)) for _ in range(rng.randrange(1, 3))]
-    opened = [Expression.binary_op("INT_AND", value, Expression.constant(1, size=_BOXED_FOUR)) for value in opened]
+    opened = [Expression.binary_op("INT_AND", value, _constant(1, boxed=True)) for value in opened]
     values = closed + opened
     prime = _analysis(values)
     choices = list(closed)
