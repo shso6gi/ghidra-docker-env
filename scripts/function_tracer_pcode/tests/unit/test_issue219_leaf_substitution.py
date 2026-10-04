@@ -272,3 +272,61 @@ def test_the_leaf_that_exceeds_the_limit_is_not_asked():
         with pytest.raises(JsonBudgetExhausted):
             _measured(_Fields(a=expr), asked, terminal=False)
     assert asked.leaves == []
+
+
+# ---------------------------------------------------------------------------
+# 置き換えは、それを claim した walk だけが使う（レビュー 5）
+# ---------------------------------------------------------------------------
+
+
+class _NestsAWalk:
+    """walk の中の producer: 自分の置き換えを効かせ、同じ作業量で値を LEGACY に作る（入れ子の walk）。"""
+
+    def __init__(self, work: Any, substitution: Any) -> None:
+        self.work = work
+        self.substitution = substitution
+        self.built: List[Any] = []
+
+    def json_items(self):
+        with substituting_leaves(self.work, self.substitution):
+            self.built.append(RESULT_JSON_POLICY.materialize(_Fields(a=_expr()), budget=self.work))
+        yield "nested", 1
+
+
+def test_a_walk_nested_inside_a_walk_never_uses_a_substitution_even_one_its_producer_armed():
+    with budget_policy_scope(BudgetPolicy()):
+        with serialization_scope(site="t", target_parts=("t",)) as work:
+            asked = _Asked()
+            producer = _NestsAWalk(work, asked)
+            RESULT_JSON_POLICY.materialize(_Fields(a=producer), budget=work)
+    assert producer.built == [{"a": _expr().to_dict()}]
+    assert asked.leaves == []
+
+
+def test_each_outermost_walk_under_one_arming_claims_it_in_turn():
+    """walk は claim を walk の間だけ持ち、終われば返す: 同じ `with` の中の次の walk も置き換えを使う。"""
+
+    with budget_policy_scope(BudgetPolicy()):
+        with serialization_scope(site="t", target_parts=("t",)) as work:
+            asked = _Asked()
+            with substituting_leaves(work, asked):
+                first = RESULT_JSON_POLICY.materialize(_Fields(a=_expr(3)), budget=work)
+                second = RESULT_JSON_POLICY.materialize(_Fields(a=_expr(4)), budget=work)
+    assert type(first["a"]) is _Marker and type(second["a"]) is _Marker
+    assert len(asked.leaves) == 2
+
+
+def test_another_thread_cannot_claim_an_armed_substitution_even_when_no_walk_holds_it():
+    import threading
+
+    with budget_policy_scope(BudgetPolicy()):
+        with serialization_scope(site="t", target_parts=("t",)) as work:
+            asked = _Asked()
+            built: List[Any] = []
+            with substituting_leaves(work, asked):
+                thread = threading.Thread(
+                    target=lambda: built.append(RESULT_JSON_POLICY.materialize(_Fields(a=_expr()), budget=work)))
+                thread.start()
+                thread.join()
+    assert built == [{"a": _expr().to_dict()}]
+    assert asked.leaves == []

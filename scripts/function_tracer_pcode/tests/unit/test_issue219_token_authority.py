@@ -246,6 +246,33 @@ def _producers(monkeypatch):
     yield
 
 
+def _compare_exercising_tokens(factory, steps, monkeypatch) -> None:
+    """oracle の比較に加えて、on が実際に token を置いて再利用の経路を通ったこと（別の理由の miss / bypass で
+    反例が隠れていないこと）を確かめる。"""
+
+    placed: List[bool] = []
+    real = oracle.snapshot_reuse.read_snapshot_inputs
+
+    def spy(analysis, hook):
+        try:
+            return real(analysis, hook)
+        finally:
+            # 読みが例外で抜けても、hook が置いた token は見る（置いた後に入力の code が失敗した経路）
+            if oracle.snapshot_reuse._SNAPSHOT_REUSE_ENABLED:
+                placed.append(bool(hook.__placed_values__()))
+
+    monkeypatch.setattr(oracle.snapshot_reuse, "read_snapshot_inputs", spy)
+    metrics = oracle._compare(factory, steps, monkeypatch)
+    counts = metrics["on"].get("counts", {})
+    canonical_calls = sum(1 for kind, arg in steps if kind == "call" and arg == "canonical")
+    # 入力の code の中の再入（`from_function_analysis`）は別の直列化の中なので bypass する（外側の呼び出しは bypass しない）
+    assert not [key for key in counts if key.startswith("bypass:") and key != "bypass:nested_serialization"], counts
+    # 外側の呼び出しはすべて再利用の経路を通る（入力の再入も、読みの scope の外（直列化の target の key）で起きれば
+    # 1 回の request として数える: main と同じ回数・順で走る）
+    assert counts.get("requests", 0) >= canonical_calls, counts
+    assert placed and any(placed), placed
+
+
 def _factory(producer: str, where: str):
     def factory() -> oracle.State:
         state = oracle.State(["plain", producer], pending=False)
@@ -265,7 +292,7 @@ def test_input_code_that_calls_the_codec_sees_the_same_answer_as_main(producer, 
     復帰と hit の経路を含む）。"""
 
     steps = [("call", "canonical"), ("call", "canonical"), ("mutate", "mutate_plain"), ("call", "canonical")]
-    oracle._compare(_factory(producer, where), steps, monkeypatch)
+    _compare_exercising_tokens(_factory(producer, where), steps, monkeypatch)
 
 
 def test_a_token_the_input_made_in_the_snapshot_id_is_rejected_as_in_main(monkeypatch):
@@ -343,7 +370,7 @@ def test_a_value_built_in_a_fresh_context_and_kept_in_the_snapshot_id_is_the_sam
         state.analysis.return_abi_facts["p1"].target = state.analysis
         return state
 
-    oracle._compare(factory, [("call", "canonical"), ("call", "canonical")], monkeypatch)
+    _compare_exercising_tokens(factory, [("call", "canonical"), ("call", "canonical")], monkeypatch)
 
 
 class _Leaves(LeafSubstitution):
@@ -391,7 +418,7 @@ def test_a_substitution_left_armed_by_a_suspended_generator_behaves_as_in_main(m
         state.analysis.analysis_scope_key = ("scope", state.analysis.return_abi_facts.pop("p2"))
         return state
 
-    oracle._compare(factory, [("call", "canonical")], monkeypatch)
+    _compare_exercising_tokens(factory, [("call", "canonical")], monkeypatch)
 
 
 class SwapsTheFunctionRef(_Recorder):
