@@ -14,12 +14,14 @@ which term of the formula.  (The reviewers' regressions are in
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from scripts.function_tracer_pcode.core.stage_journal_reader import JournalRow, JournalSegment
 from scripts.function_tracer_pcode.reporting import deadline_margin_acceptance as acceptance
 from scripts.function_tracer_pcode.reporting import deadline_margin_summary as margin
 from scripts.function_tracer_pcode.tests.unit.test_issue106b_review1_regressions import (
+    _journal_end,
     _resolved_unknown,
     _root,
     _row,
@@ -29,15 +31,13 @@ from scripts.function_tracer_pcode.tests.unit.test_issue106b_review1_regressions
 )
 
 
-def _segment(rows):
-    return JournalSegment(index=0, rows=tuple(
-        JournalRow(
-            line_number=index, seq=row["seq"], event=row["event"], stage=row["stage"],
-            seconds=row["seconds"], t_monotonic=row["t_monotonic"], t_epoch=row["t_epoch"],
-            pid=row["pid"], payload=row["payload"],
-        )
-        for index, row in enumerate(rows, start=1)
-    ))
+def _sealed_view(tmp_path, rows):
+    """The journal a child that exited normally leaves (sealed), read the way the margin reads it."""
+
+    path = tmp_path / "pair.stage.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in [*rows, _journal_end(rows)]),
+                    encoding="utf-8")
+    return margin.JournalView.read(path, None)
 
 
 def _journal(origin_at=20.0, budget=100.0, overrun=1.5, finalize=0.4, emit=0.3):
@@ -54,10 +54,10 @@ def _journal(origin_at=20.0, budget=100.0, overrun=1.5, finalize=0.4, emit=0.3):
     return rows, finalize_start + finalize + 0.1 + emit
 
 
-def _observe(rows, sidecar, outcome="UNKNOWN"):
+def _observe(tmp_path, rows, sidecar, outcome="UNKNOWN"):
     return margin.observe_pair(
         "k", outcome, termination="resolved", timeout_kind=None,
-        segment=_segment(rows), segment_reason=None, sidecar=sidecar,
+        journal=_sealed_view(tmp_path, rows), sidecar=sidecar,
     )
 
 
@@ -75,9 +75,9 @@ def _run(root):
     return margin.observe_run(root)
 
 
-def test_the_intervals_add_up_to_the_time_charged_minus_the_budget():
+def test_the_intervals_add_up_to_the_time_charged_minus_the_budget(tmp_path):
     rows, last_at = _journal()
-    pair = _observe(rows, _sidecar(last_at + 2.5))
+    pair = _observe(tmp_path, rows, _sidecar(last_at + 2.5))
 
     assert pair.cut is True and pair.missing == {}
     assert pair.values["pre"] == pytest.approx(20.0)
@@ -88,19 +88,19 @@ def test_the_intervals_add_up_to_the_time_charged_minus_the_budget():
     assert sum(pair.post_trip_parts.values()) == pytest.approx(pair.values["post_trip"])
 
 
-def test_a_pair_that_did_not_trip_is_not_cut_and_has_no_intervals():
+def test_a_pair_that_did_not_trip_is_not_cut_and_has_no_intervals(tmp_path):
     rows = [_row(1, "note", 0.0, payload={"note": "pair_journal_opened"})]
-    pair = _observe(rows, _sidecar(10.0), outcome="EQUIVALENT")
+    pair = _observe(tmp_path, rows, _sidecar(10.0), outcome="EQUIVALENT")
 
     assert pair.cut is False
     assert pair.values == {} and pair.missing == {}
 
 
-def test_a_sidecar_without_the_deadline_loses_only_the_intervals_that_need_it():
+def test_a_sidecar_without_the_deadline_loses_only_the_intervals_that_need_it(tmp_path):
     rows, last_at = _journal()
     sidecar = _sidecar(last_at + 1.0)
     del sidecar["deadline_monotonic"]
-    pair = _observe(rows, sidecar)
+    pair = _observe(tmp_path, rows, sidecar)
 
     assert sorted(pair.values) == ["overrun", "post_trip"]
     assert pair.missing == {
@@ -118,10 +118,11 @@ def test_a_journal_with_two_executions_and_no_child_identity_is_not_read(tmp_pat
                 sidecar=_sidecar(last_at + 1.0))
     (pair,) = margin.observe_run(root).pairs
 
-    # the old execution's 40 s overrun is never read as the current one's
-    assert pair.cut is None
-    assert pair.cut_unknown_reason == "journal: ambiguous_multi_execution"
+    # the old execution's 40 s overrun is never read as the current one's: the result says the
+    # deadline cut the pair, but no interval is taken from an ambiguous journal
+    assert pair.cut is True
     assert pair.values == {}
+    assert set(pair.missing.values()) == {"journal: ambiguous_multi_execution"}
 
 
 def test_a_run_tree_keeps_every_pair_and_its_reason(tmp_path):
@@ -132,7 +133,7 @@ def test_a_run_tree_keeps_every_pair_and_its_reason(tmp_path):
                 journal=[_row(1, "note", 0.0, payload={"note": "pair_journal_opened"})],
                 sidecar=_sidecar(10.0))
     _write_pair(root, "f_B5_B6", _resolved_unknown(), journal=rows)          # no sidecar
-    _write_pair(root, "f_B7_B8", _resolved_unknown())                        # no journal
+    _write_pair(root, "f_B7_B8", _resolved_unknown(), log="")                # no journal, no result
     pairs = {pair.key[-7:]: pair for pair in margin.observe_run(root).pairs}
 
     assert sorted(pairs) == ["f_B1_B2", "f_B3_B4", "f_B5_B6", "f_B7_B8"]
@@ -149,17 +150,19 @@ def test_a_run_tree_keeps_every_pair_and_its_reason(tmp_path):
 def test_the_run_facts_come_from_the_manifest(tmp_path):
     root = tmp_path / "eq"
     root.mkdir()
-    _write_pair(root, "f_B1_B2", {"canonical_outcome": "EQUIVALENT"},
-                journal=[_row(1, "note", 0.0, payload={"note": "pair_journal_opened"})])
     (root / "run_manifest.txt").write_text(
         "analysis_timeout=410\npair_process_timeout_seconds=600\nparallel_jobs=32\n"
         "git_commit=abc\ngit_dirty=0\n", encoding="utf-8")
+    _write_pair(root, "f_B1_B2", {"canonical_outcome": "EQUIVALENT"},
+                journal=[_row(1, "note", 0.0, payload={"note": "pair_journal_opened"})])
     facts = margin.observe_run(root).facts
 
     assert (facts.deadline_seconds, facts.pair_process_timeout_seconds, facts.parallel_jobs,
             facts.git_commit, facts.git_dirty) == (410.0, 600.0, 32, "abc", False)
     assert facts.samples == frozenset({"REVE/sample/Eq/new"})
     (root / "run_manifest.txt").write_text("analysis_timeout=0\n", encoding="utf-8")
+    _write_pair(root, "f_B1_B2", {"canonical_outcome": "EQUIVALENT"},
+                journal=[_row(1, "note", 0.0, payload={"note": "pair_journal_opened"})])
     assert margin.observe_run(root).facts.deadline_off is True
 
 
@@ -173,7 +176,8 @@ def test_a_manifest_without_the_deadline_takes_the_single_trip_budget(tmp_path):
 
     assert facts.deadline_seconds == 100.0
     assert facts.deadline_source == (
-        "deadline_tripped budget_seconds (the manifest does not record it)")
+        "deadline_tripped budget_seconds=100, result analysis_deadline budget_seconds=100 "
+        "(the manifest does not record it)")
 
 
 def test_percentiles_are_nearest_rank_and_p99_needs_enough_samples():

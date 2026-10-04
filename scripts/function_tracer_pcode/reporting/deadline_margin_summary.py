@@ -85,9 +85,11 @@ from scripts.function_tracer_pcode.authority.contracts import Outcome
 from scripts.function_tracer_pcode.core.deadline import parse_budget_seconds
 from scripts.function_tracer_pcode.core.stage_journal_reader import (
     SUMMARY_READ_LIMIT_BYTES,
+    JournalRow,
     JournalSegment,
+    end_attestation_problem,
     read_stage_journal,
-    select_current_segment,
+    select_verified_segment,
     stage_intervals,
 )
 from scripts.function_tracer_pcode.reporting import deadline_margin_acceptance as acceptance
@@ -190,6 +192,8 @@ class PairObservation:
     entered_lead_window: bool = False
     #: 妥当な trip の note が記録した解析の期限（run の事実の照合に使う）
     budget_seconds: Optional[float] = None
+    #: 結果 JSON の ``analysis_deadline`` が記録した解析の期限（run の事実の照合に使う）
+    result_budget_seconds: Optional[float] = None
     #: sidecar が記録した process の期限（run の事実の照合に使う）
     process_timeout_seconds: Optional[float] = None
     trip_stage: Optional[str] = None
@@ -205,6 +209,8 @@ class PairObservation:
         _require_finite("PairObservation", "needed", self.needed)
         _require_finite("PairObservation", "lead_seconds", self.lead_seconds, nonnegative=True)
         _require_finite("PairObservation", "budget_seconds", self.budget_seconds, positive=True)
+        _require_finite("PairObservation", "result_budget_seconds", self.result_budget_seconds,
+                        positive=True)
         _require_finite("PairObservation", "process_timeout_seconds",
                         self.process_timeout_seconds, positive=True)
 
@@ -216,6 +222,7 @@ class PairObservation:
             "missing": dict(self.missing), "lead_seconds": self.lead_seconds,
             "needed": self.needed, "entered_lead_window": self.entered_lead_window,
             "budget_seconds": self.budget_seconds,
+            "result_budget_seconds": self.result_budget_seconds,
             "process_timeout_seconds": self.process_timeout_seconds,
             "trip_stage": self.trip_stage, "post_trip_parts": dict(self.post_trip_parts),
         }
@@ -266,13 +273,20 @@ def _read_key_values(path: Path) -> Dict[str, str]:
 
 def _measured(value: Any, name: str, *, positive: bool = False,
               nonnegative: bool = False) -> Tuple[Optional[float], str]:
-    """記録された数値を、有限で値域に入るときだけ値にする（入らなければ理由）。"""
+    """記録された数値を、有限な double で値域に入るときだけ値にする（入らなければ理由）。
+
+    外部の記録の不正（欠け・型・``NaN`` / ``Infinity``・double を越える整数・値域）は理由付きの
+    欠測にする（例外にしない）。record の不変条件（`_require_finite`）は内部の bug の検出に残す。
+    """
 
     if value is None:
         return None, f"{name} is missing"
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None, f"{name} is not a number"
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return None, f"{name} is outside the range of a double"
     if not math.isfinite(number):
         return None, f"{name} is not a finite number"
     if positive and number <= 0:
@@ -280,6 +294,18 @@ def _measured(value: Any, name: str, *, positive: bool = False,
     if nonnegative and number < 0:
         return None, f"{name} is negative"
     return number, ""
+
+
+def _derived(value: Optional[float], name: str) -> Tuple[Optional[float], str]:
+    """有限な記録どうしの派生値（和・差）を、有限なときだけ値にする。
+
+    個々に有限な記録でも組み合わせると double を越え得る（``1e308 + 1e308``）。それは記録の
+    組み合わせが値域に入らない証拠の不正で、理由付きの欠測にする。
+    """
+
+    if value is None or math.isfinite(value):
+        return value, ""
+    return None, f"{name} is not a finite number (the recorded values it is derived from are out of range)"
 
 
 def _manifest_seconds(text: Optional[str], name: str, *, allow_zero: bool = False,
@@ -295,6 +321,17 @@ def _manifest_seconds(text: Optional[str], name: str, *, allow_zero: bool = Fals
         return parse_budget_seconds(number), ""
     except ValueError:
         return None, f"run_manifest {name}={text!r} is not a valid number of seconds"
+
+
+def _manifest_count(text: Optional[str]) -> Optional[int]:
+    """manifest の件数（10 進の数字だけ）。読めなければ ``None``（例外にしない）。"""
+
+    if not text or not text.isascii() or not text.isdigit():
+        return None
+    try:
+        return int(text)
+    except ValueError:                                     # 桁数の上限を越える
+        return None
 
 
 def _sidecar_number(sidecar: Optional[Mapping[str, Any]], key: str, *, positive: bool = False,
@@ -313,7 +350,7 @@ class _Trip:
     stage: str
 
 
-def _trip_note(row: Any) -> Tuple[Optional[_Trip], str]:
+def _trip_note(row: JournalRow) -> Tuple[Optional[_Trip], str]:
     """trip の note を、全体として妥当なときだけ読む（1 つでも欠ければ note 全体を使わない）。
 
     負の overrun（期限の前に始めるのを断った）の範囲は期限の機構の規則なので、ここでは
@@ -331,15 +368,119 @@ def _trip_note(row: Any) -> Tuple[Optional[_Trip], str]:
     if problem:
         return None, problem
     stage = row.payload.get("stage")
-    return _Trip(at=row.t_monotonic, budget=budget, elapsed=elapsed,
-                 stage=stage if isinstance(stage, str) else "?"), ""
+    if not isinstance(stage, str) or not stage:
+        return None, "deadline_tripped stage is missing"
+    return _Trip(at=row.t_monotonic, budget=budget, elapsed=elapsed, stage=stage), ""
 
 
-def _tripped(segment: JournalSegment) -> List[Any]:
+def _tripped(segment: JournalSegment) -> List[JournalRow]:
     return [
         row for row in segment.rows
         if row.event == "note" and row.payload.get("note") == TRIP_NOTE
     ]
+
+
+# ---------------------------------------------------------------------------
+# 期限で打ち切ったかの 2 つの出所（journal と結果 JSON）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class JournalView:
+    """margin が journal から使ってよいもの: 損失の無い current segment と、終わりの証明。
+
+    ``segment`` が ``None`` なら ``problem`` がその理由（読めない・曖昧・損失がある・trip の行が
+    契約に反する）。``end_problem`` が ``None`` なのは ``journal_end`` で終わりまで証明された
+    segment だけ（それ以外では「trip の行が無い」から trip が無かったとは言えない）。
+    """
+
+    segment: Optional[JournalSegment]
+    problem: str = ""
+    trips: Tuple[JournalRow, ...] = ()
+    end_problem: Optional[str] = "no journal"
+
+    @classmethod
+    def read(cls, path: Any, sidecar: Optional[Mapping[str, Any]]) -> "JournalView":
+        read = read_stage_journal(path, max_bytes=SUMMARY_READ_LIMIT_BYTES)
+        segment, reason = select_verified_segment(
+            read,
+            pid=(sidecar or {}).get("child_pid"),
+            start_token=(sidecar or {}).get("child_start_token"),
+        )
+        if segment is None:
+            text = reason if (reason or "").startswith("journal incomplete") else f"journal: {reason}"
+            return cls(segment=None, problem=text)
+        trips = tuple(_tripped(segment))
+        if len(trips) > 1:
+            return cls(segment=None, problem=(
+                f"journal records {TRIP_NOTE} {len(trips)} times (the deadline writes it once)"))
+        return cls(segment=segment, trips=trips, end_problem=end_attestation_problem(segment))
+
+
+@dataclass(frozen=True)
+class DeadlineRecord:
+    """結果 JSON の ``diagnostics.analysis_deadline``（`core.deadline.Deadline.diagnostic`）。
+
+    checker が解析の期限の scope の終わりに書く、期限の持ち主自身の最終記録。scope の外では
+    期限は trip しないので、``tripped`` は「この解析で trip したか」の完全な記録になる。
+    """
+
+    tripped: bool
+    budget_seconds: float
+
+
+def deadline_record(payload: Optional[Mapping[str, Any]]) -> Tuple[Optional[DeadlineRecord], str]:
+    """``(記録, "")`` / ``(None, "")``（記録が無い）/ ``(None, 理由)``（記録が契約に合わない）。"""
+
+    if not isinstance(payload, Mapping):
+        return None, ""
+    diagnostics = payload.get("diagnostics")
+    if not isinstance(diagnostics, Mapping) or "analysis_deadline" not in diagnostics:
+        return None, ""
+    block = diagnostics["analysis_deadline"]
+    if not isinstance(block, Mapping):
+        return None, "result analysis_deadline is not an object"
+    tripped = block.get("tripped")
+    if not isinstance(tripped, bool):
+        return None, "result analysis_deadline tripped is not a boolean"
+    budget, problem = _measured(block.get("budget_seconds"),
+                                "result analysis_deadline budget_seconds", positive=True)
+    if problem:
+        return None, problem
+    stage = block.get("trip_stage")
+    if tripped != (isinstance(stage, str) and bool(stage)):
+        return None, "result analysis_deadline trip_stage does not match tripped"
+    return DeadlineRecord(tripped=tripped, budget_seconds=budget), ""
+
+
+def deadline_cut(
+    journal: JournalView, record: Optional[DeadlineRecord], record_problem: str,
+) -> Tuple[Optional[bool], str]:
+    """期限で打ち切ったか: ``(True / False / None, 読めない理由)``。
+
+    trip が「無かった」と言えるのは、結果 JSON の記録が ``tripped: false`` のときか、``journal_end``
+    で終わりまで証明された journal に trip の行が無いときだけ。2 つの出所が両方あれば照合する
+    （食い違えば ``None``）。不完全な証拠から trip の不在を結論しない。
+    """
+
+    if record_problem:
+        return None, record_problem
+    journal_trip = None if journal.segment is None else bool(journal.trips)
+    attested = journal.segment is not None and journal.end_problem is None
+    if record is not None:
+        if journal_trip is True and not record.tripped:
+            return None, f"the journal records {TRIP_NOTE} but the result's analysis_deadline does not"
+        if journal_trip is False and record.tripped and attested:
+            return None, f"the result's analysis_deadline records a trip the attested journal does not"
+        return record.tripped, ""
+    if journal_trip is None:
+        return None, f"{journal.problem}; no result records analysis_deadline"
+    if journal_trip:
+        return True, ""
+    if attested:
+        return False, ""
+    return None, (f"no {TRIP_NOTE} row, but {journal.end_problem}; "
+                  "no result records analysis_deadline")
 
 
 def post_trip_parts(
@@ -393,13 +534,14 @@ def _timeout_termination(timeout_kind: Optional[str]) -> str:
 
 def observe_pair(
     key: str, outcome: str, *, termination: str, timeout_kind: Optional[str],
-    segment: Optional[JournalSegment], segment_reason: Optional[str],
-    sidecar: Optional[Mapping[str, Any]],
+    journal: JournalView, sidecar: Optional[Mapping[str, Any]],
+    result_payload: Optional[Mapping[str, Any]] = None,
 ) -> PairObservation:
     """1 pair の観測。区間は 1 つずつ別に求め、測れない区間は理由を残す（0 で埋めない）。
 
-    ``segment`` は完全に読めた journal の current execution だけを渡す（不完全・曖昧なら
-    ``None`` と理由。`observe_run`）。完全な journal に trip が無いときだけ ``cut=False``。
+    打ち切ったかは `deadline_cut`（journal と結果 JSON の照合）。区間は損失の無い journal の
+    trip の行から、``post_trip`` / ``tail`` は終わりが証明された journal からだけ求める。
+    記録と派生値は有限で値域に入るときだけ値にする（不正な外部の記録は例外にしない）。
     """
 
     entered = bool(
@@ -408,50 +550,61 @@ def observe_pair(
     )
     process, process_problem = _sidecar_number(sidecar, "timeout_seconds", positive=True)
     lead, lead_problem = _sidecar_number(sidecar, "lead_seconds", nonnegative=True)
+    record, record_problem = deadline_record(result_payload)
     base = dict(key=key, outcome=outcome, termination=termination,
                 timeout_kind=timeout_kind, entered_lead_window=entered,
-                lead_seconds=lead, process_timeout_seconds=process)
-    if segment is None:
-        return PairObservation(cut=None, cut_unknown_reason=segment_reason or "journal: unknown",
-                               **base)
-    trips = _tripped(segment)
-    if not trips:
+                lead_seconds=lead, process_timeout_seconds=process,
+                result_budget_seconds=None if record is None else record.budget_seconds)
+    cut, cut_problem = deadline_cut(journal, record, record_problem)
+    if cut is None:
+        return PairObservation(cut=None, cut_unknown_reason=cut_problem, **base)
+    if not cut:
         return PairObservation(cut=False, **base)
-    trip, note_problem = _trip_note(trips[0])
-    values: Dict[str, float] = {}
     missing: Dict[str, str] = {}
+    trip, note_problem = (None, journal.problem or (
+        f"the journal has no {TRIP_NOTE} row ({journal.end_problem})"))
+    if journal.segment is not None and journal.trips:
+        trip, note_problem = _trip_note(journal.trips[0])
     if trip is None:
-        for name in (*acceptance.TERM_POOLS, acceptance.LEAD):
+        for name in acceptance.TERM_POOLS:
             missing[name] = note_problem
+        if lead is None:
+            missing[acceptance.LEAD] = lead_problem
         return PairObservation(cut=True, missing=missing, **base)
-    untimed = sum(1 for row in segment.rows if row.t_monotonic is None)
-    last = None if untimed else max(row.t_monotonic for row in segment.rows)
-    last_problem = f"{untimed} journal row(s) have no time" if untimed else ""
+    values: Dict[str, float] = {}
+
+    def put(name: str, value: Optional[float], problem: str) -> Optional[float]:
+        value, derived_problem = _derived(value, name)
+        if value is None:
+            missing[name] = derived_problem or problem
+        else:
+            values[name] = round(value, 3)
+        return value
+
+    end_problem = journal.end_problem
+    last = None if end_problem else journal.segment.rows[-1].t_monotonic
     deadline, deadline_problem = _sidecar_number(sidecar, "deadline_monotonic")
     offset, offset_problem = _sidecar_number(sidecar, "cancel_linearized_offset_seconds")
     if entered:
         offset_problem = "the child exit was not observed before the stack-dump send"
-    child_exit = None if deadline is None or offset is None or entered else deadline + offset
-    origin = None if deadline is None or process is None else deadline - process
-
-    def put(name: str, value: Optional[float], problem: str) -> None:
-        if value is None:
-            missing[name] = problem
-        else:
-            values[name] = round(value, 3)
-
+    child_exit, exit_problem = _derived(
+        None if deadline is None or offset is None or entered else deadline + offset,
+        "the child exit (deadline_monotonic + cancel_linearized_offset_seconds)")
+    origin, origin_problem = _derived(
+        None if deadline is None or process is None else deadline - process,
+        "the process deadline's origin (deadline_monotonic - timeout_seconds)")
     pre = None if origin is None else trip.at - trip.elapsed - origin
     if pre is not None and pre < 0:
         put("pre", None, f"the analysis started {-pre:g}s before the process deadline's origin")
     else:
-        put("pre", pre, deadline_problem or process_problem)
+        put("pre", pre, origin_problem or deadline_problem or process_problem)
     put("overrun", trip.elapsed - trip.budget, "")
-    put("post_trip", None if last is None else last - trip.at, last_problem)
+    put("post_trip", None if last is None else last - trip.at, end_problem or "")
     tail = None if child_exit is None or last is None else child_exit - last
     if tail is not None and tail < 0:
         put("tail", None, f"the child exit was observed {-tail:g}s before the last journal event")
     else:
-        put("tail", tail, deadline_problem or offset_problem or last_problem)
+        put("tail", tail, exit_problem or deadline_problem or offset_problem or end_problem or "")
     for name in acceptance.TERM_POOLS:
         if name not in values and name not in missing:
             missing[name] = "no observer for this interval"
@@ -459,11 +612,16 @@ def observe_pair(
         missing[acceptance.LEAD] = lead_problem
     needed = None
     if not missing and child_exit is not None and origin is not None:
-        needed = round(child_exit - origin - trip.budget, 3)
-    parts = {}
+        needed, problem = _derived(child_exit - origin - trip.budget, "needed")
+        if needed is None:
+            missing["needed"] = problem
+        else:
+            needed = round(needed, 3)
+    parts: Dict[str, float] = {}
     if last is not None:
-        parts = {name: round(value, 3)
-                 for name, value in post_trip_parts(segment, trip.at, last).items()}
+        raw = post_trip_parts(journal.segment, trip.at, last)
+        if all(math.isfinite(value) for value in raw.values()):
+            parts = {name: round(value, 3) for name, value in raw.items()}
     return PairObservation(
         cut=True, values=values, missing=missing, needed=needed,
         budget_seconds=trip.budget, trip_stage=trip.stage, post_trip_parts=parts, **base,
@@ -481,37 +639,42 @@ def _fmt(values: Iterable[float]) -> str:
 
 
 def _reconcile(fact: str, manifest_key: str, manifest: Tuple[Optional[float], str],
-               recorded: Iterable[float], recorded_label: str,
+               recorded: Mapping[str, Sequence[float]],
                ) -> Tuple[Optional[float], str, Tuple[str, ...]]:
-    """同じ事実の 2 つの出所を照合する: ``(値, 値の出所, 食い違い)``。
+    """同じ事実の出所を照合する: ``(値, 値の出所, 食い違い)``。
 
-    manifest があれば、記録された値はすべてそれと等しくなければならない（同じ double を
-    CLI / supervisor が読んで書く）。manifest が無ければ、記録された値が 1 つのときだけ採る。
+    ``recorded`` は出所の名前 → 記録された値。manifest があれば、記録された値はすべてそれと
+    等しくなければならない（同じ double を CLI / supervisor が読んで書く）。manifest が無ければ、
+    記録された値がすべての出所で 1 つのときだけ採る。
     """
 
     value, problem = manifest
-    seen = set(recorded)
+    present = {label: set(values) for label, values in recorded.items() if values}
+    seen = set().union(*present.values()) if present else set()
+    described = ", ".join(f"{label}={_fmt(values)}" for label, values in present.items())
+    labels = " / ".join(recorded)
     if problem:
         return None, problem, (problem,)
     if value is not None:
         if seen - {value}:
             return None, f"{fact} disagrees between sources", (
                 f"{fact} disagrees between sources (run_manifest {manifest_key}={value:g}, "
-                f"{recorded_label}={_fmt(seen)})",)
+                f"{described})",)
         return value, f"run_manifest {manifest_key}", ()
     if len(seen) == 1:
-        return next(iter(seen)), f"{recorded_label} (the manifest does not record it)", ()
+        return next(iter(seen)), f"{described} (the manifest does not record it)", ()
     if len(seen) > 1:
         return None, f"{fact} disagrees between sources", (
-            f"{fact} disagrees between sources ({recorded_label}={_fmt(seen)})",)
-    return None, f"neither run_manifest {manifest_key} nor {recorded_label} records it", ()
+            f"{fact} disagrees between sources ({described})",)
+    return None, f"neither run_manifest {manifest_key} nor {labels} records it", ()
 
 
 def observe_run(root: Path) -> RunObservation:
     """result tree（1 half）の観測。pair を 1 件も除かない。
 
-    journal は完全に読めたときだけ使う（`JournalRead.incomplete_reasons`）。run の事実は
-    manifest と pair の記録（trip の budget・sidecar）を照合して決める（`_reconcile`）。
+    journal は損失の無い current segment だけを使う（`JournalView`）。打ち切ったかは journal と
+    結果 JSON の照合（`deadline_cut`）。run の事実は manifest と pair の記録（trip の budget・結果の
+    budget・sidecar）を照合して決める（`_reconcile`）。
     """
 
     root = Path(root)
@@ -521,58 +684,53 @@ def observe_run(root: Path) -> RunObservation:
         key = str(Path(record.status_path).relative_to(root))[: -len(PAIR_STATUS_SUFFIX)]
         evidence = load_pair_evidence(record.status_path)
         kind = evidence.timeout_kind_report().kind if record.outcome == TIMEOUT_OUTCOME else None
-        sidecar = evidence.sidecar
-        read = read_stage_journal(evidence.paths.journal, max_bytes=SUMMARY_READ_LIMIT_BYTES)
-        segment, reason = select_current_segment(
-            read,
-            pid=(sidecar or {}).get("child_pid"),
-            start_token=(sidecar or {}).get("child_start_token"),
-        )
-        if segment is None:
-            reason = f"journal: {reason}"
-        elif read.incomplete_reasons:
-            segment, reason = None, f"journal incomplete: {', '.join(read.incomplete_reasons)}"
         pairs.append(observe_pair(
             key, record.outcome, termination=termination_of(record.outcome, kind),
-            timeout_kind=kind, segment=segment, segment_reason=reason, sidecar=sidecar,
+            timeout_kind=kind, journal=JournalView.read(evidence.paths.journal, evidence.sidecar),
+            sidecar=evidence.sidecar, result_payload=evidence.result_payload,
         ))
-    budgets = [pair.budget_seconds for pair in pairs if pair.budget_seconds is not None]
+    budgets = {
+        f"{TRIP_NOTE} budget_seconds":
+            [pair.budget_seconds for pair in pairs if pair.budget_seconds is not None],
+        "result analysis_deadline budget_seconds":
+            [pair.result_budget_seconds for pair in pairs if pair.result_budget_seconds is not None],
+    }
     manifest_deadline = _manifest_seconds(manifest.get("analysis_timeout"), "analysis_timeout",
                                           allow_zero=True)
     deadline_off = manifest_deadline == (0.0, "")
     conflicts: List[str] = []
     if deadline_off:
         deadline, source = None, "run_manifest analysis_timeout=0 (off)"
-        if budgets:
+        recorded = ", ".join(f"{label}={_fmt(values)}" for label, values in budgets.items() if values)
+        if recorded:
             conflicts.append(
                 "analysis deadline disagrees between sources (run_manifest analysis_timeout=0 "
-                f"(off), deadline_tripped budget_seconds={_fmt(budgets)})")
+                f"(off), {recorded})")
     else:
         deadline, source, found = _reconcile(
-            "analysis deadline", "analysis_timeout", manifest_deadline, budgets,
-            "deadline_tripped budget_seconds")
+            "analysis deadline", "analysis_timeout", manifest_deadline, budgets)
         conflicts.extend(found)
     process, _, found = _reconcile(
         "process timeout", "pair_process_timeout_seconds",
         _manifest_seconds(manifest.get("pair_process_timeout_seconds"),
                           "pair_process_timeout_seconds"),
-        [pair.process_timeout_seconds for pair in pairs if pair.process_timeout_seconds is not None],
-        "stack-dump sidecar timeout_seconds")
+        {"stack-dump sidecar timeout_seconds": [
+            pair.process_timeout_seconds for pair in pairs
+            if pair.process_timeout_seconds is not None]})
     conflicts.extend(found)
     lead, _, found = _reconcile(
         "stack-dump lead", "pair_stack_dump_lead",
         _manifest_seconds(manifest.get("pair_stack_dump_lead"), "pair_stack_dump_lead",
                           allow_zero=True),
-        [pair.lead_seconds for pair in pairs if pair.lead_seconds is not None],
-        "stack-dump sidecar lead_seconds")
+        {"stack-dump sidecar lead_seconds": [
+            pair.lead_seconds for pair in pairs if pair.lead_seconds is not None]})
     conflicts.extend(found)
-    jobs = manifest.get("parallel_jobs")
     dirty = manifest.get("git_dirty")
     facts = RunFacts(
         root=str(root), deadline_seconds=deadline, deadline_off=deadline_off,
         deadline_source=source, pair_process_timeout_seconds=process,
         stack_dump_lead_seconds=lead,
-        parallel_jobs=int(jobs) if jobs and jobs.isdigit() else None,
+        parallel_jobs=_manifest_count(manifest.get("parallel_jobs")),
         git_commit=manifest.get("git_commit") or None,
         git_dirty=None if dirty not in ("0", "1") else dirty == "1",
         samples=frozenset(_sample_of(pair.key) for pair in pairs),

@@ -204,12 +204,13 @@ def test_pair_without_a_journal(tmp_path, pool):
     root, pools = _scenario(tmp_path, pool)
     if pool != "P":
         _cut(root)
-    _write_pair(root, "f_B3_B4", _resolved_unknown(), sidecar=_sidecar(30.0))
+    _write_pair(root, "f_B3_B4", _resolved_unknown(), sidecar=_sidecar(30.0), log="")
     verdict = _verdict(tmp_path, **pools)
 
     assert verdict["status"] == "undetermined", verdict
     assert verdict["undetermined"] == [
-        f"pool {pool}: pair {KEY_2}: cannot tell whether the deadline cut it (journal: journal_not_regular_file)"
+        f"pool {pool}: pair {KEY_2}: cannot tell whether the deadline cut it "
+        "(journal: journal_not_regular_file; no result records analysis_deadline)"
     ]
 
 
@@ -218,7 +219,14 @@ def test_pair_without_a_journal(tmp_path, pool):
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("pool, expected", [("P", "violated"), ("L", "violated"), ("F", "holds")])
+#: a killed child neither seals its journal nor prints a result: nothing says it was not cut
+_KILLED_UNKNOWN = ("cannot tell whether the deadline cut it (no deadline_tripped row, but no "
+                   "journal_end row (the end is not attested); no result records analysis_deadline)")
+
+
+@pytest.mark.parametrize("pool, expected", [
+    ("P", "violated"), ("L", "violated"), ("F", "undetermined"),
+])
 def test_process_timeout(tmp_path, pool, expected):
     root, pools = _scenario(tmp_path, pool)
     if pool != "P":
@@ -231,6 +239,7 @@ def test_process_timeout(tmp_path, pool, expected):
         assert verdict["violations"] == [
             f"pool {pool}: pair {KEY_2}: process TIMEOUT in a run with the deadline"
         ]
+    assert verdict["undetermined"] == [f"pool {pool}: pair {KEY_2}: {_KILLED_UNKNOWN}"]
 
 
 @pytest.mark.parametrize("pool, expected", [
@@ -405,7 +414,8 @@ def test_a_termination_class_without_a_rule_is_undetermined(tmp_path, monkeypatc
 
     assert verdict["status"] == "undetermined", verdict
     assert verdict["undetermined"] == [
-        f"pool P: pair {KEY_2}: termination 'new_kind_of_end' has no acceptance rule"
+        f"pool P: pair {KEY_2}: termination 'new_kind_of_end' has no acceptance rule",
+        f"pool P: pair {KEY_2}: {_KILLED_UNKNOWN}",
     ]
 
 

@@ -252,6 +252,10 @@ def _pair_findings(
         if pool == POOL_P and pair.lead_seconds is None:
             reason = pair.missing.get(LEAD, "no stack-dump status sidecar")
             undetermined.append(f"{where}: lead unobserved ({reason})")
+        if (pool == POOL_P and pair.needed is None
+                and not any(name in pair.missing for name in (*pool_intervals(pool), LEAD))):
+            reason = pair.missing.get("needed", "not derived")
+            undetermined.append(f"{where}: needed unobserved ({reason})")
     return violations, undetermined
 
 

@@ -122,14 +122,15 @@ def test_a_pool_given_without_any_cut_pair_is_not_a_pass(tmp_path, pool):
 
 @pytest.mark.parametrize("pool", ["profile", "load", "pre"])
 def test_a_pair_whose_journal_is_missing_is_not_silently_dropped(tmp_path, pool):
-    """A TIMEOUT without a journal used to vanish from the measurement."""
+    """A TIMEOUT without a journal used to vanish from the measurement.  (Without a journal
+    and without a result: a result's own record of the deadline would settle "not cut".)"""
 
     profile = _root(tmp_path, "profile")
     _normal_pair(profile)
     other = profile if pool == "profile" else _root(tmp_path, "other")
     if pool != "profile":
         _normal_pair(other, "f_B5_B6")
-    _write_pair(other, "f_B3_B4", _resolved_timeout_status())
+    _write_pair(other, "f_B3_B4", _resolved_timeout_status(), log="")
     kwargs = {} if pool == "profile" else {pool: [other]}
     payload = _verdict(tmp_path, [profile], **kwargs)
 

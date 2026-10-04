@@ -21,6 +21,7 @@ the expectations are literal: none is computed with the code under test.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -74,8 +75,61 @@ def _sidecar(exit_at, *, signal_sent=False, evidence=None):
     }
 
 
+def _journal_end(rows):
+    """The row `StageJournal.seal()` writes when the child exits normally."""
+
+    last = rows[-1]
+    time = last.get("t_monotonic")
+    at = time - T0 if isinstance(time, float) and math.isfinite(time) else 0.0
+    return _row(last["seq"] + 1, "journal_end", at,
+                payload={"last_seq": last["seq"], "write_failures": 0})
+
+
+def _deadline_log(tripped=None, budget=BUDGET, stage="solver") -> str:
+    """The result JSON a child that finished prints.  ``tripped`` ``None`` = a run without the
+    deadline (no ``analysis_deadline``); otherwise the deadline's own final record
+    (`core.deadline.Deadline.diagnostic`, attached at the end of the deadline's scope)."""
+
+    diagnostics = {}
+    if tripped is not None:
+        diagnostics["analysis_deadline"] = {
+            "budget_seconds": budget, "elapsed_seconds": 1.0, "stage_reads": {},
+            "tripped": tripped, "trip_stage": stage if tripped else None,
+        }
+    return ("=== EQUIVALENCE_RESULT_JSON_BEGIN ===\n"
+            + json.dumps({"diagnostics": diagnostics}) + "\n=== EQUIVALENCE_RESULT_JSON_END ===\n")
+
+
+def _result_log(root: Path, journal) -> str:
+    """The result a finished child prints for this journal: the run's deadline (the CLI's
+    ``--analysis-timeout``, as the manifest records it) and whether the journal tripped."""
+
+    manifest = root / "run_manifest.txt"
+    fields = dict(line.split("=", 1) for line in manifest.read_text(encoding="utf-8").splitlines()
+                  if "=" in line) if manifest.is_file() else {}
+    deadline = fields.get("analysis_timeout", str(BUDGET)).rstrip("s")
+    if deadline in ("0", "0.0"):
+        return _deadline_log(None)
+    trips = [row for row in journal or ()
+             if isinstance(row.get("payload"), dict)
+             and row["payload"].get("note") == "deadline_tripped"]
+    return _deadline_log(bool(trips), budget=float(deadline))
+
+
 def _write_pair(root: Path, stem: str, status: dict, journal=None, sidecar=None,
-                runtime=None, log="no result json here\n"):
+                runtime=None, log=None, sealed=None):
+    """Write one pair the way the runner and the child do.
+
+    A child that exits normally seals its journal (`journal_end`) and prints its
+    result JSON with the deadline's record; a child the supervisor killed
+    (``supervisor_status`` TIMEOUT) does neither.
+    """
+
+    killed = status.get("supervisor_status") == "TIMEOUT"
+    if sealed is None:
+        sealed = not killed
+    if log is None:
+        log = "no result json here\n" if killed else _result_log(root, journal)
     folder = root / "REVE" / "sample" / "Eq" / "new" / "f"
     (folder / ".runtime-metrics").mkdir(parents=True, exist_ok=True)
     status = dict(status)
@@ -86,8 +140,9 @@ def _write_pair(root: Path, stem: str, status: dict, journal=None, sidecar=None,
     (folder / f"{stem}.pair-status.json").write_text(json.dumps(status), encoding="utf-8")
     (folder / f"{stem}.log").write_text(log, encoding="utf-8")
     if journal is not None:
+        rows = list(journal) + ([_journal_end(journal)] if sealed and journal else [])
         (folder / f"{stem}.stage.jsonl").write_text(
-            "".join(json.dumps(row) + "\n" for row in journal), encoding="utf-8")
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     if sidecar is not None:
         (folder / ".runtime-metrics" / f"{stem}.stack-dump.status.json").write_text(
             json.dumps(sidecar), encoding="utf-8")

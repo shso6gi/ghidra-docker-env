@@ -30,6 +30,7 @@ import pytest
 
 from scripts.function_tracer_pcode.reporting import deadline_margin_summary as margin
 from scripts.function_tracer_pcode.tests.unit.test_issue106b_review1_regressions import (
+    _deadline_log,
     _resolved_unknown,
     _row,
     _sidecar,
@@ -74,12 +75,28 @@ def _journal_path(root: Path, stem: str) -> Path:
     return root / "REVE" / "sample" / "Eq" / "new" / "f" / f"{stem}.stage.jsonl"
 
 
-def _slow_pair_with_journal_text(root: Path, text: str) -> None:
+def _slow_pair_with_journal_text(root: Path, text: str, log: str = "") -> None:
     """A pair that needed 120 s after the deadline (more than the margin), whose journal
-    is ``text``."""
+    is ``text``.  ``log`` is what the child printed (default: no result JSON)."""
 
-    _write_pair(root, "f_B3_B4", _resolved_unknown(), journal=[], sidecar=_sidecar(220.0))
+    _write_pair(root, "f_B3_B4", _resolved_unknown(), journal=[], sidecar=_sidecar(220.0),
+                log=log)
     _journal_path(root, "f_B3_B4").write_text(text, encoding="utf-8")
+
+
+#: the four intervals of a profile pair the deadline cut (the lead comes from the sidecar)
+_P_INTERVALS = ("pre", "overrun", "post_trip", "tail")
+
+
+def _lost(reason: str, result: str):
+    """The reasons a pair whose journal lost something gets: without a result nothing says
+    whether the deadline cut it; with the result's trip no interval is read from the journal."""
+
+    if result == "none":
+        return [f"pool P: pair {KEY_2}: cannot tell whether the deadline cut it "
+                f"(journal incomplete: {reason}; no result records analysis_deadline)"]
+    return [f"pool P: pair {KEY_2}: {name} unobserved (journal incomplete: {reason})"
+            for name in _P_INTERVALS]
 
 
 def _lines(rows) -> str:
@@ -136,38 +153,36 @@ def _trip_lost_as(kind: str) -> str:
     raise AssertionError(kind)
 
 
+@pytest.mark.parametrize("result", ["none", "tripped"])
 @pytest.mark.parametrize("kind, reason", [
     ("partial_final_line", "partial_final_line"),
-    ("malformed_line", "malformed_lines=1"),
-    ("payload_not_an_object", "field_errors=1"),
+    ("malformed_line", "seq_gaps=1, malformed_lines=1"),      # the garbled line was seq 2
+    ("payload_not_an_object", "field_errors in 1 row(s): payload"),
 ])
-def test_a_journal_that_lost_its_trip_is_not_a_pass(tmp_path, kind, reason):
+def test_a_journal_that_lost_its_trip_is_not_a_pass(tmp_path, kind, reason, result):
     profile = _tree(tmp_path)
     _normal(profile)
-    _slow_pair_with_journal_text(profile, _trip_lost_as(kind))
+    _slow_pair_with_journal_text(profile, _trip_lost_as(kind),
+                                 log="" if result == "none" else _deadline_log(True))
     verdict = _verdict(tmp_path, [profile])
 
     assert verdict["status"] == "undetermined", verdict
-    assert verdict["undetermined"] == [
-        f"pool P: pair {KEY_2}: cannot tell whether the deadline cut it "
-        f"(journal incomplete: {reason})"
-    ]
+    assert verdict["undetermined"] == _lost(reason, result)
 
 
-def test_a_journal_truncated_before_its_trip_is_not_a_pass(tmp_path):
+@pytest.mark.parametrize("result", ["none", "tripped"])
+def test_a_journal_truncated_before_its_trip_is_not_a_pass(tmp_path, result):
     profile = _tree(tmp_path)
     _normal(profile)
     rows, _ = _cut_rows(origin_at=20.0, overrun=60.0, emit=30.0)
-    filler = json.dumps(dict(_row(0, "note", 1.0, payload={"note": "x" * 1000}), seq=None)) + "\n"
-    padding = filler * (9 * 1024 * 1024 // len(filler))                    # past the read limit
-    _slow_pair_with_journal_text(profile, _lines(rows[:1]) + padding + _lines(rows[1:]))
+    filler = _row(2, "note", 1.0, payload={"note": "x" * (9 * 1024 * 1024)})  # past the read limit
+    later = [dict(row, seq=row["seq"] + 1) for row in rows[1:]]
+    _slow_pair_with_journal_text(profile, _lines([rows[0], filler, *later]),
+                                 log="" if result == "none" else _deadline_log(True))
     verdict = _verdict(tmp_path, [profile])
 
     assert verdict["status"] == "undetermined", verdict
-    assert verdict["undetermined"] == [
-        f"pool P: pair {KEY_2}: cannot tell whether the deadline cut it "
-        "(journal incomplete: truncated, partial_final_line)"
-    ]
+    assert verdict["undetermined"] == _lost("partial_final_line, truncated", result)
 
 
 # --------------------------------------------------------------------------
@@ -220,10 +235,7 @@ def test_a_journal_row_without_a_finite_time_after_the_trip_is_not_measured(tmp_
     verdict = _verdict(tmp_path, [profile])
 
     assert verdict["status"] == "undetermined", verdict
-    assert verdict["undetermined"] == [
-        f"pool P: pair {KEY_2}: cannot tell whether the deadline cut it "
-        "(journal incomplete: field_errors=1)"
-    ]
+    assert verdict["undetermined"] == _lost("field_errors in 1 row(s): t_monotonic", "tripped")
 
 
 def test_an_overrun_below_the_start_refusal_reserve_is_inconsistent(tmp_path):
@@ -256,13 +268,13 @@ def test_a_manifest_deadline_the_trips_contradict_is_not_accepted(tmp_path):
     _write_pair(profile, "f_B1_B2", _resolved_unknown(), journal=rows, sidecar=_sidecar(last_at + 1.0))
     short, short_last = _cut_rows(budget=50.0)
     _write_pair(profile, "f_B3_B4", _resolved_unknown(), journal=short,
-                sidecar=_sidecar(short_last + 1.0))
+                sidecar=_sidecar(short_last + 1.0), log=_deadline_log(True, budget=50.0))
     verdict = _verdict(tmp_path, [profile])
 
     assert verdict["status"] == "undetermined", verdict
     assert (f"pool P: run {profile}: analysis deadline disagrees between sources "
-            "(run_manifest analysis_timeout=120, deadline_tripped budget_seconds=50,120)"
-            ) in verdict["undetermined"]
+            "(run_manifest analysis_timeout=120, deadline_tripped budget_seconds=50,120, "
+            "result analysis_deadline budget_seconds=50,120)") in verdict["undetermined"]
 
 
 def test_a_manifest_process_timeout_the_supervisor_contradicts_is_not_accepted(tmp_path):

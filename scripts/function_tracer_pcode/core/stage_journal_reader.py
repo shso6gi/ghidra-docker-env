@@ -26,13 +26,31 @@ readiness / stage / dump を current に流用しない。複数 segment を合�
 
 * 判定には一切関与しない（journal は結果 JSON の外の診断）。
 * 読めない・壊れている・曖昧な場合は例外を投げず、`unavailable_reason` を返す。
-* **読めた行だけが観測である。** 読み取りで失った情報（上限で切った・書きかけの最終行・
-  壊れた行・型の合わない field）は `JournalRead.incomplete_reasons` に残る。進行中の stage を
-  見るような診断は不完全な journal でも使ってよいが、**「ある event が無い」ことから結論を
-  出す読み手**（例: margin の計測で「trip が無い = 期限内に終わった」）は、
-  `incomplete_reasons` が空でない journal から結論を出してはならない。
-* 数値の field は有限な数だけを値とする（JSON の ``NaN`` / ``Infinity`` は値にせず、
-  型の合わない field として数える）。
+* **読めた行だけが観測である。** 読み取りで失った情報は 2 つの単位で残る:
+  file 全体（`JournalRead.incomplete_reasons`: 上限で切った・書きかけの最終行・壊れた行・
+  契約に合わない field・欠番）と、execution segment ごと（`JournalSegment.losses`: その
+  segment の行に起きた損失だけ）。進行中の stage を見るような診断は不完全な journal でも
+  使ってよいが、**「ある event が無い」ことから結論を出す読み手**（例: margin の計測で
+  「trip が無い = 期限内に終わった」）は `select_verified_segment` を使い、損失の無い segment
+  からだけ結論を出し、終わりまでの結論には `JournalSegment.end_attested` も要る。
+
+## 行の契約（書き手 `core.stage_journal` の行の会計に対応）
+
+* 必須（無い・``null``・型違いは field の損失）: ``schema`` / ``seq``（1 以上の整数）/
+  ``event``（`JOURNAL_EVENTS` のどれか）/ ``t_monotonic`` / ``t_epoch``（有限な数）/
+  ``pid``（整数）/ ``payload``（object）。
+* ``null`` を許す: ``stage``（``note`` / ``journal_end`` の行）、``seconds``（あれば 0 以上の有限な数）。
+* event ごと: ``stage_start`` / ``stage_end`` / ``counter`` / ``handler_registered`` は ``stage`` が
+  文字列、``note`` は ``payload.note`` が文字列、``journal_end`` は ``payload.last_seq`` /
+  ``payload.write_failures`` が 0 以上の整数。
+* 数値は有限な double に変換できるものだけを値とする（JSON の ``NaN`` / ``Infinity`` と、double の
+  範囲を越える整数は値にしない）。
+* segment の損失: 先頭が ``seq`` 1 でない（開始行を失った）、``seq`` の欠番（書けなかった行）、
+  その segment の範囲の壊れた行・契約に合わない行、最後の segment なら上限・書きかけの最終行。
+  複数 execution の ``seq`` の巻き戻り（次の execution が 1 から始める）は損失ではない。
+* 終わりの証明（`JournalSegment.end_attested`）: segment の最後の行が ``journal_end`` で、その
+  ``last_seq`` が直前の番号、``write_failures`` が 0。無ければ、最後の行より後に失われた行が
+  無いとは言えない。
 * regular file 以外は読まない（FIFO を開いて固まらないため）。読む量にも上限を置く。
 
 dependency rule: 標準ライブラリ以外を import しない（`core` は最下層）。
@@ -48,10 +66,13 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core.stage_journal import (
+    EVENT_COUNTER,
     EVENT_HANDLER_REGISTERED,
+    EVENT_JOURNAL_END,
     EVENT_NOTE,
     EVENT_STAGE_END,
     EVENT_STAGE_START,
+    JOURNAL_EVENTS,
     STAGE_JOURNAL_SCHEMA,
 )
 
@@ -91,6 +112,8 @@ class JournalRow:
     t_epoch: Optional[float]
     pid: Optional[int]
     payload: Mapping[str, Any]
+    #: 契約に合わなかった field の名前（空なら行の契約どおり。値は ``None`` / ``{}`` にした）
+    problems: Tuple[str, ...] = ()
 
     @property
     def region_path(self) -> Tuple[str, ...]:
@@ -108,6 +131,10 @@ class JournalSegment:
     rows: Tuple[JournalRow, ...]
     #: この segment の `handler_registered` 行（複数あれば最後のもの）。
     handler_row: Optional[JournalRow] = None
+    #: この segment の行に起きた損失（空なら、最初の行から最後の行まで書かれた行がすべて残っている）
+    losses: Tuple[str, ...] = ()
+    #: 最後の行が整合した ``journal_end``（最後の行より後に失った行が無い）
+    end_attested: bool = False
 
     @property
     def pids(self) -> Tuple[int, ...]:
@@ -141,8 +168,10 @@ class JournalRead:
     seq_rollbacks: int = 0
     opened_notes: int = 0
     unavailable_reason: Optional[str] = None
-    #: 行としては読めたが、field の型・値が契約に合わなかった数（値は ``None`` / ``{}`` にした）
+    #: 行としては読めたが、field が契約に合わなかった数（値は ``None`` / ``{}`` にした）
     field_errors: int = 0
+    #: segment の中の ``seq`` の欠番の数（書けなかった行・先頭の失われた行）
+    seq_gaps: int = 0
 
     @property
     def incomplete_reasons(self) -> Tuple[str, ...]:
@@ -157,6 +186,8 @@ class JournalRead:
             reasons.append(f"malformed_lines={self.malformed_lines}")
         if self.field_errors:
             reasons.append(f"field_errors={self.field_errors}")
+        if self.seq_gaps:
+            reasons.append(f"seq_gaps={self.seq_gaps}")
         return tuple(reasons)
 
     @property
@@ -185,6 +216,7 @@ class JournalRead:
             "seq_rollbacks": self.seq_rollbacks,
             "opened_notes": self.opened_notes,
             "field_errors": self.field_errors,
+            "seq_gaps": self.seq_gaps,
             "multi_execution": self.multi_execution,
             "unavailable_reason": self.unavailable_reason,
         }
@@ -194,6 +226,8 @@ class JournalRead:
 class _Builder:
     rows: List[JournalRow] = field(default_factory=list)
     malformed: int = 0
+    #: 壊れた行の行番号（segment へ割り当てる）
+    malformed_line_numbers: List[int] = field(default_factory=list)
     partial_final_line: bool = False
     truncated: bool = False
     field_errors: int = 0
@@ -204,32 +238,56 @@ def _coerce_int(value: Any) -> Optional[int]:
 
 
 def _coerce_float(value: Any) -> Optional[float]:
-    """有限な数だけを値にする（``NaN`` / ``Infinity`` は時刻・秒数ではない）。"""
+    """有限な double だけを値にする（``NaN`` / ``Infinity`` / double の範囲を越える整数は値でない）。"""
 
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    value = float(value)
+    try:
+        value = float(value)
+    except OverflowError:
+        return None
     return value if math.isfinite(value) else None
 
 
-def _field_errors(row: Mapping[str, Any]) -> int:
-    """書かれているのに契約に合わない field の数（書かれていない・``null`` は数えない）。"""
-
-    errors = 0
-    for key in ("seq", "pid"):
-        if row.get(key) is not None and _coerce_int(row.get(key)) is None:
-            errors += 1
-    for key in ("seconds", "t_monotonic", "t_epoch"):
-        if row.get(key) is not None and _coerce_float(row.get(key)) is None:
-            errors += 1
-    if row.get("payload") is not None and not isinstance(row.get("payload"), dict):
-        errors += 1
-    if row.get("stage") is not None and not isinstance(row.get("stage"), str):
-        errors += 1
-    return errors
+#: ``stage`` を文字列で持つ event（それ以外の event は ``null`` も可）
+_STAGED_EVENTS = frozenset({EVENT_STAGE_START, EVENT_STAGE_END, EVENT_COUNTER, EVENT_HANDLER_REGISTERED})
 
 
-def _parse_line(text: str, line_number: int) -> Optional[Tuple[JournalRow, int]]:
+def _row_problems(row: Mapping[str, Any]) -> Tuple[str, ...]:
+    """行の契約（module docstring）に合わない field の名前。無い・``null`` も必須 field なら損失。"""
+
+    problems: List[str] = []
+    seq = _coerce_int(row.get("seq"))
+    if seq is None or seq < 1:
+        problems.append("seq")
+    if _coerce_int(row.get("pid")) is None:
+        problems.append("pid")
+    for key in ("t_monotonic", "t_epoch"):
+        if _coerce_float(row.get(key)) is None:
+            problems.append(key)
+    seconds = row.get("seconds")
+    if seconds is not None and (_coerce_float(seconds) is None or seconds < 0):
+        problems.append("seconds")
+    event = row.get("event")
+    if event not in JOURNAL_EVENTS:
+        problems.append("event")
+    stage = row.get("stage")
+    if (stage is not None or event in _STAGED_EVENTS) and not (isinstance(stage, str) and stage):
+        problems.append("stage")
+    payload = row.get("payload")
+    if not isinstance(payload, dict):
+        problems.append("payload")
+    elif event == EVENT_NOTE and not isinstance(payload.get("note"), str):
+        problems.append("payload.note")
+    elif event == EVENT_JOURNAL_END:
+        for key in ("last_seq", "write_failures"):
+            number = _coerce_int(payload.get(key))
+            if number is None or number < 0:
+                problems.append(f"payload.{key}")
+    return tuple(problems)
+
+
+def _parse_line(text: str, line_number: int) -> Optional[JournalRow]:
     try:
         row = json.loads(text)
     except ValueError:
@@ -251,7 +309,8 @@ def _parse_line(text: str, line_number: int) -> Optional[Tuple[JournalRow, int]]
         t_epoch=_coerce_float(row.get("t_epoch")),
         pid=_coerce_int(row.get("pid")),
         payload=payload if isinstance(payload, dict) else {},
-    ), _field_errors(row)
+        problems=_row_problems(row),
+    )
 
 
 def _read_rows(path: str, *, max_bytes: int) -> _Builder:
@@ -272,17 +331,17 @@ def _read_rows(path: str, *, max_bytes: int) -> _Builder:
     for index, text in enumerate(lines, start=1):
         if not text.strip():
             continue
-        parsed = _parse_line(text, index)
-        if parsed is None:
+        row = _parse_line(text, index)
+        if row is None:
             builder.malformed += 1
+            builder.malformed_line_numbers.append(index)
             continue
-        row, errors = parsed
-        builder.field_errors += errors
+        builder.field_errors += len(row.problems)
         builder.rows.append(row)
     return builder
 
 
-def _split_segments(rows: Sequence[JournalRow]) -> Tuple[Tuple[JournalSegment, ...], int, int]:
+def _split_segments(rows: Sequence[JournalRow]) -> Tuple[List[List[JournalRow]], int, int]:
     """行を execution segment に切る。
 
     新しい segment が始まるのは **file の先頭** / `pair_journal_opened` note /
@@ -314,14 +373,96 @@ def _split_segments(rows: Sequence[JournalRow]) -> Tuple[Tuple[JournalSegment, .
             previous_seq = row.seq
     if current:
         segments.append(current)
+    return segments, rollbacks, opened
+
+
+def _missing_seqs(group: Sequence[JournalRow], *, from_one: bool = True) -> int:
+    """segment の中の欠番の数（巻き戻りは segment の境界なのでここには無い）。
+
+    ``from_one`` なら先頭の前（1 から最初の番号まで）の欠番も数える。
+    """
+
+    missing = 0
+    expected: Optional[int] = 1 if from_one else None
+    for row in group:
+        if row.seq is None:
+            continue
+        if expected is not None and row.seq > expected:
+            missing += row.seq - expected
+        expected = row.seq + 1
+    return missing
+
+
+def _end_problem(group: Sequence[JournalRow]) -> Optional[str]:
+    """``journal_end`` による終わりの証明が成り立たない理由（成り立てば ``None``）。"""
+
+    ends = [index for index, row in enumerate(group) if row.event == EVENT_JOURNAL_END]
+    if not ends:
+        return "no journal_end row (the end is not attested)"
+    if len(ends) > 1 or ends[-1] != len(group) - 1:
+        return "journal_end is not the last row of its execution"
+    row = group[-1]
+    last_seq = _coerce_int(row.payload.get("last_seq"))
+    failures = _coerce_int(row.payload.get("write_failures"))
+    if row.problems or last_seq is None or failures is None:
+        return "journal_end does not carry its accounting"
+    if row.seq is None or last_seq != row.seq - 1:
+        return f"journal_end last_seq={last_seq} does not precede its own seq {row.seq}"
+    if failures:
+        return f"journal_end reports {failures} write failure(s)"
+    return None
+
+
+def _build_segments(
+    groups: Sequence[Sequence[JournalRow]], builder: _Builder,
+) -> Tuple[JournalSegment, ...]:
+    """segment ごとの損失を割り当てる（壊れた行は行番号で、file 末尾の損失は最後の segment へ）。"""
+
     built: List[JournalSegment] = []
-    for index, group in enumerate(segments):
+    for index, group in enumerate(groups):
+        first_line = group[0].line_number if index else 0
+        next_line = groups[index + 1][0].line_number if index + 1 < len(groups) else None
+        last = index == len(groups) - 1
+        losses: List[str] = []
+        first_seq = next((row.seq for row in group if row.seq is not None), None)
+        if first_seq is not None and first_seq != 1:
+            losses.append(f"first seq is {first_seq}, not 1")
+        gaps = _missing_seqs(group, from_one=False)
+        if gaps:
+            losses.append(f"seq_gaps={gaps}")
+        bad_rows = sum(1 for row in group if row.problems)
+        if bad_rows:
+            fields = sorted({name for row in group for name in row.problems})
+            losses.append(f"field_errors in {bad_rows} row(s): {', '.join(fields)}")
+        malformed = sum(
+            1 for number in builder.malformed_line_numbers
+            if number >= first_line and (next_line is None or number < next_line)
+        )
+        if malformed:
+            losses.append(f"malformed_lines={malformed}")
+        if last and builder.partial_final_line:
+            losses.append("partial_final_line")
+        if last and builder.truncated:
+            losses.append("truncated")
         handler = None
         for row in group:
             if row.event == EVENT_HANDLER_REGISTERED:
                 handler = row
-        built.append(JournalSegment(index=index, rows=tuple(group), handler_row=handler))
-    return tuple(built), rollbacks, opened
+        built.append(JournalSegment(
+            index=index, rows=tuple(group), handler_row=handler, losses=tuple(losses),
+            end_attested=not losses and _end_problem(group) is None,
+        ))
+    return tuple(built)
+
+
+def end_attestation_problem(segment: JournalSegment) -> Optional[str]:
+    """``segment`` の終わりが証明されない理由（`JournalSegment.end_attested` なら ``None``）。"""
+
+    if segment.end_attested:
+        return None
+    if segment.losses:
+        return f"journal incomplete: {', '.join(segment.losses)}"
+    return _end_problem(segment.rows) or "the end is not attested"
 
 
 def read_stage_journal(
@@ -356,17 +497,18 @@ def read_stage_journal(
             unavailable_reason=UNAVAILABLE_EMPTY,
             field_errors=builder.field_errors,
         )
-    segments, rollbacks, opened = _split_segments(builder.rows)
+    groups, rollbacks, opened = _split_segments(builder.rows)
     return JournalRead(
         path=resolved,
         rows=tuple(builder.rows),
-        segments=segments,
+        segments=_build_segments(groups, builder),
         malformed_lines=builder.malformed,
         partial_final_line=builder.partial_final_line,
         truncated=builder.truncated,
         seq_rollbacks=rollbacks,
         opened_notes=opened,
         field_errors=builder.field_errors,
+        seq_gaps=sum(_missing_seqs(group) for group in groups),
     )
 
 
@@ -407,6 +549,23 @@ def select_current_segment(
     if all(segment.handler_row is None for segment in read.segments):
         return None, UNAVAILABLE_NO_HANDLER
     return None, UNAVAILABLE_IDENTITY_CHANGED
+
+
+def select_verified_segment(
+    read: JournalRead, *, pid: Optional[int] = None, start_token: Optional[str] = None,
+) -> Tuple[Optional[JournalSegment], Optional[str]]:
+    """「ある event が無い」から結論を出す読み手の入口: 損失の無い current segment だけを返す。
+
+    選び方は `select_current_segment` と同じ。選んだ segment に損失があれば ``None`` と
+    ``journal incomplete: ...``。他の execution の segment の損失は問わない（正当な巻き戻りを
+    損失と混同しない）。終わりまでの結論には、返した segment の ``end_attested`` も確かめる。
+    """
+    segment, reason = select_current_segment(read, pid=pid, start_token=start_token)
+    if segment is None:
+        return None, reason
+    if segment.losses:
+        return None, f"journal incomplete: {', '.join(segment.losses)}"
+    return segment, None
 
 
 @dataclass(frozen=True)
