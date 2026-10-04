@@ -49,7 +49,7 @@ def _witness_hash_mode(request, monkeypatch):
     if request.param == "collide":
         from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse
 
-        monkeypatch.setattr(snapshot_reuse, "_hash", lambda value, retained=False: 0)
+        monkeypatch.setattr(snapshot_reuse, "_hash", lambda value, retained=False, placed=None: 0)
     yield request.param
 
 

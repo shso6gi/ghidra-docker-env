@@ -112,8 +112,10 @@ def test_only_the_single_read_hands_the_codec_a_token_capability():
 
 
 def test_no_ambient_state_decides_whether_a_token_passes():
-    """許可を thread / context の状態に置かない（入力の code へ伝わる）: snapshot の schema と再利用の owner は
-    `threading.local` / `ContextVar` を持たない。"""
+    """token の許可を thread / context の状態に置かない（入力の code へ伝わる）: snapshot の schema と再利用の owner
+    は `threading.local` / `ContextVar` を持たない（静的な確認はこの 2 module だけ。葉の置き換えの範囲は
+    `core/budget_policy` が walk の claim で決め、新しい context・別 thread・入れ子の walk に渡らないことは
+    `test_issue219_token_authority.py` が実行して確かめる）。"""
 
     for path in (SCHEMA, OWNER):
         tree = parse_source(path)

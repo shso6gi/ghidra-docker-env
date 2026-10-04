@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+import json
 from types import MappingProxyType
 from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
@@ -625,6 +626,9 @@ def _witness_token_identity(kind: type) -> Optional[Callable[[Any], int]]:
     return None
 
 
+#: token でない JSON にできない値の例外を、標準の encoder と同じにするための instance（`default` は値だけを読む）
+_PLAIN_ENCODER = json.JSONEncoder()
+
 #: token の印の key（凍結した写しの JSON に object（`{...}`）を書くのは enum の値の写しだけで、その key がこの
 #: 文字列と重なっても、同じ位置の `retained_form` の写し（token か enum の member か）が違う）
 _WITNESS_TOKEN_MARK = "\u0000witness_token"
@@ -650,7 +654,8 @@ def _marked_fingerprint_digest(frozen: Any, placed: PlacedTokens) -> Tuple[str, 
     def mark(value: Any) -> Any:
         identity_of = _witness_token_identity(type(value)) if placed.holds(value) else None
         if identity_of is None:
-            raise TypeError(f"{type_name(type(value))} is not JSON serializable")
+            # token でない値: `digest_frozen` の JSON の writer と同じ例外（型・文面）
+            return json.JSONEncoder.default(_PLAIN_ENCODER, value)
         marked[0] = True
         return {_WITNESS_TOKEN_MARK: identity_of(value)}
 
@@ -845,9 +850,12 @@ def snapshot_material(
     """解析から snapshot の材料を作る（**唯一の抽出**。`work` は開いた直列化の作業量）。
 
     `leaf_substitution`（`core/budget_policy.LeafSubstitution`）は、意味の view（`semantic_snapshot_dict` /
-    `to_dict()`）を walker が作る間だけ効く: token になり得るのは、walker が record の field の値・列の要素として
-    置く葉だけ（walker は key を `json_items` の名前から作り、set を作らない: codec の並び・key に token は来ない）。
-    `assemble_snapshot` が戻す位置はここだけ。効果要約の投影・`snapshot_id`・診断の参照は置き換えない。
+    `to_dict()`）の walk の間だけ効き、それを使うのは、その walk（view が walk の外から始めた LEGACY の構築）だけ
+    （`SerializationWork.claim_leaf_substitution`: その間、同じ thread の別の walk（新しい context のものも）・別の
+    thread の walk・walk の中の producer が始めた walk は置き換えを受け取らない）。token になり得るのは、その walk が
+    record の field の値・列の要素として置く葉だけ（walker は key を `json_items` の名前から作り、set を作らない）。
+    入力の code が token を受け取ることは無いので、`snapshot_id`・効果要約の投影・診断の参照に token は来ない
+    （入力が作った同じ型の object は token ではない: `PlacedTokens`）。
     """
 
     # 解析前提でない derived proof は下で捨てるので、表現できる解析は最初から
@@ -920,7 +928,8 @@ class SnapshotRead(NamedTuple):
     """canonical な生成経路の本体が読んだもの（`read_snapshot_inputs`）。snapshot はこれの純粋な関数。
 
     token（`leaf_substitution` が置いた値）は、意味の view の木から写した `frozen_payload` / `held_fields` の中に
-    だけある。
+    だけある（view の walk だけが置き換えを使い、入力の code へは渡らない）。token として扱うのは `placed` にある
+    object そのものだけ。
     """
 
     #: `create` の digest が凍結する値（`fingerprint_payload` の codec の写し）の JSON の digest。token は値の identity の
@@ -967,11 +976,12 @@ def read_snapshot_inputs(analysis: Any, leaf_substitution: Any = None) -> Snapsh
         )
         # `create` と同じく、codec の写しは digest にしてから `retained_form` の写しを作る（token が無ければ写しを
         # 手放す: 大きな写しを、次の写しを作る間に持ち越さない）
+        has_tokens = False
         if placed:
             frozen_digest, has_tokens = _marked_fingerprint_digest(frozen, placed)
-        else:
-            frozen_digest, has_tokens = SnapshotFingerprintCodec.digest_frozen(frozen), False
         if not has_tokens:
+            # token が写しに無い（置かなかった・置いた葉が fingerprint の材料に残らなかった）: digest は本体と同じ writer
+            frozen_digest = SnapshotFingerprintCodec.digest_frozen(frozen)
             frozen = None
         held_id, held_fields, held_refs = retained_form(
             material.snapshot_id, material.semantic_fields, material.diagnostic_refs,

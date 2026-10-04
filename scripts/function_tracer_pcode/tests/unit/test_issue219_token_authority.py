@@ -17,6 +17,8 @@ oracle は `test_issue219_single_read` と同じ（同じ factory から作っ�
 
 from __future__ import annotations
 
+import contextvars
+import enum
 import random
 import threading
 from typing import Any, List
@@ -24,6 +26,7 @@ from typing import Any, List
 import pytest
 
 from scripts.function_tracer_pcode.core.expression import Expression
+from scripts.function_tracer_pcode.core import json_encoding
 from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
 from scripts.function_tracer_pcode.core.budget_policy import (
     NO_SUBSTITUTION,
@@ -199,6 +202,17 @@ def _attempt_value(call) -> Any:
         return ("rejected", type(failure).__name__, str(failure))
 
 
+class WalksInAFreshContext(_Recorder):
+    """`json_items` が同じ thread の新しい `contextvars.Context` で closed な値を LEGACY に作る（外側の walk の中に
+    見えない walk。置き換えは、それを claim した読みの walk だけが使う: レビュー 5 の監査の反例 A）。"""
+
+    def json_items(self):
+        built = contextvars.Context().run(json_encoding.materialize, _closed())
+        seen = "token" if isinstance(built, ElidedSemanticValue) else type(built).__name__
+        self.calls.append(seen)
+        yield "built", seen
+
+
 class OpensItsOwnScope(NestedSnapshot):
     """`stable_key` が自分で再利用の scope を開き、その中で再入する（入れ子の scope は外側の読みに影響しない）。"""
 
@@ -210,6 +224,7 @@ class OpensItsOwnScope(NestedSnapshot):
 
 
 PRODUCERS = {
+    "walks_in_a_fresh_context": WalksInAFreshContext,
     "opens_its_own_scope": OpensItsOwnScope,
     "walks_in_another_thread": WalksInAnotherThread,
     "arms_its_own_substitution": ArmsItsOwnSubstitution,
@@ -297,3 +312,175 @@ def test_random_combinations_of_input_code_have_the_same_answers_as_main(seed, m
         return state
 
     oracle._compare(factory, oracle._random_steps(rng), monkeypatch)
+
+
+# ---------------------------------------------------------------------------
+# レビュー 5 の独立した監査の反例
+# ---------------------------------------------------------------------------
+
+
+class SmugglesWhatItBuilt(_Recorder):
+    """`json_items` が新しい context で作った値を、読みが view の後に読む `analysis_scope_key` へ置く（反例 A2: 置いた
+    token が `snapshot_id` に入れば、展開されずに返る）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.target: Any = None
+
+    def json_items(self):
+        built = contextvars.Context().run(json_encoding.materialize, _closed())
+        self.calls.append(type(built).__name__)
+        if self.target is not None:
+            self.target.analysis_scope_key = ("scope", built)
+        yield "seen", 1
+
+
+def test_a_value_built_in_a_fresh_context_and_kept_in_the_snapshot_id_is_the_same_as_main(monkeypatch):
+    monkeypatch.setitem(oracle.PRODUCERS, "smuggles", SmugglesWhatItBuilt)
+
+    def factory() -> oracle.State:
+        state = oracle.State(["plain", "smuggles"], pending=False)
+        state.analysis.return_abi_facts["p1"].target = state.analysis
+        return state
+
+    oracle._compare(factory, [("call", "canonical"), ("call", "canonical")], monkeypatch)
+
+
+class _Leaves(LeafSubstitution):
+    __slots__ = ()
+
+    def __leaf_substitute__(self, leaf, size):
+        return "mine" if type(leaf) is Expression else NO_SUBSTITUTION
+
+
+class LeavesItsSubstitutionArmed(_Recorder):
+    """`json_items` が generator の中で置き換えを効かせ、generator を途中で止めたまま返す（`with` が LIFO で
+    抜けない: 反例 B）。読みの `with` が抜けても、外すのは自分の entry だけ。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.held: Any = None
+
+    def json_items(self):
+        work = active_serialization_work()
+
+        def armed():
+            with substituting_leaves(work, _Leaves()):
+                yield 1
+
+        self.held = armed()
+        next(self.held)
+        self.calls.append("armed")
+        yield "armed", 1
+
+
+class HoldsAClosedValue(_Recorder):
+    """LEGACY の表現に closed な式を持つ record（`snapshot_id` の中で codec が作る）。"""
+
+    def json_items(self):
+        self.calls.append("read")
+        yield "e", _closed()
+
+
+def test_a_substitution_left_armed_by_a_suspended_generator_behaves_as_in_main(monkeypatch):
+    monkeypatch.setitem(oracle.PRODUCERS, "leaves_armed", LeavesItsSubstitutionArmed)
+    monkeypatch.setitem(oracle.PRODUCERS, "holds_closed", HoldsAClosedValue)
+
+    def factory() -> oracle.State:
+        state = oracle.State(["plain", "leaves_armed", "holds_closed"], pending=False)
+        state.analysis.analysis_scope_key = ("scope", state.analysis.return_abi_facts.pop("p2"))
+        return state
+
+    oracle._compare(factory, [("call", "canonical")], monkeypatch)
+
+
+class SwapsTheFunctionRef(_Recorder):
+    """`json_items`（`function_ref` より後に読まれる）が、`function_ref` を同じ値を包む **新しい** 入力の
+    `ElidedSemanticValue` に置き換える（反例: witness が型で token を見分けると、別の object を同じと見て hit し、
+    前の呼び出しの object を返す）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.target: Any = None
+        self.inner = object()
+        self.made: List[Any] = []
+
+    def json_items(self):
+        token = ElidedSemanticValue(self.inner)
+        self.made.append(token)
+        self.target.function_ref = token
+        # 意味の値は呼び出しの間で同じ（witness の残りは等しい: 違いは `function_ref` の object だけ）
+        yield "swapped", 1
+
+
+@pytest.mark.parametrize("mode", ["on", "off", "main"])
+def test_an_input_object_of_the_token_type_is_compared_by_identity_not_as_a_token(mode, monkeypatch):
+    """各呼び出しが返す `diagnostic_refs["function_ref"]` は、その呼び出しの読みが見た object（main と同じ）。"""
+
+    monkeypatch.setattr(oracle.snapshot_reuse, "_SNAPSHOT_REUSE_ENABLED", mode == "on")
+    state = oracle.State(["plain"], pending=False)
+    analysis = state.analysis
+    original = analysis.function_ref
+    producer = SwapsTheFunctionRef()
+    producer.target = analysis
+    analysis.return_abi_facts["p9"] = producer
+    seen = []
+    with oracle.pair_failure_scope(("pair", 1), None), oracle.budget_policy_scope(oracle.BudgetPolicy()), \
+            oracle.snapshot_reuse_scope():
+        for _ in range(3):
+            analysis.function_ref = original
+            snapshot = (AnalysisSnapshot._build_from_function_analysis(analysis) if mode == "main"
+                        else AnalysisSnapshot.from_function_analysis(analysis))
+            seen.append(producer.made.index(snapshot.diagnostic_refs["function_ref"]))
+        counts = oracle.snapshot_reuse_metrics().get("counts", {})
+    # 1 回の呼び出しで `json_items` は 2 回走る（view の walk と codec）: main でも返るのは各呼び出しの 1 つ目
+    assert seen == [0, 2, 4]
+    assert counts.get("hits", 0) == 0
+
+
+class SetsTheSameFunctionRef(_Recorder):
+    """`SwapsTheFunctionRef` と同じ置き場所・同じ意味の値で、毎回 **同じ** object を置く（陽性の対照）。"""
+
+    def __init__(self, same: Any) -> None:
+        super().__init__()
+        self.target: Any = None
+        self.same = same
+
+    def json_items(self):
+        self.target.function_ref = self.same
+        yield "swapped", 1
+
+
+def test_the_same_function_ref_object_does_hit_so_the_identity_test_can_fail():
+    """陽性の対照: 同じ object を毎回置けば on は hit する（上の test は hit し得る形で、hit しないことを確かめている）。"""
+
+    state = oracle.State(["plain"], pending=False)
+    analysis = state.analysis
+    same = ElidedSemanticValue(object())
+    producer = SetsTheSameFunctionRef(same)
+    producer.target = analysis
+    analysis.return_abi_facts["p9"] = producer
+    original = analysis.function_ref
+    with oracle.pair_failure_scope(("pair", 1), None), oracle.budget_policy_scope(oracle.BudgetPolicy()), \
+            oracle.snapshot_reuse_scope():
+        for _ in range(3):
+            analysis.function_ref = original
+            snapshot = AnalysisSnapshot.from_function_analysis(analysis)
+            assert snapshot.diagnostic_refs["function_ref"] is same
+        counts = oracle.snapshot_reuse_metrics()["counts"]
+    assert counts["hits"] == 2
+
+
+class _Unencodable(enum.Enum):
+    """値が JSON にできない（`frozenset`）enum: codec の写しは通るが、fingerprint の JSON にできない。"""
+
+    SET = frozenset({1})
+
+
+def test_a_value_the_fingerprint_json_cannot_write_raises_the_same_error_as_main(monkeypatch):
+    def factory() -> oracle.State:
+        state = oracle.State(["plain"], pending=False)
+        state.analysis.analysis_scope_key = ("scope", _Unencodable.SET)
+        return state
+
+    oracle._compare(factory, [("call", "canonical")], monkeypatch)

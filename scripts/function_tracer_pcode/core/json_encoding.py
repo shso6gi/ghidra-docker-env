@@ -923,10 +923,10 @@ class JsonBudget:
         consumed = self.consumed if self.max_bytes is None else self.max_bytes + 1
         raise JsonBudgetExhausted(consumed_bytes=consumed, max_bytes=self.max_bytes)
 
-    def tree(self, leaf: Any, *, build: bool, substitutable: bool = False) -> Tuple[Any, int]:
+    def tree(self, leaf: Any, *, build: bool, substitution: Any = None) -> Tuple[Any, int]:
         """sized leaf の大きさを **作る前に** 求めて足し、`build` なら木を作る。
 
-        `substitutable` は `SerializationWork.tree` と同じ interface（この予算は置き換えを持たない）。
+        `substitution` は `SerializationWork.tree` と同じ interface（この予算は置き換えを claim させないので常に `None`）。
         """
 
         remaining = self.remaining()
@@ -2098,11 +2098,11 @@ class _Walk:
         self.token_sink = token_sink
         #: 1 回しか辿れない列（iterator）を辿ったか（辿った後の値は同じ値として辿り直せない）
         self.entered_iterator = False
-        #: sized leaf を予算の置き換え（`SerializationWork.active_leaf_substitution`）に任せてよいか。walk の外から
-        #: 始めた LEGACY の構築だけ（`run` が決める）: 置き換えた葉は、walk を始めた呼ぶ側だけが受け取る。
-        #: walk の中の producer（`json_items` とその helper）が始めた walk の値は、producer の code が読むので
-        #: 置き換えない
-        self.substitutable = False
+        #: この walk が claim した葉の置き換え（`SerializationWork.claim_leaf_substitution`。walk の外から始めた
+        #: LEGACY の構築だけが `run` で claim し、walk の間だけ持つ）: 置き換えた葉は、walk を始めた呼ぶ側だけが
+        #: 受け取る。walk の中の producer（`json_items` とその helper）が始めた walk は claim しない（新しい
+        #: context・別の thread で始めても、持たれている entry は claim できない）
+        self.claimed: Any = None
         self.item_separator = utf8_length(policy.item_separator)
         self.key_separator = utf8_length(policy.key_separator)
         self.stack: List[_Frame] = []
@@ -2462,7 +2462,10 @@ class _Walk:
             self.push("dict", _walk_iter(json_items(item)), parent, key, item, build=build)
             return
         if _record_protocol(kind, "__json_tree__") is not None:
-            built, size = self.budget.tree(item, build=build, substitutable=self.substitutable)
+            claimed = self.claimed
+            built, size = self.budget.tree(
+                item, build=build, substitution=None if claimed is None else claimed.substitution,
+            )
             if self.token_sink is not None:
                 self.token("t" + protocol_method(item, "__json_identity__")(item))
             if build:
@@ -2776,9 +2779,12 @@ class _Walk:
 
     def run(self, source: Any) -> Any:
         holder: List[Any] = [None]
-        self.substitutable = (
-            _ACTIVE_WORK.get() is None and self.mode == LEGACY and self.build and self.token_sink is None
-        )
+        claim = getattr(self.budget, "claim_leaf_substitution", None)
+        if (
+            claim is not None and _ACTIVE_WORK.get() is None and self.mode == LEGACY and self.build
+            and self.token_sink is None
+        ):
+            self.claimed = claim()
         # walk の間に呼ぶ producer が作る予算は、この walk の作業量の子（`JsonBudget.parent`）
         active = _ACTIVE_WORK.set(self.effort)
         try:
@@ -2789,6 +2795,9 @@ class _Walk:
                 self.drain_to(0)
         finally:
             _ACTIVE_WORK.reset(active)
+            claimed, self.claimed = self.claimed, None
+            if claimed is not None:
+                self.budget.release_leaf_substitution(claimed)
         return holder[0]
 
     def drain_to(self, depth: int) -> None:

@@ -68,6 +68,8 @@ from scripts.function_tracer_pcode.core.semantic_lifecycle import (
 )
 from scripts.function_tracer_pcode.core.stage_journal import journal_note
 from scripts.function_tracer_pcode.proof.obligations.snapshot import (
+    NO_PLACED_TOKENS,
+    PlacedTokens,
     SnapshotRead,
     assemble_snapshot,
     canonical_generation_path,
@@ -188,14 +190,18 @@ class _ReadHook(LeafSubstitution):
 # * 型は同じ型 **そのもの**（`True` / `1`、list / tuple を畳まない）
 # * 値で比べるのは、同じ値なら返す値どうしが `==` になる組み込みの型だけ（`str` / `int` / `bytes`、NaN で
 #   ない `float` は表現まで: `0.0` / `-0.0` は fingerprint が違う）。NaN は同じ object だけ
-# * token は包んだ値が同じ object
+# * token は包んだ値が同じ object。token であるのは、その witness の読みが置いた object そのもの（`PlacedTokens`）
+#   だけ: 入力が作った同じ型の object は、ほかの object と同じく同じ object だけ（型では token にしない）
 # * 本体の投影が新しく作る容器（tuple / mapping / frozenset）は中身で比べる
 # * それ以外の object は同じ object だけ（その状態が fingerprint に効くなら、codec の写しが状態を値として持つ）
 # * 参照で置かれる値（`_Retained`）の中の変わり得る容器は同じ object だけ（不変な tuple / frozenset は辿る）
 #
 # hash は同じ規則に合わせる（等しいなら同じ hash）。利用者の code（`__eq__` / `__hash__`）を呼ばない。
 
-def _same(a: Any, b: Any, retained: bool = False) -> bool:
+def _same(
+    a: Any, b: Any, retained: bool = False,
+    placed_a: PlacedTokens = NO_PLACED_TOKENS, placed_b: PlacedTokens = NO_PLACED_TOKENS,
+) -> bool:
     if a is b:
         return True
     kind = type(a)
@@ -205,19 +211,19 @@ def _same(a: Any, b: Any, retained: bool = False) -> bool:
         return a == b
     if kind is float:
         return a == a and float.__repr__(a) == float.__repr__(b)
-    if kind is ElidedSemanticValue:
+    if kind is ElidedSemanticValue and placed_a.holds(a) and placed_b.holds(b):
         return a.value is b.value
     if kind is _Retained:
-        return _same(a.value, b.value, True)
+        return _same(a.value, b.value, True, placed_a, placed_b)
     if kind is tuple:
         if len(a) != len(b):
             return False
         for x, y in zip(a, b):
-            if not _same(x, y, retained):
+            if not _same(x, y, retained, placed_a, placed_b):
                 return False
         return True
     if kind is frozenset:
-        return _same_set(a, b, retained)
+        return _same_set(a, b, retained, placed_a, placed_b)
     if retained:
         # 参照で置かれる変わり得る値・object: 同じ object だけ（上の `is`）
         return False
@@ -225,33 +231,33 @@ def _same(a: Any, b: Any, retained: bool = False) -> bool:
         if len(a) != len(b):
             return False
         for x, y in zip(a, b):
-            if not _same(x, y):
+            if not _same(x, y, False, placed_a, placed_b):
                 return False
         return True
     if kind is dict or kind is MappingProxyType:
         if len(a) != len(b):
             return False
         for (key_a, item_a), (key_b, item_b) in zip(a.items(), b.items()):
-            if not (_same(key_a, key_b) and _same(item_a, item_b)):
+            if not (_same(key_a, key_b, False, placed_a, placed_b) and _same(item_a, item_b, False, placed_a, placed_b)):
                 return False
         return True
     if kind is set:
-        return _same_set(a, b, False)
+        return _same_set(a, b, False, placed_a, placed_b)
     return False
 
 
-def _same_set(a: Any, b: Any, retained: bool) -> bool:
+def _same_set(a: Any, b: Any, retained: bool, placed_a: PlacedTokens, placed_b: PlacedTokens) -> bool:
     if len(a) != len(b):
         return False
     buckets: Dict[int, List[Any]] = {}
     for item in b:
-        buckets.setdefault(_hash(item, retained), []).append(item)
+        buckets.setdefault(_hash(item, retained, placed_b), []).append(item)
     for item in a:
-        candidates = buckets.get(_hash(item, retained))
+        candidates = buckets.get(_hash(item, retained, placed_a))
         if not candidates:
             return False
         for index, candidate in enumerate(candidates):
-            if _same(item, candidate, retained):
+            if _same(item, candidate, retained, placed_a, placed_b):
                 del candidates[index]
                 break
         else:
@@ -259,7 +265,7 @@ def _same_set(a: Any, b: Any, retained: bool) -> bool:
     return True
 
 
-def _hash(value: Any, retained: bool = False) -> int:
+def _hash(value: Any, retained: bool = False, placed: PlacedTokens = NO_PLACED_TOKENS) -> int:
     kind = type(value)
     if kind is str or kind is int or kind is bytes:
         return hash((kind.__name__, value))
@@ -269,21 +275,21 @@ def _hash(value: Any, retained: bool = False) -> int:
         if value != value:
             return hash(("nan", id(value)))
         return hash(("float", float.__repr__(value)))
-    if kind is ElidedSemanticValue:
+    if kind is ElidedSemanticValue and placed.holds(value):
         return hash(("token", id(value.value)))
     if kind is _Retained:
-        return hash(("retained", _hash(value.value, True)))
+        return hash(("retained", _hash(value.value, True, placed)))
     if kind is tuple:
-        return hash(("tuple", tuple(_hash(item, retained) for item in value)))
+        return hash(("tuple", tuple(_hash(item, retained, placed) for item in value)))
     if kind is frozenset:
-        return hash(("frozenset", sum(_hash(item, retained) for item in value) & 0xFFFFFFFFFFFFFFFF, len(value)))
+        return hash(("frozenset", sum(_hash(item, retained, placed) for item in value) & 0xFFFFFFFFFFFFFFFF, len(value)))
     if not retained:
         if kind is list:
-            return hash(("list", tuple(_hash(item) for item in value)))
+            return hash(("list", tuple(_hash(item, False, placed) for item in value)))
         if kind is dict or kind is MappingProxyType:
-            return hash((kind.__name__, tuple((_hash(k), _hash(v)) for k, v in value.items())))
+            return hash((kind.__name__, tuple((_hash(k, False, placed), _hash(v, False, placed)) for k, v in value.items())))
         if kind is set:
-            return hash(("set", sum(_hash(item) for item in value) & 0xFFFFFFFFFFFFFFFF, len(value)))
+            return hash(("set", sum(_hash(item, False, placed) for item in value) & 0xFFFFFFFFFFFFFFFF, len(value)))
     return hash(("object", id(value)))
 
 
@@ -292,7 +298,7 @@ def _hash(value: Any, retained: bool = False) -> int:
 _WITNESS_HASH_NODES = 2048
 
 
-def _witness_hash(parts: Tuple[Any, ...]) -> int:
+def _witness_hash(parts: Tuple[Any, ...], placed: PlacedTokens = NO_PLACED_TOKENS) -> int:
     """`_hash` と同じ規則の、読む node の数を抑えた hash（`_same` で等しい組は同じ hash）。
 
     容器は型と長さ、葉は `_hash` を、幅優先の順に上限まで畳む。set / frozenset は要素の順が
@@ -325,21 +331,29 @@ def _witness_hash(parts: Tuple[Any, ...]) -> int:
         elif kind is frozenset or (not retained and kind is set):
             folded.append(hash((kind.__name__, len(value))))
         else:
-            folded.append(_hash(value, retained))
+            folded.append(_hash(value, retained, placed))
     return hash(tuple(folded))
 
 
 class _Witness:
-    """store の key（hash を 1 回だけ求める。比べるのは `_same`: 利用者の code を呼ばない）。"""
+    """store の key（hash を 1 回だけ求める。比べるのは `_same`: 利用者の code を呼ばない）。
 
-    __slots__ = ("parts", "_hash")
+    `placed` はその読みが置いた token（token として比べてよいのはその object だけ。入力が作った同じ型の object は
+    ほかの object と同じく identity で比べる）。
+    """
 
-    def __init__(self, parts: Tuple[Any, ...]) -> None:
+    __slots__ = ("parts", "placed", "_hash")
+
+    def __init__(self, parts: Tuple[Any, ...], placed: PlacedTokens = NO_PLACED_TOKENS) -> None:
         self.parts = parts
-        self._hash = _witness_hash(parts)
+        self.placed = placed
+        self._hash = _witness_hash(parts, placed)
 
     def __eq__(self, other: Any) -> bool:
-        return type(other) is _Witness and other._hash == self._hash and _same(self.parts, other.parts)
+        return (
+            type(other) is _Witness and other._hash == self._hash
+            and _same(self.parts, other.parts, False, self.placed, other.placed)
+        )
 
     def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
@@ -525,7 +539,7 @@ def _witness_of(read: SnapshotRead) -> _Witness:
         _Retained(read.held_id),
         read.held_fields,
         read.held_refs,
-    ))
+    ), read.placed)
 
 
 def _seal_observed(store: SnapshotReuse, pending: List[Any], read: SnapshotRead) -> None:

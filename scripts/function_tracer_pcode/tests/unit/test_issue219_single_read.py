@@ -53,8 +53,8 @@ def _witness_hash_mode(request, monkeypatch):
     """`collide` は witness の hash を定数にして、比べ方（`_same`）だけで決めさせる。"""
 
     if request.param == "collide":
-        monkeypatch.setattr(snapshot_reuse, "_witness_hash", lambda parts: 0)
-        monkeypatch.setattr(snapshot_reuse, "_hash", lambda value, retained=False: 0)
+        monkeypatch.setattr(snapshot_reuse, "_witness_hash", lambda parts, placed=None: 0)
+        monkeypatch.setattr(snapshot_reuse, "_hash", lambda value, retained=False, placed=None: 0)
     yield request.param
 
 
