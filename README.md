@@ -426,7 +426,10 @@ per profile on the supervisor's clock; the formula, the run lists and the number
 re-measures it. The verdict is `holds`, `violated` or `undetermined`
 (`reporting/deadline_margin_acceptance.py`): a run that does not fit its pool, a TIMEOUT
 whose kind is not established, a pair whose journal or interval is missing, or a pool
-with no pair the deadline cut is `undetermined`, never a pass.
+with no pair the deadline cut is `undetermined`, never a pass. "Not cut by the deadline"
+is read only from the result's own `analysis_deadline` record or from a journal the
+child sealed at exit (`journal_end`, no seq gap, no write failure); a readable journal
+with a lost row is not evidence that no trip happened.
 
 The effective values are recorded as `analysis_timeout` / `analysis_timeout_enabled` /
 `analysis_timeout_margin` in each `run_manifest.txt` and in `subset_manifest.txt`, and
