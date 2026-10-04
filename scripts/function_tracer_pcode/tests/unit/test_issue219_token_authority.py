@@ -259,7 +259,8 @@ def _compare_exercising_tokens(factory, steps, monkeypatch) -> None:
         finally:
             # 読みが例外で抜けても、hook が置いた token は見る（置いた後に入力の code が失敗した経路）
             if oracle.snapshot_reuse._SNAPSHOT_REUSE_ENABLED:
-                placed.append(bool(hook.__placed_values__()))
+                # hook が置いた token の表（版によらず読めるように、この PR の hook の内部の表を直接見る）
+                placed.append(bool(hook._tokens))
 
     monkeypatch.setattr(oracle.snapshot_reuse, "read_snapshot_inputs", spy)
     metrics = oracle._compare(factory, steps, monkeypatch)
