@@ -165,6 +165,10 @@ class _ReadHook(LeafSubstitution):
             self.pending.append(leaf)
         return NO_SUBSTITUTION
 
+    def __placed_values__(self) -> Tuple[Any, ...]:
+        # この読みで置いた token そのもの（`snapshot.PlacedTokens` が、token を扱う唯一の許可にする）
+        return tuple(self._tokens.values())
+
 
 # ---------------------------------------------------------------------------
 # witness の比べ方（snapshot の等しさと保持から導く。1 つの規則）
@@ -587,7 +591,7 @@ def reuse_or_build(cls: Any, analysis: Any) -> Any:
     if snapshot is None:
         started = time.perf_counter()
         store.count("body_executions")
-        snapshot = assemble_snapshot(read, has_tokens=hook.elided > 0)
+        snapshot = assemble_snapshot(read)
         store.add_seconds("body", time.perf_counter() - started)
         if witness is not None:
             try:

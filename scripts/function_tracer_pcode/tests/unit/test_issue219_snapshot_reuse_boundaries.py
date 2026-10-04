@@ -88,28 +88,42 @@ def test_only_the_snapshot_material_turns_on_a_leaf_substitution_and_only_the_ow
     assert [node.name for node in sites] == ["snapshot_material"]
 
 
-def test_only_the_single_read_asks_the_codec_to_pass_witness_tokens():
-    """codec が token を通すのは、canonical な経路の単一の読み（`read_snapshot_inputs`）の digest の凍結だけ。"""
+def test_only_the_single_read_hands_the_codec_a_token_capability():
+    """token を扱う許可（`PlacedTokens`）は引数でだけ渡る: `_freeze_placing` に `None` 以外を渡すのは単一の読み
+    （`read_snapshot_inputs`）だけ（`_freeze_placing` 自身の再帰を除く）。許可を作るのは `placed_tokens_of`（と
+    `NO_PLACED_TOKENS`）だけ。"""
 
-    sites: List[str] = []
+    passers: List[str] = []
+    makers: List[str] = []
     for path, tree in _production_modules():
-        functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
-        for function in functions:
+        for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
             for node, name in _calls(function):
-                if name == "witness_tokens_pass":
-                    sites.append(f"{path.relative_to(PACKAGE_ROOT)}:{function.name}")
-    assert sites == [f"{SCHEMA.relative_to(PACKAGE_ROOT)}:read_snapshot_inputs"]
-    # 通すかは thread の状態（`_WITNESS_FREEZE`）だけで決まり、それを真にするのは `witness_tokens_pass` だけ
-    writers = [
-        node.lineno for node in ast.walk(parse_source(SCHEMA))
-        if isinstance(node, ast.Assign) and any(
-            isinstance(target, ast.Attribute) and target.attr == "active" for target in node.targets
-        )
-    ]
-    scope = next(
-        node for node in ast.walk(parse_source(SCHEMA)) if isinstance(node, ast.FunctionDef) and node.name == "witness_tokens_pass"
-    )
-    assert writers and all(scope.lineno <= line <= scope.end_lineno for line in writers)
+                if name == "_freeze_placing":
+                    capability = node.args[1] if len(node.args) > 1 else None
+                    if not (isinstance(capability, ast.Constant) and capability.value is None):
+                        passers.append(f"{path.relative_to(PACKAGE_ROOT)}:{function.name}")
+                if name == "PlacedTokens":
+                    makers.append(f"{path.relative_to(PACKAGE_ROOT)}:{function.name}")
+    schema = SCHEMA.relative_to(PACKAGE_ROOT)
+    # `_freeze_placing` の再帰は局所の名前（`recurse`）で、許可を渡すのは組み込みの容器の要素だけ（record の表現・
+    # identity key・dataclass の field へ渡らないことは `test_only_a_placed_token_passes_...` が実際に確かめる）
+    assert sorted(set(passers)) == [f"{schema}:read_snapshot_inputs"]
+    assert sorted(set(makers)) == [f"{schema}:placed_tokens_of"]
+
+
+def test_no_ambient_state_decides_whether_a_token_passes():
+    """許可を thread / context の状態に置かない（入力の code へ伝わる）: snapshot の schema と再利用の owner は
+    `threading.local` / `ContextVar` を持たない。"""
+
+    for path in (SCHEMA, OWNER):
+        tree = parse_source(path)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                bases = [base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", None) for base in node.bases]
+                assert "local" not in bases, f"{path.name}:{node.lineno}"
+            if isinstance(node, ast.Call):
+                name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
+                assert name not in ("local", "ContextVar"), f"{path.name}:{node.lineno}"
 
 
 def test_the_reuse_owner_reads_the_input_only_through_the_single_read():
@@ -220,23 +234,28 @@ def test_only_the_reuse_owner_registers_witness_token_types():
     assert [entry[0] for entry in snapshot_module._WITNESS_TOKEN_TYPES] == [snapshot_reuse.ElidedSemanticValue]
 
 
-def test_the_codec_passes_a_token_only_inside_the_single_reads_scope_and_restores_it():
-    """token の型の値は `witness_tokens_pass` の中でだけ写しに置かれ、外（digest・本体）では opaque として拒まれる。
-    例外で抜けても状態は戻り、入れ子にはできない。"""
+def test_only_a_placed_token_passes_and_only_through_the_internal_freeze():
+    """通常の入口（`freeze` / `_freeze_unmetered` / `digest`）は token を拒む。`_freeze_placing` は渡された許可に
+    ある token **そのもの** だけを置く（同じ型の別の object は拒む）。許可は record の表現・identity key・dataclass
+    の field へは渡らない（そこは入力の値）。"""
 
-    from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec, witness_tokens_pass
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import PlacedTokens, SnapshotFingerprintCodec
     from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import ElidedSemanticValue
 
     token = ElidedSemanticValue(object())
+    placed = PlacedTokens([token])
+    for entry in (SnapshotFingerprintCodec.freeze, SnapshotFingerprintCodec._freeze_unmetered, SnapshotFingerprintCodec.digest):
+        with pytest.raises(TypeError, match="opaque object ElidedSemanticValue"):
+            entry({"k": token})
+    assert SnapshotFingerprintCodec._freeze_placing({"k": [token]}, placed) == (("k", (token,)),)
+    with pytest.raises(TypeError, match="opaque object ElidedSemanticValue"):
+        SnapshotFingerprintCodec._freeze_placing({"k": ElidedSemanticValue(token.value)}, placed)
+
+    class Keyed:
+        def stable_key(self):
+            return ("key", token)
+
+    with pytest.raises(TypeError, match="opaque object ElidedSemanticValue"):
+        SnapshotFingerprintCodec._freeze_placing({"k": Keyed()}, placed)
     with pytest.raises(TypeError):
-        SnapshotFingerprintCodec._freeze_unmetered({"k": token})
-    with witness_tokens_pass():
-        assert SnapshotFingerprintCodec._freeze_unmetered({"k": token}) == (("k", token),)
-        with pytest.raises(ValueError):
-            with witness_tokens_pass():
-                pass
-    with pytest.raises(RuntimeError):
-        with witness_tokens_pass():
-            raise RuntimeError("boom")
-    with pytest.raises(TypeError):
-        SnapshotFingerprintCodec._freeze_unmetered({"k": token})
+        PlacedTokens([object()])

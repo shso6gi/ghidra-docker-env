@@ -487,22 +487,33 @@ def test_a_hit_returns_a_new_snapshot_object_with_the_same_retained_values():
 
 
 def test_the_witness_digest_of_the_codec_copy_follows_the_fingerprint_and_token_identity():
-    """codec の写しの witness の digest: token が無ければ fingerprint の digest と同じ。token は値の identity で書く。"""
+    """codec の写しの witness の digest: token が無ければ fingerprint の digest と同じ。token は値の identity で書く。
+    token として書くのは、読みが置いた token（`PlacedTokens`）だけ: 置いていない同じ型の object は JSON にできない値。"""
 
-    from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec, witness_fingerprint_digest
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import (
+        NO_PLACED_TOKENS,
+        PlacedTokens,
+        SnapshotFingerprintCodec,
+        witness_fingerprint_digest,
+    )
     from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import ElidedSemanticValue
 
     plain = SnapshotFingerprintCodec.freeze({"a": [1, 2.5, "x", None, True]})
-    assert witness_fingerprint_digest(plain) == SnapshotFingerprintCodec.digest_frozen(plain)
+    assert witness_fingerprint_digest(plain, NO_PLACED_TOKENS) == SnapshotFingerprintCodec.digest_frozen(plain)
     value = published(Expression.binary_op("INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(7, size=4)))
     twin = published(Expression.binary_op("INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(7, size=4)))
-    first = (("k", ElidedSemanticValue(value)),)
-    again = (("k", ElidedSemanticValue(value)),)
-    other = (("k", ElidedSemanticValue(twin)),)
-    assert witness_fingerprint_digest(first) == witness_fingerprint_digest(again)
-    assert witness_fingerprint_digest(first) != witness_fingerprint_digest(other)
+    tokens = [ElidedSemanticValue(value), ElidedSemanticValue(value), ElidedSemanticValue(twin)]
+    placed = PlacedTokens(tokens)
+    first, again, other = ((("k", token),) for token in tokens)
+    assert witness_fingerprint_digest(first, placed) == witness_fingerprint_digest(again, placed)
+    assert witness_fingerprint_digest(first, placed) != witness_fingerprint_digest(other, placed)
     with pytest.raises(TypeError):
-        witness_fingerprint_digest((("k", object()),))
+        witness_fingerprint_digest((("k", object()),), placed)
+    # 置いていない token（同じ型・同じ値を包む）は token として書かない
+    with pytest.raises(TypeError):
+        witness_fingerprint_digest((("k", ElidedSemanticValue(value)),), placed)
+    with pytest.raises(TypeError):
+        witness_fingerprint_digest(first, NO_PLACED_TOKENS)
 
 
 # ---------------------------------------------------------------------------
@@ -628,5 +639,6 @@ def test_the_read_keeps_the_codec_copy_only_when_it_holds_tokens():
     assert plain.frozen_digest == body.semantic_fingerprint
     assert hook.elided > 0 and tokens.frozen_payload is not None
     assert tokens.frozen_digest != body.semantic_fingerprint
-    assert assemble_snapshot(tokens, has_tokens=True).semantic_fingerprint == body.semantic_fingerprint
-    assert assemble_snapshot(plain, has_tokens=False).semantic_fingerprint == body.semantic_fingerprint
+    assert assemble_snapshot(tokens).semantic_fingerprint == body.semantic_fingerprint
+    assert assemble_snapshot(plain).semantic_fingerprint == body.semantic_fingerprint
+    assert not plain.placed and tokens.placed

@@ -711,6 +711,12 @@ class LeafSubstitution:
     def __leaf_substitute__(self, leaf: Any, size: Optional[int]) -> Any:
         return NO_SUBSTITUTION
 
+    def __placed_values__(self) -> Tuple[Any, ...]:
+        """これまでに置いた値（`NO_SUBSTITUTION` 以外の答え）そのもの。置いた値を後で特別に扱う側（例: snapshot の
+        読みが token を codec に通す）は、型ではなくこの値の identity で照合する。"""
+
+        return ()
+
 
 @contextmanager
 def substituting_leaves(work: Optional[SerializationWork], substitution: Optional[LeafSubstitution]) -> Iterator[None]:

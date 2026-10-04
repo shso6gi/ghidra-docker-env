@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 import hashlib
-import threading
 from types import MappingProxyType
-from typing import Any, Callable, Dict, Iterator, List, Mapping, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
 from scripts.function_tracer_pcode.core import json_encoding
 from scripts.function_tracer_pcode.core.budget_policy import serialization_scope, substituting_leaves
@@ -19,6 +17,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     identity_key_of,
     is_json_record,
     materialize,
+    protocol_method,
 )
 from scripts.function_tracer_pcode.core.live_values import (
     metered_storage_reads,
@@ -327,11 +326,21 @@ class SnapshotFingerprintCodec:
         digest は snapshot のたびに値全体を写すので、数える経路の分岐・helper を通さない
         （`test_the_unmetered_freeze_equals_the_metered_copy` が同じ値であることを固定）。
 
-        単一の読みの凍結（`witness_tokens_pass`。`read_snapshot_inputs` だけが入る）の中でだけ、再利用の owner が
-        登録した token の型 **そのもの**（`register_witness_token_type`）の値を写しにそのまま置く
-        （`expand_witness_tokens` が、token が代わりに置かれた値の写しへ戻す）。入力の型が自分で何を宣言しても
-        token にはならない。それ以外（digest・本体）では token も opaque な値として拒む。確かめるのは opaque な値の
-        分岐だけ（token はそこにしか来ない。容器と scalar の経路は本体と同じ）。
+        **token を通さない**: 呼ぶ側の文脈（読みの最中・入力の code の中・入れ子・例外の後）によらず、token の型の
+        値も opaque な値として拒む。token を写しに置けるのは、単一の読みが自分の置いた token（`PlacedTokens`）を
+        明示して渡す内部の凍結（`_freeze_placing`。`read_snapshot_inputs` だけが呼ぶ）だけ。
+        """
+
+        return cls._freeze_placing(value, None)
+
+    @classmethod
+    def _freeze_placing(cls, value: Any, placed: Optional["PlacedTokens"]) -> Any:
+        """`_freeze_unmetered` の本体。`placed` は、この凍結がそのまま写しに置いてよい token（その読みの hook が
+        置いた object そのもの。identity で照合する）。`None` なら何も置かない（通常の codec）。
+
+        許可は引数でだけ渡る（thread や module の状態を読まない）: この凍結の中で走る入力の code（`stable_key` /
+        record の LEGACY 表現）が codec を呼べば、その呼び出しは `placed` を持たない通常の凍結になる。入力が作った
+        同じ型の object は `placed` に無いので token ではない（main と同じく opaque として拒む）。
         """
 
         if value is None:
@@ -339,13 +348,13 @@ class SnapshotFingerprintCodec:
         kind = type(value)
         if kind is str or kind is int or kind is bool or kind is float:
             return value
-        freeze = cls._freeze_unmetered
+        recurse = cls._freeze_placing
         # 速い経路: 組み込みの型そのものの容器（組み込みの振る舞いと分かっている）
         if (type(value) is tuple or type(value) is list):
-            return tuple(freeze(v) for v in value)
+            return tuple(recurse(v, placed) for v in value)
         if type(value) is dict:
             return cls.sorted_mapping_items(
-                tuple((freeze(key), freeze(item)) for key, item in value.items())
+                tuple((recurse(key, placed), recurse(item, placed)) for key, item in value.items())
             )
         scalar = plain_scalar(value)
         if scalar is not NOT_PLAIN:
@@ -359,24 +368,25 @@ class SnapshotFingerprintCodec:
         mapping = builtin_mapping(value)
         if mapping is not None:
             return cls.sorted_mapping_items(
-                tuple((freeze(key), freeze(item)) for key, item in items_of(mapping))
+                tuple((recurse(key, placed), recurse(item, placed)) for key, item in items_of(mapping))
             )
         if builtin_sequence(value):
-            return tuple(freeze(v) for v in elements_of(value))
+            return tuple(recurse(v, placed) for v in elements_of(value))
         if builtin_set(value):
-            return _set_members(tuple(freeze(v) for v in elements_of(value)))
-        if _WITNESS_FREEZE.active and _is_witness_token_type(kind):
+            return _set_members(tuple(recurse(v, placed) for v in elements_of(value)))
+        if _is_placed_token(placed, value):
             return value
         name = type_name(kind)
         has_key, identity_key = identity_key_of(value)
         if has_key:
-            return (name, freeze(identity_key))
+            # 入力の code（`stable_key`）が返した値: 入力の値なので token を通さない
+            return (name, recurse(identity_key, None))
         if is_json_record(value):
             # record の LEGACY 表現（`to_dict()` と同じ walker。解析 1 件分の作業量の中ならそこへ数える）
-            return (name, freeze(materialize(value)))
+            return (name, recurse(materialize(value), None))
         names = dataclass_field_names(value)
         if names is not None:
-            return (name, tuple((field_name, freeze(field_value(value, field_name))) for field_name in names))
+            return (name, tuple((field_name, recurse(field_value(value, field_name), None)) for field_name in names))
         raise TypeError(f"opaque object {name} has no object-derived stable identity")
 
     @classmethod
@@ -533,34 +543,57 @@ class _FreezeMeter:
         self._policy.count_into(value, self.budget, mode=LEGACY)
 
 
-#: snapshot の再利用の token の型と、token が代わりに置かれた値の LEGACY の木を作る関数（`_freeze_unmetered` は
-#: `witness_tokens_pass` の中でだけ、この型 **そのもの** の値を写しにそのまま置く）。登録するのは再利用の owner だけ（静的 test）
+#: snapshot の再利用の token の型と、token が代わりに置かれた値の LEGACY の木を作る関数・identity。登録は token の
+#: **展開の方法** を決めるだけで、token を扱う許可ではない（許可は `PlacedTokens`）。登録するのは再利用の owner だけ（静的 test）
 _WITNESS_TOKEN_TYPES: List[Tuple[type, Callable[[Any], Any], Callable[[Any], int]]] = []
 
 
-class _WitnessFreeze(threading.local):
-    """この thread の codec の凍結が token を通すか（`witness_tokens_pass` の中だけ真）。"""
+class PlacedTokens:
+    """1 回の単一の読みで、葉の置き換え（`LeafSubstitution`）が **置いた** token（identity で照合する）。
 
-    active = False
-
-
-_WITNESS_FREEZE = _WitnessFreeze()
-
-
-@contextmanager
-def witness_tokens_pass() -> Iterator[None]:
-    """この中の `_freeze_unmetered` は、登録した token の型そのものの値を写しにそのまま置く。
-
-    入るのは単一の読み（`read_snapshot_inputs`）の digest の凍結だけ（静的 test）。入れ子にしない。
+    token を扱う許可はこれだけ: codec の内部の凍結（`SnapshotFingerprintCodec._freeze_placing`）・digest の印・
+    展開は、この中にある object そのものだけを token として扱う。型だけでは token にならない（入力が作った同じ型の
+    object は token ではない）。作るのは `read_snapshot_inputs` だけで、読みの値（`SnapshotRead`）と一緒に渡る。
     """
 
-    if _WITNESS_FREEZE.active:
-        raise ValueError("witness tokens already pass in this thread")
-    _WITNESS_FREEZE.active = True
-    try:
-        yield
-    finally:
-        _WITNESS_FREEZE.active = False
+    __slots__ = ("_by_id",)
+
+    def __init__(self, tokens: Iterable[Any]) -> None:
+        by_id: Dict[int, Any] = {}
+        for token in tokens:
+            if _witness_token_tree(type(token)) is None:
+                raise TypeError(f"{type_name(type(token))} is not a registered witness token type")
+            by_id[id(token)] = token
+        #: id → token（token への強参照も兼ねる: 生きている間 id は別の object に使い回されない）
+        self._by_id = by_id
+
+    def holds(self, value: Any) -> bool:
+        return _is_placed_token(self, value)
+
+    def __bool__(self) -> bool:
+        return bool(self._by_id)
+
+
+def _is_placed_token(placed: Optional[PlacedTokens], value: Any) -> bool:
+    """`value` が `placed` にある token **そのもの** か（identity だけで照合する: 値の protocol を呼ばない）。"""
+
+    if placed is None:
+        return False
+    token = placed._by_id.get(id(value))
+    return token is not None and token is value
+
+
+#: token を 1 つも置かなかった読み
+NO_PLACED_TOKENS = PlacedTokens(())
+
+
+def placed_tokens_of(leaf_substitution: Any) -> PlacedTokens:
+    """葉の置き換えが置いた値（`LeafSubstitution.__placed_values__`）を、token の許可にする。"""
+
+    if leaf_substitution is None:
+        return NO_PLACED_TOKENS
+    values = protocol_method(leaf_substitution, "__placed_values__")(leaf_substitution)
+    return PlacedTokens(values) if values else NO_PLACED_TOKENS
 
 
 def register_witness_token_type(kind: type, tree_of: Callable[[Any], Any], identity_of: Callable[[Any], int]) -> type:
@@ -597,7 +630,7 @@ def _witness_token_identity(kind: type) -> Optional[Callable[[Any], int]]:
 _WITNESS_TOKEN_MARK = "\u0000witness_token"
 
 
-def witness_fingerprint_digest(frozen: Any) -> str:
+def witness_fingerprint_digest(frozen: Any, placed: PlacedTokens) -> str:
     """codec の写し（token を含み得る）の fingerprint の digest。token は、代わりに置かれた値の identity の印で書く。
 
     token の無い写しでは `digest_frozen(frozen)` と同じ。token の位置が同じで同じ値を指す写しどうしは、展開した
@@ -605,17 +638,17 @@ def witness_fingerprint_digest(frozen: Any) -> str:
     意味の view の木の中だけで、`retained_form` の写しの同じ位置にも同じ token がある（再利用は両方を比べる）。
     """
 
-    return _marked_fingerprint_digest(frozen)[0]
+    return _marked_fingerprint_digest(frozen, placed)[0]
 
 
-def _marked_fingerprint_digest(frozen: Any) -> Tuple[str, bool]:
+def _marked_fingerprint_digest(frozen: Any, placed: PlacedTokens) -> Tuple[str, bool]:
     """`witness_fingerprint_digest` と、写しに token があったか（JSON を 1 回書く。token が無ければ、書く JSON は
     `digest_frozen` と同じ: 印の関数は JSON にできない値でだけ呼ばれる）。"""
 
     marked = [False]
 
     def mark(value: Any) -> Any:
-        identity_of = _witness_token_identity(type(value))
+        identity_of = _witness_token_identity(type(value)) if placed.holds(value) else None
         if identity_of is None:
             raise TypeError(f"{type_name(type(value))} is not JSON serializable")
         marked[0] = True
@@ -625,25 +658,26 @@ def _marked_fingerprint_digest(frozen: Any) -> Tuple[str, bool]:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest(), marked[0]
 
 
-def _is_witness_token_type(kind: type) -> bool:
-    return _witness_token_tree(kind) is not None
-
-
-def _replace_witness_tokens(value: Any, leaf: Callable[[Any, Callable[[Any], Any]], Any]) -> Any:
-    """組み込みの容器（tuple / list / dict / MappingProxy / frozenset）の中の token を `leaf(token, tree_of)` に
-    置き換える。token の無い容器は同じ object を返す（容器でない値・入力の object の中は辿らない）。"""
+def _replace_witness_tokens(
+    value: Any, leaf: Callable[[Any, Callable[[Any], Any]], Any], placed: PlacedTokens,
+) -> Any:
+    """組み込みの容器（tuple / list / dict / MappingProxy / frozenset）の中の、`placed` にある token を
+    `leaf(token, tree_of)` に置き換える。token の無い容器は同じ object を返す（容器でない値・入力の object の中は
+    辿らない。`placed` に無い同じ型の object はそのまま）。"""
 
     kind = type(value)
-    tree_of = _witness_token_tree(kind)
-    if tree_of is not None:
-        return leaf(value, tree_of)
+    if placed.holds(value):
+        return leaf(value, _witness_token_tree(kind))
     if kind is tuple or kind is list or kind is frozenset:
-        items = [_replace_witness_tokens(item, leaf) for item in value]
+        items = [_replace_witness_tokens(item, leaf, placed) for item in value]
         if all(new is old for new, old in zip(items, value)):
             return value
         return kind(items)
     if kind is dict or kind is MappingProxyType:
-        rows = [(key, _replace_witness_tokens(key, leaf), item, _replace_witness_tokens(item, leaf)) for key, item in value.items()]
+        rows = [
+            (key, _replace_witness_tokens(key, leaf, placed), item, _replace_witness_tokens(item, leaf, placed))
+            for key, item in value.items()
+        ]
         if all(new_key is key and new_item is item for key, new_key, item, new_item in rows):
             return value
         rebuilt = {new_key: new_item for _key, new_key, _item, new_item in rows}
@@ -651,18 +685,18 @@ def _replace_witness_tokens(value: Any, leaf: Callable[[Any, Callable[[Any], Any
     return value
 
 
-def expand_witness_tokens(frozen: Any) -> Any:
-    """凍結した値（codec の写し）の token を、token が代わりに置かれた値の凍結した写しへ戻す（純粋）。"""
+def expand_witness_tokens(frozen: Any, placed: PlacedTokens) -> Any:
+    """凍結した値（codec の写し）の、`placed` にある token を、token が代わりに置かれた値の凍結した写しへ戻す（純粋）。"""
 
     return _replace_witness_tokens(
-        frozen, lambda token, tree_of: SnapshotFingerprintCodec._freeze_unmetered(tree_of(token)),
+        frozen, lambda token, tree_of: SnapshotFingerprintCodec._freeze_unmetered(tree_of(token)), placed,
     )
 
 
-def _expand_held_tokens(held: Any) -> Any:
-    """snapshot に置く値（`retained_form` の写し）の token を、置かれるはずだった木の写しへ戻す（純粋）。"""
+def _expand_held_tokens(held: Any, placed: PlacedTokens) -> Any:
+    """snapshot に置く値（`retained_form` の写し）の、`placed` にある token を、置かれるはずだった木の写しへ戻す（純粋）。"""
 
-    return _replace_witness_tokens(held, lambda token, tree_of: deep_freeze(tree_of(token)))
+    return _replace_witness_tokens(held, lambda token, tree_of: deep_freeze(tree_of(token)), placed)
 
 
 #: `AnalysisSnapshot.create` の既定の抽出 schema の版
@@ -903,6 +937,8 @@ class SnapshotRead(NamedTuple):
     observed_runtime_ref: Callable[[Any, Any], Any]
     #: この読みの直列化の作業量が数えた byte の大きさ（置き換えた葉も数える。数えない作業量では 0）
     serialized_bytes: int
+    #: この読みの葉の置き換えが置いた token（token を扱う唯一の許可。置かなければ `NO_PLACED_TOKENS`）
+    placed: PlacedTokens
 
 
 def read_snapshot_inputs(analysis: Any, leaf_substitution: Any = None) -> SnapshotRead:
@@ -922,37 +958,43 @@ def read_snapshot_inputs(analysis: Any, leaf_substitution: Any = None) -> Snapsh
         target_parts=snapshot_serialization_target(analysis),
     ) as work:
         material = snapshot_material(analysis, to_dict, work, leaf_substitution)
-        with witness_tokens_pass():
-            frozen = SnapshotFingerprintCodec._freeze_unmetered(
-                fingerprint_payload(material.snapshot_id, material.semantic_fields, SNAPSHOT_EXTRACTION_SCHEMA_VERSION),
-            )
+        # token を扱う許可は、この読みの置き換えが置いた token だけ（`PlacedTokens`）。置かなければ本体と同じ通常の
+        # 凍結（`_freeze_unmetered`）
+        placed = placed_tokens_of(leaf_substitution)
+        frozen = SnapshotFingerprintCodec._freeze_placing(
+            fingerprint_payload(material.snapshot_id, material.semantic_fields, SNAPSHOT_EXTRACTION_SCHEMA_VERSION),
+            placed if placed else None,
+        )
         # `create` と同じく、codec の写しは digest にしてから `retained_form` の写しを作る（token が無ければ写しを
         # 手放す: 大きな写しを、次の写しを作る間に持ち越さない）
-        frozen_digest, has_tokens = _marked_fingerprint_digest(frozen)
+        if placed:
+            frozen_digest, has_tokens = _marked_fingerprint_digest(frozen, placed)
+        else:
+            frozen_digest, has_tokens = SnapshotFingerprintCodec.digest_frozen(frozen), False
         if not has_tokens:
             frozen = None
         held_id, held_fields, held_refs = retained_form(
             material.snapshot_id, material.semantic_fields, material.diagnostic_refs,
         )
     return SnapshotRead(
-        frozen_digest, frozen, held_id, held_fields, held_refs, work.observed_runtime_ref, work.consumed,
+        frozen_digest, frozen, held_id, held_fields, held_refs, work.observed_runtime_ref, work.consumed, placed,
     )
 
 
-def assemble_snapshot(read: SnapshotRead, *, has_tokens: bool = True) -> "AnalysisSnapshot":
+def assemble_snapshot(read: SnapshotRead) -> "AnalysisSnapshot":
     """読んだ値から、`create` と同じ snapshot を作る（純粋: 入力の code を呼ばない）。
 
-    token を、token が代わりに置かれた値の木に戻す: digest は凍結した写しの中で、snapshot に置く値は
-    `retained_form` の写しの中で。`has_tokens` が偽（読みが token を置かなかった）なら `retained_form` を戻す走査を
-    しない。codec の写しに token が無ければ、読みが求めた digest がそのまま fingerprint（`create` の残りそのもの）。
+    読みが置いた token（`read.placed`）を、token が代わりに置かれた値の木に戻す: digest は凍結した写しの中で、
+    snapshot に置く値は `retained_form` の写しの中で。token を置かなかった読みでは戻す走査をしない。codec の写しに
+    token が無ければ、読みが求めた digest がそのまま fingerprint（`create` の残りそのもの）。
     """
 
     held = read.held_fields
-    if has_tokens:
-        held = _expand_held_tokens(held)
+    if read.placed:
+        held = _expand_held_tokens(held, read.placed)
     fingerprint = read.frozen_digest
     if read.frozen_payload is not None:
-        fingerprint = SnapshotFingerprintCodec.digest_frozen(expand_witness_tokens(read.frozen_payload))
+        fingerprint = SnapshotFingerprintCodec.digest_frozen(expand_witness_tokens(read.frozen_payload, read.placed))
     return AnalysisSnapshot._from_parts(
         fingerprint,
         read.held_id,
@@ -982,6 +1024,7 @@ def canonical_generation_path(cls: Any) -> bool:
         and codec.get("freeze") is _CANONICAL_CODEC[1]
         and codec.get("_freeze_unmetered") is _CANONICAL_CODEC[2]
         and codec.get("digest_frozen") is _CANONICAL_CODEC[3]
+        and codec.get("_freeze_placing") is _CANONICAL_CODEC[4]
     )
 
 
@@ -989,7 +1032,8 @@ _CANONICAL_CREATE = AnalysisSnapshot.__dict__["create"]
 _CANONICAL_BUILD = AnalysisSnapshot.__dict__["_build_from_function_analysis"]
 _CANONICAL_FROM_PARTS = AnalysisSnapshot.__dict__["_from_parts"]
 _CANONICAL_CODEC = tuple(
-    SnapshotFingerprintCodec.__dict__[name] for name in ("digest", "freeze", "_freeze_unmetered", "digest_frozen")
+    SnapshotFingerprintCodec.__dict__[name]
+    for name in ("digest", "freeze", "_freeze_unmetered", "digest_frozen", "_freeze_placing")
 )
 _CANONICAL_VIEW = _canonical_view()
 
