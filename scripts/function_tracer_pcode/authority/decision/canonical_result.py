@@ -1266,9 +1266,13 @@ def _adopted_terminal(store: Any, status: Any) -> TerminalAuthority:
     """
 
     if status not in TERMINAL_STATUSES:
+        # Issue #204: the projection and the store are deleted with the pair's temporary
+        # directory, so the reason the durable evidence names is carried into the message
+        # (the pair-status detail).  It is read with the same rule the supervisor used; the
+        # classification still fails.
         raise ValueError(
             "supervisor projection is not a terminal authority: "
-            f"status={status!r}"
+            f"status={status!r}; durable evidence: {_durable_verdict(store)}"
         )
     inspection = inspect_terminal(store, mode=None, process_alive=process_is_alive)
     authority = inspection.authority
@@ -1280,6 +1284,16 @@ def _adopted_terminal(store: Any, status: Any) -> TerminalAuthority:
             f"{step.detail}"
         )
     return authority
+
+
+def _durable_verdict(store: Any) -> str:
+    """What the durable evidence decides now (``next_step``: kind, invalid code, detail)."""
+
+    try:
+        step = inspect_terminal(store, mode=None, process_alive=process_is_alive).step
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return f"unreadable ({type(exc).__name__}: {exc})"[:300]
+    return f"{step.kind.value} {getattr(step.invalid_code, 'value', None)} {step.detail}"[:500]
 
 
 def _require_logged_result(log_path: Path, envelope: CanonicalEnvelope) -> None:

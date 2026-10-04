@@ -112,7 +112,8 @@ def _assert_terminal(run, expected):
         assert projection["error_code"] == detail, projection
         assert projection["error_detail"]
         assert run.exit_code == 2
-        with pytest.raises(ValueError, match="not a terminal authority"):
+        # Issue #204: the classifier's message (the pair-status detail) names the durable verdict
+        with pytest.raises(ValueError, match=f"not a terminal authority: .*durable evidence: .*{detail}"):
             classify(run)
         return None
     classified = classify(run)
