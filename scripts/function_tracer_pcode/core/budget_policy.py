@@ -489,7 +489,7 @@ class SerializationWork:
 
     __slots__ = (
         "site", "enabled", "_target_parts", "max_bytes", "consumed", "_meter", "_policy", "terminal", "runtime_ref_memo", "parent",
-        "leaf_substitution",
+        "_substitutions",
     )
 
     def __init__(
@@ -514,8 +514,10 @@ class SerializationWork:
         #: 入れ子の terminal な scope は外側の作業量へも足す（外側の上限も効く）
         self.parent = parent
         #: sized leaf を作る前に呼ぶ置き換え（`substituting_leaves` の間だけ。`NO_SUBSTITUTION` 以外を返せば、
-        #: その値を葉として置く）。何を置き換えるかは渡す側が決める（ここは置き換えの仕組みだけを持つ）
-        self.leaf_substitution: Optional["LeafSubstitution"] = None
+        #: その値を葉として置く）。何を置き換えるかは渡す側が決める（ここは置き換えの仕組みだけを持つ）。
+        #: thread ごとの stack: 効かせた thread の、その時点で一番内側の置き換えだけが効く（別の thread・抜けた後の
+        #: walk には効かない。入れ子は内側が効き、抜けると外側へ戻る）
+        self._substitutions: Dict[int, List["LeafSubstitution"]] = {}
 
         self.site = str(site)
         #: この直列化 1 回の間だけの、式の木の中の runtime ref の LEGACY 表現の memo
@@ -586,7 +588,7 @@ class SerializationWork:
         from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, protocol_method
 
         # 置き換えは package の `LeafSubstitution` の protocol（型の関数を直接呼ぶ）
-        substitution = self.leaf_substitution if substitutable else None
+        substitution = self.active_leaf_substitution() if substitutable else None
         # sized leaf の protocol は package の型の関数を直接呼ぶ（instance の属性を引かない）
         if not self.enabled:
             substitute = NO_SUBSTITUTION
@@ -646,6 +648,12 @@ class SerializationWork:
         policy = self._policy if policy is None else policy
         limit = policy.serialization_bytes
         return None if limit is None else max(0, limit - self.consumed)
+
+    def active_leaf_substitution(self) -> Optional["LeafSubstitution"]:
+        """この thread が今この作業量に効かせている置き換え（無ければ `None`）。"""
+
+        stack = self._substitutions.get(threading.get_ident())
+        return stack[-1] if stack else None
 
     def observed_runtime_ref(self, ref: Any, missing: Any) -> Any:
         """この直列化が描いた runtime ref の LEGACY 表現（`runtime_ref_memo`。描いていなければ `missing`）。
@@ -732,13 +740,17 @@ def substituting_leaves(work: Optional[SerializationWork], substitution: Optiona
         return
     if not isinstance(substitution, LeafSubstitution):
         raise TypeError("a leaf substitution must be a LeafSubstitution")
-    if work.leaf_substitution is not None:
-        raise ValueError("a work already has a leaf substitution")
-    work.leaf_substitution = substitution
+    # 効くのは、効かせた thread の、この `with` の間だけ（入れ子は内側が効き、抜けると外側へ戻る: 呼ぶ側が誰でも
+    # 同じ規則。別の thread が同じ作業量で始めた walk には効かない）
+    ident = threading.get_ident()
+    stack = work._substitutions.setdefault(ident, [])
+    stack.append(substitution)
     try:
         yield
     finally:
-        work.leaf_substitution = None
+        stack.pop()
+        if not stack:
+            work._substitutions.pop(ident, None)
 
 
 def active_serialization_work() -> Optional[SerializationWork]:

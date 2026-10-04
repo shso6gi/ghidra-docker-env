@@ -17,13 +17,19 @@ oracle は `test_issue219_single_read` と同じ（同じ factory から作っ�
 
 from __future__ import annotations
 
+import threading
 from typing import Any, List
 
 import pytest
 
 from scripts.function_tracer_pcode.core.expression import Expression
 from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
-from scripts.function_tracer_pcode.core.budget_policy import active_serialization_work
+from scripts.function_tracer_pcode.core.budget_policy import (
+    NO_SUBSTITUTION,
+    LeafSubstitution,
+    active_serialization_work,
+    substituting_leaves,
+)
 from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot, SnapshotFingerprintCodec
 from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import ElidedSemanticValue
 from scripts.function_tracer_pcode.tests.unit import test_issue219_single_read as oracle
@@ -136,7 +142,65 @@ class FreezesTokenFromJsonItems(_Recorder):
         yield "seen", seen
 
 
+class WalksInAnotherThread(_Recorder):
+    """`json_items` が今の作業量を別の thread へ渡し、そこで closed な値を LEGACY に作る（別 thread の walk は
+    外側の walk の中に見えない: 置き換えの許可は作業量の object に付いていてはならない）。"""
+
+    def json_items(self):
+        work = active_serialization_work()
+        holder: List[Any] = []
+
+        def build() -> None:
+            try:
+                holder.append(RESULT_JSON_POLICY.materialize(_closed(), budget=work))
+            except Exception as failure:  # noqa: BLE001 - test oracle: record what the thread saw
+                holder.append(failure)
+
+        thread = threading.Thread(target=build)
+        thread.start()
+        thread.join()
+        built = holder[0] if holder else None
+        seen = "token" if isinstance(built, ElidedSemanticValue) else type(built).__name__
+        self.calls.append(seen)
+        yield "built", seen
+
+
+class _Mine(LeafSubstitution):
+    """入力の code が自分で効かせる置き換え（式の葉を文字列に置く）。"""
+
+    __slots__ = ()
+
+    def __leaf_substitute__(self, leaf, size):
+        return "mine" if type(leaf) is Expression else NO_SUBSTITUTION
+
+
+class ArmsItsOwnSubstitution(_Recorder):
+    """`json_items` が公開の `substituting_leaves` で自分の置き換えを効かせ、作った値を記録する（読みの置き換えが
+    入れ子の呼び出しを拒んだり、入力の置き換えと混ざったりしない）。"""
+
+    def json_items(self):
+        work = active_serialization_work()
+        seen = _attempt_value(lambda: _arm_and_build(work))
+        self.calls.append(seen)
+        yield "seen", seen
+
+
+def _arm_and_build(work: Any) -> Any:
+    with substituting_leaves(work, _Mine()):
+        built = RESULT_JSON_POLICY.materialize(_closed(), budget=work)
+    return "token" if isinstance(built, ElidedSemanticValue) else repr(built)[:60]
+
+
+def _attempt_value(call) -> Any:
+    try:
+        return ("value", call())
+    except (TypeError, ValueError) as failure:
+        return ("rejected", type(failure).__name__, str(failure))
+
+
 PRODUCERS = {
+    "walks_in_another_thread": WalksInAnotherThread,
+    "arms_its_own_substitution": ArmsItsOwnSubstitution,
     "freezes_token": FreezesToken,
     "digests_token": DigestsToken,
     "creates_with_token": CreatesWithToken,

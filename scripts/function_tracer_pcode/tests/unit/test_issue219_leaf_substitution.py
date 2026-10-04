@@ -201,22 +201,37 @@ def test_only_the_leaves_built_while_substituting_are_asked():
             with substituting_leaves(work, asked):
                 during = RESULT_JSON_POLICY.materialize(_Fields(a=expr), budget=work)
             after = RESULT_JSON_POLICY.materialize(_Fields(a=expr), budget=work)
-            assert work.leaf_substitution is None
+            assert work.active_leaf_substitution() is None
     assert before == after == {"a": expr.to_dict()}
     assert type(during["a"]) is _Marker and asked.leaves == [expr]
 
 
-def test_a_substitution_must_be_a_leaf_substitution_and_does_not_nest():
+def test_a_substitution_must_be_a_leaf_substitution_nests_like_a_context_and_stays_in_its_thread():
+    """置き換えは `with` の間だけ、効かせた thread でだけ効く。入れ子は内側が効き、抜けると外側へ戻る（呼ぶ側が
+    誰でも同じ規則: 読みの置き換えの中で入力の code が自分の置き換えを効かせても拒まない）。"""
+
+    import threading
+
     with budget_policy_scope(BudgetPolicy()):
         with serialization_scope(site="t", target_parts=("t",)) as work:
             with pytest.raises(TypeError):
                 with substituting_leaves(work, lambda leaf: leaf):
                     pass
-            with substituting_leaves(work, _Asked()):
-                with pytest.raises(ValueError):
-                    with substituting_leaves(work, _Asked()):
-                        pass
-            assert work.leaf_substitution is None
+            outer, inner = _Asked(), _Asked()
+            with substituting_leaves(work, outer):
+                assert work.active_leaf_substitution() is outer
+                with substituting_leaves(work, inner):
+                    assert work.active_leaf_substitution() is inner
+                    seen = []
+                    thread = threading.Thread(target=lambda: seen.append(work.active_leaf_substitution()))
+                    thread.start()
+                    thread.join()
+                    assert seen == [None]
+                assert work.active_leaf_substitution() is outer
+            with pytest.raises(RuntimeError):
+                with substituting_leaves(work, outer):
+                    raise RuntimeError("boom")
+            assert work.active_leaf_substitution() is None
 
 
 def test_the_substitution_is_asked_even_outside_a_budget_scope():

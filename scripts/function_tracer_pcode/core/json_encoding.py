@@ -2098,7 +2098,7 @@ class _Walk:
         self.token_sink = token_sink
         #: 1 回しか辿れない列（iterator）を辿ったか（辿った後の値は同じ値として辿り直せない）
         self.entered_iterator = False
-        #: sized leaf を予算の置き換え（`SerializationWork.leaf_substitution`）に任せてよいか。walk の外から
+        #: sized leaf を予算の置き換え（`SerializationWork.active_leaf_substitution`）に任せてよいか。walk の外から
         #: 始めた LEGACY の構築だけ（`run` が決める）: 置き換えた葉は、walk を始めた呼ぶ側だけが受け取る。
         #: walk の中の producer（`json_items` とその helper）が始めた walk の値は、producer の code が読むので
         #: 置き換えない
