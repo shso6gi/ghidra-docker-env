@@ -773,9 +773,31 @@ def test_a_manifest_count_that_is_not_a_count_is_unknown_not_a_crash(tmp_path, t
     manifest = (profile / "run_manifest.txt").read_text(encoding="utf-8")
     (profile / "run_manifest.txt").write_text(
         manifest.replace("parallel_jobs=4", f"parallel_jobs={text}"), encoding="utf-8")
+    try:
+        facts = margin.observe_run(profile).facts
+    except Exception as exc:                        # an external record never raises (contract)
+        pytest.fail(f"the margin command line raised {type(exc).__name__}: {exc}")
 
-    assert margin.observe_run(profile).facts.parallel_jobs is None
+    assert facts.parallel_jobs is None
     assert _verdict(tmp_path, [profile])["status"] == "holds"
+
+
+@pytest.mark.parametrize("stage", [None, "", 7])
+def test_a_trip_note_without_its_stage_is_not_measured(tmp_path, stage):
+    """The deadline writes the stage it tripped in; a note without it is not the deadline's note."""
+
+    profile = _tree(tmp_path, "profile")
+    _cut(profile)
+    rows = _cut_rows()
+    rows[1]["payload"]["stage"] = stage
+    _write_pair(profile, "f_B3_B4", _resolved_unknown(), journal=rows, sidecar=_sidecar(123.5))
+    verdict = _verdict(tmp_path, [profile])
+
+    assert verdict["status"] == "undetermined", verdict
+    assert verdict["undetermined"] == [
+        f"pool P: pair {KEY_2}: {name} unobserved (deadline_tripped stage is missing)"
+        for name in ("pre", "overrun", "post_trip", "tail")
+    ]
 
 
 @pytest.mark.parametrize("sealed, expected", [(True, "holds"), (False, "undetermined")])
