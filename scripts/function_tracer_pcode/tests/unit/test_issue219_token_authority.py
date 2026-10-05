@@ -202,7 +202,7 @@ def _attempt_value(call) -> Any:
 
 class WalksInAFreshContext(_Recorder):
     """`json_items` が同じ thread の新しい `contextvars.Context` で closed な値を LEGACY に作る（外側の walk の中に
-    見えない walk。置き換えは、それを claim した読みの walk だけが使う: レビュー 5 の監査の反例 A）。"""
+    見えない walk。置き換えは、それを引数で受け取った読みの walk だけが使う: レビュー 5 の監査の反例 A）。"""
 
     def json_items(self):
         built = contextvars.Context().run(json_encoding.materialize, _closed())
@@ -565,12 +565,33 @@ def test_a_value_the_fingerprint_json_cannot_write_raises_the_same_error_as_main
 def _harvest_placed_tokens() -> List[Any]:
     """入力の code が公開 API で辿れる範囲から、置き換えの hook と、それが置いた token を集める。
 
-    今の直列化の作業量（`active_serialization_work`）と walk の作業量（`active_walk_work`）の、`_` で始まらない
-    属性と引数の無い公開の getter を 1 段辿り、`LeafSubstitution` が見つかれば `__placed_values__()` を呼ぶ。
+    `_reachable_values` が辿れる値（core の `active_*` getter と、それが返す作業量の公開の属性・getter）に
+    `LeafSubstitution` があれば `__placed_values__()` を呼ぶ（辿れることの陽性対照は
+    `test_the_harvester_finds_a_hook_that_the_walk_exposes`）。
     """
 
     found: List[Any] = []
-    holders = [active_serialization_work(), json_encoding.active_walk_work()]
+    for value in _reachable_values():
+        if isinstance(value, LeafSubstitution):
+            found.extend(value.__placed_values__())
+    return found
+
+
+def _reachable_values() -> List[Any]:
+    """入力の code が公開 API で 1 段辿れる値: core の直列化の module の引数の無い `active_*` getter の返り値と、
+    それが返す作業量の公開の属性・引数の無い公開の getter の返り値。"""
+
+    from scripts.function_tracer_pcode.core import budget_policy
+
+    holders: List[Any] = []
+    for module in (budget_policy, json_encoding):
+        for name in dir(module):
+            if name.startswith("active_") and callable(getattr(module, name)):
+                try:
+                    holders.append(getattr(module, name)())
+                except Exception:  # noqa: BLE001 - test probe: getters with arguments refuse
+                    continue
+    reached: List[Any] = list(holders)
     for holder in [h for h in holders if h is not None]:
         candidates = []
         for name in dir(holder):
@@ -586,10 +607,35 @@ def _harvest_placed_tokens() -> List[Any]:
                 except Exception:  # noqa: BLE001 - test probe: getters with arguments refuse
                     continue
             candidates.append(value)
-        for value in candidates:
-            if isinstance(value, LeafSubstitution):
-                found.extend(value.__placed_values__())
-    return found
+        reached.extend(candidates)
+    return reached
+
+
+def test_the_harvester_finds_a_hook_that_the_walk_exposes(monkeypatch):
+    """陽性対照: walk が置き換えを作業量に載せれば、harvester はそれを見つける（見つからないのは辿れないから）。"""
+
+    real_init = json_encoding._Walk.__init__
+
+    def exposing(self, *args, **kwargs):
+        real_init(self, *args, **kwargs)
+        if self.substitution is not None:
+            self.effort.leaf_substitution = self.substitution
+
+    monkeypatch.setattr(json_encoding._Walk, "__init__", exposing)
+    reached: List[Any] = []
+
+    class _Probe:
+        def json_items(self):
+            reached.extend(value for value in _reachable_values() if isinstance(value, LeafSubstitution))
+            yield "probe", 1
+
+    hook = _Mine()
+    with oracle.budget_policy_scope(oracle.BudgetPolicy()):
+        from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
+
+        with serialization_scope(site="t", target_parts=("t",)) as work:
+            RESULT_JSON_POLICY.materialize(_Probe(), budget=work, leaf_substitution=hook)
+    assert reached == [hook]
 
 
 class PlacesHarvestedTokens(_Recorder):
@@ -623,7 +669,7 @@ def test_input_code_cannot_reach_the_reuse_owners_hook_or_placed_tokens(where, m
         producer.where = where
         return state
 
-    oracle._compare(factory, [("call", "canonical"), ("call", "canonical"), ("call", "canonical")], monkeypatch)
+    _compare_exercising_tokens(factory, [("call", "canonical"), ("call", "canonical"), ("call", "canonical")], monkeypatch)
 
 
 @pytest.mark.parametrize("mode", ["on", "off", "main"])
@@ -682,4 +728,4 @@ def test_a_walk_started_before_the_owner_walk_never_receives_the_substitution(wh
         return state
 
     monkeypatch.setattr(_JsonItemsBuildsFirst, "observe", lambda self: tuple(self.seen), raising=False)
-    oracle._compare(factory, [("call", "canonical"), ("call", "canonical")], monkeypatch)
+    _compare_exercising_tokens(factory, [("call", "canonical"), ("call", "canonical")], monkeypatch)

@@ -11,8 +11,9 @@ record の protocol・`stable_key`・runtime ref の表現）の回数と順が�
 **根拠（単一の読み）**: canonical な生成経路（`snapshot.canonical_generation_path`）の呼び出しは、本体と同じ読みを
 同じ順に **1 回だけ** 行う（`snapshot.read_snapshot_inputs`。本体と同じ scope・上限・観測）。違いは 1 つだけ:
 意味の view の木の中の serialization-closed な検証済みの値（C-RS2: 不変で、直列化は写しから描く純粋な処理）を、
-その値への identity token に置いたまま読む（view が owner の `FunctionReturnAnalysis` の定義のままで、walk の結果を
-そのまま返すときだけ。それ以外の view では token を置かない: 置いた葉を view 自身の code が受け取り得る）。snapshot は読んだ値の **純粋な関数**（`snapshot.assemble_snapshot`:
+その値への identity token に置いたまま読む（main の view の呼び出しが飛ばす引き当てが全部 owner の定義のまま
+で、`_materialize` を直接呼ぶことが main と同じ呼び出しのときだけ: `snapshot._view_returns_its_walk`。置き換えは
+その walk への引数で、それ以外の code は受け取らない。それ以外の view では token を置かない）。snapshot は読んだ値の **純粋な関数**（`snapshot.assemble_snapshot`:
 token を戻し、digest を求め、`retained_form` の写しを作る）で、witness はその関数の入力そのもの（codec の写しと
 `retained_form` の写し。token は値の identity）。等しい witness からは等しい snapshot が出るので、hit は純粋な部分
 だけを省く。入力に対して走る code は hit / miss / on / off で変わらない（読みは毎回 1 回、hit が省くのは純粋な部分）。

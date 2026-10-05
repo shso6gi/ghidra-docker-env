@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
-from types import MappingProxyType
+from types import MappingProxyType, MethodType
 from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
 from scripts.function_tracer_pcode.core import json_encoding
@@ -881,7 +881,7 @@ def snapshot_material(
     # 解析前提でない derived proof は下で捨てるので、表現できる解析は最初から
     # 作らない（`semantic_snapshot_dict`。残りは `to_dict()` と同じ値）
     semantic_view = getattr(analysis, "semantic_snapshot_dict", None)
-    if leaf_substitution is not None and _view_returns_its_walk(analysis):
+    if leaf_substitution is not None and _view_returns_its_walk(analysis, semantic_view):
         # owner の view（`semantic_snapshot_dict` → `_materialize`、どちらも定義のまま）と同じ呼び出しを、置き換えを
         # その view の walk へ **引数で** 渡して行う。置き換えはどこにも登録しないので、view の walk より前に走る
         # code（instance の `_json_items` など）・walk の中の producer・別の walk は受け取れない
@@ -919,27 +919,48 @@ def snapshot_material(
     )
 
 
-def _view_returns_its_walk(analysis: Any) -> bool:
-    """`analysis` の意味の view が、owner（`core/analysis.FunctionReturnAnalysis`）の定義のままか。
+def _view_returns_its_walk(analysis: Any, semantic_view: Any) -> bool:
+    """`_CANONICAL_VIEW[1]`（`_materialize`）を直接呼ぶことが、main の `semantic_snapshot_dict()` と **同じ呼び出し**か。
 
-    型そのもので、view（`semantic_snapshot_dict` → `_materialize`）を instance・class のどちらでも置き換えて
-    いないときだけ真。真なら、`_CANONICAL_VIEW[1]`（`_materialize`）を直接呼ぶことが main の `semantic_snapshot_dict()`
-    と同じ呼び出しで、その walk の結果をそのまま材料にする（置き換えた葉を受け取るのは snapshot の材料だけ）。
-    walk の前後・中で走る入力の code（`_json_items` の差し替えを含む）は置き換えを受け取らないので、ここでは
+    main は view を `getattr` で引いて呼び（`semantic_view` はその結果）、view は `self._materialize` を引き、
+    `_materialize` は `RESULT_JSON_POLICY.materialize` で walk する。ここで直接呼ぶ経路が飛ばす引き当てが、どれも
+    owner の定義そのものに解決し、引き当て自体が code を走らせないときだけ真:
+
+    * 型が `FunctionReturnAnalysis` そのもので、属性の引き当てを置き換えていない（`__getattribute__` が
+      `object` のもの）。instance の `__dict__` に view を置いていない
+    * main が引いた view が、owner の `semantic_snapshot_dict` をこの `analysis` に束ねたもの。class の
+      `semantic_snapshot_dict` / `_materialize` が定義のまま
+    * `_materialize` が引く walk の入口（`core.analysis` の `RESULT_JSON_POLICY` とその `materialize`）が定義のまま
+      （置き換えを受け取るのは core の walk だけ）
+
+    真なら walk の結果をそのまま材料にする（置き換えた葉を受け取るのは snapshot の材料だけ）。walk の前後・中で
+    走る入力の code（`_json_items` の差し替えを含む）は、main と同じく走るが置き換えを受け取らないので、ここでは
     判定しない（置き換えは walk への引数で、登録されないため）。偽なら置き換えない（読みは同じ 1 回: 置き換えないだけ）。
     """
 
-    from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
+    from scripts.function_tracer_pcode.core import analysis as analysis_module
 
-    if type(analysis) is not FunctionReturnAnalysis:
+    owner = analysis_module.FunctionReturnAnalysis
+    if type(analysis) is not owner or owner.__getattribute__ is not object.__getattribute__:
         return False
     instance = getattr(analysis, "__dict__", {})
     if "semantic_snapshot_dict" in instance or "_materialize" in instance:
         return False
-    namespace = FunctionReturnAnalysis.__dict__
+    if (
+        type(semantic_view) is not MethodType
+        or semantic_view.__func__ is not _CANONICAL_VIEW[0]
+        or semantic_view.__self__ is not analysis
+    ):
+        return False
+    namespace = owner.__dict__
+    policy = analysis_module.__dict__.get("RESULT_JSON_POLICY")
     return (
         namespace.get("semantic_snapshot_dict") is _CANONICAL_VIEW[0]
         and namespace.get("_materialize") is _CANONICAL_VIEW[1]
+        and policy is json_encoding.RESULT_JSON_POLICY
+        and type(policy) is json_encoding.JsonEncodingPolicy
+        and "materialize" not in getattr(policy, "__dict__", {})
+        and json_encoding.JsonEncodingPolicy.__dict__.get("materialize") is _CANONICAL_MATERIALIZE
     )
 
 
@@ -1072,6 +1093,7 @@ _CANONICAL_CODEC = tuple(
     for name in ("digest", "freeze", "_freeze_unmetered", "digest_frozen", "_freeze_placing")
 )
 _CANONICAL_VIEW = _canonical_view()
+_CANONICAL_MATERIALIZE = json_encoding.JsonEncodingPolicy.__dict__["materialize"]
 
 
 @dataclass(frozen=True)
