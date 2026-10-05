@@ -58,7 +58,7 @@ from scripts.function_tracer_pcode.tests.unit._supervisor_support import supervi
 REPO = Path(__file__).resolve().parents[4]
 
 # --------------------------------------------------------------------------
-# 1. the child: a signal after the handler was unloaded
+# 1. the child: a signal after CPython's own shutdown unloaded the handler
 # --------------------------------------------------------------------------
 
 _CHILD = r"""
@@ -77,9 +77,12 @@ else:                                    # the registration before the fix, in a
     signal.signal(signal.SIGUSR1, signal.SIG_DFL)
     faulthandler.register(signal.SIGUSR1, file=open(dump, "ab", buffering=0),
                           all_threads=True, chain=False)
-faulthandler.unregister(signal.SIGUSR1)  # what _PyFaulthandler_Fini does at shutdown
+# the sync point: Py_AtExit hooks run at the very end of Py_FinalizeEx, after the interpreter
+# unloaded faulthandler (_PyFaulthandler_Fini) and reset the signal module (_PySignal_Fini)
+ctypes.pythonapi.Py_AtExit.argtypes = [ctypes.c_void_p]
+assert ctypes.pythonapi.Py_AtExit(ctypes.cast(ctypes.CDLL(None).pause, ctypes.c_void_p)) == 0
 print("result printed", flush=True)
-ctypes.CDLL(None).pause()                # the sync point: the parent signals once we are here
+sys.exit(0)                              # the real shutdown; the parent signals in pause()
 """
 
 #: pause(2) (the parent waits until the child is blocked in it)
@@ -93,12 +96,21 @@ def _blocked_in_pause(pid: int) -> bool:
         return False
 
 
+def _ignores(pid: int, number: int) -> bool:
+    """The kernel's disposition: is ``number`` in the process's ignored set (``SigIgn``)?"""
+
+    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        if line.startswith("SigIgn:"):
+            return bool((int(line.split()[1], 16) >> (int(number) - 1)) & 1)
+    raise AssertionError("no SigIgn line")
+
+
 @pytest.mark.skipif(_PAUSE is None, reason="the pause(2) syscall number is pinned for x86_64 only")
 @pytest.mark.parametrize("mode, killed", [
     ("production", False), ("earlier_registration", False), ("pre_fix", True),
 ])
 def test_a_signal_after_the_handler_is_unloaded_kills_only_the_pre_fix_child(tmp_path, mode, killed):
-    """The production registration leaves SIGUSR1 ignored once faulthandler lets it go; the
+    """After CPython's shutdown the production registration leaves SIGUSR1 ignored; the
     registration before the fix left it at the default, and the child dies by the signal.
 
     ``earlier_registration``: faulthandler keeps the disposition of the first registration when
@@ -115,19 +127,21 @@ def test_a_signal_after_the_handler_is_unloaded_kills_only_the_pre_fix_child(tmp
         while not _blocked_in_pause(child.pid):
             assert child.poll() is None, child.returncode
             assert time.monotonic() < limit, "the child never reached pause()"
+            time.sleep(0.01)
+        assert _ignores(child.pid, signal.SIGUSR1) is not killed
         os.kill(child.pid, signal.SIGUSR1)
         if killed:
             assert child.wait(timeout=30) == -signal.SIGUSR1
         else:
-            # an ignored signal does not even wake pause(): the child is still there, blocked
-            with pytest.raises(subprocess.TimeoutExpired):
-                child.wait(timeout=1.0)
-            assert _blocked_in_pause(child.pid)
+            # an ignored signal is discarded when it is generated (inside kill(2)): the child is
+            # still blocked in pause(), nothing pending
+            assert child.poll() is None and _blocked_in_pause(child.pid)
     finally:
         if child.poll() is None:
             child.kill()
             child.wait()
     assert child.stdout.read().strip() == "result printed"
+    assert (tmp_path / "dump.txt").stat().st_size == 0          # the handler was gone
 
 
 # --------------------------------------------------------------------------
