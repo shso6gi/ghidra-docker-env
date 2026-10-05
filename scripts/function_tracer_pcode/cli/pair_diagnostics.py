@@ -30,7 +30,18 @@
 * ``SIGQUIT`` は HotSpot の thread dump に使われており、JVM が先に捕まえる。
 * ``SIGUSR2`` は glibc / JVM の内部（`SR_signum` の既定近辺）と衝突し得る。
 * ``SIGUSR1`` は既定動作が terminate なので、**登録が確認できない限り送っては
-  ならない**（送信側の責務は PR-124-C）。この PR では送信を一切行わない。
+  ならない**（送信側の責務は PR-124-C）。この module は送信を一切行わない。
+
+## 登録は child の一生を覆わない（Issue #204）
+
+CPython は interpreter の終了処理（``_PyFaulthandler_Fini``）で handler を外し、SIGUSR1 を
+**登録の直前の disposition** へ戻す。結果を出し終えた child はその後も終了処理（最終 GC など）
+を続けるので、既定（terminate）のままだと、その間に届いた診断の signal が child を殺す。
+だから登録の直前に SIGUSR1 を ``SIG_IGN`` にし（外れた後は無視）、readiness の payload に
+``disposition_after_unregister``（値の定義は送信側の ``stack_dump_diagnostic``）を宣言する。
+送信側はこの宣言の無い child へ送らない。faulthandler は登録済みの signal を登録し直しても
+直前の disposition を覚え直さないので、先に既存の登録を外してから ``SIG_IGN`` にする（宣言は
+既存の登録の有無に依らず真になる）。
 
 `chain=False` は「faulthandler が stack を書いたあと、**登録時点で入っていた
 previous handler へ連鎖しない**」という設定である。あとから別の handler が
@@ -180,6 +191,27 @@ def jvm_already_started() -> bool:
         return False
 
 
+#: 登録の失敗で SIGUSR1 の disposition を変えていない（``_restore_disposition`` の入力）
+_NOT_CHANGED = object()
+
+
+def _restore_disposition(signal_number: int, previous: Any) -> str:
+    """登録に失敗したとき、``SIG_IGN`` にする前の disposition へ戻す。結果を note に残す。
+
+    ``signal.signal`` は Python 以外が設置した handler を ``None`` で返し、それは Python から
+    設置し直せない。その場合は無視のまま残る（readiness は書かないので送信側は送らない）。
+    """
+    if previous is _NOT_CHANGED:
+        return "unchanged"
+    if previous is None:
+        return "ignored_previous_not_restorable"
+    try:
+        signal.signal(signal_number, previous)
+    except (OSError, ValueError, TypeError) as exc:
+        return f"ignored_restore_failed:{type(exc).__name__}"
+    return "restored"
+
+
 #: `seal_active_stage_journal` を interpreter の終了に 1 回だけ登録したか
 _SEAL_AT_EXIT_REGISTERED = False
 
@@ -226,7 +258,7 @@ def register_stack_dump_handler(
         return state
 
     handle = None
-    previous: Any = None
+    previous: Any = _NOT_CHANGED
     phase = "open_dump_file"
     try:
         directory = os.path.dirname(state.dump_path_tmp)
@@ -238,6 +270,10 @@ def register_stack_dump_handler(
         # 終了処理の途中にいる child を supervisor の診断 signal が殺す（rc -SIGUSR1 → 結果と
         # CLI code が join しない → INVALID）。先に無視へ変えておけば、登録中は handler が
         # dump を書き、外れた後の signal は無視される（診断は終了の仕方を変えない）。
+        # 既に登録されていると、faulthandler は登録し直しても直前の disposition を覚え直さない
+        # （最初の登録の時点のものを戻す）。先に外して、下の SIG_IGN を覚えさせる。
+        phase = "unregister_previous"
+        replaced_registration = faulthandler.unregister(signal_number)
         phase = "ignore_after_unregister"
         previous = signal.signal(signal_number, signal.SIG_IGN)
         phase = "register"
@@ -253,17 +289,13 @@ def register_stack_dump_handler(
                 handle.close()
             except OSError:
                 pass
-        if previous is not None:
-            try:
-                signal.signal(signal_number, previous)
-            except (OSError, ValueError, TypeError):
-                pass
         state.handler_registered = False
         state.registration_error = type(exc).__name__
         # readiness を主張しない。理由だけを残す（送信側が判定に使う）。
         journal_note(f"handler_registration_failed:{type(exc).__name__}", {
             "phase": phase,
             "detail": f"{type(exc).__name__}: {exc}"[:200],
+            "disposition": _restore_disposition(signal_number, previous),
             "dump_path_tmp": state.dump_path_tmp,
             "dump_artifact_path": state.dump_artifact_path,
             "signal_number": int(signal_number),
@@ -298,6 +330,7 @@ def register_stack_dump_handler(
         # Issue #204: handler が外れた後（interpreter の終了処理）の disposition。送信側は
         # これが無視であることを readiness の条件にする（signal が child を殺さない根拠）
         "disposition_after_unregister": DISPOSITION_AFTER_UNREGISTER_IGNORE,
+        "replaced_registration": bool(replaced_registration),
         "sigcgt_probe": _sigcgt_probe(signal_number),
     }
     payload.update(_child_start_token())
