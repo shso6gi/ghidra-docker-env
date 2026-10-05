@@ -32,7 +32,6 @@ from scripts.function_tracer_pcode.core.budget_policy import (
     NO_SUBSTITUTION,
     LeafSubstitution,
     active_serialization_work,
-    substituting_leaves,
 )
 from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot, SnapshotFingerprintCodec
 from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import ElidedSemanticValue, snapshot_reuse_scope
@@ -179,8 +178,8 @@ class _Mine(LeafSubstitution):
 
 
 class ArmsItsOwnSubstitution(_Recorder):
-    """`json_items` が公開の `substituting_leaves` で自分の置き換えを効かせ、作った値を記録する（読みの置き換えが
-    入れ子の呼び出しを拒んだり、入力の置き換えと混ざったりしない）。"""
+    """`json_items` が自分の walk に自分の置き換えを引数で渡し、作った値を記録する（読みの置き換えが入れ子の
+    呼び出しを拒んだり、入力の置き換えと混ざったりしない）。"""
 
     def json_items(self):
         work = active_serialization_work()
@@ -190,8 +189,7 @@ class ArmsItsOwnSubstitution(_Recorder):
 
 
 def _arm_and_build(work: Any) -> Any:
-    with substituting_leaves(work, _Mine()):
-        built = RESULT_JSON_POLICY.materialize(_closed(), budget=work)
+    built = RESULT_JSON_POLICY.materialize(_closed(), budget=work, leaf_substitution=_Mine())
     return "token" if isinstance(built, ElidedSemanticValue) else repr(built)[:60]
 
 
@@ -223,7 +221,51 @@ class OpensItsOwnScope(NestedSnapshot):
         return ("own_scope", len(self.calls), seen[0])
 
 
+class HarvestsInJsonItems(_Recorder):
+    """owner の walk の **中**（`json_items`）で、公開 API から辿れる hook・置いた token を集め、その数を値にする。"""
+
+    def json_items(self):
+        tokens = _harvest_placed_tokens()
+        self.calls.append(("harvested", len(tokens)))
+        yield "harvested", len(tokens)
+
+
+class HarvestsInStableKey(_Recorder):
+    """owner の walk の **後**（`snapshot_id` の凍結が呼ぶ `stable_key`）で同じことをする。"""
+
+    def stable_key(self):
+        tokens = _harvest_placed_tokens()
+        self.calls.append(("harvested", len(tokens)))
+        return ("harvested", len(self.calls), len(tokens))
+
+
+class WalksAfterTheOwnerWalk(_Recorder):
+    """owner の walk の **後**（`stable_key`）に、今の作業量で closed な値を LEGACY に作り、その型を key にする。"""
+
+    def stable_key(self):
+        work = active_serialization_work()
+        built = RESULT_JSON_POLICY.materialize(_closed(), budget=work) if work is not None else json_encoding.materialize(_closed())
+        seen = "token" if isinstance(built, ElidedSemanticValue) else type(built).__name__
+        self.calls.append(seen)
+        return ("after", len(self.calls), seen)
+
+
+class RaisesInTheOwnerWalk(_Recorder):
+    """owner の walk の途中（1 要素を置いた後）で初回だけ例外を上げる（例外の後の呼び出しに何も残らない）。"""
+
+    def json_items(self):
+        self.calls.append("started")
+        yield "first", _closed()
+        if self.calls.count("started") == 1:
+            raise ValueError("raised in the owner walk")
+        yield "second", 1
+
+
 PRODUCERS = {
+    "harvests_in_json_items": HarvestsInJsonItems,
+    "harvests_in_stable_key": HarvestsInStableKey,
+    "walks_after_the_owner_walk": WalksAfterTheOwnerWalk,
+    "raises_in_the_owner_walk": RaisesInTheOwnerWalk,
     "walks_in_a_fresh_context": WalksInAFreshContext,
     "opens_its_own_scope": OpensItsOwnScope,
     "walks_in_another_thread": WalksInAnotherThread,
@@ -382,8 +424,8 @@ class _Leaves(LeafSubstitution):
 
 
 class LeavesItsSubstitutionArmed(_Recorder):
-    """`json_items` が generator の中で置き換えを効かせ、generator を途中で止めたまま返す（`with` が LIFO で
-    抜けない: 反例 B）。読みの `with` が抜けても、外すのは自分の entry だけ。"""
+    """`json_items` が generator の中で自分の置き換えを渡した walk を走らせ、generator を途中で止めたまま返す
+    （レビュー 5 の反例 B の形。置き換えは walk の引数なので、止めた generator が後へ残すものは無い）。"""
 
     def __init__(self) -> None:
         super().__init__()
@@ -393,8 +435,8 @@ class LeavesItsSubstitutionArmed(_Recorder):
         work = active_serialization_work()
 
         def armed():
-            with substituting_leaves(work, _Leaves()):
-                yield 1
+            yield RESULT_JSON_POLICY.materialize(_closed(), budget=work, leaf_substitution=_Leaves())
+            yield 2
 
         self.held = armed()
         next(self.held)
@@ -512,3 +554,132 @@ def test_a_value_the_fingerprint_json_cannot_write_raises_the_same_error_as_main
         return state
 
     oracle._compare(factory, [("call", "canonical")], monkeypatch)
+
+
+# ---------------------------------------------------------------------------
+# レビュー 6: 再利用の owner の hook・置いた token が入力の code へ公開 API で渡らないこと、
+# 置き換えが owner の walk に結び付くこと
+# ---------------------------------------------------------------------------
+
+
+def _harvest_placed_tokens() -> List[Any]:
+    """入力の code が公開 API で辿れる範囲から、置き換えの hook と、それが置いた token を集める。
+
+    今の直列化の作業量（`active_serialization_work`）と walk の作業量（`active_walk_work`）の、`_` で始まらない
+    属性と引数の無い公開の getter を 1 段辿り、`LeafSubstitution` が見つかれば `__placed_values__()` を呼ぶ。
+    """
+
+    found: List[Any] = []
+    holders = [active_serialization_work(), json_encoding.active_walk_work()]
+    for holder in [h for h in holders if h is not None]:
+        candidates = []
+        for name in dir(holder):
+            if name.startswith("_"):
+                continue
+            try:
+                value = getattr(holder, name)
+            except Exception:  # noqa: BLE001 - test probe: any attribute may refuse
+                continue
+            if callable(value):
+                try:
+                    value = value()
+                except Exception:  # noqa: BLE001 - test probe: getters with arguments refuse
+                    continue
+            candidates.append(value)
+        for value in candidates:
+            if isinstance(value, LeafSubstitution):
+                found.extend(value.__placed_values__())
+    return found
+
+
+class PlacesHarvestedTokens(_Recorder):
+    """`json_items`（意味の view の walk の中）が、辿れた置いた token を `function_ref` か `snapshot_id` に置く
+    （レビュー 6 の反例 1: 実際に置かれた token なので `PlacedTokens` の照合を通る）。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.target: Any = None
+        self.where = "function_ref"
+
+    def json_items(self):
+        tokens = _harvest_placed_tokens()
+        self.calls.append(("harvested", len(tokens)))
+        if tokens and self.target is not None:
+            if self.where == "function_ref":
+                self.target.function_ref = tokens[0]
+            else:
+                self.target.analysis_scope_key = ("scope", tokens[0])
+        yield "harvested", 1
+
+
+@pytest.mark.parametrize("where", ["function_ref", "analysis_scope_key"])
+def test_input_code_cannot_reach_the_reuse_owners_hook_or_placed_tokens(where, monkeypatch):
+    monkeypatch.setitem(oracle.PRODUCERS, "harvests", PlacesHarvestedTokens)
+
+    def factory() -> oracle.State:
+        state = oracle.State(["plain", "harvests"], pending=False)
+        producer = state.analysis.return_abi_facts["p1"]
+        producer.target = state.analysis
+        producer.where = where
+        return state
+
+    oracle._compare(factory, [("call", "canonical"), ("call", "canonical"), ("call", "canonical")], monkeypatch)
+
+
+@pytest.mark.parametrize("mode", ["on", "off", "main"])
+def test_a_harvested_token_in_the_function_ref_is_never_a_hit_or_a_returned_reference(mode, monkeypatch):
+    """反例 1 の false hit: 各呼び出しが返す `function_ref` は、その呼び出しの読みが見た object（main と同じ）。
+    入力の code は hook・置いた token を辿れないので `function_ref` は毎回同じ入力のまま（その hit は正しい再利用）。"""
+
+    monkeypatch.setattr(oracle.snapshot_reuse, "_SNAPSHOT_REUSE_ENABLED", mode == "on")
+    state = oracle.State(["plain"], pending=False)
+    analysis = state.analysis
+    original = analysis.function_ref
+    producer = PlacesHarvestedTokens()
+    producer.target = analysis
+    analysis.return_abi_facts["p9"] = producer
+    seen = []
+    with oracle.pair_failure_scope(("pair", 1), None), oracle.budget_policy_scope(oracle.BudgetPolicy()), \
+            oracle.snapshot_reuse_scope():
+        for _ in range(3):
+            analysis.function_ref = original
+            snapshot = (AnalysisSnapshot._build_from_function_analysis(analysis) if mode == "main"
+                        else AnalysisSnapshot.from_function_analysis(analysis))
+            seen.append((snapshot.diagnostic_refs["function_ref"] is analysis.function_ref,
+                         isinstance(snapshot.diagnostic_refs["function_ref"], ElidedSemanticValue)))
+        counts = oracle.snapshot_reuse_metrics().get("counts", {})
+    assert seen == [(True, False)] * 3
+    assert producer.calls and set(producer.calls) == {("harvested", 0)}
+    if mode == "on":
+        # 陽性対照: 同じ入力の 3 回は再利用される（上の不一致が hit を止めたのではない）
+        assert counts.get("hits", 0) == 2
+
+
+class _JsonItemsBuildsFirst:
+    """instance の `_json_items` を、先に別の closed な値を LEGACY に作ってから元の iterator を返す関数にする
+    （レビュー 6 の反例 2: 先行の walk が owner の walk より先に始まる）。"""
+
+    def __init__(self, analysis: Any, where: str) -> None:
+        self.analysis = analysis
+        self.where = where
+        self.seen: List[Any] = []
+
+    def __call__(self, *, include_derived_proof: bool):
+        built = json_encoding.materialize(_closed())
+        self.seen.append("token" if isinstance(built, ElidedSemanticValue) else type(built).__name__)
+        if self.where == "analysis_scope_key":
+            self.analysis.analysis_scope_key = ("scope", built)
+        return type(self.analysis)._json_items(self.analysis, include_derived_proof=include_derived_proof)
+
+
+@pytest.mark.parametrize("where", ["observe", "analysis_scope_key"])
+def test_a_walk_started_before_the_owner_walk_never_receives_the_substitution(where, monkeypatch):
+    def factory() -> oracle.State:
+        state = oracle.State(["plain"], pending=False)
+        hook = _JsonItemsBuildsFirst(state.analysis, where)
+        state.analysis.__dict__["_json_items"] = hook
+        state.objects["json_items_hook"] = hook
+        return state
+
+    monkeypatch.setattr(_JsonItemsBuildsFirst, "observe", lambda self: tuple(self.seen), raising=False)
+    oracle._compare(factory, [("call", "canonical"), ("call", "canonical")], monkeypatch)

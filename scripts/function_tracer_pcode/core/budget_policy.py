@@ -489,7 +489,6 @@ class SerializationWork:
 
     __slots__ = (
         "site", "enabled", "_target_parts", "max_bytes", "consumed", "_meter", "_policy", "terminal", "runtime_ref_memo", "parent",
-        "_substitutions",
     )
 
     def __init__(
@@ -513,13 +512,6 @@ class SerializationWork:
             raise TypeError("a serialization scope cannot start inside a walk; count into the walk's work instead")
         #: 入れ子の terminal な scope は外側の作業量へも足す（外側の上限も効く）
         self.parent = parent
-        #: sized leaf を作る前に呼ぶ置き換え（`substituting_leaves` の間だけ。`NO_SUBSTITUTION` 以外を返せば、
-        #: その値を葉として置く）。何を置き換えるかは渡す側が決める（ここは置き換えの仕組みだけを持つ）。
-        #: thread ごとの stack（`substituting_leaves` の 1 回が 1 つの entry）。置き換えを使うのは、その entry を
-        #: **claim した walk だけ**（`claim_leaf_substitution`: 効かせた thread が walk の外から始めた LEGACY の構築が、
-        #: その時点で一番内側の entry を walk の間だけ持つ）。持たれている間は、同じ thread の別の walk（新しい
-        #: `contextvars.Context` で始めたものも）・別の thread の walk は置き換えを受け取らない
-        self._substitutions: Dict[int, List["_ArmedSubstitution"]] = {}
 
         self.site = str(site)
         #: この直列化 1 回の間だけの、式の木の中の runtime ref の LEGACY 表現の memo
@@ -576,11 +568,11 @@ class SerializationWork:
     def tree(self, leaf: Any, *, build: bool, substitution: Optional["LeafSubstitution"] = None) -> Tuple[Any, int]:
         """sized leaf（式の木）の大きさを **作る前に** 求めて足し、`build` なら作る。
 
-        `substitution` は、この葉を置く walk が claim した置き換え（`claim_leaf_substitution`。walk の外から
-        始めた LEGACY の構築だけが claim する: `core/json_encoding._Walk`）。walk が引数で渡すときだけ尋ねる:
-        walk の中の code が読む値・`Expression.to_dict()` の返り値は置き換えない。尋ねるのは見積もりの後で、
-        見積もった大きさ（数えない作業量では `None`）を渡す（見積もりは置き換えの有無に依らず走るので、
-        尋ねるために走る code は無い）。
+        `substitution` は、この葉を置く walk に、その walk を始めた呼ぶ側が **引数で** 渡した置き換え
+        （`JsonEncodingPolicy.materialize(..., leaf_substitution=...)`。`core/json_encoding._Walk` がその walk の葉に
+        だけ渡す）。作業量は置き換えを持たない: 同じ作業量で始めた別の walk（walk の中の producer が始めたもの・
+        新しい context・別 thread）は、何も渡されなければ置き換えない。尋ねるのは見積もりの後で、見積もった大きさ
+        （数えない作業量では `None`）を渡す（見積もりは置き換えの有無に依らず走るので、尋ねるために走る code は無い）。
 
         **置き換えが変えるのは置く値だけで、数える量は変えない**: 置き換えた葉も、置き換えない葉と
         同じく大きさを見積もって足し、distinct な node を数え、上限と比べる（作らないだけ）。この作業量の
@@ -650,33 +642,6 @@ class SerializationWork:
         limit = policy.serialization_bytes
         return None if limit is None else max(0, limit - self.consumed)
 
-    def active_leaf_substitution(self) -> Optional["LeafSubstitution"]:
-        """この thread が今この作業量に効かせている一番内側の置き換え（無ければ `None`）。"""
-
-        stack = self._substitutions.get(threading.get_ident())
-        return stack[-1].substitution if stack else None
-
-    def claim_leaf_substitution(self) -> Optional["_ArmedSubstitution"]:
-        """walk の外から始めた LEGACY の構築が、この thread の一番内側の置き換えを walk の間だけ持つ。
-
-        その entry を別の walk が持っていれば `None`（下の entry へは降りない）。返した entry は
-        `release_leaf_substitution` で返す。
-        """
-
-        stack = self._substitutions.get(threading.get_ident())
-        if not stack:
-            return None
-        armed = stack[-1]
-        if armed.claimed:
-            return None
-        armed.claimed = True
-        return armed
-
-    @staticmethod
-    def release_leaf_substitution(armed: Optional["_ArmedSubstitution"]) -> None:
-        if armed is not None:
-            armed.claimed = False
-
     def observed_runtime_ref(self, ref: Any, missing: Any) -> Any:
         """この直列化が描いた runtime ref の LEGACY 表現（`runtime_ref_memo`。描いていなければ `missing`）。
 
@@ -723,27 +688,21 @@ class _NoSubstitution:
         return "NO_SUBSTITUTION"
 
 
-class _ArmedSubstitution:
-    """`substituting_leaves` の 1 回分（置き換えと、それを持つ walk があるか）。"""
-
-    __slots__ = ("substitution", "claimed")
-
-    def __init__(self, substitution: "LeafSubstitution") -> None:
-        self.substitution = substitution
-        self.claimed = False
-
-
 #: `leaf_substitution` の答え: 置き換えない（葉は通常どおり見積もって作る）
 NO_SUBSTITUTION = _NoSubstitution()
 
 
 class LeafSubstitution:
-    """直列化の作業量の sized leaf の置き換え（`substituting_leaves`）の protocol。
+    """直列化の作業量の sized leaf の置き換えの protocol（`JsonEncodingPolicy.materialize(..., leaf_substitution=...)`）。
 
     `__leaf_substitute__(leaf, size)` は、作業量が sized leaf の大きさを見積もって数えた後、葉を作る
     **前** に呼ばれ、置く値か `NO_SUBSTITUTION` を返す。`size` は見積もった byte の大きさ（数えない
-    作業量では `None`）。何を置き換えるかは subclass（渡す側）が決める。呼ばれるのは、効かせた thread が walk の
-    外から始めた LEGACY の構築が置く葉だけ（`SerializationWork.tree`）。上限を超えた葉には尋ねない（作業量が先に止まる）。
+    作業量では `None`）。何を置き換えるかは subclass（渡す側）が決める。呼ばれるのは、この置き換えを引数で受け取った
+    walk 自身が置く葉だけ（`SerializationWork.tree`）。置き換えはどこにも登録されない（作業量・thread・context の
+    状態に置かない）ので、渡した呼ぶ側の外の code は辿れない。上限を超えた葉には尋ねない（作業量が先に止まる）。
+
+    置き換えは置く値だけを変え、数える量は変えない: 作業量の量・上限の超過・観測値は置き換えの有無に依らない
+    （terminal な作業量でも使える）。
     """
 
     __slots__ = ()
@@ -756,39 +715,6 @@ class LeafSubstitution:
         読みが token を codec に通す）は、型ではなくこの値の identity で照合する。"""
 
         return ()
-
-
-@contextmanager
-def substituting_leaves(work: Optional[SerializationWork], substitution: Optional[LeafSubstitution]) -> Iterator[None]:
-    """この中で `work` が作る sized leaf を `substitution` に尋ねる（`None` なら何もしない）。
-
-    置き換えは置く値だけを変え、数える量は変えない（`SerializationWork.tree`）: 作業量の量・上限の
-    超過・観測値は、置き換えの有無に依らない。そのため terminal な作業量（意味の限界になる本体の直列化）
-    でも使える。置き換えた葉を受け取るのは呼ぶ側だけ（効かせた thread が walk の外から始めた LEGACY の構築が置く
-    葉）。入れ子にでき、内側が効き、抜けると外側へ戻る。別の thread の walk には効かない。
-    """
-
-    if substitution is None or work is None:
-        yield
-        return
-    if not isinstance(substitution, LeafSubstitution):
-        raise TypeError("a leaf substitution must be a LeafSubstitution")
-    # 効くのは、効かせた thread の、この `with` の間だけ（入れ子は内側が効き、抜けると外側へ戻る: 呼ぶ側が誰でも
-    # 同じ規則。別の thread が同じ作業量で始めた walk には効かない）
-    ident = threading.get_ident()
-    stack = work._substitutions.setdefault(ident, [])
-    armed = _ArmedSubstitution(substitution)
-    stack.append(armed)
-    try:
-        yield
-    finally:
-        # 自分の entry だけを外す（入れ子が LIFO で抜けなくても、別の `with` の entry を外さない）
-        for index in range(len(stack) - 1, -1, -1):
-            if stack[index] is armed:
-                del stack[index]
-                break
-        if not stack:
-            work._substitutions.pop(ident, None)
 
 
 def active_serialization_work() -> Optional[SerializationWork]:
@@ -909,5 +835,4 @@ __all__ = [
     "active_serialization_work",
     "LeafSubstitution",
     "NO_SUBSTITUTION",
-    "substituting_leaves",
 ]

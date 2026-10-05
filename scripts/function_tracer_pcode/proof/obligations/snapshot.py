@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
 from scripts.function_tracer_pcode.core import json_encoding
-from scripts.function_tracer_pcode.core.budget_policy import serialization_scope, substituting_leaves
+from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
 from scripts.function_tracer_pcode.core.json_encoding import (
     LEGACY,
     RESULT_JSON_POLICY,
@@ -329,7 +329,7 @@ class SnapshotFingerprintCodec:
 
         **token を通さない**: 呼ぶ側の文脈（読みの最中・入力の code の中・入れ子・例外の後）によらず、token の型の
         値も opaque な値として拒む。token を写しに置けるのは、単一の読みが自分の置いた token（`PlacedTokens`）を
-        明示して渡す内部の凍結（`_freeze_placing`。`read_snapshot_inputs` だけが呼ぶ）だけ。
+        明示して渡す内部の凍結（`_freeze_placing`。意味の値の位置へだけ渡す `frozen_fingerprint_payload` が呼ぶ）だけ。
         """
 
         return cls._freeze_placing(value, None)
@@ -714,6 +714,24 @@ def fingerprint_payload(snapshot_id: Any, semantic_fields: Any, extraction_schem
     return (extraction_schema_version, snapshot_id, semantic_fields)
 
 
+def frozen_fingerprint_payload(
+    snapshot_id: Any, semantic_fields: Any, extraction_schema_version: int, placed: Optional["PlacedTokens"],
+) -> Tuple[Any, ...]:
+    """`SnapshotFingerprintCodec._freeze_unmetered(fingerprint_payload(...))` と同じ値（同じ順に同じ入力の code を走らせる）。
+
+    token を写しに置いてよいのは **意味の値（`semantic_fields`）の中だけ**: 単一の読みの置き換えが token を置くのは
+    意味の view の walk の葉だけなので、`snapshot_id` は `placed` を渡さずに凍結する（置いた token がそこに現れても、
+    main と同じく opaque な値として拒む）。
+    """
+
+    version, identity, fields = fingerprint_payload(snapshot_id, semantic_fields, extraction_schema_version)
+    return (
+        SnapshotFingerprintCodec._freeze_placing(version, None),
+        SnapshotFingerprintCodec._freeze_placing(identity, None),
+        SnapshotFingerprintCodec._freeze_placing(fields, placed),
+    )
+
+
 def retained_form(snapshot_id: Any, semantic_fields: Any, diagnostic_refs: Any) -> Tuple[Any, Any, Any]:
     """`create` が snapshot に置く値（**保持の契約**。`create` と再利用が共有する）。
 
@@ -849,22 +867,28 @@ def snapshot_material(
 ) -> SnapshotMaterial:
     """解析から snapshot の材料を作る（**唯一の抽出**。`work` は開いた直列化の作業量）。
 
-    `leaf_substitution`（`core/budget_policy.LeafSubstitution`）は、意味の view（`semantic_snapshot_dict` /
-    `to_dict()`）の walk の間だけ効き、それを使うのは、その walk（view が walk の外から始めた LEGACY の構築）だけ
-    （`SerializationWork.claim_leaf_substitution`: その間、同じ thread の別の walk（新しい context のものも）・別の
-    thread の walk・walk の中の producer が始めた walk は置き換えを受け取らない）。token になり得るのは、その walk が
-    record の field の値・列の要素として置く葉だけ（walker は key を `json_items` の名前から作り、set を作らない）。
-    入力の code が token を受け取ることは無いので、`snapshot_id`・効果要約の投影・診断の参照に token は来ない
-    （入力が作った同じ型の object は token ではない: `PlacedTokens`）。
+    `leaf_substitution`（`core/budget_policy.LeafSubstitution`）は、意味の view が owner の定義のまま
+    （`_view_returns_its_walk`）のときだけ、その view の walk へ **引数で** 渡す（`FunctionReturnAnalysis._materialize(...,
+    leaf_substitution=...)` → `JsonEncodingPolicy.materialize`）。置き換えは作業量・thread・context のどこにも登録
+    しないので、使えるのはその walk が自分で置く葉だけ: view の walk より前に走る code（instance の `_json_items`
+    など）・walk の中の producer が始めた walk・同じ作業量の別の walk は受け取らず、入力の code はこの置き換え
+    （と、それが置いた token）を公開 API で辿れない。token になり得るのは、その walk が record の field の値・列の
+    要素として置く葉だけ（walker は key を `json_items` の名前から作り、set を作らない）。`snapshot_id`・効果要約の
+    投影・診断の参照に token は置かれず、そこに現れた値は token として扱わない（`frozen_fingerprint_payload`・
+    再利用の witness の比較は、意味の値の位置でだけ token を見る）。
     """
 
     # 解析前提でない derived proof は下で捨てるので、表現できる解析は最初から
     # 作らない（`semantic_snapshot_dict`。残りは `to_dict()` と同じ値）
     semantic_view = getattr(analysis, "semantic_snapshot_dict", None)
-    if leaf_substitution is not None and not _view_returns_its_walk(analysis):
-        # 置き換えた葉を受け取るのが view 自身の code になり得る（view が walk の結果を読む・作り直す）
-        leaf_substitution = None
-    with substituting_leaves(work, leaf_substitution):
+    if leaf_substitution is not None and _view_returns_its_walk(analysis):
+        # owner の view（`semantic_snapshot_dict` → `_materialize`、どちらも定義のまま）と同じ呼び出しを、置き換えを
+        # その view の walk へ **引数で** 渡して行う。置き換えはどこにも登録しないので、view の walk より前に走る
+        # code（instance の `_json_items` など）・walk の中の producer・別の walk は受け取れない
+        semantic_fields = dict(_CANONICAL_VIEW[1](
+            analysis, include_derived_proof=False, leaf_substitution=leaf_substitution,
+        ))
+    else:
         semantic_fields = dict(semantic_view() if callable(semantic_view) else to_dict())
     # These fields describe execution/diagnostic state rather than the
     # immutable extraction premise.  Proofs are applied through a derived
@@ -896,11 +920,13 @@ def snapshot_material(
 
 
 def _view_returns_its_walk(analysis: Any) -> bool:
-    """`analysis` の意味の view が、owner（`core/analysis.FunctionReturnAnalysis`）の定義のままで、walk の結果を
-    そのまま返すか（置き換えた葉を受け取るのが snapshot の材料だけである、と言える view か）。
+    """`analysis` の意味の view が、owner（`core/analysis.FunctionReturnAnalysis`）の定義のままか。
 
     型そのもので、view（`semantic_snapshot_dict` → `_materialize`）を instance・class のどちらでも置き換えて
-    いないときだけ。それ以外の view では置き換えない（読みは同じ 1 回: 置き換えないだけ）。
+    いないときだけ真。真なら、`_CANONICAL_VIEW[1]`（`_materialize`）を直接呼ぶことが main の `semantic_snapshot_dict()`
+    と同じ呼び出しで、その walk の結果をそのまま材料にする（置き換えた葉を受け取るのは snapshot の材料だけ）。
+    walk の前後・中で走る入力の code（`_json_items` の差し替えを含む）は置き換えを受け取らないので、ここでは
+    判定しない（置き換えは walk への引数で、登録されないため）。偽なら置き換えない（読みは同じ 1 回: 置き換えないだけ）。
     """
 
     from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
@@ -956,7 +982,7 @@ def read_snapshot_inputs(analysis: Any, leaf_substitution: Any = None) -> Snapsh
     同じ scope（site・target・上限・観測）の中で、抽出・digest の凍結・`retained_form` を本体と同じ順に行う。
     入力の code（解析の view・record の protocol・`stable_key`）を走らせるのはここだけで、`assemble_snapshot`
     は読んだ値から snapshot を作る純粋な関数。`leaf_substitution` が置き換えた葉は、作業量の量・上限の超過・
-    観測値を変えない（`core/budget_policy.substituting_leaves`）。
+    観測値を変えない（`core/budget_policy.LeafSubstitution`）。
     """
 
     to_dict = getattr(analysis, "to_dict", None)
@@ -970,8 +996,8 @@ def read_snapshot_inputs(analysis: Any, leaf_substitution: Any = None) -> Snapsh
         # token を扱う許可は、この読みの置き換えが置いた token だけ（`PlacedTokens`）。置かなければ本体と同じ通常の
         # 凍結（`_freeze_unmetered`）
         placed = placed_tokens_of(leaf_substitution)
-        frozen = SnapshotFingerprintCodec._freeze_placing(
-            fingerprint_payload(material.snapshot_id, material.semantic_fields, SNAPSHOT_EXTRACTION_SCHEMA_VERSION),
+        frozen = frozen_fingerprint_payload(
+            material.snapshot_id, material.semantic_fields, SNAPSHOT_EXTRACTION_SCHEMA_VERSION,
             placed if placed else None,
         )
         # `create` と同じく、codec の写しは digest にしてから `retained_form` の写しを作る（token が無ければ写しを

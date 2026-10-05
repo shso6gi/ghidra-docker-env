@@ -28,10 +28,12 @@ token を戻し、digest を求め、`retained_form` の写しを作る）で、
 届かなければ、その pair の残りは token を置かず witness も作らない（memo を切ったときと同じ読みと組み立て）。
 
 **token の権限**（C-RS7）: token を扱えるのは、単一の読みが自分の hook で置いた token（`snapshot.PlacedTokens`、
-identity で照合）を、その読みの内部の凍結（`SnapshotFingerprintCodec._freeze_placing`）と展開に引数で渡すときだけ。
-通常の codec の入口は、呼ぶ側の文脈（読みの最中・入力の code の中・入れ子・別 thread・例外の後）によらず token を
-拒む。許可は thread や module の状態に置かない（入力の code へ伝わるため）。葉の置き換えも、効かせた thread の
-`with` の間だけ効く（`core/budget_policy.substituting_leaves`）。
+identity で照合）を、その読みの内部の凍結（`snapshot.frozen_fingerprint_payload`）と展開・witness の比較に引数で渡す
+ときだけ、しかも **意味の値の位置（`semantic_fields` / `retained_form` の `held_fields`）でだけ**。`snapshot_id`・診断の
+参照に現れた値は、置いた token であっても token として比べない・展開しない（identity で比べ、codec は main と同じく
+拒む）。hook は単一の読みの view の walk へ引数で渡すだけで、作業量・thread・context に登録しない
+（`core/json_encoding.JsonEncodingPolicy.materialize(..., leaf_substitution=...)`）: 入力の code は hook も置いた token も
+公開 API で辿れない。通常の codec の入口は、呼ぶ側の文脈によらず token を拒む。
 
 **sealing**（C-RS2 の接続）: closed かどうかは読むだけ。単一の読みの中で pending だった値（runtime ref の写しを
 待つ値）は、読みの後で、**その読みが描いた ref の表現** から写す（`seal_serialization(observed=...)`。表現を作る
@@ -82,7 +84,7 @@ from scripts.function_tracer_pcode.proof.obligations.snapshot import (
 _SNAPSHOT_REUSE_ENABLED = True
 
 #: witness の形の版（形を変えたら上げる。pair をまたがないので互換は要らない）
-_WITNESS_FORMAT = 3
+_WITNESS_FORMAT = 4
 
 
 # ---------------------------------------------------------------------------
@@ -338,21 +340,25 @@ def _witness_hash(parts: Tuple[Any, ...], placed: PlacedTokens = NO_PLACED_TOKEN
 class _Witness:
     """store の key（hash を 1 回だけ求める。比べるのは `_same`: 利用者の code を呼ばない）。
 
-    `placed` はその読みが置いた token（token として比べてよいのはその object だけ。入力が作った同じ型の object は
-    ほかの object と同じく identity で比べる）。
+    `parts` は token の無い部分（形の版・予算の scope / policy・codec の写しの digest・`snapshot_id` と診断の参照の
+    保持）で、token を見ずに比べる。`fields` は `retained_form` の意味の値（`held_fields`）で、token として比べるのは
+    その読みが置いた token（`placed`）だけ。置いた token が `parts` の側（`snapshot_id`・診断の参照）に現れても、
+    ほかの object と同じく identity で比べる（入力の code が token を辿れないことに加えて、位置で token を限る）。
     """
 
-    __slots__ = ("parts", "placed", "_hash")
+    __slots__ = ("parts", "fields", "placed", "_hash")
 
-    def __init__(self, parts: Tuple[Any, ...], placed: PlacedTokens = NO_PLACED_TOKENS) -> None:
+    def __init__(self, parts: Tuple[Any, ...], fields: Any, placed: PlacedTokens = NO_PLACED_TOKENS) -> None:
         self.parts = parts
+        self.fields = fields
         self.placed = placed
-        self._hash = _witness_hash(parts, placed)
+        self._hash = hash((_witness_hash(parts), _witness_hash((fields,), placed)))
 
     def __eq__(self, other: Any) -> bool:
         return (
             type(other) is _Witness and other._hash == self._hash
-            and _same(self.parts, other.parts, False, self.placed, other.placed)
+            and _same(self.parts, other.parts)
+            and _same(self.fields, other.fields, False, self.placed, other.placed)
         )
 
     def __ne__(self, other: Any) -> bool:
@@ -537,9 +543,8 @@ def _witness_of(read: SnapshotRead) -> _Witness:
         active_budget_policy().to_diagnostic(),
         read.frozen_digest,
         _Retained(read.held_id),
-        read.held_fields,
         read.held_refs,
-    ), read.placed)
+    ), read.held_fields, read.placed)
 
 
 def _seal_observed(store: SnapshotReuse, pending: List[Any], read: SnapshotRead) -> None:

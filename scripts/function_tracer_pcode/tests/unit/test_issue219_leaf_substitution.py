@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
 """直列化の作業量の葉の置き換え（Issue #219 PR-219-B、`core/budget_policy` の汎用の仕組み）。
 
-core は「sized leaf を作る前に、渡された置き換えに尋ねる」ことだけを持ち（`substituting_leaves`）、
+core は「sized leaf を作る前に、walk へ引数で渡された置き換えに尋ねる」ことだけを持ち
+（`JsonEncodingPolicy.materialize(..., leaf_substitution=...)`）、
 何を置き換えるか（snapshot の意味）は知らない。ここでは仕組みの契約を固定する:
 
 * 置き換えを渡さない作業量の挙動は今と同じ（出力・数えた量・観測）
 * 置き換えが変えるのは置く値だけ: 数えた byte・distinct な node・上限の超過（terminal な限界を含む）・
   観測値は、置き換えない作業量と同じ（そのため本体の terminal な作業量でも使える）
-* 尋ねるのは `substituting_leaves` の間に、walk の外から始めた LEGACY の構築が置く葉だけ（呼ぶ側だけが
-  受け取る値）。walk の中の code が読む値・`Expression.to_dict()` の返り値・数えるだけの walk は置き換えない
+* 尋ねるのは置き換えを引数で受け取った walk が自分で置く葉だけ（呼ぶ側だけが受け取る値）。置き換えは
+  作業量・thread・context に登録されないので、同じ作業量の前後・中・別 thread・新しい context の walk、walk の
+  中の code が読む値・`Expression.to_dict()` の返り値・数えるだけの walk は置き換えない
 """
 
 from __future__ import annotations
@@ -25,7 +27,6 @@ from scripts.function_tracer_pcode.core.budget_policy import (
     budget_observations,
     budget_policy_scope,
     serialization_scope,
-    substituting_leaves,
 )
 from scripts.function_tracer_pcode.core.errors import (
     ExpressionSizeBudgetExceeded,
@@ -104,8 +105,7 @@ def _clean_ledger_stack():
 
 def _measured(source: Any, substitution: Any = None, *, terminal: bool = True, site: str = "test.leaf"):
     with serialization_scope(site=site, target_parts=("t",), terminal=terminal) as work:
-        with substituting_leaves(work, substitution):
-            built = RESULT_JSON_POLICY.materialize(source, budget=work)
+        built = RESULT_JSON_POLICY.materialize(source, budget=work, leaf_substitution=substitution)
         return built, work.consumed, work.distinct_nodes
 
 
@@ -181,57 +181,59 @@ def test_values_built_for_code_inside_a_walk_are_never_substituted():
     assert asked.leaves == [expr]
 
 
-def test_to_dict_and_count_only_walks_are_never_substituted():
-    expr = _expr()
-    asked = _Asked()
-    with budget_policy_scope(BudgetPolicy()):
-        with serialization_scope(site="t", target_parts=("t",)) as work:
-            with substituting_leaves(work, asked):
-                assert expr.to_dict() == Expression.to_dict(expr) and type(expr.to_dict()) is dict
-                RESULT_JSON_POLICY.count_into(_Fields(a=expr), work)
-    assert asked.leaves == []
+def test_only_the_walk_given_the_substitution_is_asked():
+    """同じ作業量で前後に始めた walk・`to_dict()`・数えるだけの walk は、引数を渡されないので置き換えない。"""
 
-
-def test_only_the_leaves_built_while_substituting_are_asked():
     expr = _expr()
     asked = _Asked()
     with budget_policy_scope(BudgetPolicy()):
         with serialization_scope(site="t", target_parts=("t",)) as work:
             before = RESULT_JSON_POLICY.materialize(_Fields(a=expr), budget=work)
-            with substituting_leaves(work, asked):
-                during = RESULT_JSON_POLICY.materialize(_Fields(a=expr), budget=work)
+            during = RESULT_JSON_POLICY.materialize(_Fields(a=expr), budget=work, leaf_substitution=asked)
             after = RESULT_JSON_POLICY.materialize(_Fields(a=expr), budget=work)
-            assert work.active_leaf_substitution() is None
+            assert expr.to_dict() == Expression.to_dict(expr) and type(expr.to_dict()) is dict
+            RESULT_JSON_POLICY.count_into(_Fields(a=expr), work)
     assert before == after == {"a": expr.to_dict()}
     assert type(during["a"]) is _Marker and asked.leaves == [expr]
 
 
-def test_a_substitution_must_be_a_leaf_substitution_nests_like_a_context_and_stays_in_its_thread():
-    """置き換えは `with` の間だけ、効かせた thread でだけ効く。入れ子は内側が効き、抜けると外側へ戻る（呼ぶ側が
-    誰でも同じ規則: 読みの置き換えの中で入力の code が自分の置き換えを効かせても拒まない）。"""
-
-    import threading
-
+def test_a_substitution_must_be_a_leaf_substitution_and_needs_a_serialization_work():
     with budget_policy_scope(BudgetPolicy()):
         with serialization_scope(site="t", target_parts=("t",)) as work:
             with pytest.raises(TypeError):
-                with substituting_leaves(work, lambda leaf: leaf):
-                    pass
-            outer, inner = _Asked(), _Asked()
-            with substituting_leaves(work, outer):
-                assert work.active_leaf_substitution() is outer
-                with substituting_leaves(work, inner):
-                    assert work.active_leaf_substitution() is inner
-                    seen = []
-                    thread = threading.Thread(target=lambda: seen.append(work.active_leaf_substitution()))
-                    thread.start()
-                    thread.join()
-                    assert seen == [None]
-                assert work.active_leaf_substitution() is outer
-            with pytest.raises(RuntimeError):
-                with substituting_leaves(work, outer):
-                    raise RuntimeError("boom")
-            assert work.active_leaf_substitution() is None
+                RESULT_JSON_POLICY.materialize(_Fields(a=_expr()), budget=work, leaf_substitution=lambda leaf: leaf)
+    with pytest.raises(TypeError):
+        RESULT_JSON_POLICY.materialize(_Fields(a=_expr()), leaf_substitution=_Asked())
+
+
+def test_the_substitution_is_not_reachable_from_the_work_or_the_walk_work():
+    """置き換えは作業量にも walk の作業量にも登録されない（公開の属性・引数の無い getter から辿れない）。"""
+
+    asked = _Asked()
+    seen: List[Any] = []
+
+    class _Probe:
+        def json_items(self):
+            for holder in (json_encoding.active_walk_work(),):
+                for name in dir(holder):
+                    if name.startswith("_"):
+                        continue
+                    value = getattr(holder, name)
+                    if callable(value):
+                        try:
+                            value = value()
+                        except Exception:  # noqa: BLE001 - probe: getters with arguments refuse
+                            continue
+                    seen.append(value is asked)
+            yield "probed", 1
+
+    with budget_policy_scope(BudgetPolicy()):
+        with serialization_scope(site="t", target_parts=("t",)) as work:
+            RESULT_JSON_POLICY.materialize(_Fields(a=_expr(), p=_Probe()), budget=work, leaf_substitution=asked)
+            for name in dir(work):
+                if not name.startswith("_") and not callable(getattr(work, name)):
+                    seen.append(getattr(work, name) is asked)
+    assert seen and not any(seen)
 
 
 def test_the_substitution_is_asked_even_outside_a_budget_scope():
@@ -280,53 +282,60 @@ def test_the_leaf_that_exceeds_the_limit_is_not_asked():
 
 
 class _NestsAWalk:
-    """walk の中の producer: 自分の置き換えを効かせ、同じ作業量で値を LEGACY に作る（入れ子の walk）。"""
+    """walk の中の producer: 同じ作業量で値を LEGACY に作る（入れ子の walk。置き換えは渡さない）。"""
 
-    def __init__(self, work: Any, substitution: Any) -> None:
+    def __init__(self, work: Any, substitution: Any = None) -> None:
         self.work = work
         self.substitution = substitution
         self.built: List[Any] = []
 
     def json_items(self):
-        with substituting_leaves(self.work, self.substitution):
-            self.built.append(RESULT_JSON_POLICY.materialize(_Fields(a=_expr()), budget=self.work))
+        self.built.append(RESULT_JSON_POLICY.materialize(
+            _Fields(a=_expr()), budget=self.work, leaf_substitution=self.substitution))
         yield "nested", 1
 
 
-def test_a_walk_nested_inside_a_walk_never_uses_a_substitution_even_one_its_producer_armed():
+def test_a_walk_nested_inside_a_walk_never_uses_the_outer_walks_substitution():
     with budget_policy_scope(BudgetPolicy()):
         with serialization_scope(site="t", target_parts=("t",)) as work:
             asked = _Asked()
-            producer = _NestsAWalk(work, asked)
-            RESULT_JSON_POLICY.materialize(_Fields(a=producer), budget=work)
+            producer = _NestsAWalk(work)
+            RESULT_JSON_POLICY.materialize(_Fields(a=producer), budget=work, leaf_substitution=asked)
     assert producer.built == [{"a": _expr().to_dict()}]
     assert asked.leaves == []
 
 
-def test_each_outermost_walk_under_one_arming_claims_it_in_turn():
-    """walk は claim を walk の間だけ持ち、終われば返す: 同じ `with` の中の次の walk も置き換えを使う。"""
+def test_a_producer_may_pass_its_own_substitution_to_its_own_walk():
+    """入力の code が自分の walk に自分の置き換えを渡すのは main と同じ（外側の置き換えとは混ざらない）。"""
 
     with budget_policy_scope(BudgetPolicy()):
         with serialization_scope(site="t", target_parts=("t",)) as work:
-            asked = _Asked()
-            with substituting_leaves(work, asked):
-                first = RESULT_JSON_POLICY.materialize(_Fields(a=_expr(3)), budget=work)
-                second = RESULT_JSON_POLICY.materialize(_Fields(a=_expr(4)), budget=work)
-    assert type(first["a"]) is _Marker and type(second["a"]) is _Marker
-    assert len(asked.leaves) == 2
+            outer, own = _Asked(), _Asked("own")
+            producer = _NestsAWalk(work, own)
+            built = RESULT_JSON_POLICY.materialize(_Fields(a=producer, b=_expr(5)), budget=work, leaf_substitution=outer)
+    assert producer.built == [{"a": "own"}] and len(own.leaves) == 1
+    assert type(built["b"]) is _Marker and len(outer.leaves) == 1 and outer.leaves[0] is built["b"].leaf
 
 
-def test_another_thread_cannot_claim_an_armed_substitution_even_when_no_walk_holds_it():
+def test_walks_in_another_thread_or_a_fresh_context_never_use_it():
+    import contextvars
     import threading
 
     with budget_policy_scope(BudgetPolicy()):
         with serialization_scope(site="t", target_parts=("t",)) as work:
             asked = _Asked()
             built: List[Any] = []
-            with substituting_leaves(work, asked):
-                thread = threading.Thread(
-                    target=lambda: built.append(RESULT_JSON_POLICY.materialize(_Fields(a=_expr()), budget=work)))
-                thread.start()
-                thread.join()
-    assert built == [{"a": _expr().to_dict()}]
+
+            class _Elsewhere:
+                def json_items(self):
+                    thread = threading.Thread(target=lambda: built.append(
+                        RESULT_JSON_POLICY.materialize(_Fields(a=_expr()), budget=work)))
+                    thread.start()
+                    thread.join()
+                    built.append(contextvars.Context().run(
+                        RESULT_JSON_POLICY.materialize, _Fields(a=_expr()), budget=work))
+                    yield "elsewhere", 1
+
+            RESULT_JSON_POLICY.materialize(_Fields(e=_Elsewhere()), budget=work, leaf_substitution=asked)
+    assert built == [{"a": _expr().to_dict()}, {"a": _expr().to_dict()}]
     assert asked.leaves == []

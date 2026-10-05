@@ -66,31 +66,57 @@ def _calls(tree: ast.AST) -> Iterator[Tuple[ast.Call, str]]:
                 yield node, name
 
 
-def test_only_the_snapshot_material_turns_on_a_leaf_substitution_and_only_the_owner_defines_one():
-    """置き換えを効かせるのは schema の owner の `snapshot_material`（意味の view の間だけ）。置き換える型を
-    定義するのは再利用の owner だけ。"""
+ANALYSIS = PACKAGE_ROOT / "core" / "analysis.py"
 
+
+def _keyword_passers(keyword: str) -> List[str]:
+    """`keyword=` を `None` 以外の値で渡す production の関数（`path:関数名`）。"""
+
+    passers: List[str] = []
+    for path, tree in _production_modules():
+        for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
+            # 呼ぶ先の形（名前・属性・`_CANONICAL_VIEW[1]` のような添字）によらず全ての呼び出しを見る
+            for node in (child for child in ast.walk(function) if isinstance(child, ast.Call)):
+                for item in node.keywords:
+                    if item.arg == keyword and not (isinstance(item.value, ast.Constant) and item.value.value is None):
+                        passers.append(f"{path.relative_to(PACKAGE_ROOT)}:{function.name}")
+    return sorted(set(passers))
+
+
+def test_only_the_snapshot_material_hands_a_walk_a_leaf_substitution_and_only_the_owner_defines_one():
+    """置き換えは walk の引数でだけ渡る（作業量・thread・context に登録しない）。それを渡すのは schema の owner の
+    `snapshot_material`（意味の view 1 回）と、受け取った引数を自分の walk 1 回へそのまま渡す
+    `FunctionReturnAnalysis._materialize` だけ。core の walk は受け取った置き換えを自分の葉へ使うだけ
+    （`_Walk` の `substitution=`）。置き換える型を定義するのは再利用の owner だけ。"""
+
+    assert _keyword_passers("leaf_substitution") == [
+        f"{ANALYSIS.relative_to(PACKAGE_ROOT)}:_materialize",
+        f"{SCHEMA.relative_to(PACKAGE_ROOT)}:snapshot_material",
+    ]
+    materialize = next(
+        node for node in ast.walk(parse_source(ANALYSIS))
+        if isinstance(node, ast.FunctionDef) and node.name == "_materialize"
+    )
+    forwarded = [
+        item.value for node in ast.walk(materialize) if isinstance(node, ast.Call)
+        for item in node.keywords if item.arg == "leaf_substitution"
+    ]
+    # 受け取った引数をそのまま 1 回だけ渡す（自分で置き換えを作らない）
+    assert len(forwarded) == 1 and isinstance(forwarded[0], ast.Name) and forwarded[0].id == "leaf_substitution"
     offenders: List[str] = []
     for path, tree in _production_modules():
-        for node, name in _calls(tree):
-            if name == "substituting_leaves" and path != SCHEMA:
-                offenders.append(f"{path.relative_to(PACKAGE_ROOT)}:{node.lineno}")
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef) and path != OWNER:
                 bases = [base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", None) for base in node.bases]
                 if "LeafSubstitution" in bases:
                     offenders.append(f"{path.relative_to(PACKAGE_ROOT)}:{node.lineno}: {node.name}")
     assert offenders == []
-    sites = [
-        node for node in ast.walk(parse_source(SCHEMA))
-        if isinstance(node, ast.FunctionDef) and any(name == "substituting_leaves" for _n, name in _calls(node))
-    ]
-    assert [node.name for node in sites] == ["snapshot_material"]
 
 
 def test_only_the_single_read_hands_the_codec_a_token_capability():
-    """token を扱う許可（`PlacedTokens`）は引数でだけ渡る: `_freeze_placing` に `None` 以外を渡すのは単一の読み
-    （`read_snapshot_inputs`）だけ（`_freeze_placing` 自身の再帰を除く）。許可を作るのは `placed_tokens_of`（と
+    """token を扱う許可（`PlacedTokens`）は引数でだけ渡る: `_freeze_placing` に `None` 以外を渡すのは単一の読みの
+    `frozen_fingerprint_payload`（意味の field の位置だけ。`snapshot_id` は `None`）だけ（`_freeze_placing` 自身の
+    再帰を除く）。許可を作るのは `placed_tokens_of`（と
     `NO_PLACED_TOKENS`）だけ。"""
 
     passers: List[str] = []
@@ -107,15 +133,22 @@ def test_only_the_single_read_hands_the_codec_a_token_capability():
     schema = SCHEMA.relative_to(PACKAGE_ROOT)
     # `_freeze_placing` の再帰は局所の名前（`recurse`）で、許可を渡すのは組み込みの容器の要素だけ（record の表現・
     # identity key・dataclass の field へ渡らないことは `test_only_a_placed_token_passes_...` が実際に確かめる）
-    assert sorted(set(passers)) == [f"{schema}:read_snapshot_inputs"]
+    assert sorted(set(passers)) == [f"{schema}:frozen_fingerprint_payload"]
+    callers = sorted({
+        f"{path.relative_to(PACKAGE_ROOT)}:{function.name}"
+        for path, tree in _production_modules()
+        for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef))
+        for _node, name in _calls(function) if name == "frozen_fingerprint_payload"
+    })
+    assert callers == [f"{schema}:read_snapshot_inputs"]
     assert sorted(set(makers)) == [f"{schema}:placed_tokens_of"]
 
 
 def test_no_ambient_state_decides_whether_a_token_passes():
     """token の許可を thread / context の状態に置かない（入力の code へ伝わる）: snapshot の schema と再利用の owner
-    は `threading.local` / `ContextVar` を持たない（静的な確認はこの 2 module だけ。葉の置き換えの範囲は
-    `core/budget_policy` が walk の claim で決め、新しい context・別 thread・入れ子の walk に渡らないことは
-    `test_issue219_token_authority.py` が実行して確かめる）。"""
+    は `threading.local` / `ContextVar` を持たない（静的な確認はこの 2 module だけ。葉の置き換えは walk の引数で
+    だけ渡り、新しい context・別 thread・入れ子や前後の walk に渡らないことは `test_issue219_leaf_substitution.py`
+    と `test_issue219_token_authority.py` が実行して確かめる）。"""
 
     for path in (SCHEMA, OWNER):
         tree = parse_source(path)

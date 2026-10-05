@@ -1701,7 +1701,7 @@ class FunctionReturnAnalysis:
 
         return self._materialize(include_derived_proof=False)
 
-    def _materialize(self, *, include_derived_proof: bool) -> Dict:
+    def _materialize(self, *, include_derived_proof: bool, leaf_substitution: Any = None) -> Dict:
         # Issue #22 PR-22-D: 解析 1 件分の表現は **まとめて** 1 つの直列化の作業量
         # （`core/budget_policy.SerializationWork`、`JsonBudget` の一種）。walker が
         # `json_items()` から 1 要素ずつ引き出して数え、合計が予算を超えた時点で
@@ -1717,9 +1717,12 @@ class FunctionReturnAnalysis:
                 self.entry_point,
             ),
         ) as work:
+            # `leaf_substitution` はこの walk の葉だけに使う置き換え（snapshot の読みが渡す。`json_items` の producer が
+            # 始めた walk・この walk より前に始まった walk には渡らない: `core/json_encoding.JsonEncodingPolicy.materialize`）
             return RESULT_JSON_POLICY.materialize(
                 pairs_of(self._json_items(include_derived_proof=include_derived_proof)),
                 budget=work,
+                leaf_substitution=leaf_substitution,
             )
 
     def json_items(self):

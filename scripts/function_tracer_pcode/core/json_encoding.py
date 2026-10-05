@@ -926,7 +926,7 @@ class JsonBudget:
     def tree(self, leaf: Any, *, build: bool, substitution: Any = None) -> Tuple[Any, int]:
         """sized leaf の大きさを **作る前に** 求めて足し、`build` なら木を作る。
 
-        `substitution` は `SerializationWork.tree` と同じ interface（この予算は置き換えを claim させないので常に `None`）。
+        `substitution` は `SerializationWork.tree` と同じ interface（`materialize` は置き換えを直列化の作業量の walk にだけ渡すので、ここでは常に `None`）。
         """
 
         remaining = self.remaining()
@@ -1270,15 +1270,31 @@ class JsonEncodingPolicy:
         _Walk(self, mode, budget, build=False, effort_to_budget=size_only).run(source)
         return budget.consumed
 
-    def materialize(self, source: Any, *, budget: Optional[JsonBudget] = None, counted: bool = False) -> Any:
+    def materialize(
+        self, source: Any, *, budget: Optional[JsonBudget] = None, counted: bool = False,
+        leaf_substitution: Any = None,
+    ) -> Any:
         """LEGACY 表現を作る（record の `to_dict()`・snapshot）。`budget` を渡すとそこへ数える。
 
         `counted=True` は大きさを数え終えた値を写すとき（数え直さない。walk の中でも作れる）。
+
+        `leaf_substitution`（`core/budget_policy.LeafSubstitution`）は、**この walk** が置く sized leaf だけに使う
+        置き換え（直列化の作業量 `budget` が要る）。どこにも登録しないので、この walk の中の producer が始めた walk・
+        同じ作業量の別の walk には効かず、渡した呼ぶ側の外の code から辿れない。
         """
 
+        if leaf_substitution is not None:
+            from scripts.function_tracer_pcode.core.budget_policy import LeafSubstitution, SerializationWork
+
+            if not isinstance(leaf_substitution, LeafSubstitution):
+                raise TypeError("a leaf substitution must be a LeafSubstitution")
+            if not isinstance(budget, SerializationWork):
+                raise TypeError("a leaf substitution needs the serialization work it counts into")
         if budget is None:
             return _Walk(self, LEGACY, JsonBudget(None, detached=counted), build=True).run(source)
-        return _Walk(self, LEGACY, budget, build=True, effort_to_budget=True).run(source)
+        return _Walk(
+            self, LEGACY, budget, build=True, effort_to_budget=True, substitution=leaf_substitution,
+        ).run(source)
 
     def bounded_native_copy(self, value: Any, *, max_bytes: int) -> Optional[Tuple[Any, int]]:
         """JSON の値になる組み込みの型 **そのもの** だけの値の写しと、それを書いた byte 数。
@@ -2082,6 +2098,7 @@ class _Walk:
         token_sink: Optional[Callable[[bytes], None]] = None,
         effort: Optional[JsonBudget] = None,
         effort_to_budget: bool = False,
+        substitution: Any = None,
     ) -> None:
         self.policy = policy
         self.mode = mode
@@ -2098,11 +2115,10 @@ class _Walk:
         self.token_sink = token_sink
         #: 1 回しか辿れない列（iterator）を辿ったか（辿った後の値は同じ値として辿り直せない）
         self.entered_iterator = False
-        #: この walk が claim した葉の置き換え（`SerializationWork.claim_leaf_substitution`。walk の外から始めた
-        #: LEGACY の構築だけが `run` で claim し、walk の間だけ持つ）: 置き換えた葉は、walk を始めた呼ぶ側だけが
-        #: 受け取る。walk の中の producer（`json_items` とその helper）が始めた walk は claim しない（新しい
-        #: context・別の thread で始めても、持たれている entry は claim できない）
-        self.claimed: Any = None
+        #: この walk を始めた呼ぶ側が引数で渡した葉の置き換え（`materialize(..., leaf_substitution=...)`）。この walk
+        #: 自身が置く sized leaf にだけ使う（作業量・thread・context の状態に置かないので、walk の中の producer が
+        #: 始めた walk・別の walk は受け取らない）。置き換えた葉は、walk を始めた呼ぶ側だけが受け取る
+        self.substitution = substitution
         self.item_separator = utf8_length(policy.item_separator)
         self.key_separator = utf8_length(policy.key_separator)
         self.stack: List[_Frame] = []
@@ -2462,10 +2478,7 @@ class _Walk:
             self.push("dict", _walk_iter(json_items(item)), parent, key, item, build=build)
             return
         if _record_protocol(kind, "__json_tree__") is not None:
-            claimed = self.claimed
-            built, size = self.budget.tree(
-                item, build=build, substitution=None if claimed is None else claimed.substitution,
-            )
+            built, size = self.budget.tree(item, build=build, substitution=self.substitution)
             if self.token_sink is not None:
                 self.token("t" + protocol_method(item, "__json_identity__")(item))
             if build:
@@ -2779,12 +2792,6 @@ class _Walk:
 
     def run(self, source: Any) -> Any:
         holder: List[Any] = [None]
-        claim = getattr(self.budget, "claim_leaf_substitution", None)
-        if (
-            claim is not None and _ACTIVE_WORK.get() is None and self.mode == LEGACY and self.build
-            and self.token_sink is None
-        ):
-            self.claimed = claim()
         # walk の間に呼ぶ producer が作る予算は、この walk の作業量の子（`JsonBudget.parent`）
         active = _ACTIVE_WORK.set(self.effort)
         try:
@@ -2795,9 +2802,6 @@ class _Walk:
                 self.drain_to(0)
         finally:
             _ACTIVE_WORK.reset(active)
-            claimed, self.claimed = self.claimed, None
-            if claimed is not None:
-                self.budget.release_leaf_substitution(claimed)
         return holder[0]
 
     def drain_to(self, depth: int) -> None:

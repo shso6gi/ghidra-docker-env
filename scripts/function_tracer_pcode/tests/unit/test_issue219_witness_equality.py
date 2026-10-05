@@ -291,8 +291,11 @@ def test_the_witness_hash_reads_a_bounded_prefix_and_the_comparison_decides_the_
     # 上限の外の違いは hash に出ない（同じ候補）が、`_same` が区別する
     assert reuse._witness_hash((wide,)) == reuse._witness_hash((changed,))
     assert not reuse._same((wide,), (changed,))
-    assert reuse._Witness((wide,)) != reuse._Witness((changed,))
-    assert reuse._Witness((wide,)) == reuse._Witness((tuple(wide),))
+    assert reuse._Witness((wide,), ()) != reuse._Witness((changed,), ())
+    assert reuse._Witness((wide,), ()) == reuse._Witness((tuple(wide),), ())
+    # 意味の field の位置（token を見る位置）も同じ規則
+    assert reuse._Witness((), (wide,)) != reuse._Witness((), (changed,))
+    assert reuse._Witness((), (wide,)) == reuse._Witness((), (tuple(wide),))
 
 
 def test_a_large_unchanged_value_is_still_reused():
