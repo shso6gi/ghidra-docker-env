@@ -125,6 +125,17 @@ def restore_sigusr1():
         pass
 
 
+@pytest.fixture(autouse=True)
+def _keep_the_sigusr1_disposition():
+    """Issue #204: production の登録は SIGUSR1 を「無視」にしてから handler を付ける（外れた後も
+    無視のまま）。test の process にそれを残すと、後の test の subprocess が無視を継承するので、
+    登録を呼ぶ test の前後で disposition を元へ戻す。"""
+
+    before = signal.getsignal(STACK_DUMP_SIGNAL)
+    yield
+    signal.signal(STACK_DUMP_SIGNAL, before)
+
+
 # --------------------------------------------------------------------------
 # 1. 行 schema と seq
 # --------------------------------------------------------------------------

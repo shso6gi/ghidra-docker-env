@@ -66,7 +66,8 @@ mode, dump = sys.argv[1], sys.argv[2]
 if mode == "production":
     state = register_stack_dump_handler(PairDiagnostics(dump_path_tmp=dump))
     assert state.handler_registered, state.registration_error
-else:                                    # the registration before the fix
+else:                                    # the registration before the fix, in a fresh process
+    signal.signal(signal.SIGUSR1, signal.SIG_DFL)
     faulthandler.register(signal.SIGUSR1, file=open(dump, "ab", buffering=0),
                           all_threads=True, chain=False)
 faulthandler.unregister(signal.SIGUSR1)  # what _PyFaulthandler_Fini does at shutdown
