@@ -24,6 +24,14 @@ from scripts.function_tracer_pcode.authority.contracts import (
     authority_digest,
     canonical_value,
 )
+from scripts.function_tracer_pcode.authority.decision.classification_failure import (
+    ProjectionNotAdoptedError,
+    describe as describe_durable,
+    durable_reading,
+    failure_record,
+    reading_of,
+    write_failure_record,
+)
 from scripts.function_tracer_pcode.authority.decision.decision import DecisiveProofKind
 from scripts.function_tracer_pcode.authority.decision.pair_status_authority import seal_pair_status
 from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
@@ -1257,43 +1265,38 @@ def conditional_pair_status_projection(
     }
 
 
-def _adopted_terminal(store: Any, status: Any) -> TerminalAuthority:
-    """store が ``status`` の終端を採用する状態なら、その authority を返す（Issue #165）。
+def _adopted_terminal(store: Any, supervisor: Mapping[str, Any]) -> TerminalAuthority:
+    """store が projection の ``status`` の終端を採用する状態なら、その authority を返す（Issue #165）。
 
     判断は supervisor と同じ ``terminal_driver.inspect``（``next_step`` と
     ``adopt``）をそのまま使い、検証・競合の規則を分類器に複製しない。exit
     mode は推測せず、E に記録された supervisor の mode で読む。
+
+    採用できなければ ``ProjectionNotAdoptedError``（Issue #204）: projection と store は pair の
+    一時 dir と一緒に消えるので、supervisor が記録した判断と、いま durable な evidence から同じ
+    規則で読んだ判断を message（pair-status の detail）と record に運ぶ。分類は失敗のまま。
     """
 
+    status = supervisor.get("status")
     if status not in TERMINAL_STATUSES:
-        # Issue #204: the projection and the store are deleted with the pair's temporary
-        # directory, so the reason the durable evidence names is carried into the message
-        # (the pair-status detail).  It is read with the same rule the supervisor used; the
-        # classification still fails.
-        raise ValueError(
+        durable = durable_reading(store)
+        raise ProjectionNotAdoptedError(
             "supervisor projection is not a terminal authority: "
-            f"status={status!r}; durable evidence: {_durable_verdict(store)}"
+            f"status={status!r} error_code={supervisor.get('error_code')!r} "
+            f"child_returncode={supervisor.get('child_returncode')!r}; "
+            f"durable evidence: {describe_durable(durable)}",
+            durable=durable,
         )
     inspection = inspect_terminal(store, mode=None, process_alive=process_is_alive)
     authority = inspection.authority
     if authority is None or authority.status != status:
-        step = inspection.step
-        raise ValueError(
+        durable = reading_of(inspection)
+        raise ProjectionNotAdoptedError(
             f"{status} projection is not the durable terminal authority: "
-            f"{step.kind.value} {getattr(step.invalid_code, 'value', None)} "
-            f"{step.detail}"
+            f"{describe_durable(durable)}",
+            durable=durable,
         )
     return authority
-
-
-def _durable_verdict(store: Any) -> str:
-    """What the durable evidence decides now (``next_step``: kind, invalid code, detail)."""
-
-    try:
-        step = inspect_terminal(store, mode=None, process_alive=process_is_alive).step
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        return f"unreadable ({type(exc).__name__}: {exc})"[:300]
-    return f"{step.kind.value} {getattr(step.invalid_code, 'value', None)} {step.detail}"[:500]
 
 
 def _require_logged_result(log_path: Path, envelope: CanonicalEnvelope) -> None:
@@ -1356,7 +1359,7 @@ def classify_pair_status(
     if supervisor.get("launch_receipt_digest") != launch.receipt_digest:
         raise ValueError("supervisor projection does not join durable launch")
     status = supervisor.get("status")
-    authority = _adopted_terminal(store, status)
+    authority = _adopted_terminal(store, supervisor)
     if authority.launch.receipt_digest != launch.receipt_digest:
         raise ValueError("adopted terminal does not join the durable launch")
     expected = terminal_projection(authority, factory)
@@ -1406,6 +1409,9 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("--pair-status-verification-key-file")
     parser.add_argument("--pair-execution-target-file")
     parser.add_argument("--classification-diagnostic-log")
+    # Issue #204: 分類が失敗したときだけ書く診断（projection の写しと durable な evidence の読み）。
+    # runner は store を消す前の成果物として run dir に置く。判定には使わない。
+    parser.add_argument("--classification-failure-output")
     args = parser.parse_args(arguments)
     if not all((
         args.classify_pair_log, args.supervisor_projection,
@@ -1447,6 +1453,22 @@ def main(arguments: list[str] | None = None) -> int:
                 print(
                     "Pair classification diagnostic log append failed: "
                     f"{type(log_exc).__name__}: {log_exc}",
+                    file=sys.stderr,
+                )
+        if args.classification_failure_output:
+            try:
+                write_failure_record(
+                    Path(args.classification_failure_output),
+                    failure_record(
+                        detail=detail,
+                        projection_path=Path(args.supervisor_projection),
+                        durable=getattr(exc, "durable", None),
+                    ),
+                )
+            except OSError as record_exc:
+                print(
+                    "Pair classification failure record write failed: "
+                    f"{type(record_exc).__name__}: {record_exc}",
                     file=sys.stderr,
                 )
         print(json.dumps({
