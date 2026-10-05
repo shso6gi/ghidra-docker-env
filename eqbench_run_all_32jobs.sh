@@ -125,6 +125,13 @@ if [[ ! "$PAIR_PROCESS_TIMEOUT_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
     echo "Error: pair process timeout values must be seconds, for example 300s" >&2
     exit 1
 fi
+# Issue #106 PR-106-B: the analysis deadline handed to every pair.  ANALYSIS_TIMEOUT
+# (default: the full-run default of reporting/runner_timeout_policy.py; 0 = off),
+# ANALYSIS_TIMEOUT_MARGIN and PAIR_PROCESS_TIMEOUT are checked together here,
+# before anything is compiled or scheduled and in DRY_RUN mode too: an
+# inconsistent combination stops the run with exit 1.  PAIR_PROCESS_TIMEOUT is
+# never raised to make room.
+validation_resolve_analysis_timeout_policy "$PYTHON_BIN" "" "$SCRIPT_DIR" || exit 1
 if [[ ! "$PARALLEL_JOBS_REQUESTED" =~ ^[1-9][0-9]*$ \
     || ! "$EQBENCH_CPU_TOKENS" =~ ^[1-9][0-9]*$ \
     || ! "$EQBENCH_PAIR_CPU_TOKENS" =~ ^[1-9][0-9]*$ \
@@ -609,6 +616,8 @@ run_pair() {
         --stack-dump-file "$stack_dump_tmp"
         --stack-dump-artifact "$stack_dump_artifact"
     )
+    # Issue #106 PR-106-B: empty when ANALYSIS_TIMEOUT=0 (the pre-deadline argv).
+    equiv_cmd+=( ${ANALYSIS_TIMEOUT_CLI_ARGS[@]+"${ANALYSIS_TIMEOUT_CLI_ARGS[@]}"} )
     if [[ "$EQBENCH_IDENTICAL_FAST_PATH" == "0" ]]; then
         equiv_cmd+=( --no-identical-fast-path )
     fi
@@ -991,6 +1000,7 @@ pair_process_kill_after=$PAIR_PROCESS_KILL_AFTER
 pair_stack_dump_lead=$PAIR_STACK_DUMP_LEAD
 pair_process_timeout_seconds=$PAIR_PROCESS_TIMEOUT_SECONDS
 pair_process_kill_after_seconds=$PAIR_PROCESS_KILL_AFTER_SECONDS
+$ANALYSIS_TIMEOUT_MANIFEST_LINES
 equiv_timeout=$EQUIV_TIMEOUT
 decompile_timeout=$DECOMPILE_TIMEOUT
 pairwise_timeout=$PAIRWISE_TIMEOUT
@@ -1002,7 +1012,7 @@ callee_unbound_reuse_shadow=$FT_CALLEE_UNBOUND_REUSE_SHADOW
 skip_completed_results=$SKIP_COMPLETED_RESULTS
 error_only_rerun=$ERROR_ONLY_RERUN
 debug=$EQBENCH_DEBUG
-analysis_config_schema=eqbench-analysis-config-v3
+analysis_config_schema=eqbench-analysis-config-v4
 identical_fast_path=$EQBENCH_IDENTICAL_FAST_PATH
 eqbench_tmpdir=$EQBENCH_TMPDIR
 authority_keyset_id=$AUTHORITY_KEYSET_ID
@@ -1081,6 +1091,7 @@ echo "Parallel jobs requested: $PARALLEL_JOBS_REQUESTED"
 echo "Resource admission: enabled=$EQBENCH_RESOURCE_ADMISSION cpu_tokens=$EQBENCH_CPU_TOKENS pair_cpu_tokens=$EQBENCH_PAIR_CPU_TOKENS admission_jobs=$RESOURCE_ADMISSION_JOBS"
 echo "Progress receipts: interval=${EQBENCH_PROGRESS_INTERVAL_SECONDS}s (wall/RSS per pair)"
 echo "Pair process timeout: $PAIR_PROCESS_TIMEOUT (kill after $PAIR_PROCESS_KILL_AFTER)"
+echo "Analysis timeout: ${ANALYSIS_TIMEOUT_SECONDS}s (0 = off; margin ${ANALYSIS_TIMEOUT_MARGIN_SECONDS}s)"
 echo "Equiv timeout: $EQUIV_TIMEOUT"
 echo "Decompile timeout: $DECOMPILE_TIMEOUT"
 echo "Pairwise timeout: $PAIRWISE_TIMEOUT (hard $PAIRWISE_TIMEOUT_HARD)"
@@ -1521,6 +1532,8 @@ fi
     "FT_CALLEE_UNBOUND_REUSE_SHADOW=$FT_CALLEE_UNBOUND_REUSE_SHADOW" \
     "PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT" \
     "PAIR_PROCESS_KILL_AFTER=$PAIR_PROCESS_KILL_AFTER" \
+    "ANALYSIS_TIMEOUT=${ANALYSIS_TIMEOUT-}" \
+    "ANALYSIS_TIMEOUT_MARGIN=${ANALYSIS_TIMEOUT_MARGIN-}" \
     "./eqbench_run_all_32jobs.sh"
 
 echo ""

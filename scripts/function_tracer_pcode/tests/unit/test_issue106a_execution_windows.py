@@ -475,7 +475,7 @@ def test_review1_mixed_class_a_and_b_backends_in_one_query():
 def _decided(guarantee_class, truth, outcome="EQUIVALENT"):
     return TargetObservation(
         key="k", guarantee_class=guarantee_class, before_outcome="TIMEOUT",
-        after_outcome=outcome, after_truth=truth,
+        after_outcome=outcome, after_truth=truth, before_timeout_kind="process_wall_clock",
     )
 
 

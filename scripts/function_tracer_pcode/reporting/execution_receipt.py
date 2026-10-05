@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from decimal import Decimal
 import json
 from pathlib import Path
 import re
@@ -18,6 +19,10 @@ from scripts.function_tracer_pcode.authority.decision.pair_status_authority impo
 from scripts.function_tracer_pcode.reporting.execution_identity import (
     sha256_file,
     source_tree_digest,
+)
+from scripts.function_tracer_pcode.reporting.runner_timeout_policy import (
+    KEY_ANALYSIS_TIMEOUT,
+    KEY_ANALYSIS_TIMEOUT_MARGIN,
 )
 
 
@@ -68,6 +73,22 @@ ANALYSIS_CONFIG_V2_FIELDS = ANALYSIS_CONFIG_V1_FIELDS - {"skip_completed_results
 # schema; one that does not name it is read as v2 exactly as before.
 ANALYSIS_CONFIG_V3_FIELDS = ANALYSIS_CONFIG_V2_FIELDS | {"identical_fast_path"}
 ANALYSIS_CONFIG_V3_SCHEMA = "eqbench-analysis-config-v3"
+# Issue #106 PR-106-B.  The runner's analysis deadline changes what a pair's
+# result is (a pair cut at the deadline is an UNKNOWN it would not otherwise
+# be), so the deadline and its margin join the identity: runs with different
+# deadlines never reuse each other's pair statuses, and the publication
+# manifest's ``analysis_config`` records the values a run used.  A v4 run with
+# the deadline off (``analysis_timeout`` = 0) ran exactly what a v3 run ran, so
+# ``normalize_semantic_analysis_config`` projects it onto v3 -- the margin means
+# nothing without a deadline -- and an OFF run can resume a tree written before
+# the deadline existed.
+ANALYSIS_CONFIG_V4_FIELDS = ANALYSIS_CONFIG_V3_FIELDS | {
+    "analysis_timeout_seconds", "analysis_timeout_margin_seconds",
+}
+ANALYSIS_CONFIG_V4_SCHEMA = "eqbench-analysis-config-v4"
+ANALYSIS_CONFIG_SCHEMAS_WITH_FAST_PATH = frozenset({
+    ANALYSIS_CONFIG_V3_SCHEMA, ANALYSIS_CONFIG_V4_SCHEMA,
+})
 ANALYSIS_CONFIG_SCHEMA_KEY = "analysis_config_schema"
 MATRIX_RUN_SCOPES = frozenset({"REPRESENTATIVE", "FULL_EQBENCH", "FULL_NEQ"})
 
@@ -81,7 +102,7 @@ def analysis_config_from_run(run: Mapping[str, str]) -> Mapping[str, Any]:
     would let an ON run and an OFF run share a digest.
     """
     schema = run.get(ANALYSIS_CONFIG_SCHEMA_KEY)
-    if schema is not None and schema != ANALYSIS_CONFIG_V3_SCHEMA:
+    if schema is not None and schema not in ANALYSIS_CONFIG_SCHEMAS_WITH_FAST_PATH:
         raise ValueError("matrix run manifest names an unknown analysis config schema")
     try:
         config = {
@@ -104,9 +125,12 @@ def analysis_config_from_run(run: Mapping[str, str]) -> Mapping[str, Any]:
             "pair_process_kill_after_seconds": run["pair_process_kill_after_seconds"],
             "prefilter_source_census_digest": run["prefilter_source_census_digest"],
         }
-        if schema == ANALYSIS_CONFIG_V3_SCHEMA:
-            config["schema"] = ANALYSIS_CONFIG_V3_SCHEMA
+        if schema in ANALYSIS_CONFIG_SCHEMAS_WITH_FAST_PATH:
+            config["schema"] = schema
             config["identical_fast_path"] = _exact_flag(run["identical_fast_path"])
+        if schema == ANALYSIS_CONFIG_V4_SCHEMA:
+            config["analysis_timeout_seconds"] = run[KEY_ANALYSIS_TIMEOUT]
+            config["analysis_timeout_margin_seconds"] = run[KEY_ANALYSIS_TIMEOUT_MARGIN]
     except (KeyError, ValueError) as exc:
         raise ValueError("matrix run manifest lacks typed analysis config") from exc
     validate_analysis_config(config)
@@ -121,23 +145,26 @@ def _exact_flag(value: str) -> bool:
 
 
 def validate_analysis_config(config: Mapping[str, Any]) -> None:
-    timeout_fields = (
+    timeout_fields = [
         "equiv_timeout_seconds", "decompile_timeout_seconds",
         "pairwise_timeout_seconds", "pairwise_timeout_hard_seconds",
         "pair_process_timeout_seconds", "pair_process_kill_after_seconds",
-    )
+    ]
     if not isinstance(config, Mapping):
         raise ValueError("EqBench typed analysis config is invalid")
     expected_fields = {
         "eqbench-analysis-config-v1": ANALYSIS_CONFIG_V1_FIELDS,
         "eqbench-analysis-config-v2": ANALYSIS_CONFIG_V2_FIELDS,
         ANALYSIS_CONFIG_V3_SCHEMA: ANALYSIS_CONFIG_V3_FIELDS,
+        ANALYSIS_CONFIG_V4_SCHEMA: ANALYSIS_CONFIG_V4_FIELDS,
     }.get(config.get("schema"))
     bool_fields = {"debug", "dry_run"}
     if config.get("schema") == "eqbench-analysis-config-v1":
         bool_fields.add("skip_completed_results")
-    if config.get("schema") == ANALYSIS_CONFIG_V3_SCHEMA:
+    if config.get("schema") in ANALYSIS_CONFIG_SCHEMAS_WITH_FAST_PATH:
         bool_fields.add("identical_fast_path")
+    if config.get("schema") == ANALYSIS_CONFIG_V4_SCHEMA:
+        timeout_fields += ["analysis_timeout_seconds", "analysis_timeout_margin_seconds"]
     if (
         expected_fields is None or set(config) != expected_fields
         or config["authority_kind"] != "EqBenchAnalysisConfig"
@@ -158,10 +185,28 @@ def validate_analysis_config(config: Mapping[str, Any]) -> None:
 
 
 def normalize_semantic_analysis_config(config: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Project historical v1 config onto the scheduling-free v2 authority."""
+    """Project historical v1 config onto the scheduling-free v2 authority.
+
+    A v4 config whose analysis deadline is off is projected onto v3 (see
+    ``ANALYSIS_CONFIG_V4_SCHEMA``); a v4 config with the deadline on stays v4,
+    so it never compares equal to a run made without the deadline.
+    """
 
     validate_analysis_config(config)
-    if config["schema"] in ("eqbench-analysis-config-v2", ANALYSIS_CONFIG_V3_SCHEMA):
+    if (
+        config["schema"] == ANALYSIS_CONFIG_V4_SCHEMA
+        and Decimal(config["analysis_timeout_seconds"]) == 0
+    ):
+        projected = {
+            key: value for key, value in config.items()
+            if key not in ANALYSIS_CONFIG_V4_FIELDS - ANALYSIS_CONFIG_V3_FIELDS
+        }
+        projected["schema"] = ANALYSIS_CONFIG_V3_SCHEMA
+        validate_analysis_config(projected)
+        return projected
+    if config["schema"] in (
+        "eqbench-analysis-config-v2", ANALYSIS_CONFIG_V3_SCHEMA, ANALYSIS_CONFIG_V4_SCHEMA,
+    ):
         # A v3 config is *not* projected onto v2: dropping the fast-path field
         # would make an ON run and an OFF run compare equal, which is exactly
         # the confusion the field exists to prevent.

@@ -77,6 +77,10 @@ TIMEOUT_KIND_ORDER = (
     KIND_UNKNOWN,
     KIND_NOT_APPLICABLE,
 )
+#: supervisor の process deadline が終端を決めた（= process TIMEOUT）と読める `timeout_kind`。
+#: 「TIMEOUT だから process が kill された」と読まないため、consumer はこの集合で判断する
+#: （Issue #106 PR-106-B: margin の測定・targeted pair の受理）。
+PROCESS_DEADLINE_KINDS = frozenset({KIND_PROCESS_WALL_CLOCK, KIND_BOTH_SIGNALS})
 
 # 証拠の状態。`absent`（そもそも残っていない）と `invalid`（残っているが
 # 検証に落ちた / 矛盾している）を潰さない。
@@ -730,24 +734,52 @@ def _optional_bool(sidecar: Optional[Mapping[str, Any]], key: str) -> Optional[b
     return value if isinstance(value, bool) else None
 
 
-def build_timeout_pair_row(
-    outcome_record: Any, *, include_non_timeout: bool = False,
-) -> Optional[TimeoutPairRow]:
-    """1 pair 分の診断行を作る。TIMEOUT でなければ既定では `None`。"""
-    if outcome_record.outcome != TIMEOUT_OUTCOME and not include_non_timeout:
-        return None
-    paths = pair_paths(outcome_record.status_path)
+@dataclass(frozen=True)
+class PairEvidence:
+    """1 pair の終了の証拠（pair status・supervisor の診断 sidecar・結果 payload）。
+
+    読めない file は空（pair status）/ ``None``（sidecar・payload）。推定で埋めない。
+    """
+
+    paths: PairPaths
+    pair_status: Mapping[str, Any]
+    sidecar: Optional[Mapping[str, Any]]
+    result_payload: Optional[Mapping[str, Any]]
+
+    def timeout_kind_report(self) -> "TimeoutKindReport":
+        return classify_timeout_kind(
+            self.pair_status, result_payload=self.result_payload,
+            status_sidecar=self.sidecar,
+        )
+
+
+def load_pair_evidence(status_path: Any) -> PairEvidence:
+    """pair-status の path から、その pair の終了の証拠を読む（例外は投げない）。"""
+    paths = pair_paths(status_path)
     try:
         pair_status = json.loads(paths.pair_status.read_text(encoding="utf-8"))
     except _READ_ERRORS:
         pair_status = {}
     if not isinstance(pair_status, Mapping):
         pair_status = {}
-    sidecar = read_stack_dump_status(paths.diagnostic_status)
-    payload = read_result_payload(paths.log)
-    report = classify_timeout_kind(
-        pair_status, result_payload=payload, status_sidecar=sidecar,
+    return PairEvidence(
+        paths=paths,
+        pair_status=pair_status,
+        sidecar=read_stack_dump_status(paths.diagnostic_status),
+        result_payload=read_result_payload(paths.log),
     )
+
+
+def build_timeout_pair_row(
+    outcome_record: Any, *, include_non_timeout: bool = False,
+) -> Optional[TimeoutPairRow]:
+    """1 pair 分の診断行を作る。TIMEOUT でなければ既定では `None`。"""
+    if outcome_record.outcome != TIMEOUT_OUTCOME and not include_non_timeout:
+        return None
+    evidence = load_pair_evidence(outcome_record.status_path)
+    paths = evidence.paths
+    sidecar = evidence.sidecar
+    report = evidence.timeout_kind_report()
     journal = read_stage_journal(paths.journal, max_bytes=SUMMARY_READ_LIMIT_BYTES)
     # sidecar が現在の child の pid / start_token を残していればそれで一意に選ぶ。
     # 無い run（sidecar 以前）では、混在の兆候が無い journal だけを使う。

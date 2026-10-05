@@ -12,7 +12,18 @@ append-only JSONL** としても出す。プロセスが SIGKILL されても、
   ``t_monotonic`` / ``t_epoch`` / ``pid`` / ``payload``。``schema`` を全行に
   持たせるのは、途中で切れた file でも 1 行だけで解釈できるようにするため。
 * ``event`` は ``handler_registered`` / ``stage_start`` / ``stage_end`` /
-  ``counter`` / ``note`` の 5 種類だけ。
+  ``counter`` / ``note`` / ``journal_end`` の 6 種類だけ。
+
+**行の会計（Issue #106 PR-106-B review 4）。** 読み手が「書かれた行がすべて残っている」ことを
+確かめられるように、書き手は次を守る:
+
+* ``seq`` は **書こうとした** 行ごとに 1 つ進む（1 から始まり、書けなかった行も番号を消費する）。
+  だから途中の書き込み失敗は、後の行が書ければ ``seq`` の欠番として file に残る。
+* 最後の行より後の失敗は欠番にならない。それを見えるようにするのが `StageJournal.seal()` の
+  ``journal_end`` 行で、``last_seq``（それまでに書こうとした最後の番号）と ``write_failures`` を
+  持つ。``journal_end`` があり、欠番が無く、``write_failures`` が 0 の journal だけが「終わりまで
+  全部書けた」と言える。kill された child は ``journal_end`` を書かない（終わりは証明されない）。
+* seal / close の後に来た event は書かず、番号も消費しない（journal は seal までの記録）。
 
 **計測の定義はここに作らない。** journal は `StageClock` の region / stage を
 そのまま観測する surface で、`stage_end` の ``seconds`` は clock が
@@ -45,6 +56,8 @@ EVENT_STAGE_START = "stage_start"
 EVENT_STAGE_END = "stage_end"
 EVENT_COUNTER = "counter"
 EVENT_NOTE = "note"
+#: `StageJournal.seal()` が書く最後の行（payload は ``last_seq`` / ``write_failures``）。
+EVENT_JOURNAL_END = "journal_end"
 
 JOURNAL_EVENTS = frozenset({
     EVENT_HANDLER_REGISTERED,
@@ -52,6 +65,7 @@ JOURNAL_EVENTS = frozenset({
     EVENT_STAGE_END,
     EVENT_COUNTER,
     EVENT_NOTE,
+    EVENT_JOURNAL_END,
 })
 
 #: 逐次記録する region 名。`condition_simplify` のように 1 pair で 10^5 回
@@ -139,37 +153,73 @@ class StageJournal:
         seconds: Any = None,
         payload: Optional[Mapping[str, Any]] = None,
     ) -> Optional[int]:
-        """1 event を書いて flush する。書けた場合だけ ``seq`` を返す。"""
+        """1 event を書いて flush する。書けた場合だけ ``seq`` を返す。
+
+        書けなかった行も ``seq`` を 1 つ消費する（欠番が失敗の痕跡になる。module docstring）。
+        """
+        if self._handle is None:
+            return None
+        with self._lock:
+            return self._append_locked(event, stage=stage, seconds=seconds, payload=payload)
+
+    def _append_locked(
+        self,
+        event: str,
+        *,
+        stage: Optional[str] = None,
+        seconds: Any = None,
+        payload: Optional[Mapping[str, Any]] = None,
+    ) -> Optional[int]:
         handle = self._handle
         if handle is None:
             return None
+        self._seq += 1
+        sequence = self._seq
+        try:
+            row = {
+                "schema": STAGE_JOURNAL_SCHEMA,
+                "seq": sequence,
+                "event": str(event),
+                "stage": None if stage is None else str(stage),
+                "seconds": _coerce_seconds(seconds),
+                "t_monotonic": round(time.monotonic(), 6),
+                "t_epoch": round(time.time(), 6),
+                "pid": self.pid,
+                "payload": dict(payload) if payload else {},
+            }
+            handle.write(json.dumps(
+                row, ensure_ascii=False, sort_keys=True, default=_unserializable,
+            ) + "\n")
+            handle.flush()
+        except _JOURNAL_ERRORS as exc:
+            self.write_failures += 1
+            self.last_error = f"{type(exc).__name__}: {exc}"[:200]
+            return None
+        return sequence
+
+    def seal(self) -> Optional[int]:
+        """``journal_end`` を書いて閉じる。書けた場合だけその ``seq`` を返す。
+
+        ``last_seq`` と ``write_failures`` は同じ lock の中で読むので、他の thread の行と
+        食い違わない。``journal_end`` 自身が書けなければ終わりは証明されない（読み手が判断する）。
+        """
+        if self._handle is None:
+            return None
         with self._lock:
-            self._seq += 1
-            sequence = self._seq
-            try:
-                row = {
-                    "schema": STAGE_JOURNAL_SCHEMA,
-                    "seq": sequence,
-                    "event": str(event),
-                    "stage": None if stage is None else str(stage),
-                    "seconds": _coerce_seconds(seconds),
-                    "t_monotonic": round(time.monotonic(), 6),
-                    "t_epoch": round(time.time(), 6),
-                    "pid": self.pid,
-                    "payload": dict(payload) if payload else {},
-                }
-                handle.write(json.dumps(
-                    row, ensure_ascii=False, sort_keys=True, default=_unserializable,
-                ) + "\n")
-                handle.flush()
-            except _JOURNAL_ERRORS as exc:
-                self.write_failures += 1
-                self.last_error = f"{type(exc).__name__}: {exc}"[:200]
-                return None
-            return sequence
+            sequence = self._append_locked(EVENT_JOURNAL_END, payload={
+                "last_seq": self._seq,
+                "write_failures": self.write_failures,
+            })
+            handle, self._handle = self._handle, None
+        self._close_handle(handle)
+        return sequence
 
     def close(self) -> None:
+        """``journal_end`` を書かずに閉じる（終わりは証明されない。child の終了では `seal` を使う）。"""
         handle, self._handle = self._handle, None
+        self._close_handle(handle)
+
+    def _close_handle(self, handle: Any) -> None:
         if handle is None:
             return
         try:
@@ -208,6 +258,14 @@ def close_active_stage_journal() -> None:
     journal, _ACTIVE_JOURNAL = _ACTIVE_JOURNAL, None
     if journal is not None:
         journal.close()
+
+
+def seal_active_stage_journal() -> None:
+    """active journal を外し、``journal_end`` を書いて閉じる（child の終了時に 1 回）。"""
+    global _ACTIVE_JOURNAL
+    journal, _ACTIVE_JOURNAL = _ACTIVE_JOURNAL, None
+    if journal is not None:
+        journal.seal()
 
 
 def journal_event(

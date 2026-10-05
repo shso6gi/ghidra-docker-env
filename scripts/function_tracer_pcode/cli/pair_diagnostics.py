@@ -53,6 +53,7 @@ artifact への退避（copy）と存在確認は PR-124-C の責務で、この
 
 from __future__ import annotations
 
+import atexit
 import faulthandler
 import os
 import signal
@@ -65,6 +66,7 @@ from scripts.function_tracer_pcode.core.stage_journal import (
     StageJournal,
     journal_event,
     journal_note,
+    seal_active_stage_journal,
     set_active_stage_journal,
 )
 
@@ -175,15 +177,34 @@ def jvm_already_started() -> bool:
         return False
 
 
+#: `seal_active_stage_journal` を interpreter の終了に 1 回だけ登録したか
+_SEAL_AT_EXIT_REGISTERED = False
+
+
+def _register_seal_at_exit() -> None:
+    """child の終了（`sys.exit` を含む正常な interpreter の終了）で journal を seal する。
+
+    kill された child（SIGKILL / 既定の SIGTERM）では走らない: その journal には ``journal_end``
+    が無く、終わりまで書けたことは証明されない（`core.stage_journal` の行の会計）。
+    JVM より前に登録するので、atexit の逆順で JVM の停止より後に走る。
+    """
+
+    global _SEAL_AT_EXIT_REGISTERED
+    if not _SEAL_AT_EXIT_REGISTERED:
+        atexit.register(seal_active_stage_journal)
+        _SEAL_AT_EXIT_REGISTERED = True
+
+
 def open_pair_journal(
     journal_path: Any, *, context: Optional[Mapping[str, Any]] = None
 ) -> Optional[StageJournal]:
-    """journal を開いて active にし、pair の識別情報を 1 行残す。"""
+    """journal を開いて active にし、pair の識別情報を 1 行残す。終了時の seal を登録する。"""
     resolved = _path_argument(journal_path)
     if resolved is None:
         return None
     journal = StageJournal(resolved)
     set_active_stage_journal(journal)
+    _register_seal_at_exit()
     opened: Dict[str, Any] = {"journal_path": resolved}
     if context:
         opened.update(dict(context))
