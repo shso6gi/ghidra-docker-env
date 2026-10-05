@@ -97,6 +97,22 @@ def test_a_replaced_attribute_lookup_is_not_skipped(monkeypatch):
     oracle._compare(_factory, STEPS, monkeypatch)
 
 
+def test_a_replaced_lookup_of_only_the_walk_method_is_not_skipped(monkeypatch):
+    """`__getattribute__` が view は定義のまま返し、view が引く `_materialize` だけを置き換える（main の view は
+    置き換えた `_materialize` を呼ぶ。直接呼べば飛ばす）。"""
+
+    base = object.__getattribute__
+
+    def lookup(self, name):
+        value = base(self, name)
+        if name == "_materialize":
+            return lambda **kwargs: _marked(value(**kwargs))
+        return value
+
+    monkeypatch.setattr(FunctionReturnAnalysis, "__getattribute__", lookup)
+    oracle._compare(_factory, STEPS, monkeypatch)
+
+
 @pytest.mark.parametrize("how", ["class_method", "rebound_policy"])
 def test_a_replaced_walk_entry_never_receives_the_hook(how, monkeypatch):
     """`_materialize` が引く walk の入口を置き換えると、置き換えた code は hook を受け取らない（main と同じ呼び出し）。"""

@@ -7,7 +7,7 @@
 
 * `frozen_fingerprint_payload` は `snapshot_id` を許可無しで凍結する（置いた token も opaque として拒む）。token が
   無い入力では `_freeze_unmetered(fingerprint_payload(...))` と同じ値・同じ例外
-* 再利用の witness は `parts`（`snapshot_id` の digest・診断の参照を含む）を token を見ずに比べ、`fields` でだけ
+* 再利用の witness は（hash を定数にした `collide` でも: 比べ方だけで決まる）`parts`（`snapshot_id` の digest・診断の参照を含む）を token を見ずに比べ、`fields` でだけ
   token を「同じ値の token」として比べる（陽性対照: `fields` の token は別 object でも同じ値なら等しい）
 """
 
@@ -29,6 +29,9 @@ from scripts.function_tracer_pcode.proof.obligations.snapshot import (
     placed_tokens_of,
 )
 from scripts.function_tracer_pcode.tests.unit._publication import published
+from scripts.function_tracer_pcode.tests.unit.test_issue219_single_read import (  # noqa: F401 - fixtures
+    _witness_hash_mode,
+)
 
 
 def _closed(value: int = 3) -> Expression:
