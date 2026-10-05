@@ -1002,6 +1002,8 @@ def test_no_module_reads_the_journal_to_decide_anything():
         "journal_event", "journal_stage_start", "journal_stage_end",
         "journal_counter", "journal_note", "journal_region_start",
         "journal_region_end", "journal_region_reentry",
+        # 行の語彙（Issue #106 PR-106-B review 4: 読み手は event の一覧と終わりの行で行の契約を確かめる）
+        "EVENT_JOURNAL_END", "JOURNAL_EVENTS",
     }
     # journal を「開いて所有する」ことが許されるのは CLI の設置点と再公開だけ。
     owners = {"cli.pair_diagnostics", "checker.diagnostics"}

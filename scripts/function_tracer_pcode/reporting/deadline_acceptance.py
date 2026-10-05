@@ -23,7 +23,10 @@ ground truth との関係は `outcome_transition.correctness_axis` の値（``co
 読み替えない。判定（EQ / NOT_EQ）に値が無い（``None``）ときは ``unconfirmed`` と同じ扱い
 （整合を主張できない）。未知の値は拒む。
 
-改善（improvement）は before が TIMEOUT で、after が Class A の accepted な結果のときだけ。
+改善（improvement）は before が **process の TIMEOUT**（`timeout_kind` が supervisor の process
+deadline を示す: `timeout_hotspot_summary.PROCESS_DEADLINE_KINDS`）で、after が Class A の accepted な
+結果のときだけ。checker 自身の solver の terminal timeout（`child_solver_timeout`）や、証拠の足りない
+TIMEOUT は「process TIMEOUT から改善した」とは数えない（Issue #106 PR-106-B review 1）。
 soundness violation は after の EQ / NOT_EQ が ground truth と矛盾するとき（Class に依らない）。
 完了は、Class A が全件 accepted・Class B が全件 safe・改善が 1 件以上・violation 0（``unconfirmed``
 が 1 件でもあれば完了にしない）。
@@ -60,6 +63,9 @@ DEADLINE_REASON = _DeadlineExceeded.REASON_ID
 DEADLINE_STOP_STATE = _PairStopState.PAIR_TERMINAL_DEADLINE.value
 from scripts.function_tracer_pcode.smt.parallel import (  # noqa: E402
     WORKER_NOT_STOPPABLE_EVIDENCE,
+)
+from scripts.function_tracer_pcode.reporting.timeout_hotspot_summary import (  # noqa: E402
+    PROCESS_DEADLINE_KINDS,
 )
 SNAPSHOT_HEADER = "=== deadline_tripped"
 
@@ -99,6 +105,9 @@ class TargetObservation:
     limitation_evidence: Tuple[str, ...] = ()
     pair_stop_state: Optional[str] = None
     stack_snapshot: bool = False
+    #: TIMEOUT の終わり方（`timeout_hotspot_summary.classify_timeout_kind`。TIMEOUT でなければ None）
+    before_timeout_kind: Optional[str] = None
+    after_timeout_kind: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -114,13 +123,22 @@ class TargetVerdict:
     improvement: bool
     soundness_violation: bool
     detail: str
+    before_timeout_kind: Optional[str] = None
+
+
+def _process_timeout(outcome: str, kind: Optional[str]) -> bool:
+    """supervisor の process deadline が終端を決めた TIMEOUT か（証拠で。outcome だけでは決めない）。"""
+
+    return outcome == OUTCOME_TIMEOUT and kind in PROCESS_DEADLINE_KINDS
 
 
 def _worker_termination(observation: TargetObservation) -> str:
     if WORKER_NOT_STOPPABLE_EVIDENCE in observation.limitation_evidence:
         return "not_stoppable"
-    if observation.after_outcome == OUTCOME_TIMEOUT:
+    if _process_timeout(observation.after_outcome, observation.after_timeout_kind):
         return "process_killed"
+    if observation.after_outcome == OUTCOME_TIMEOUT:
+        return f"timeout:{observation.after_timeout_kind or 'unclassified'}"
     return "stopped"
 
 
@@ -177,8 +195,13 @@ def classify_target(observation: TargetObservation) -> TargetVerdict:
             verdict, detail = VERDICT_UNSAFE, f"{outcome} is not a safe fallback"
         elif truth == TRUTH_UNCONFIRMED:
             verdict, detail = VERDICT_UNCONFIRMED, "decision the ground truth does not confirm"
-        elif outcome == OUTCOME_TIMEOUT:
+        elif _process_timeout(outcome, observation.after_timeout_kind):
             verdict, detail = VERDICT_FALLBACK_SAFE, "supervisor TIMEOUT fallback"
+        elif outcome == OUTCOME_TIMEOUT:
+            verdict, detail = VERDICT_FALLBACK_SAFE, (
+                f"terminal TIMEOUT ({observation.after_timeout_kind or 'unclassified'}), "
+                "not the supervisor's fallback"
+            )
         elif worker == "not_stoppable":
             verdict, detail = VERDICT_FALLBACK_SAFE, "result after a non-stoppable worker returned by itself"
         elif truth == TRUTH_CONSISTENT or (outcome == OUTCOME_UNKNOWN and observation.after_reasons):
@@ -188,7 +211,7 @@ def classify_target(observation: TargetObservation) -> TargetVerdict:
     improvement = (
         observation.guarantee_class == CLASS_A
         and verdict == VERDICT_ACCEPTED
-        and observation.before_outcome == OUTCOME_TIMEOUT
+        and _process_timeout(observation.before_outcome, observation.before_timeout_kind)
     )
     return TargetVerdict(
         key=observation.key,
@@ -202,6 +225,7 @@ def classify_target(observation: TargetObservation) -> TargetVerdict:
         improvement=improvement,
         soundness_violation=contradicted,
         detail=detail,
+        before_timeout_kind=observation.before_timeout_kind,
     )
 
 
@@ -252,17 +276,21 @@ def _limitation_block(payload: Optional[Mapping[str, Any]]) -> Mapping[str, Any]
     return block if isinstance(block, Mapping) else {}
 
 
-def _stack_snapshot(log_path: Optional[str]) -> bool:
-    if not log_path:
+def _stack_snapshot(evidence: Optional[Any]) -> bool:
+    """**この pair の** stack dump に trip の header があるか（同じ dir の別 pair の dump は見ない）。"""
+
+    if evidence is None:
         return False
-    pair_dir = Path(log_path).parent
-    for dump in pair_dir.glob(".runtime-metrics/*.stack-dump.txt"):
-        try:
-            if SNAPSHOT_HEADER in dump.read_text(errors="replace"):
-                return True
-        except OSError:
-            continue
-    return False
+    try:
+        return SNAPSHOT_HEADER in evidence.paths.stack_dump.read_text(errors="replace")
+    except OSError:
+        return False
+
+
+def _timeout_kind(record: Any, evidence: Optional[Any]) -> Optional[str]:
+    if record is None or record.outcome != OUTCOME_TIMEOUT or evidence is None:
+        return None
+    return evidence.timeout_kind_report().kind
 
 
 def observe_runs(
@@ -277,6 +305,9 @@ def observe_runs(
         load_ground_truth,
     )
     from scripts.function_tracer_pcode.reporting.pair_outcomes import load_pair_outcomes
+    from scripts.function_tracer_pcode.reporting.timeout_hotspot_summary import (
+        load_pair_evidence,
+    )
 
     before = load_pair_outcomes(before_root)
     after = load_pair_outcomes(after_root)
@@ -291,6 +322,12 @@ def observe_runs(
     for key, guarantee_class in targets.items():
         record_before = before_by.get(key)
         record_after = after_by.get(key)
+        evidence_before = (
+            load_pair_evidence(record_before.status_path) if record_before is not None else None
+        )
+        evidence_after = (
+            load_pair_evidence(record_after.status_path) if record_after is not None else None
+        )
         payload = final_result_payload(record_after)
         block = _limitation_block(payload)
         rows.append(TargetObservation(
@@ -305,7 +342,9 @@ def observe_runs(
             pair_stop_state=((payload or {}).get("diagnostics") or {}).get("failures", {}).get(
                 "pair_stop_state"
             ) if payload else None,
-            stack_snapshot=_stack_snapshot(record_after.log_path if record_after else None),
+            stack_snapshot=_stack_snapshot(evidence_after),
+            before_timeout_kind=_timeout_kind(record_before, evidence_before),
+            after_timeout_kind=_timeout_kind(record_after, evidence_after),
         ))
     return rows
 
@@ -324,13 +363,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     verdicts = [classify_target(row) for row in observe_runs(args.before, args.after, targets)]
     summary = summarize(verdicts)
     header = (
-        "key", "class", "before", "after", "deadline_result", "worker", "snapshot",
-        "verdict", "improvement", "violation",
+        "key", "class", "before", "before_timeout_kind", "after", "deadline_result", "worker",
+        "snapshot", "verdict", "improvement", "violation",
     )
+
     print("\t".join(header))
     for row in verdicts:
         print("\t".join(str(item) for item in (
-            row.key, row.guarantee_class, row.before_outcome, row.after_outcome,
+            row.key, row.guarantee_class, row.before_outcome, row.before_timeout_kind,
+            row.after_outcome,
             row.deadline_result, row.worker_termination, row.stack_snapshot, row.verdict,
             row.improvement, row.soundness_violation,
         )))

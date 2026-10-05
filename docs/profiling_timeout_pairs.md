@@ -266,9 +266,14 @@ python3 -B -m scripts.function_tracer_pcode.reporting.timeout_hotspot_summary \
 （registration → 送信 → 観測 → 退避 → 分類 → hotspot）を確かめるための run。
 
 ```bash
-PAIR_PROCESS_TIMEOUT=60s OUTPUT_BASE_DIR=logs/EqBench/subset_issue124_t60 \
+ANALYSIS_TIMEOUT=0 PAIR_PROCESS_TIMEOUT=60s OUTPUT_BASE_DIR=logs/EqBench/subset_issue124_t60 \
   bash eqbench_run_subset.sh
 ```
+
+`ANALYSIS_TIMEOUT=0` が要る（Issue #106 PR-106-B 以降）。固定 subset の既定の解析の期限
+（110 s）と余裕（130 s）は 60 s の process timeout に収まらないので、指定しないと runner は pair を
+始めずに exit 1 する。また期限があると pair は process TIMEOUT の前に理由付き UNKNOWN で
+終わり、この run が作りたい TIMEOUT 経路を通らない。
 
 **これは評価ではない。** 60s は本番の予算（既定 600s、固定 subset は 240s）より
 ずっと短いので、ここで出た TIMEOUT 件数・outcome 分布・reason 集合を
@@ -292,3 +297,159 @@ authority の finalize 区間（`_profiled_finish`）だけを見たいときは
 （`authority/lifecycle/production_boundary.py`）。区間ごとの秒数は結果 JSON の
 `diagnostics.timings`（`stages` / `regions` / `phases` / `boundary_seconds`）にも
 入っているので、まずそちらを見てから profile を取ると当たりが早い。
+
+## 10. 解析の期限（`ANALYSIS_TIMEOUT`）と margin（Issue #106 PR-106-B）
+
+runner は pair に解析の期限（`--analysis-timeout`）を渡し、`ANALYSIS_TIMEOUT +
+ANALYSIS_TIMEOUT_MARGIN <= PAIR_PROCESS_TIMEOUT` を run の開始前に確かめる（規則は
+`reporting/runner_timeout_policy.py`、使い方は README の "Analysis deadline (Issue #106)"）。
+margin は「期限で打ち切った pair の child が、process の期限の lead window（SIGUSR1 の送信）
+より前に終わる」ための余裕。観測（区間・終了の分類・run の事実）の owner は
+`reporting/deadline_margin_summary.py`、計測集合の適格性・採用式・判定の owner は
+`reporting/deadline_margin_acceptance.py`。
+
+### 区間（supervisor の時計）
+
+process の期限に数えられるのは、supervisor が barrier を外してから child の終了を観測する
+まで。端点は supervisor の診断 sidecar（`<pair>.stack-dump.status.json` の
+`deadline_monotonic` / `timeout_seconds` / `lead_seconds` / `cancel_linearized_offset_seconds`）と
+child の journal（同じ monotonic 時計）から取る。Eq / Neq の両方の runner が sidecar を書くので、
+Neq の pair も同じように測れる（per-pair の runtime receipt が無いこと（#160）は影響しない）。
+GNU time の wall は使わない（supervisor の起動と child の終了後の durable write を含み、process の
+期限に数えない時間まで足してしまう）。
+
+| 区間 | 内容 | 端点 |
+|---|---|---|
+| `pre` | CLI の起動・JVM・project open・import・auto analyze | process の期限の起点 → 解析の期限の起点 |
+| `overrun` | checkpoint の無い区間・止まるまで戻らない処理（協調的な solver の停止と join を含む）。負の値は「残りが sub-operation の余裕 0.5 s を切ったので始めなかった」 | 解析の期限 → trip |
+| `post_trip` | 限界の帰属・組み立て・出力の準備・`connector.finish`・conditional lane・`close_programs`・結果 JSON | trip → journal の最後の event |
+| `tail` | JVM の停止・interpreter の終了 | journal の最後の event → supervisor が child の終了を観測 |
+
+`needed = pre + overrun + post_trip + tail`（恒等式）。`post_trip` の内訳は stage の区間と
+trip 後の窓の交差を、各瞬間を最も内側の stage へ 1 回だけ割り当てて求める（各値 0 以上、和は
+`post_trip`。trip より前に始まった stage・入れ子・順序に依らない）。TIMEOUT の pair は
+`timeout_kind`（`timeout_hotspot_summary`）で分類し、process の kill（`process_wall_clock` /
+`both_signals`）だけを process TIMEOUT と数える。checker 自身の solver の terminal timeout は
+`solver_timeout`、証拠の足りないものは `timeout_unclassified`、canonical outcome の無いものは
+`termination_invalid`。child の終了より先に SIGUSR1 の送信が始まった pair は `entered_lead_window`。
+区間は 1 つずつ別に求め、測れない区間は理由を残す（0 で埋めない・他の区間を消さない）。journal を
+読めず打ち切ったかどうか分からない pair も理由つきで残す（黙って落とさない）。
+
+### 採用式（profile ごと）
+
+```text
+margin(profile) = ceil5( max_{P∪L∪F} pre + max_{P∪L} overrun + max_P post_trip + max_P tail + lead )
+```
+
+| 項 | 何で決まるか | どの pool から最大を取るか |
+|---|---|---|
+| `pre` | 負荷（JVM / import の競合）。期限の code に依らない | `P∪L∪F` |
+| `overrun` | 負荷と、checkpoint の無い区間の長さ。期限の長さに依らない | `P∪L` |
+| `post_trip` / `tail` | 打ち切るまでに作った状態の大きさ（期限が長いほど伸びる） | `P` |
+| `lead` | supervisor が stack dump の SIGUSR1 を送る先行時間（`PAIR_STACK_DUMP_LEAD`、既定 2 s） | `P` の sidecar |
+
+### 計測集合の適格性（集計の前に、run の事実だけで決める）
+
+| pool | 適格な run | 使う区間 |
+|---|---|---|
+| `P` | 期限の機構が評価対象と同じ commit の **clean な tree**、`PAIR_PROCESS_TIMEOUT` が profile と同じ、解析の期限が profile の期限 **以上**、sample が profile の母集団の中（固定 subset は `eqbench_subset.json` の Eq / Neq の source、full は EqBench 全体）、child が journal を **seal する**（`journal_end` の行がある。review 4）。並列度は問わない | `pre` `overrun` `post_trip` `tail` `lead` |
+| `L` | 期限の機構が同じ commit の clean な tree の、期限つきの run（profile・期限の長さ・並列度・負荷を問わない） | `pre` `overrun` |
+| `F` | 期限つきの run（commit・tree の状態を問わない） | `pre` |
+
+- `P` を「期限が profile の値 **以上**」にするのは、`post_trip` / `tail` が期限とともに伸びるため。
+  期限の短い run（30 s 診断など）を `P` に入れると過小評価になるので `L` に回す。期限の長い run は
+  上界として入れてよい。並列度の違いは `pre` / `overrun`（最大を取る）にだけ効くので問わない。
+- 期限の機構（`core/deadline.py`・solver の停止・checkpoint の配置）の同一性は commit で決め、dirty な
+  tree は（解析 source の digest が commit と違うので）同じ機構と認めない。
+- `P` が seal する child を要るのは、`post_trip` / `tail` が journal の終わり（最後に書けた行）を使うため。
+  seal しない child（review 4 より前の書き手）の journal は、最後の行より後の書き込み失敗を排除できない
+  ので、その run は `L`（`pre` / `overrun` は終わりを使わない）に回る。
+- 適格でない run を pool に渡すと判定は `undetermined`（黙って除かない）。
+
+### 判定（3 値）
+
+- `holds`: 全 run が適格、打ち切った全 pair でその pool が使う区間が観測でき、各項に標本があり、
+  式の和 ≤ margin、`P` の各 pair の `needed + lead` ≤ margin。`margin_holds` はこのときだけ true。
+- `violated`: `P` / `L` に process TIMEOUT（`process_wall_clock` / `both_signals`）か lead window に入った
+  pair がある、和 > margin、margin を越えた `P` の pair がある。
+- `undetermined`: profile の情報の欠け、適格でない run、`P` / `L` の `timeout_unclassified` /
+  `termination_invalid`、打ち切ったかどうか読めない pair、区間の欠測、打ち切った pair の無い pool、
+  標本の無い項。checker 自身の solver の terminal timeout（`child_solver_timeout`）は margin の事象では
+  ないので、どちらにも数えない。`F` は別の code の run なので、その終了の分類は判定に使わない。
+
+### 証拠の契約（review 3、review 4 で改訂）
+
+読めた行が妥当であることを、必要な観測が欠けていないことと取り違えない。値が「ある・変換できる」
+ことを、証拠が「完全・妥当・整合」であることと取り違えない。
+
+| 契約 | owner | 守れないとき |
+|---|---|---|
+| 行の会計: `seq` は書こうとした行ごとに 1 進む（書けなかった行も番号を消費する = 欠番が残る）。child は終了時に `journal_end`（`last_seq` / `write_failures`）を書いて seal する。kill された child は seal しない | `core/stage_journal.py`（`StageJournal.seal`）、`cli/pair_diagnostics.py`（終了時に seal） | — |
+| 行の契約: 必須 field（`schema` / `seq` / `event` / `t_monotonic` / `t_epoch` / `pid` / `payload`）の欠け・`null`・型違い、event ごとの必須（stage の event の `stage`、`note` の `payload.note`、`journal_end` の会計）、`null` を許す field（note の `stage`、`seconds`） | `core/stage_journal_reader.py` | その行は segment の損失 |
+| journal の完全性は execution segment ごと: 先頭の欠け（`seq` が 1 から始まらない）・欠番・その segment の壊れた行と契約に合わない行・最後の segment の上限 / 書きかけの最終行（`JournalSegment.losses`）。複数 execution の `seq` の巻き戻りは損失ではない。終わりの証明（`end_attested`）は整合した `journal_end`（`write_failures` 0） | `core/stage_journal_reader.py`（`select_verified_segment` / `end_attestation_problem`） | margin は区間を読まない（欠測）。stage / hotspot / supervisor の診断は従来どおり読む |
+| 打ち切ったかの事実: 結果 JSON の `analysis_deadline`（期限の持ち主が scope の終わりに書く最終記録）と journal の trip の行を照合する。「打ち切っていない」は、結果の記録が `tripped: false` か、終わりが証明された journal に trip が無いときだけ。食い違えば読めない | `deadline_margin_summary.deadline_cut` | 打ち切ったかどうか読めない（`undetermined`） |
+| 区間: `pre` / `overrun` は損失の無い segment の trip の行と sidecar、`post_trip` / `tail` は終わりの証明された segment から | `deadline_margin_summary`（`JournalView` / `observe_pair`） | 区間の欠測（`undetermined`） |
+| 数値の妥当性: 有限な double で値域に入る値だけ（記録: trip の note は全体として budget > 0・elapsed ≥ 0、sidecar の timeout > 0・lead ≥ 0、結果の記録の budget > 0。`10**400` のような double を越える整数も値にしない。派生値: 和・差が double を越えれば欠測。`pre` / `tail` は負にならない）。外部の記録の不正は理由付きの欠測で、例外にしない | `deadline_margin_summary`（観測）。record（`RunFacts` / `PairObservation` / `MarginProfile`）は有限でない数を拒む（内部の bug の検出）。CLI の秒は `core.deadline.parse_budget_seconds` | 区間の欠測（`undetermined`）。CLI は exit 2 |
+| 負の overrun の範囲: 期限は `期限 − 余裕` までの残りを単位へ直して 0 なら始めないので、最大 `余裕 + 最も粗い単位の 1`（既定 0.5 + 1 = 1.5 s）早く trip する | `core.deadline.earliest_start_refusal_seconds` | `P` / `L`（評価対象と同じ機構）で越えれば `undetermined`。`F`（別の機構）には当てない |
+| 事実の整合: manifest の `analysis_timeout` と各 trip・各結果の記録の `budget_seconds`、`pair_process_timeout_seconds` / `pair_stack_dump_lead` と各 sidecar | `deadline_margin_summary.observe_run`（`RunFacts.conflicts`） | 値は持たず、両方の値を理由に残す（`undetermined`） |
+| 終了の分類: `authority.contracts.Outcome` の 5 値だけ | `deadline_margin_summary.termination_of` | `termination_invalid`（`P` / `L` で `undetermined`） |
+
+- **SIGUSR1 の lead と SIGTERM の grace は別物。** lead（deadline の 2 s 前）は process の期限
+  より **前**: child がその窓の中で終わると #204 の経路（`PAIR_STATUS_AUTHORITY_INVALID`）に入るので、
+  margin の中に取る。grace（`PAIR_PROCESS_KILL_AFTER`、SIGTERM から SIGKILL まで）は process の
+  期限の **後** で、その時点で pair は TIMEOUT と決まっているので margin には使えない（入れない）。
+- 共有 host では runner が負荷を制限しない（評価 slot は未実装）。観測した高負荷の値は **除かない**:
+  `pre` は期限の code に依らないので、PR-106-A の計測（2 つの run を同時に流した高負荷）も `F` に入る。
+  `overrun` は期限の機構が今と同じ code（PR-106-A の review 5 `c3b533b0` 以降、clean な tree）の run
+  だけを使う。それより前の round（停止・採否の実装が違う）は `overrun` の根拠にしない（`pre` には使う）。
+- 止められない worker（能力を宣言しない backend）の join には上限が無い: その pair は supervisor の
+  TIMEOUT（fallback）になり、margin には入れない（Class B。production の backend は z3 だけ）。
+- 区間の最大は別の pair・別の run の値を足している（1 pair の実際の合計より保守的）。
+- 観測した最大は保証ではない。margin を越えた pair は process TIMEOUT として記録され、別の結果に
+  化けない。区間が増えたとき・`PAIR_STACK_DUMP_LEAD` を変えたときは取り直す。
+
+### 採用値（PR-106-B review 2 で再評価、2026-10-03）
+
+pool の割り当ては上の規則を run の事実（manifest と trip の note）だけに当てて機械的に決めた
+（この host の Issue #106 の run すべてが対象。区間の値は割り当てに使っていない）。期限の機構が同じ
+commit: `c3b533b0` `c883ba9a` `06aed6f0` `aa06b462` `6244a1c5` `d98c4975` `747ad633` `a6cf3b20` `8c664a8c` `fdc92d75`（`c3b533b0` との差は
+`core/deadline.py` の `parse_budget_seconds` / `earliest_start_refusal_seconds`・`stage_journal_reader` の読み取り・
+journal の seal（review 4）・CLI の引数検査で、停止・checkpoint・solver の停止は同一）。割り当てと値の一覧は PR #237 の本文。
+
+| 項 | full matrix（600 s、期限 410 s。`P`: 期限 410–480 s の 8 run、44 pair） | 固定 subset（240 s、期限 110 s。`P`: 期限 110–120 s の 20 run、41 pair） |
+|---|---|---|
+| `pre` | 73.2（`F`: PR-106-A round 2 の subset 診断、同時 run の高負荷） | 73.2（同じ） |
+| `overrun` | 14.5（`L`: P=32 の Neq 30 s 診断） | 14.5（同じ） |
+| `post_trip` | 56.8（ell CheckCond、475 s） | 18.9（barthe2big B4_B16） |
+| `tail` | 28.1（ell snippet） | 1.1 |
+| lead | 2 | 2 |
+| 和 | 174.5 → **holds**（margin 190） | 109.7 → **holds**（margin 130） |
+| 参考: dirty な review 5 の run を `L` に入れた場合（review 1 の数え方） | `overrun` 25.5 → 185.6、holds | 120.8、holds |
+
+- review 3 の証拠の契約（上の表）で同じ run を評価し直しても値は同じで、どちらも holds（不完全な
+  journal・区間の欠測・事実の食い違い・期限の機構の規則より早い trip は `P` / `L` / `F` とも 0。
+  `P` / `L` の最も早い trip は期限の 1.37 s 前で、1.5 s の範囲内）。
+- **review 4 の契約で再評価（2026-10-04）**: review 4 より前の child は journal を seal しないので、それまでの
+  `P` の run（full 12 / subset 48）は `post_trip` / `tail` の終わりを証明できず、`P` に入らない（`L` に回り、
+  `pre` / `overrun` は従来どおり使う）。`pre` / `overrun` の最大と打ち切りの有無はすべて読めた（読めない
+  pair 0、行の契約違反 0 / 13,165 file）。足りない `P` だけを、seal する `fdc92d75` で取り直した（評価 slot の
+  手順、5 round とも他の container 0）: full は P-ell 既定 ×2・480 s ×1・smoke ×2・ell の heavy pair 475 s
+  （P=11）×1、subset は固定 subset 既定 ×3・§8.5 の追加反復 既定 ×3。
+
+| 項 | full matrix（600 s、期限 410 s。`P` 6 run、打ち切り 38 pair） | 固定 subset（240 s、期限 110 s。`P` 12 run、打ち切り 21 pair） |
+|---|---|---|
+| `pre` | 73.2（`F`、変化なし） | 73.2 |
+| `overrun` | 14.5（`L`、変化なし） | 14.5 |
+| `post_trip` | 56.8（ell CheckCond B12_B16、475 s。終わりを証明） | 14.2（barthe2big B4_B16） |
+| `tail` | 27.3（ell snippet B12_B16） | 1.2 |
+| lead | 2 | 2 |
+| 和 | **173.8 → holds**（margin 190） | **105.0 → holds**（margin 130） |
+| 参考: seal 以前の `P`（終わり未証明、review 3 の値） | 174.5 | 109.7 |
+
+- 既定値は変えない: full **190 s / 410 s**、固定 subset **130 s / 110 s**（どちらも規則どおりの集合で
+  holds。下げると review 1 の数え方では越えるので下げない）。
+- review 1 の一覧は `P` に期限 30 s の run を含め（期限 **以上** の規則に反する）、subset の `P` に
+  PR-106-A の dirty な run を含めていた。統一した規則で数え直した結果が上の表。
+- 計画の暫定値（480 / 120 s）と、初版 PR の 475 / 115 s（margin 125 s）は、この式の和を収められない。
+- 未計測: full matrix そのもの（147 source / 49,320 pair）、ell の heavy pair を P=32 で流す run（33 pair ×
+  最大 5.9 GB で host の memory を越えるため P=11）、評価 slot で排他にした低負荷 profile（P-low）。

@@ -21,6 +21,8 @@ from scripts.eqbench import ci_subset
 WORKING_ROOT = "/workspace/tmp/eqbench-work/benchmarks"
 TIMEOUT = "240s"
 FAST_PATH = "1"
+ANALYSIS_TIMEOUT = "120"
+ANALYSIS_TIMEOUT_MARGIN = "100"
 
 #: A miniature stand-in for scripts/function_tracer_pcode/reporting/
 #: eqbench_subset.json: two sources and two pair ids per half, so the expected
@@ -45,6 +47,8 @@ def _run_manifest_text(half: str, **overrides: str) -> str:
         ci_subset.ROOT_KEY_BY_HALF[half]: WORKING_ROOT,
         "pair_process_timeout": TIMEOUT,
         "identical_fast_path": FAST_PATH,
+        "analysis_timeout": ANALYSIS_TIMEOUT,
+        "analysis_timeout_margin": ANALYSIS_TIMEOUT_MARGIN,
         "analysis_config_schema": ci_subset.DEFAULT_ANALYSIS_CONFIG_SCHEMA,
         "benchmark_gate_status": "PASS",
     }
@@ -165,6 +169,8 @@ def run_verify(run_dir: Path, scope: str, **kwargs: object) -> ci_subset.Report:
         "working_root": WORKING_ROOT,
         "pair_process_timeout": TIMEOUT,
         "identical_fast_path": FAST_PATH,
+        "analysis_timeout": ANALYSIS_TIMEOUT,
+        "analysis_timeout_margin": ANALYSIS_TIMEOUT_MARGIN,
         "runner_exit_status": 0,
         "subset_definition": write_definition(run_dir.parent),
     }
@@ -275,6 +281,8 @@ def test_the_eq_half_is_not_checked_against_the_neq_root_key(tmp_path):
     [
         ("pair_process_timeout", "pair_process_timeout"),
         ("identical_fast_path", "identical_fast_path"),
+        ("analysis_timeout", "analysis_timeout"),
+        ("analysis_timeout_margin", "analysis_timeout_margin"),
         ("analysis_config_schema", "analysis_config_schema"),
     ],
 )
@@ -302,6 +310,33 @@ def test_identical_fast_path_off_is_a_value_not_an_absence(tmp_path):
     off_expected = run_verify(run_dir, "all", identical_fast_path="1")
     assert not off_expected.passed
     assert "env.eq.identical_fast_path" in failed_checks(off_expected)
+
+
+def test_analysis_timeout_off_is_a_value_not_an_absence(tmp_path):
+    """Issue #106 PR-106-B: ``0`` (no deadline) must arrive as ``0``.
+
+    A half that recorded no ``analysis_timeout`` at all -- a runner from before
+    the deadline was wired -- is a failure, never read as "off".
+    """
+
+    run_dir = make_run(tmp_path, "all")
+    for half in ("eq", "neq"):
+        _write(
+            run_dir / half / ci_subset.RUN_MANIFEST_FILE,
+            _run_manifest_text(half, analysis_timeout="0"),
+        )
+    assert run_verify(run_dir, "all", analysis_timeout="0").passed
+    on_expected = run_verify(run_dir, "all", analysis_timeout=ANALYSIS_TIMEOUT)
+    assert "env.eq.analysis_timeout" in failed_checks(on_expected)
+
+    text = _run_manifest_text("neq")
+    _write(
+        run_dir / "neq" / ci_subset.RUN_MANIFEST_FILE,
+        "".join(line + "\n" for line in text.splitlines()
+                if not line.startswith("analysis_timeout=")),
+    )
+    missing = run_verify(run_dir, "all", analysis_timeout="0")
+    assert "env.neq.analysis_timeout" in failed_checks(missing)
 
 
 def test_a_missing_run_manifest_key_fails_rather_than_being_skipped(tmp_path):
@@ -666,6 +701,8 @@ def test_cli_verify_writes_both_reports_and_returns_the_verdict(tmp_path, capsys
             "--working-root", WORKING_ROOT,
             "--pair-process-timeout", TIMEOUT,
             "--identical-fast-path", FAST_PATH,
+            "--analysis-timeout", ANALYSIS_TIMEOUT,
+            "--analysis-timeout-margin", ANALYSIS_TIMEOUT_MARGIN,
             "--runner-exit-status", "0",
             "--subset-definition", str(write_definition(tmp_path)),
             "--json", str(json_path), "--text", str(text_path),
@@ -685,6 +722,8 @@ def test_cli_verify_fails_the_step_when_a_gate_did_not_pass(tmp_path, capsys):
             "--working-root", WORKING_ROOT,
             "--pair-process-timeout", TIMEOUT,
             "--identical-fast-path", FAST_PATH,
+            "--analysis-timeout", ANALYSIS_TIMEOUT,
+            "--analysis-timeout-margin", ANALYSIS_TIMEOUT_MARGIN,
             "--runner-exit-status", "0",
             "--subset-definition", str(write_definition(tmp_path)),
         ]
@@ -753,6 +792,7 @@ def test_the_full_profile_requires_the_runner_exit_status_to_be_supplied(tmp_pat
     report = ci_subset.verify(
         run_dir=run_dir, scope="all", working_root=WORKING_ROOT,
         pair_process_timeout=TIMEOUT, identical_fast_path=FAST_PATH,
+        analysis_timeout=ANALYSIS_TIMEOUT, analysis_timeout_margin=ANALYSIS_TIMEOUT_MARGIN,
     )
     assert not report.passed
     assert "run.runner_exit_status" in failed_checks(report)

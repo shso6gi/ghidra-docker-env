@@ -79,6 +79,12 @@ if [[ "$NEQ_RUN_SCOPE" == FULL_NEQ && ( -n "$NEQ_SAMPLE_FILTER" || -n "$NEQ_PAIR
 PAIR_PROCESS_TIMEOUT_SECONDS="$(printf '%s' "$PAIR_PROCESS_TIMEOUT" | sed 's/s$//')"
 PAIR_PROCESS_KILL_AFTER_SECONDS="$(printf '%s' "$PAIR_PROCESS_KILL_AFTER" | sed 's/s$//')"
 PAIR_STACK_DUMP_LEAD_SECONDS="$(printf '%s' "$PAIR_STACK_DUMP_LEAD" | sed 's/s$//')"
+# Issue #106 PR-106-B: the analysis deadline handed to every pair, checked with the
+# same rule as the Eq runner (reporting/runner_timeout_policy.py) before anything is
+# compiled or scheduled, DRY_RUN included.  An inconsistent ANALYSIS_TIMEOUT /
+# ANALYSIS_TIMEOUT_MARGIN / PAIR_PROCESS_TIMEOUT stops the run with exit 1;
+# PAIR_PROCESS_TIMEOUT is never raised to make room.
+validation_resolve_analysis_timeout_policy "$PYTHON_BIN" "" "$SCRIPT_DIR" || exit 1
 
 RESOURCE_ADMISSION_JOBS="$EQBENCH_CPU_TOKENS"
 if (( EQBENCH_RESOURCE_ADMISSION == 1 )); then
@@ -276,6 +282,7 @@ if (( DRY_RUN == 1 )); then
     echo "selected_functions=$TOTAL_PLANNED_FUNCTIONS"
     echo "planned_pair_jobs=$TOTAL_PLANNED_PAIR_JOBS"
     echo "pairs_per_function=$EXPECTED_PAIRS_PER_FUNCTION"
+    printf '%s\n' "$ANALYSIS_TIMEOUT_MANIFEST_LINES"
     exit 0
 fi
 
@@ -529,6 +536,8 @@ run_pair() {
     local dump_tmp
     dump_tmp="$checkpoint/$exec_nonce/stack-dump.txt"
     local -a supervisor_cmd=("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.process.supervisor_command --checkpoint-root "$checkpoint" --authority-output "$authority" --working-directory "$SCRIPT_DIR" --execution-nonce "$exec_nonce" --result-occurrence-id "$result_id" --source-snapshot-fingerprint "$source_fp" --stream-id "$stream" --deadline-policy-digest "$(printf 'neq:%s:%s' "$PAIR_PROCESS_TIMEOUT_SECONDS" "$PAIR_PROCESS_KILL_AFTER_SECONDS" | sha256sum | awk '{print $1}')" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --timeout-seconds "$PAIR_PROCESS_TIMEOUT_SECONDS" --kill-grace-seconds "$PAIR_PROCESS_KILL_AFTER_SECONDS" --allow-child-exit-resolution --stage-journal "$journal_file" --stack-dump-file "$dump_tmp" --stack-dump-artifact "$dump_artifact" --diagnostic-status-output "$dump_status" --stack-dump-lead-seconds "$PAIR_STACK_DUMP_LEAD_SECONDS" -- env TMPDIR="$pair_tmp" TEMP="$pair_tmp" TMP="$pair_tmp" UNKNOWN_TAXONOMY_V2_RESULT_ENTRY_OCCURRENCE_NONCE="$nonce" FT_EXPANDER_DEDUP_CASE_LIMIT="$FT_EXPANDER_DEDUP_CASE_LIMIT" FT_CALLEE_UNBOUND_REUSE="$FT_CALLEE_UNBOUND_REUSE" FT_CALLEE_UNBOUND_REUSE_SHADOW="$FT_CALLEE_UNBOUND_REUSE_SHADOW" "$PYTHON_BIN" -m scripts.function_tracer_pcode.cli.main --equiv "$left" "$right" --binary-ids "$left_id" "$right_id" -f "$function" --emit-result-json --equiv-timeout "$EQUIV_TIMEOUT" --timeout "$DECOMPILE_TIMEOUT" --pairwise-timeout "$PAIRWISE_TIMEOUT" --pairwise-timeout-hard "$PAIRWISE_TIMEOUT_HARD" --stage-journal "$journal_file" --stack-dump-file "$dump_tmp" --stack-dump-artifact "$dump_artifact")
+    # Issue #106 PR-106-B: empty when ANALYSIS_TIMEOUT=0 (the pre-deadline argv).
+    supervisor_cmd+=( ${ANALYSIS_TIMEOUT_CLI_ARGS[@]+"${ANALYSIS_TIMEOUT_CLI_ARGS[@]}"} )
     if [[ "$EQBENCH_IDENTICAL_FAST_PATH" == "0" ]]; then supervisor_cmd+=( --no-identical-fast-path ); fi
     if [[ "$EQBENCH_DEBUG" == "1" ]]; then supervisor_cmd+=( -d ); fi
     "${supervisor_cmd[@]}" > "$log" 2>&1 || ec=$?
@@ -592,6 +601,7 @@ pair_process_kill_after=$PAIR_PROCESS_KILL_AFTER
 pair_stack_dump_lead=$PAIR_STACK_DUMP_LEAD
 pair_process_timeout_seconds=$PAIR_PROCESS_TIMEOUT_SECONDS
 pair_process_kill_after_seconds=$PAIR_PROCESS_KILL_AFTER_SECONDS
+$ANALYSIS_TIMEOUT_MANIFEST_LINES
 equiv_timeout=$EQUIV_TIMEOUT
 decompile_timeout=$DECOMPILE_TIMEOUT
 pairwise_timeout=$PAIRWISE_TIMEOUT
@@ -603,7 +613,7 @@ callee_unbound_reuse_shadow=$FT_CALLEE_UNBOUND_REUSE_SHADOW
 skip_completed_results=$SKIP_COMPLETED_RESULTS
 error_only_rerun=$ERROR_ONLY_RERUN
 debug=$EQBENCH_DEBUG
-analysis_config_schema=eqbench-analysis-config-v3
+analysis_config_schema=eqbench-analysis-config-v4
 identical_fast_path=$EQBENCH_IDENTICAL_FAST_PATH
 max_samples=$NEQ_MAX_SAMPLES
 sample_filter=$NEQ_SAMPLE_FILTER
@@ -865,7 +875,7 @@ exit_status=0
 if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT > 0 || FUNCTION_CENSUS_FAILURES > 0 || VALIDATION_BENCHMARK_GATE_FAILURES > 0 )); then
     exit_status=1
 fi
-"$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt --repo-root "$SCRIPT_DIR" --private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" --output "$OUTPUT_BASE_DIR/validation-execution-receipt.json" --matrix-root "$OUTPUT_BASE_DIR" --source-digest-start "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" --exit-status "$exit_status" -- "env" "NEQ_RUN_SCOPE=$NEQ_RUN_SCOPE" "NEQ_BUILD_POLICY=$NEQ_BUILD_POLICY" "ERROR_RERUN_MANIFEST_SHA256=$ERROR_RERUN_MANIFEST_SHA256" "ERROR_RERUN_RUN_ID=$ERROR_RERUN_RUN_ID" "SKIP_COMPLETED_RESULTS=$SKIP_COMPLETED_RESULTS" "ERROR_ONLY_RERUN=$ERROR_ONLY_RERUN" "EQBENCH_BENCHMARK_GATE=${EQBENCH_BENCHMARK_GATE:-1}" "EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS=${EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS:-0}" "EQBENCH_GROUND_TRUTH_FILE=${EQBENCH_GROUND_TRUTH_FILE:-}" "./neqbench_run_all_32jobs.sh"
+"$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt --repo-root "$SCRIPT_DIR" --private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" --output "$OUTPUT_BASE_DIR/validation-execution-receipt.json" --matrix-root "$OUTPUT_BASE_DIR" --source-digest-start "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" --exit-status "$exit_status" -- "env" "NEQ_RUN_SCOPE=$NEQ_RUN_SCOPE" "NEQ_BUILD_POLICY=$NEQ_BUILD_POLICY" "ERROR_RERUN_MANIFEST_SHA256=$ERROR_RERUN_MANIFEST_SHA256" "ERROR_RERUN_RUN_ID=$ERROR_RERUN_RUN_ID" "SKIP_COMPLETED_RESULTS=$SKIP_COMPLETED_RESULTS" "ERROR_ONLY_RERUN=$ERROR_ONLY_RERUN" "EQBENCH_BENCHMARK_GATE=${EQBENCH_BENCHMARK_GATE:-1}" "EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS=${EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS:-0}" "EQBENCH_GROUND_TRUTH_FILE=${EQBENCH_GROUND_TRUTH_FILE:-}" "ANALYSIS_TIMEOUT=${ANALYSIS_TIMEOUT-}" "ANALYSIS_TIMEOUT_MARGIN=${ANALYSIS_TIMEOUT_MARGIN-}" "./neqbench_run_all_32jobs.sh"
 echo "NeqBench same-ISA caller-closure matrix finished: $OUTPUT_BASE_DIR"
 if (( VALIDATION_BENCHMARK_GATE_FAILURES > 0 )); then
     echo "Error: benchmark validation gate $VALIDATION_BENCHMARK_GATE_STATUS; see $OUTPUT_BASE_DIR/benchmark_validation_gate.txt" >&2

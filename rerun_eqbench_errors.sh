@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 # Re-run only ERROR pairs through the production Eq/Neq runners.
+#
+# Every other setting is the runners' own and passes through the environment,
+# including the analysis deadline (Issue #106): ANALYSIS_TIMEOUT /
+# ANALYSIS_TIMEOUT_MARGIN reach both runners unchanged, and ANALYSIS_TIMEOUT=0
+# reruns the ERROR pairs of a tree written before the deadline existed with the
+# same analysis config, so its other pair statuses stay reusable.
 
 set -euo pipefail
 
