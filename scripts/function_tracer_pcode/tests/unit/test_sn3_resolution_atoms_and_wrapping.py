@@ -14,7 +14,6 @@
 
 from __future__ import annotations
 
-import gc
 import json
 import subprocess
 import sys
@@ -221,13 +220,14 @@ def test_a_width_adapter_cycle_terminates_and_is_never_equal():
 def test_a_float_in_a_runtime_ref_is_identified_by_its_value_not_by_a_reused_id():
     # 修正前は float が `("object_id", …, id(value))` になり、死後に id が再利用された別の値と
     # 同じ比較可能な key・同じ識別済み token になった
+    # （id の再利用は GC の時機に依存するので数えない。下の「値が同じ別 object は同じ key」と
+    # 「key に object_id が無い」が、id ではなく値で識別していることを直接固定する）
     keys: dict = {}
     identities: dict = {}
-    for index in range(400):
+    for index in range(200):
         value = index * 1.5 + 0.1
         keys.setdefault(expression_key_safe(_unknown_with_ref(value)), set()).add(value)
         identities.setdefault(exact_structural_identity(_unknown_with_ref(value)), set()).add(value)
-        gc.collect()
     assert all(len(values) == 1 for values in keys.values())
     assert all(len(values) == 1 for values in identities.values())
     assert None not in keys  # 識別できる値なので比較可能

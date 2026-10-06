@@ -1016,65 +1016,76 @@ def _tags_of(item: Any) -> Tuple[str, ...]:
     場合など）。その key を持つ式の key がさらに別の ref に包まれると二重に包まれる。何重に
     包まれても検出（C-K3）と昇格規則（Gate A）から見えなくならないよう、tag はこの 1 か所で
     包みを外しながら読む。組み込みの型の値だけを読む（`live_values`）。
+
+    段は (body, depth) で表す: 要素 i は `body[i]` の包みを depth 回外した値（`_decoded`）。
+    段の数は包みの深さまで（key の入れ子より深くならない）。
     """
 
     tags: list = []
-    level = item
-    while _is_sequence(level) and len(level):
-        head = _plain_str(level[0])
-        if head is None:
+    body: Any = item
+    depth = 0
+    while True:
+        if not (type(body) is tuple or type(body) is list):
+            break
+        if len(body) == 0:
+            break
+        head = _decoded(body[0], depth)
+        if type(head) is not str:
             break
         tags.append(head)
-        # `level` が包んだ列 ("tuple" | "list", (atom(v0), atom(v1), …)) なら、包まれていた列 V
-        # （要素 vi = atom(vi) を 1 段外した値）の先頭を次の段で読む
-        if head not in _CANONICAL_SEQUENCE_TAGS or len(level) != 2:
+        if head not in _CANONICAL_SEQUENCE_TAGS or len(body) != 2:
             break
-        body = level[1]
-        if not _is_sequence(body) or not len(body):
+        # この段は包んだ列 ("tuple" | "list", (atom(v0), …)): 次の段は包まれていた列 V
+        inner = _decoded(body[1], depth)
+        if type(inner) is not tuple:
             break
-        level = _UnwrappedSequence(body)
+        inner_depth = inner[2]
+        if type(inner_depth) is not int:
+            break
+        body, depth = inner[1], inner_depth + 1
     return tuple(tags)
 
 
-def _plain_str(value: Any) -> Optional[str]:
-    if type(value) is str:
-        return value
-    value = live_values.plain_scalar(value)
-    return value if type(value) is str else None
+def _decoded(atom: Any, depth: Any) -> Any:
+    """`atom` の `canonical_atom` の包みを depth 回外した値。
 
+    str はその str、列は ``("level", body, d)``（要素 k は `body[k]` を d 回外した値）、
+    どちらでもなければ None。包みの段ごとに 2 要素（種類と中身）だけを外す。再帰の深さは
+    depth（包みの段の数）まで。
+    """
 
-def _is_sequence(value: Any) -> bool:
-    return type(value) is tuple or type(value) is list or type(value) is _UnwrappedSequence
-
-
-class _UnwrappedSequence:
-    """`canonical_atom` が包んだ列の本体を、要素ごとに 1 段外して読む view（読んだ要素だけ外す）。"""
-
-    __slots__ = ("_atoms",)
-
-    def __init__(self, atoms: Any) -> None:
-        self._atoms = atoms
-
-    def __len__(self) -> int:
-        return len(self._atoms)
-
-    def __getitem__(self, index: int) -> Any:
-        return _unwrapped_atom(self._atoms[index])
-
-
-def _unwrapped_atom(atom: Any) -> Any:
-    """`canonical_atom` の atom を 1 段外した値（str は str、列は `_UnwrappedSequence`、他は None）。"""
-
-    if not _is_sequence(atom) or len(atom) != 2:
+    if type(depth) is not int:
         return None
-    kind = _plain_str(atom[0])
+    if depth <= 0:
+        if type(atom) is str:
+            return atom
+        if type(atom) is tuple or type(atom) is list:
+            return ("level", atom, 0)
+        plain = live_values.plain_scalar(atom)
+        return plain if type(plain) is str else None
+    value = _decoded(atom, depth - 1)
+    if type(value) is not tuple:
+        return None
+    body = value[1]
+    inner_depth = value[2]
+    if type(inner_depth) is not int:
+        return None
+    if not (type(body) is tuple or type(body) is list):
+        return None
+    if len(body) != 2:
+        return None
+    kind = _decoded(body[0], inner_depth)
+    if type(kind) is not str:
+        return None
+    payload = _decoded(body[1], inner_depth)
     if kind == "str":
-        return _plain_str(atom[1])
-    if kind in _CANONICAL_SEQUENCE_TAGS:
-        body = atom[1]
-        if _is_sequence(body):
-            return _UnwrappedSequence(body)
-    return None
+        return payload if type(payload) is str else None
+    if kind not in _CANONICAL_SEQUENCE_TAGS or type(payload) is not tuple:
+        return None
+    payload_depth = payload[2]
+    if type(payload_depth) is not int:
+        return None
+    return ("level", payload[1], payload_depth + 1)
 
 
 def key_contains_placeholder(key: StructuralKey) -> bool:
