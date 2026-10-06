@@ -144,20 +144,28 @@ def canonical_atom(value: Any) -> CanonicalAtoms:
                 for field in fields(value)
             ),
         )
+    if issubclass(kind, Enum):
+        # 値を持たない enum の member は singleton で、名前が member を識別する（mixin の enum は
+        # 上の scalar の規則で基底型の値になる）。属性の辞書（`_value_` など private だけ）に落とすと
+        # 同じ enum の全 member が同じ atom になる（Issue #215 C-K1）
+        name = live_values.str_value(live_values.instance_state(value, "_name_", None))
+        if type(name) is str:
+            return ("enum", type(value).__module__, type(value).__qualname__, name)
     obj_dict = getattr(value, "__dict__", None)
-    if isinstance(obj_dict, dict) and obj_dict:
-        items = [
-            (canonical_atom(key), canonical_atom(item))
-            for key, item in obj_dict.items()
-            if not str(key).startswith("_")
-        ]
-        items.sort()
-        return (
-            "object_attrs",
-            type(value).__module__,
-            type(value).__qualname__,
-            tuple(items),
-        )
+    if type(obj_dict) is dict and obj_dict:
+        # 公開された属性だけで状態が尽きる object だけを属性の値で表す。private な属性を落とすと、
+        # それだけが違う 2 つの object が同じ atom になる（Issue #215 C-K1）。落とすものがあれば
+        # 値として識別できない（`object_id`、構造 key では識別不能）
+        attributes = list(dict.items(obj_dict))
+        if all(type(key) is str and not key.startswith("_") for key, _item in attributes):
+            items = [(canonical_atom(key), canonical_atom(item)) for key, item in attributes]
+            items.sort()
+            return (
+                "object_attrs",
+                type(value).__module__,
+                type(value).__qualname__,
+                tuple(items),
+            )
     return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
 
 
@@ -311,17 +319,18 @@ def semantic_runtime_ref_key(value: Any) -> Optional[CanonicalAtoms]:
         # bool / int / str / bytes（とその subclass）は `canonical_atom` と同じ規則（基底型の slot の
         # exact な値）。float は従来どおり安定 key を出さない値として扱う（意味 key に入れない）
         return canonical_atom(value)
-    if isinstance(value, (tuple, list)):
+    kind = type(value)
+    if issubclass(kind, (tuple, list)):
         items = []
-        for item in (tuple.__iter__(value) if isinstance(value, tuple) else list.__iter__(value)):
+        for item in (tuple.__iter__(value) if issubclass(kind, tuple) else list.__iter__(value)):
             item_key = semantic_runtime_ref_key(item)
             if item_key is None:
                 return None
             items.append(item_key)
-        return ("tuple" if isinstance(value, tuple) else "list", tuple(items))
-    if isinstance(value, (dict, MappingProxyType)):
+        return ("tuple" if issubclass(kind, tuple) else "list", tuple(items))
+    if issubclass(kind, dict) or kind is MappingProxyType:
         items = []
-        for key, item in value.items():
+        for key, item in (dict.items(value) if issubclass(kind, dict) else value.items()):
             key_key = semantic_runtime_ref_key(key)
             item_key = semantic_runtime_ref_key(item)
             if key_key is None or item_key is None:

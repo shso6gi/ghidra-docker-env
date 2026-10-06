@@ -297,3 +297,108 @@ def test_the_key_the_tail_and_the_status_follow_one_classification(frozen, optio
                 assert key != expression_key(expr, **options), (name, placement)
             else:
                 assert first == second, (name, placement)
+                # 通常 key と tail の受理規則は 1 つ: tail が識別済みなら、その label は canonical
+                # encoding が受け付ける exact な値だけから成る
+                view = structural._key_view(expr, structural.ExactTailOptions.of(**options))
+                if isinstance(view, structural._KeyView):
+                    structural._canonical_bytes(view.label)
+
+
+# --------------------------------------------------------------------------
+# 同じ分類の穴の横展開（包み直した印・enum・private な状態・容器・種別・cache）
+# --------------------------------------------------------------------------
+
+class _Opaque:
+    __slots__ = ()
+
+
+@pytest.mark.parametrize("placement", sorted(PLACEMENTS))
+def test_an_object_or_unsupported_atom_wrapped_again_is_still_unidentified(placement):
+    # `stable_key()` が `canonical_atom` の値を返すと、`object_id` / 型名だけの印が包み直される
+    for marker in (canonical_atom(_Opaque()), ("unsupported_value", "m", "q")):
+        for depth in (1, 2):
+            value = marker
+            for _ in range(depth):
+                value = canonical_atom(value)
+            expr = _build(placement, value, False)
+            key, comparable = expression_key_status(expr)
+            assert comparable is False, (marker[0], depth)
+            assert key != expression_key(_build(placement, value, False))
+            assert _tag(exact_structural_identity(expr)) == UNIDENTIFIED_TAG
+
+
+def test_enum_members_are_identified_by_their_name():
+    import enum
+
+    class Color(enum.Enum):
+        RED = 1
+        BLUE = 2
+
+    red, blue = _leaf(Color.RED), _leaf(Color.BLUE)
+    assert expression_key(red) != expression_key(blue)
+    assert expression_key(red) == expression_key(_leaf(Color.RED))
+    assert expression_key_status(red)[1] is True
+
+
+def test_an_object_whose_state_is_partly_private_is_not_identified_by_its_public_attributes():
+    class Holder:
+        def __init__(self, public, private):
+            self.public = public
+            self._private = private
+
+    class Public:
+        def __init__(self, public):
+            self.public = public
+
+    left, right = _leaf(Holder(1, "a")), _leaf(Holder(1, "b"))
+    assert expression_key_status(left)[1] is False
+    assert expression_key(left) != expression_key(right)
+    # 対照: 公開された属性で状態が尽きる object は値で識別される
+    assert expression_key(_leaf(Public(1))) == expression_key(_leaf(Public(1)))
+    assert expression_key(_leaf(Public(1))) != expression_key(_leaf(Public(2)))
+
+
+def test_a_node_kind_or_container_that_is_not_exact_is_not_read():
+    class HostileKind:
+        name = "CONSTANT"
+
+        def __eq__(self, other):
+            return True
+
+        def __hash__(self):
+            return hash(ExpressionType.CONSTANT)
+
+    fake = Expression.constant(1, size=4)
+    fake.expr_type = HostileKind()
+    key, comparable = expression_key_status(fake)
+    assert comparable is False
+    assert key != expression_key(Expression.constant(1, size=4))
+
+    class HostileList(list):
+        def __getitem__(self, index):
+            return Expression.constant(0, size=4)
+
+        def __len__(self):
+            return 2
+
+    real = Expression.binary_op("INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4))
+    real.size = 4
+    odd = Expression.binary_op("INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4))
+    odd.size = 4
+    odd.operands = HostileList(odd.operands)
+    assert expression_key_status(odd)[1] is False
+    assert expression_key(odd) != expression_key(real)
+
+
+def test_the_contradiction_cache_never_returns_an_unidentified_identity_twice():
+    from scripts.function_tracer_pcode.core.condition import Condition
+
+    token = structural.unidentified_identity("probe")
+    expr = _large(_build("leaf", _wrapped(token, 1), True))
+    expr = Expression.binary_op("INT_EQUAL", expr, Expression.constant(0, size=4))
+    expr.size = 1
+    expr = freeze_expression(expr)
+    with condition_cache_scope():
+        first = ConditionNormalizer.normalize_for_contradiction(Condition(expr))
+        second = ConditionNormalizer.normalize_for_contradiction(Condition(expr))
+    assert first != second

@@ -406,6 +406,9 @@ class ConditionNormalizer:
         key: Tuple[Expression, bool],
         value: Tuple[StructuralKey, str, StructuralKey, bool],
     ) -> None:
+        # 識別不能な identity を持つ結果は覚えない（再計算で同じ token を返すと一致してしまう。C-K5）
+        if not (identity_is_memoizable(value[0]) and identity_is_memoizable(value[2])):
+            return
         if len(cls._contradiction_cache) >= cls._CONTRADICTION_CACHE_LIMIT:
             cls._contradiction_cache.clear()
         cls._contradiction_cache[key] = value

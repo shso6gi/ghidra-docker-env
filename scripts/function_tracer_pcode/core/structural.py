@@ -43,7 +43,7 @@ WIDTH_ADAPTER_OPS = frozenset({"INT_ZEXT", "INT_SEXT"})
 
 
 def _is_all_ones_mask_for_size(expr: Optional[Expression], size: int) -> bool:
-    if expr is None or size <= 0 or expr.expr_type != ExpressionType.CONSTANT:
+    if expr is None or size <= 0 or _node_kind(expr) is not ExpressionType.CONSTANT:
         return False
     mask = (1 << (size * 8)) - 1
     value = _plain_int(expr.value)
@@ -323,6 +323,8 @@ def _is_unidentified_atom(item: tuple) -> bool:
 
 
 _NOT_COMPARABLE_TAGS = PLACEHOLDER_TAGS | PROCESS_SCOPED_TAGS
+#: 値を識別しない `canonical_atom` の atom の tag（`_is_unidentified_atom` が生の段で形を照合する）
+_UNIDENTIFIED_ATOM_TAGS = frozenset({"object_id", UNSUPPORTED_VALUE_TAG})
 
 
 def _classify_atom(atom: Any) -> Tuple[Any, bool, bool]:
@@ -355,7 +357,9 @@ def _classify_atom(atom: Any) -> Tuple[Any, bool, bool]:
                 identified = comparable = False
                 continue
             tags = _tags_of(item)
-            if UNIDENTIFIED_TAG in tags:
+            if UNIDENTIFIED_TAG in tags or not _UNIDENTIFIED_ATOM_TAGS.isdisjoint(tags[1:]):
+                # 既にある識別不能 token と、`canonical_atom` に包み直された `object_id` / 型名だけの
+                # 印（包んだ段の先頭。生の段は上の形の照合が見る）は、どの深さでも識別できない
                 identified = False
             if not _NOT_COMPARABLE_TAGS.isdisjoint(tags):
                 comparable = False
@@ -405,18 +409,24 @@ class _LabelReader:
         return unidentified_identity(reason)
 
     def text(self, value: Any) -> Any:
+        if type(value) is str:
+            return value
         if value is None:
             return ""
         scalar = live_values.json_scalar(value)
         return scalar if type(scalar) is str else self._reject("non_text_label")
 
     def integer(self, value: Any) -> Any:
+        if type(value) is int:
+            return value
         scalar = live_values.json_scalar(value)
         if scalar is True or scalar is False:
             return int(scalar)
         return scalar if type(scalar) is int else self._reject("non_integer_label")
 
     def size(self, value: Any) -> Any:
+        if type(value) is int:
+            return value
         return 0 if value is None else self.integer(value)
 
     def flag(self, value: Any) -> Any:
@@ -509,100 +519,149 @@ class _KeyView:
         self.reason = reason
 
 
+def _node_kind(node: Any) -> Optional[ExpressionType]:
+    """node の種別（exact な `ExpressionType` のときだけ。それ以外は None: 種別を識別できない）。"""
+
+    kind = getattr(node, "expr_type", None)
+    return kind if type(kind) is ExpressionType else None
+
+
+_UNREADABLE = object()
+
+
+def _sequence_of(value: Any) -> Any:
+    """容器の中身を基底型の実装で読んだ tuple（None は空）。exact な list / tuple 以外は `_UNREADABLE`。
+
+    subclass の `__getitem__` / `__len__` / `__iter__` を呼ばない（未凍結の node は任意の容器を
+    持ち得る）。
+    """
+
+    if value is None:
+        return ()
+    kind = type(value)
+    if kind is list:
+        return tuple(list.__iter__(value))
+    if kind is tuple:
+        return value
+    return _UNREADABLE
+
+
 def _key_view(node: Expression, options: ExactTailOptions):
-    """node を option の下で読む（`_Redirect` か `_KeyView`）。label の値は `_LabelReader` が分類する。"""
+    """node を option の下で読む（`_Redirect` か `_KeyView`）。
+
+    label の値は `_LabelReader` が分類する。node の種別と子の容器も exact な型のときだけ読み、
+    読めなければ識別不能（opaque）にする（値の user code を呼ばない）。
+    """
 
     current = node
     if options.strip_width_adapters:
         stripped = set()
-        while (
-            current.expr_type == ExpressionType.UNARY_OP
-            and _plain_text(current.operator) in WIDTH_ADAPTER_OPS
-            and current.operands
-        ):
+        while _node_kind(current) is ExpressionType.UNARY_OP and _plain_text(current.operator) in WIDTH_ADAPTER_OPS:
+            operands = _sequence_of(current.operands)
+            if operands is _UNREADABLE:
+                return _KeyView("opaque", _opaque_label(current), reason="unreadable_operands")
+            if not operands:
+                break
             if id(current) in stripped:
                 # 幅 adapter だけの閉路: 剥がした先の node が無い（未凍結の graph だけで起き得る）
                 return _KeyView("opaque", _opaque_label(node), reason="width_adapter_cycle")
             stripped.add(id(current))
-            current = current.operands[0]
+            current = operands[0]
             if current is None:
                 return _Redirect(None)
 
+    expr_type = _node_kind(current)
+    if expr_type is None:
+        return _KeyView("opaque", _opaque_label(current), reason="unknown_node_kind")
+    operands = _sequence_of(current.operands)
+    if operands is _UNREADABLE:
+        return _KeyView("opaque", _opaque_label(current), reason="unreadable_operands")
+
     if (
         options.collapse_full_masks
-        and current.expr_type == ExpressionType.BINARY_OP
+        and expr_type is ExpressionType.BINARY_OP
         and _plain_text(current.operator) == "INT_AND"
-        and len(current.operands) == 2
+        and len(operands) == 2
     ):
-        left, right = current.operands
-        mask_size = _plain_int(current.size) or _plain_int(right.size) or _plain_int(left.size) or 0
+        left, right = operands
+        mask_size = (
+            _plain_int(current.size)
+            or (_plain_int(right.size) if right is not None else None)
+            or (_plain_int(left.size) if left is not None else None)
+            or 0
+        )
         if _is_all_ones_mask_for_size(left, mask_size):
             return _Redirect(right)
         if _is_all_ones_mask_for_size(right, mask_size):
             return _Redirect(left)
 
     read = _LabelReader()
-    expr_type = current.expr_type
     size = read.size(current.size)
 
-    if expr_type == ExpressionType.CONSTANT:
+    if expr_type is ExpressionType.CONSTANT:
         return read.view("leaf", ("const", read.atom(current.value), size))
 
-    if expr_type == ExpressionType.LITERAL:
+    if expr_type is ExpressionType.LITERAL:
         return read.view("leaf", ("literal", read.atom(current.value), size))
 
-    if expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
+    if expr_type is ExpressionType.PARAMETER or expr_type is ExpressionType.VARIABLE:
         name = read.text(current.name)
         return read.view("leaf", (expr_type.name.lower(), name, read.atom(current.value), size))
 
-    if expr_type == ExpressionType.UNKNOWN:
+    if expr_type is ExpressionType.UNKNOWN:
         name = read.text(current.name)
         atom = read.atom(current.value)
         runtime_metadata = read.runtime_metadata(current) if options.include_semantic_runtime_refs else ()
         return read.view("leaf", ("unknown", name, atom, size, *runtime_metadata))
 
-    if expr_type == ExpressionType.UNARY_OP:
-        operand = current.operands[0] if current.operands else None
-        return read.view("unary", ("unary", read.text(current.operator), size), (operand,))
+    first = operands[0] if operands else None
 
-    if expr_type == ExpressionType.BINARY_OP:
-        left = current.operands[0] if current.operands else None
-        right = current.operands[1] if len(current.operands) > 1 else None
+    if expr_type is ExpressionType.UNARY_OP:
+        return read.view("unary", ("unary", read.text(current.operator), size), (first,))
+
+    if expr_type is ExpressionType.BINARY_OP:
+        second = operands[1] if len(operands) > 1 else None
         operator = read.text(current.operator)
         return read.view(
             "binary",
             ("binary", operator, size),
-            (left, right),
+            (first, second),
             commutative=bool(
                 options.normalize_commutative and type(operator) is str and operator in COMMUTATIVE_BINARY_OPS
             ),
         )
 
-    if expr_type == ExpressionType.MEMORY:
-        address = current.operands[0] if current.operands else None
+    if expr_type is ExpressionType.MEMORY:
         runtime_metadata = read.runtime_metadata(current) if options.include_semantic_runtime_refs else ()
         read_order = (
             ("read_order", read.integer(current.read_order_key))
             if options.include_memory_read_order and current.read_order_key is not None
             else ("read_order", None)
         )
-        return read.view("memory", ("memory", size, read_order, runtime_metadata), (address,))
+        return read.view("memory", ("memory", size, read_order, runtime_metadata), (first,))
 
-    if expr_type == ExpressionType.CALL:
-        return read.view("call", ("call", read.text(current.name), size), tuple(current.operands))
+    if expr_type is ExpressionType.CALL:
+        return read.view("call", ("call", read.text(current.name), size), operands)
 
-    if expr_type == ExpressionType.INTRINSIC:
+    if expr_type is ExpressionType.INTRINSIC:
         opcode = getattr(current, "opcode", None)
         return read.view(
             "call",
             ("intrinsic", read.text(current.name), None if opcode is None else read.integer(opcode), size),
-            tuple(current.operands),
+            operands,
         )
 
-    if expr_type == ExpressionType.PHI:
+    if expr_type is ExpressionType.PHI:
+        branches = _sequence_of(current.value)
+        if branches is _UNREADABLE:
+            return _KeyView("opaque", _opaque_label(current), reason="unreadable_phi")
         shape = []
         children = []
-        for condition, value in current.value or []:
+        for branch in branches:
+            pair = _sequence_of(branch)
+            if pair is _UNREADABLE or len(pair) != 2:
+                return _KeyView("opaque", _opaque_label(current), reason="unreadable_phi")
+            condition, value = pair
             if condition is None:
                 shape.append((False, False))
             else:
@@ -617,6 +676,8 @@ def _key_view(node: Expression, options: ExactTailOptions):
 def _plain_text(value: Any) -> Any:
     """名前・演算子の基底型の str（読めなければ None）。判定の近道と placeholder の記述だけに使う。"""
 
+    if type(value) is str:
+        return value
     scalar = live_values.json_scalar(value)
     return scalar if type(scalar) is str else None
 
@@ -624,15 +685,22 @@ def _plain_text(value: Any) -> Any:
 def _plain_int(value: Any) -> Any:
     """大きさなどの基底型の int（読めなければ None）。判定の近道と placeholder の記述だけに使う。"""
 
+    if type(value) is int:
+        return value
     scalar = live_values.json_scalar(value)
     if scalar is True or scalar is False:
         return int(scalar)
     return scalar if type(scalar) is int else None
 
 
+def _kind_name(node: Any) -> str:
+    kind = _node_kind(node)
+    return kind.name if kind is not None else "?"
+
+
 def _opaque_label(node: Expression) -> tuple:
     return (
-        "opaque", node.expr_type.name, _plain_text(node.operator) or "", _plain_text(node.name) or "",
+        "opaque", _kind_name(node), _plain_text(node.operator) or "", _plain_text(node.name) or "",
         _plain_int(node.size) or 0,
     )
 
@@ -692,12 +760,12 @@ def _key_precedes(first: StructuralKey, second: StructuralKey) -> bool:
 
 
 def _cycle_descriptor(node: Expression) -> tuple:
-    return (node.expr_type.name, _plain_text(node.name) or "", _plain_int(node.size) or 0)
+    return (_kind_name(node), _plain_text(node.name) or "", _plain_int(node.size) or 0)
 
 
 def _node_descriptor(node: Expression) -> tuple:
     # placeholder の記述（比較可否・同一性は tail token / back_ref が決める）。値は exact に読む
-    return (node.expr_type.name, _plain_text(node.operator) or "", _plain_text(node.name) or "", _plain_int(node.size) or 0)
+    return (_kind_name(node), _plain_text(node.operator) or "", _plain_text(node.name) or "", _plain_int(node.size) or 0)
 
 
 class _TailFrame:
