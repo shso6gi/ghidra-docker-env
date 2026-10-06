@@ -734,6 +734,7 @@ def frozen_fingerprint_payload(
     snapshot_id: Any, semantic_fields: Any, extraction_schema_version: int, placed: Optional["PlacedTokens"],
 ) -> Tuple[Any, ...]:
     """`SnapshotFingerprintCodec._freeze_unmetered(fingerprint_payload(...))` と同じ値（同じ順に同じ入力の code を走らせる）。
+    tuple の凍結は要素ごとに同じ順なので、3 つの部分を順に凍結して tuple にする（部分ごとに許可の有無を選ぶため）。
 
     token を写しに置いてよいのは **意味の値（`semantic_fields`）の中だけ**: 単一の読みの置き換えが token を置くのは
     意味の view の walk の葉だけなので、`snapshot_id` は `placed` を渡さずに凍結する（置いた token がそこに現れても、

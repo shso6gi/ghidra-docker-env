@@ -115,7 +115,6 @@ def test_the_witness_compares_placed_tokens_only_in_the_semantic_fields():
     assert reuse._Witness(("p",), (token_a,), placed_a) != reuse._Witness(("p",), (stranger,), placed_b)
 
 
-
 def test_a_read_without_tokens_and_the_body_never_enter_the_placing_freeze(monkeypatch):
     """許可の無い凍結は main と同じ走査だけを通る（レビュー 7: 許可を要素ごとに受け渡す走査が実 run の snapshot の
     時間を約 2 % 増やした）。本体（`create`）と、token を置かなかった読みでは、許可のある凍結も token の照合も

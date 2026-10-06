@@ -1411,6 +1411,8 @@ ENTRY_ROOTS = (
     ("checker.unknown_reason", "legacy_reason_index", ("legacy_reasons",)),
     ("proof.obligations.snapshot", "SnapshotFingerprintCodec.freeze", ("value",)),
     ("proof.obligations.snapshot", "SnapshotFingerprintCodec.digest", ("value",)),
+    # 単一の読みが許可を渡す凍結（Issue #219 PR-219-B: `_freeze_unmetered` からは呼ばれないので入口として辿る）
+    ("proof.obligations.snapshot", "SnapshotFingerprintCodec._freeze_placing", ("value",)),
     ("core.canonical_digest", "canonical_fingerprint", ("value",)),
     # 作業量の object の method（名前で WORK として信頼する引数の、package の側の本体）
     ("proof.obligations.snapshot", "_FreezeMeter.scalar", ("value",)),

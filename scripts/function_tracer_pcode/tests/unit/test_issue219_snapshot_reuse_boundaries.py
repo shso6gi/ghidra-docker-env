@@ -131,7 +131,8 @@ def test_only_the_single_read_hands_the_codec_a_token_capability():
                 if name == "PlacedTokens":
                     makers.append(f"{path.relative_to(PACKAGE_ROOT)}:{function.name}")
     schema = SCHEMA.relative_to(PACKAGE_ROOT)
-    # `_freeze_placing` の再帰は局所の名前（`recurse`）で、許可を渡すのは組み込みの容器の要素だけ（record の表現・
+    # `_freeze_placing` の再帰は局所の名前（`recurse`）で、許可を渡すのは組み込みの型そのものの tuple / list / dict の
+    # 要素だけ（MappingProxy・subclass・set・record の表現・
     # identity key・dataclass の field へ渡らないことは `test_only_a_placed_token_passes_...` が実際に確かめる）
     assert sorted(set(passers)) == [f"{schema}:frozen_fingerprint_payload"]
     callers = sorted({
