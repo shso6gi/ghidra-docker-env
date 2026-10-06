@@ -451,6 +451,9 @@ def test_a_required_proof_set_with_process_scoped_keys_is_not_reported_complete(
     token_key = json.loads(json.dumps(expression_key(build("X"), budget=BUDGET)))
     with minting_process_identities():
         assert resolve(token_key).complete is True
+        # 作った process の中でも、識別不能 token は自分の写しとも一致しないので完全ではない
+        unidentified = json.loads(json.dumps(structural.unidentified_identity("probe")))
+        assert resolve(unidentified).complete is False
     # 対照: token を持たない requirement は完全
     plain = json.loads(json.dumps(expression_key(build("X"), budget=10_000)))
     assert resolve(plain).complete is True and resolve(plain).diagnostics == ()

@@ -55,12 +55,22 @@ def _expression_runtime_metadata(expr: Expression) -> Tuple[tuple, bool, bool]:
     あれば、この node の key も比較に使えない（C-K3: 比較可否は key のどこかの placeholder で決まる）。
     """
 
+    validated = is_validated(expr)
+    if validated:
+        cached = _VALIDATED_METADATA_MEMO.get(expr, "runtime_metadata")
+        if cached is not None:
+            return cached
     runtime_key = semantic_projection(expr).runtime_structural_key
     if runtime_key is None:
-        return (), False, False
-    replaced = _identified_atom(runtime_key)
-    metadata = (("runtime_ref", replaced),)
-    return metadata, replaced is not runtime_key, _key_has_tag(replaced, PLACEHOLDER_TAGS)
+        result = ((), False, False)
+    else:
+        replaced = _identified_atom(runtime_key)
+        result = ((("runtime_ref", replaced),), replaced is not runtime_key, _key_has_tag(replaced, PLACEHOLDER_TAGS))
+    # 凍結済みの node の意味 key は変わらないので 1 回だけ読む。識別不能 token を含む結果は覚えない
+    # （識別不能 token は毎回新しい: C-K5）
+    if validated and not result[1]:
+        _VALIDATED_METADATA_MEMO.put(expr, "runtime_metadata", result)
+    return result
 
 
 def _is_all_ones_mask_for_size(expr: Optional[Expression], size: int) -> bool:
@@ -265,6 +275,9 @@ _TAIL_INTERN = _ExactTailIntern()
 #: option だけで決まる。未凍結の node は入れない（生成後に `size` 等が書き換わる）。
 _VALIDATED_TAIL_MEMO = WeakKeyedTable()
 
+#: validated node の runtime ref の意味 key（`_expression_runtime_metadata`）の memo
+_VALIDATED_METADATA_MEMO = WeakKeyedTable()
+
 #: `expression_key_or_identity` の object identity（同じ live object → 同じ serial、
 #: serial は再利用しない。`id()` は object の死後に再利用されるので使わない）
 _PROCESS_OBJECT_SERIALS = WeakKeyedTable()
@@ -286,21 +299,41 @@ def exact_tail_statistics() -> dict:
     return _TAIL_INTERN.statistics()
 
 
-def _identity_atom(value: Any) -> Tuple[Any, bool]:
+def _identity_atom(value: Any) -> Tuple[Any, bool, bool]:
     """node の値を key の atom にする。識別できない atom は識別不能 token にする。
 
-    返すのは (atom, 識別不能な部分を含むか)。規則は `_identified_atom`。
+    返すのは (atom, 識別不能な部分を含むか, placeholder を含むか)。規則は `_identified_atom`。
+    値そのものが（包まれた）placeholder・token を持つなら key は比較に使えない（C-K3）。
     """
 
     atom = _atom_key(value)
     replaced = _identified_atom(atom)
-    return replaced, replaced is not atom
+    if type(replaced) is tuple and replaced and type(replaced[0]) is str and replaced[0] in _SCALAR_ATOM_TAGS:
+        return replaced, False, False
+    return replaced, replaced is not atom, _key_has_tag(replaced, PLACEHOLDER_TAGS)
 
 
 #: `canonical_atom` の値のうち、値を識別しない atom の tag。`object_id` は「同じ object か」
 #: しか言わず object の死後に `id()` が再利用されると別物と一致する。`unsupported_value` は
 #: 型名しか残っていない（同じ型の別の値と一致する）。どちらも識別不能 token に置き換える（C-K5）
 _UNIDENTIFIED_ATOM_TAGS = frozenset({"object_id", UNSUPPORTED_VALUE_TAG})
+def _is_unidentified_atom(item: tuple) -> bool:
+    """`canonical_atom` の `("object_id", module, qualname, id)` / `("unsupported_value", module, qualname)`。
+
+    形（要素数と型）まで照合する: dataclass の atom の field の組 `(name, atom)` の name が
+    偶然 `object_id` でも、識別できない atom とはみなさない。
+    """
+
+    if not item or type(item[0]) is not str:
+        return False
+    tag = item[0]
+    if tag == "object_id":
+        return len(item) == 4 and type(item[1]) is str and type(item[2]) is str and type(item[3]) is int
+    if tag == UNSUPPORTED_VALUE_TAG:
+        return len(item) == 3 and type(item[1]) is str and type(item[2]) is str
+    return False
+
+
 #: 子を持たない `canonical_atom` の tag（置き換えの要らない atom の近道）
 _SCALAR_ATOM_TAGS = frozenset({"none", "bool", "int", "float", "str", "bytes"})
 
@@ -324,12 +357,15 @@ def _identified_atom(atom: Any) -> Any:
         if not exiting:
             if item_id in rebuilt:
                 continue
-            if item and type(item[0]) is str and item[0] in _UNIDENTIFIED_ATOM_TAGS:
+            if _is_unidentified_atom(item):
                 rebuilt[item_id] = unidentified_identity("unidentified_atom")
                 continue
             stack.append((item, True))
             for child in item:
-                if type(child) is tuple and child and id(child) not in rebuilt:
+                if (
+                    type(child) is tuple and child and id(child) not in rebuilt
+                    and not (type(child[0]) is str and child[0] in _SCALAR_ATOM_TAGS)
+                ):
                     stack.append((child, False))
             continue
         changed = False
@@ -413,27 +449,28 @@ def _key_view(node: Expression, options: ExactTailOptions):
     size = int(current.size or 0)
 
     if expr_type == ExpressionType.CONSTANT:
-        atom, unidentified = _identity_atom(current.value)
-        return _KeyView("leaf", ("const", atom, size), unidentified=unidentified)
+        atom, unidentified, placeholder = _identity_atom(current.value)
+        return _KeyView("leaf", ("const", atom, size), unidentified=unidentified, placeholder=placeholder)
 
     if expr_type == ExpressionType.LITERAL:
-        atom, unidentified = _identity_atom(current.value)
-        return _KeyView("leaf", ("literal", atom, size), unidentified=unidentified)
+        atom, unidentified, placeholder = _identity_atom(current.value)
+        return _KeyView("leaf", ("literal", atom, size), unidentified=unidentified, placeholder=placeholder)
 
     if expr_type in {ExpressionType.PARAMETER, ExpressionType.VARIABLE}:
-        atom, unidentified = _identity_atom(current.value)
+        atom, unidentified, placeholder = _identity_atom(current.value)
         return _KeyView(
-            "leaf", (expr_type.name.lower(), current.name or "", atom, size), unidentified=unidentified,
+            "leaf", (expr_type.name.lower(), current.name or "", atom, size),
+            unidentified=unidentified, placeholder=placeholder,
         )
 
     if expr_type == ExpressionType.UNKNOWN:
         runtime_metadata, metadata_unidentified, metadata_placeholder = (
             _expression_runtime_metadata(current) if options.include_semantic_runtime_refs else ((), False, False)
         )
-        atom, unidentified = _identity_atom(current.value)
+        atom, unidentified, placeholder = _identity_atom(current.value)
         return _KeyView(
             "leaf", ("unknown", current.name or "", atom, size, *runtime_metadata),
-            unidentified=unidentified or metadata_unidentified, placeholder=metadata_placeholder,
+            unidentified=unidentified or metadata_unidentified, placeholder=placeholder or metadata_placeholder,
         )
 
     if expr_type == ExpressionType.UNARY_OP:
@@ -803,8 +840,10 @@ def _build_expression_key(
     # redirect だけの閉路は `redirecting` で止める。明示 stack で辿る（予算が大きくても
     # `RecursionError` にならない）。予算は従来どおり訪れた node（redirect を含む）ごとに 1 減らす。
     path: list = []
+    path_nodes: list = []
     depth_of: dict = {}
-    redirecting: set = set()
+    #: 辿っている redirect → それを辿り始めたときの path の長さ（解いた先の node が積まれる位置）
+    redirecting: dict = {}
     memo: dict[int, StructuralKey] = {}
     tail_memo: dict = {}
     remaining = budget
@@ -831,10 +870,17 @@ def _build_expression_key(
             _placeholder()
             return ("cycle", node.expr_type.name, node.name or "", int(node.size or 0),
                     ("back_ref", len(path) - depth)), None
-        if node_id in redirecting:
+        redirect_depth = redirecting.get(node_id)
+        if redirect_depth is not None:
             _placeholder()
-            return ("cycle", node.expr_type.name, node.name or "", int(node.size or 0),
-                    unidentified_identity("redirect_cycle")), None
+            if redirect_depth >= len(path):
+                # 間に key の段が無い: redirect だけの閉路（解いた先の node が無い）
+                return ("cycle", node.expr_type.name, node.name or "", int(node.size or 0),
+                        unidentified_identity("redirect_cycle")), None
+            # redirect を解いた先の node（path の redirect_depth 段目）への閉路
+            target = path_nodes[redirect_depth]
+            return ("cycle", target.expr_type.name, target.name or "", int(target.size or 0),
+                    ("back_ref", len(path) - redirect_depth)), None
         if remaining <= 0:
             _placeholder()
             return (
@@ -846,7 +892,7 @@ def _build_expression_key(
         before = placeholders
         view = _key_view(node, options)
         if isinstance(view, _Redirect):
-            redirecting.add(node_id)
+            redirecting[node_id] = len(path)
             return None, [node, view, (view.target,), [], before]
         if view.kind == "opaque":
             _placeholder()
@@ -855,6 +901,7 @@ def _build_expression_key(
             _placeholder()
         depth_of[node_id] = len(path)
         path.append(node_id)
+        path_nodes.append(node)
         return None, [node, view, view.children, [], before]
 
     first, frame = _enter(expr)
@@ -874,10 +921,11 @@ def _build_expression_key(
         stack.pop()
         node_id = id(node)
         if isinstance(view, _Redirect):
-            redirecting.discard(node_id)
+            del redirecting[node_id]
             key = child_keys[0]
         else:
             path.pop()
+            path_nodes.pop()
             del depth_of[node_id]
             key = _assemble_key(view, child_keys)
         if placeholders == before:
@@ -1052,6 +1100,15 @@ def key_is_process_independent(key: Any) -> bool:
     """
 
     return not _key_has_tag(key, PROCESS_SCOPED_TAGS)
+
+
+def key_contains_unidentified(key: Any) -> bool:
+    """key のどこかに識別不能 token があるか（その key は自分自身の写しとも一致しない: C-K5）。"""
+
+    return _key_has_tag(key, _UNIDENTIFIED_TAGS)
+
+
+_UNIDENTIFIED_TAGS = frozenset({UNIDENTIFIED_TAG})
 
 
 def cross_process_node(node: Any) -> Any:

@@ -170,6 +170,23 @@ def test_a_cycle_of_redirects_terminates_and_is_never_equal():
     )
 
 
+def test_a_cycle_back_through_a_redirect_points_at_its_resolved_node():
+    # R = NEG(R) & 0xFFFFFFFF: R は NEG へ解ける。閉路は NEG への back_ref（redirect だけの閉路ではない）
+    negate = Expression.unary_op("INT_NEGATE", _param())
+    negate.size = 4
+    redirect = _binary("INT_AND", negate, _const(FULL))
+    negate.operands[0] = redirect
+    for budget in (1, 2, 256):
+        key = expression_key(redirect, budget=budget, collapse_full_masks=True)
+        assert key == expression_key(redirect, budget=budget, collapse_full_masks=True)
+        assert structural.UNIDENTIFIED_TAG not in json.dumps(key)
+    # redirect も予算を 1 使うので、等しくなるのは打ち切りの無い予算のとき
+    assert expression_key(redirect, collapse_full_masks=True) == expression_key(negate, collapse_full_masks=True)
+    assert expression_key(redirect, collapse_full_masks=True) == (
+        "unary", "INT_NEGATE", 4, ("cycle", "UNARY_OP", "", 4, ("back_ref", 1)),
+    )
+
+
 def test_a_width_adapter_cycle_terminates_and_is_never_equal():
     # 修正前は `_key_view` の adapter を剥がす loop が止まらなかった: 別 process で期限を付ける
     script = textwrap.dedent(
@@ -282,10 +299,10 @@ def test_a_placeholder_or_token_wrapped_several_times_is_seen(wraps):
     assert replaced != token and replaced[0] == structural.UNIDENTIFIED_TAG
 
 
+@pytest.mark.parametrize("plain", [("tuple", ("list", "str"), ("a", 1)), ("tuple", ("cycle_count", 1)), ("list", ["str"])])
 @pytest.mark.parametrize("wraps", [1, 2, 3])
-def test_a_wrapped_plain_value_is_still_comparable(wraps):
-    # 対照: tag を持たない値は何重に包んでも placeholder ではない
-    plain = ("tuple", ("list", "str"), ("a", 1))
+def test_a_wrapped_plain_value_is_still_comparable(wraps, plain):
+    # 対照: tag を持たない値は何重に包んでも placeholder ではない（包みの形に似た 2 要素の値も）
     for _ in range(wraps):
         plain = canonical_atom(plain)
     assert not key_contains_placeholder(("x", plain))
@@ -314,6 +331,38 @@ def test_a_key_whose_runtime_ref_holds_a_truncated_key_is_not_comparable_at_any_
     # 対照: 比較可能な key を持つ ref は比較可能
     plain = Expression(ExpressionType.UNKNOWN, name="u", runtime_ref=_KeyRef(expression_key(_param())))
     assert expression_key_safe(plain) is not None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [("opaque", 1), ("cycle",), ("truncated", "x")],
+    ids=["opaque", "cycle", "truncated"],
+)
+def test_a_leaf_value_that_holds_a_placeholder_is_not_comparable(value):
+    # status / safe key / key_is_comparable が同じ答えを返す（C-K3）
+    variable = Expression(ExpressionType.VARIABLE, name="v", value=value, size=4)
+    key, comparable = expression_key_status(variable)
+    assert comparable is False
+    assert key_is_comparable(key) is False
+    assert expression_key_safe(variable) is None
+    # 識別不能 token を値に持つ leaf も同じ
+    token_leaf = Expression(ExpressionType.VARIABLE, name="v", value=structural.unidentified_identity("x"), size=4)
+    assert expression_key_status(token_leaf)[1] is False
+
+
+def test_a_dataclass_field_named_like_an_unidentified_tag_is_still_identified():
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True)
+    class Fields:
+        object_id: int
+        unsupported_value: str
+
+    variable = Expression(ExpressionType.VARIABLE, name="v", value=Fields(1, "x"), size=4)
+    key = expression_key_safe(variable)
+    assert key is not None
+    assert key == expression_key_safe(Expression(ExpressionType.VARIABLE, name="v", value=Fields(1, "x"), size=4))
+    assert key != expression_key_safe(Expression(ExpressionType.VARIABLE, name="v", value=Fields(2, "x"), size=4))
 
 
 # --------------------------------------------------------------------------

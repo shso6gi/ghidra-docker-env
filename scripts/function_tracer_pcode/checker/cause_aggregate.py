@@ -55,7 +55,11 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core import json_encoding, live_values
-from scripts.function_tracer_pcode.core.structural import cross_process_node, key_is_process_independent
+from scripts.function_tracer_pcode.core.structural import (
+    cross_process_node,
+    key_contains_unidentified,
+    key_is_process_independent,
+)
 from scripts.function_tracer_pcode.core.json_encoding import (
     CANONICAL,
     LEGACY,
@@ -557,9 +561,12 @@ def identity_is_unmatchable_here(key: Any) -> bool:
     token を作った process の外（既定）では、構造 key の token は識別不能 token に置き換わって
     いて、同じ命題を表す別の写しとも一致しない（Issue #215 Gate A）。その key を数えた集計は
     「完全」と名乗れないので、呼び出し側は完全性の印を落とす（件数は過大にしか動かない）。
+    token を作った process の中でも、識別不能 token（C-K5）を含む key は自分の写しとも一致しない。
     """
 
-    return not _MINTING_PROCESS_SCOPE.get() and not key_is_process_independent(key)
+    if key_is_process_independent(key):
+        return False
+    return not _MINTING_PROCESS_SCOPE.get() or key_contains_unidentified(key)
 
 
 def resolve_required_proofs(
