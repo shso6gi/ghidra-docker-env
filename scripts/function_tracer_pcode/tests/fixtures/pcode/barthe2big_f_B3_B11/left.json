@@ -1,6 +1,6 @@
 {
  "header": {
-  "analysis_source_digest": "e93b37031549686f10edf2e5fbf477ccd6a03b28bd919adef51e998a2b5913b4",
+  "analysis_source_digest": "ab6abfb5bf4902462dbc1d1cbf2e568b2953addd4498641e0004cee855ee5c3d",
   "binary": {
    "binary_id": "B3",
    "eqbench_relative_path": "REVE/barthe2big/Eq/source/new-arm64-clang-O2",
@@ -15,9 +15,9 @@
   "fixture_id": "barthe2big_f_B3_B11",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-09-30T05:20:56+00:00",
+  "recorded_at_utc": "2026-10-06T16:36:48+00:00",
   "recorder_version": "2",
-  "recording_commit": "aee33c7f03c494488e919a87a39ae84a0dd7ede8",
+  "recording_commit": "67e135c03c87ae5e2b35cfaf2e59ab1a1d8f71a6",
   "recording_dirty": false,
   "recording_mode": {
    "connector": "production",
