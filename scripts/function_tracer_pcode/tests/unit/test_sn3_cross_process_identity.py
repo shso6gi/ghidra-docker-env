@@ -426,6 +426,36 @@ def test_required_proof_keys_from_different_processes_are_not_merged():
     assert keys(plain) == keys(plain)
 
 
+def test_a_required_proof_set_with_process_scoped_keys_is_not_reported_complete():
+    """過分割した requirement の件数を「完全」と名乗らない（reporting の root blocker 集計）。"""
+
+    from scripts.function_tracer_pcode.checker.cause_aggregate import (
+        minting_process_identities,
+        resolve_required_proofs,
+    )
+    from scripts.function_tracer_pcode.proof.cause_identity import ProofRequirementId
+
+    def resolve(structural_key):
+        requirement = ProofRequirementId.create("return_coverage", ("target", structural_key), ("contract",))
+        payload = json.loads(json.dumps(requirement.to_dict()))
+        return resolve_required_proofs(
+            proof_requirement_ids=[payload], object_target_key=None, identity_scope="unary",
+            canonical_cause_key=("cause",), recovery_actions=(),
+        )
+
+    scoped = _run_child(["X", "Y"])["keys"]["X"]
+    reported = resolve(scoped)
+    assert reported.complete is False
+    assert "process_scoped_proof_requirement" in reported.diagnostics
+    # token を作った process 自身の集計では照合できるので完全
+    token_key = json.loads(json.dumps(expression_key(build("X"), budget=BUDGET)))
+    with minting_process_identities():
+        assert resolve(token_key).complete is True
+    # 対照: token を持たない requirement は完全
+    plain = json.loads(json.dumps(expression_key(build("X"), budget=10_000)))
+    assert resolve(plain).complete is True and resolve(plain).diagnostics == ()
+
+
 def test_case_pair_refs_from_different_processes_are_not_merged():
     from scripts.function_tracer_pcode.reporting import root_blocker_summary
 

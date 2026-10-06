@@ -33,6 +33,7 @@ loop lowering はそれが一番大きいので、判断そのものは
 from __future__ import annotations
 
 from dataclasses import dataclass
+import struct
 from types import MappingProxyType
 from enum import Enum
 from typing import Any, NamedTuple, Optional, Tuple
@@ -87,10 +88,19 @@ def canonical_atom(value: Any) -> CanonicalAtoms:
         return ("bool", int(value))
     if isinstance(value, int):
         return ("int", value)
+    if type(value) is float:
+        # 値の bit 列（-0.0 と 0.0、NaN の payload も区別する）。float は immutable なので
+        # 値が identity。`object_id` に落とすと死後の `id()` 再利用で別の値と一致する（Issue #215）
+        return ("float", struct.pack(">d", value).hex())
     if isinstance(value, str):
         return ("str", value)
     if isinstance(value, bytes):
         return ("bytes", value.hex())
+    if type(value) is UnsupportedSemanticValue:
+        # 値として固定できなかったものの印（型名しか残っていない）。tuple として畳むと、
+        # 同じ型の別の object どうしが同じ atom になり識別できたように見える。印の tag を
+        # 残し、構造 key の owner（`core/structural`）が識別不能として扱う（Issue #215）
+        return (UNSUPPORTED_VALUE_TAG, value.type_module, value.type_qualname)
     if isinstance(value, tuple):
         return ("tuple", tuple(canonical_atom(item) for item in value))
     if isinstance(value, list):
@@ -194,6 +204,10 @@ def value_key_is_opaque(key: CanonicalAtoms) -> bool:
 #: snapshot がそのまま値として抱えてよい型。ここに無い型は「値」ではないので
 #: canonical な表現へ落とすか、落とせないなら unsupported として印を付ける。
 IMMUTABLE_SCALARS = (type(None), bool, int, float, str, bytes)
+
+
+#: `canonical_atom` が `UnsupportedSemanticValue` を表す atom の tag
+UNSUPPORTED_VALUE_TAG = "unsupported_value"
 
 
 class UnsupportedSemanticValue(NamedTuple):

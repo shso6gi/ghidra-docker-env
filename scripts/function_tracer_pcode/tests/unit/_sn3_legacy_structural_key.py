@@ -12,12 +12,21 @@ from typing import Optional
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.semantic_projection import canonical_atom as _atom_key
 from scripts.function_tracer_pcode.core.semantic_snapshot import COMMUTATIVE_BINARY_OPS
+from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
 from scripts.function_tracer_pcode.core.structural import (
     StructuralKey,
     WIDTH_ADAPTER_OPS,
-    _expression_runtime_metadata,
     _is_all_ones_mask_for_size,
 )
+
+
+def _expression_runtime_metadata(expr: Expression) -> tuple:
+    """main の `_expression_runtime_metadata` の写し（SN3 は識別不能な atom の置き換えを足した）。"""
+
+    runtime_key = semantic_projection(expr).runtime_structural_key
+    if runtime_key is None:
+        return ()
+    return (("runtime_ref", runtime_key),)
 
 
 def legacy_expression_key(

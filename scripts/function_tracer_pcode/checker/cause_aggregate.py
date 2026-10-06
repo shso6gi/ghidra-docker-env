@@ -551,6 +551,17 @@ class RequiredProofResolution:
     diagnostics: Tuple[str, ...] = ()
 
 
+def identity_is_unmatchable_here(key: Any) -> bool:
+    """`freeze_identity` の写し `key` が、今の scope では別の値と照合できない（過分割される）か。
+
+    token を作った process の外（既定）では、構造 key の token は識別不能 token に置き換わって
+    いて、同じ命題を表す別の写しとも一致しない（Issue #215 Gate A）。その key を数えた集計は
+    「完全」と名乗れないので、呼び出し側は完全性の印を落とす（件数は過大にしか動かない）。
+    """
+
+    return not _MINTING_PROCESS_SCOPE.get() and not key_is_process_independent(key)
+
+
 def resolve_required_proofs(
     *,
     proof_requirement_ids: Sequence[Any],
@@ -601,6 +612,9 @@ def resolve_required_proofs(
             except ValueError:
                 continue
             keys.append(freeze_identity(requirement.to_key()))
+    if any(identity_is_unmatchable_here(key) for key in keys):
+        complete = False
+        diagnostics.append("process_scoped_proof_requirement")
     return RequiredProofResolution(tuple(keys), complete, tuple(diagnostics))
 
 

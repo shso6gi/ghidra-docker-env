@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.semantic_lifecycle import is_validated
 from scripts.function_tracer_pcode.core.semantic_projection import (
+    UNSUPPORTED_VALUE_TAG,
     canonical_atom as _atom_key,
 )
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
@@ -41,17 +42,25 @@ StructuralKey = Tuple[Any, ...]
 WIDTH_ADAPTER_OPS = frozenset({"INT_ZEXT", "INT_SEXT"})
 
 
-def _expression_runtime_metadata(expr: Expression) -> tuple[StructuralKey, ...]:
-    """structural key に載せる runtime ref の意味 key。
+def _expression_runtime_metadata(expr: Expression) -> Tuple[tuple, bool, bool]:
+    """structural key に載せる runtime ref の意味 key、識別不能な atom を含むか、placeholder を含むか。
 
     生 object は読まない。`semantic_projection()` は凍結済みなら固定済みの値を、
-    未凍結ならその場で作った値を返す（どちらも pure value）。
+    未凍結ならその場で作った値を返す（どちらも pure value）。意味 key は
+    `canonical_atom` の値なので、leaf の値と同じ規則（`_identified_atom`）で識別不能な
+    atom を置き換える（Issue #215 C-K5: runtime ref の `object_id` / 支えられない値も
+    leaf の値と同じく何とも等しくならない）。
+
+    意味 key が別の構造 key を（`canonical_atom` に包まれた形で）持ち、その中に placeholder が
+    あれば、この node の key も比較に使えない（C-K3: 比較可否は key のどこかの placeholder で決まる）。
     """
 
     runtime_key = semantic_projection(expr).runtime_structural_key
     if runtime_key is None:
-        return ()
-    return (("runtime_ref", runtime_key),)
+        return (), False, False
+    replaced = _identified_atom(runtime_key)
+    metadata = (("runtime_ref", replaced),)
+    return metadata, replaced is not runtime_key, _key_has_tag(replaced, PLACEHOLDER_TAGS)
 
 
 def _is_all_ones_mask_for_size(expr: Optional[Expression], size: int) -> bool:
@@ -278,33 +287,59 @@ def exact_tail_statistics() -> dict:
 
 
 def _identity_atom(value: Any) -> Tuple[Any, bool]:
-    """node の値を key の atom にする。process 依存の atom は識別不能 token にする。
+    """node の値を key の atom にする。識別できない atom は識別不能 token にする。
 
-    `canonical_atom` の最後の手段 `("object_id", …, id(value))` は「同じ object か」
-    しか言わず、object の死後に id が再利用されると別物と一致する（C-K5）。float は
-    `canonical_atom` が object として扱うので、ここで bit 列の atom にする。
-    返すのは (atom, 識別不能な部分を含むか)。
+    返すのは (atom, 識別不能な部分を含むか)。規則は `_identified_atom`。
     """
 
-    if type(value) is float:
-        return ("float", struct.pack(">d", value).hex()), False
     atom = _atom_key(value)
-    replaced = _without_object_ids(atom)
+    replaced = _identified_atom(atom)
     return replaced, replaced is not atom
 
 
-def _without_object_ids(atom: Any) -> Any:
-    if type(atom) is not tuple or not atom:
+#: `canonical_atom` の値のうち、値を識別しない atom の tag。`object_id` は「同じ object か」
+#: しか言わず object の死後に `id()` が再利用されると別物と一致する。`unsupported_value` は
+#: 型名しか残っていない（同じ型の別の値と一致する）。どちらも識別不能 token に置き換える（C-K5）
+_UNIDENTIFIED_ATOM_TAGS = frozenset({"object_id", UNSUPPORTED_VALUE_TAG})
+#: 子を持たない `canonical_atom` の tag（置き換えの要らない atom の近道）
+_SCALAR_ATOM_TAGS = frozenset({"none", "bool", "int", "float", "str", "bytes"})
+
+
+def _identified_atom(atom: Any) -> Any:
+    """`canonical_atom` の値の、識別できない部分を識別不能 token に置き換える（**唯一の規則**）。
+
+    leaf の値と runtime ref の意味 key の両方がこれを通る。置き換えが無ければ同じ object を
+    返す（呼び出し側は `is` で「識別不能を含むか」を知る）。明示 stack で辿る（深い atom で
+    `RecursionError` にならない）。
+    """
+
+    if type(atom) is not tuple or not atom or (type(atom[0]) is str and atom[0] in _SCALAR_ATOM_TAGS):
         return atom
-    if atom[0] == "object_id":
-        return unidentified_identity("object_identity_atom")
-    changed = False
-    items = []
-    for item in atom:
-        replaced = _without_object_ids(item)
-        changed = changed or replaced is not item
-        items.append(replaced)
-    return tuple(items) if changed else atom
+    # 置き換えの要る tuple だけを作り直す: 子から先に決める（post-order）
+    stack = [(atom, False)]
+    rebuilt: dict = {}
+    while stack:
+        item, exiting = stack.pop()
+        item_id = id(item)
+        if not exiting:
+            if item_id in rebuilt:
+                continue
+            if item and type(item[0]) is str and item[0] in _UNIDENTIFIED_ATOM_TAGS:
+                rebuilt[item_id] = unidentified_identity("unidentified_atom")
+                continue
+            stack.append((item, True))
+            for child in item:
+                if type(child) is tuple and child and id(child) not in rebuilt:
+                    stack.append((child, False))
+            continue
+        changed = False
+        items = []
+        for child in item:
+            replaced = rebuilt.get(id(child), child) if type(child) is tuple and child else child
+            changed = changed or replaced is not child
+            items.append(replaced)
+        rebuilt[item_id] = tuple(items) if changed else item
+    return rebuilt[id(atom)]
 
 
 class _Redirect:
@@ -324,11 +359,11 @@ class _KeyView:
     node の読み方はこの 1 か所にしかない）。
     """
 
-    __slots__ = ("kind", "label", "children", "commutative", "unidentified")
+    __slots__ = ("kind", "label", "children", "commutative", "unidentified", "placeholder", "reason")
 
     def __init__(
         self, kind: str, label: tuple, children: tuple = (), commutative: bool = False,
-        unidentified: bool = False,
+        unidentified: bool = False, placeholder: bool = False, reason: str = "unknown_node_kind",
     ) -> None:
         self.kind = kind
         self.label = label
@@ -336,6 +371,10 @@ class _KeyView:
         self.commutative = commutative
         # label に識別不能な atom（旧 `object_id`）がある: その node は何とも等しくならない
         self.unidentified = unidentified
+        # label が（包まれた構造 key の）placeholder を持つ: key は比較に使えない（C-K3）
+        self.placeholder = placeholder or unidentified
+        # kind が "opaque" のとき、識別不能 token に記録する理由
+        self.reason = reason
 
 
 def _key_view(node: Expression, options: ExactTailOptions):
@@ -343,12 +382,19 @@ def _key_view(node: Expression, options: ExactTailOptions):
 
     current = node
     if options.strip_width_adapters:
+        stripped = set()
         while (
             current.expr_type == ExpressionType.UNARY_OP
             and current.operator in WIDTH_ADAPTER_OPS
             and current.operands
         ):
+            if id(current) in stripped:
+                # 幅 adapter だけの閉路: 剥がした先の node が無い（未凍結の graph だけで起き得る）
+                return _KeyView("opaque", _opaque_label(node), reason="width_adapter_cycle")
+            stripped.add(id(current))
             current = current.operands[0]
+            if current is None:
+                return _Redirect(None)
 
     if (
         options.collapse_full_masks
@@ -381,12 +427,13 @@ def _key_view(node: Expression, options: ExactTailOptions):
         )
 
     if expr_type == ExpressionType.UNKNOWN:
-        runtime_metadata = (
-            _expression_runtime_metadata(current) if options.include_semantic_runtime_refs else ()
+        runtime_metadata, metadata_unidentified, metadata_placeholder = (
+            _expression_runtime_metadata(current) if options.include_semantic_runtime_refs else ((), False, False)
         )
         atom, unidentified = _identity_atom(current.value)
         return _KeyView(
-            "leaf", ("unknown", current.name or "", atom, size, *runtime_metadata), unidentified=unidentified,
+            "leaf", ("unknown", current.name or "", atom, size, *runtime_metadata),
+            unidentified=unidentified or metadata_unidentified, placeholder=metadata_placeholder,
         )
 
     if expr_type == ExpressionType.UNARY_OP:
@@ -406,15 +453,18 @@ def _key_view(node: Expression, options: ExactTailOptions):
 
     if expr_type == ExpressionType.MEMORY:
         address = current.operands[0] if current.operands else None
-        runtime_metadata = (
-            _expression_runtime_metadata(current) if options.include_semantic_runtime_refs else ()
+        runtime_metadata, metadata_unidentified, metadata_placeholder = (
+            _expression_runtime_metadata(current) if options.include_semantic_runtime_refs else ((), False, False)
         )
         read_order = (
             ("read_order", int(current.read_order_key))
             if options.include_memory_read_order and current.read_order_key is not None
             else ("read_order", None)
         )
-        return _KeyView("memory", ("memory", size, read_order, runtime_metadata), (address,))
+        return _KeyView(
+            "memory", ("memory", size, read_order, runtime_metadata), (address,),
+            unidentified=metadata_unidentified, placeholder=metadata_placeholder,
+        )
 
     if expr_type == ExpressionType.CALL:
         return _KeyView("call", ("call", current.name or "", size), tuple(current.operands))
@@ -439,10 +489,11 @@ def _key_view(node: Expression, options: ExactTailOptions):
             children.append(value)
         return _KeyView("phi", ("phi", size, tuple(shape)), tuple(children))
 
-    return _KeyView(
-        "opaque",
-        ("opaque", expr_type.name, current.operator or "", current.name or "", size),
-    )
+    return _KeyView("opaque", _opaque_label(current))
+
+
+def _opaque_label(node: Expression) -> tuple:
+    return ("opaque", node.expr_type.name, node.operator or "", node.name or "", int(node.size or 0))
 
 
 def _assemble_key(view: _KeyView, child_keys: list) -> StructuralKey:
@@ -456,7 +507,7 @@ def _assemble_key(view: _KeyView, child_keys: list) -> StructuralKey:
         return (*label, child_keys[0])
     if kind == "binary":
         left_key, right_key = child_keys
-        if view.commutative and right_key < left_key:
+        if view.commutative and _key_precedes(right_key, left_key):
             left_key, right_key = right_key, left_key
         return (*label, left_key, right_key)
     if kind == "memory":
@@ -478,6 +529,25 @@ def _assemble_key(view: _KeyView, child_keys: list) -> StructuralKey:
             position += 1
         return (tag, size, tuple(branches))
     raise AssertionError(kind)
+
+
+def _key_precedes(first: StructuralKey, second: StructuralKey) -> bool:
+    """可換演算の 2 子の順序（key の値の全順序）。
+
+    比べられる key どうしは main と同じ tuple の `<`（C-K2(a): 値を変えない）。tuple の `<` が
+    比べられない要素（`("read_order", None)` と `("read_order", 3)` など）に当たる組は、
+    main では `TypeError` で key を作れなかった。その組だけ canonical encoding の bytes で
+    順序を決める（2 つの key に対して向きが一意に決まれば、可換の正規化には十分）。
+    """
+
+    try:
+        return first < second
+    except TypeError:
+        pass
+    try:
+        return _canonical_bytes(first) < _canonical_bytes(second)
+    except _NotCanonical as exc:
+        raise TypeError("commutative operand keys have no canonical order") from exc
 
 
 def _node_descriptor(node: Expression) -> tuple:
@@ -545,7 +615,7 @@ def _exact_tail_token(
                 node = view.target
                 continue
             if view.kind == "opaque":
-                return (unidentified_identity("unknown_node_kind"), None), None
+                return (unidentified_identity(view.reason), None), None
             return None, _TailFrame(node, view)
 
 
@@ -728,64 +798,93 @@ def _build_expression_key(
     打ち切った先の tail token を計算しないようにするため。
     """
 
+    # `path` は key の入れ子の 1 段ごとに 1 要素（back_ref の距離 = key の段数）。全 bit の mask を
+    # 剥がす redirect は key の段を作らないので path に積まない（`_exact_tail_token` と同じ規則）。
+    # redirect だけの閉路は `redirecting` で止める。明示 stack で辿る（予算が大きくても
+    # `RecursionError` にならない）。予算は従来どおり訪れた node（redirect を含む）ごとに 1 減らす。
     path: list = []
     depth_of: dict = {}
+    redirecting: set = set()
     memo: dict[int, StructuralKey] = {}
     tail_memo: dict = {}
-    # 予算と placeholder 件数は再帰の外で数える（key の memo 可否の判定に使う）。
-    state = {"remaining": budget, "placeholders": 0}
+    remaining = budget
+    placeholders = 0
 
     def _placeholder() -> None:
+        nonlocal placeholders
         if stop_at_placeholder:
             raise _PlaceholderReached()
-        state["placeholders"] += 1
+        placeholders += 1
 
-    def _build(node: Optional[Expression]) -> StructuralKey:
+    def _enter(node: Optional[Expression]):
+        """(決まった key, None) か (None, 子を辿る frame) を返す。"""
+
+        nonlocal remaining
         if node is None:
-            return ("none",)
+            return ("none",), None
         node_id = id(node)
         cached = memo.get(node_id)
         if cached is not None:
-            return cached
+            return cached, None
         depth = depth_of.get(node_id)
         if depth is not None:
             _placeholder()
             return ("cycle", node.expr_type.name, node.name or "", int(node.size or 0),
-                    ("back_ref", len(path) - depth))
-        if state["remaining"] <= 0:
+                    ("back_ref", len(path) - depth)), None
+        if node_id in redirecting:
+            _placeholder()
+            return ("cycle", node.expr_type.name, node.name or "", int(node.size or 0),
+                    unidentified_identity("redirect_cycle")), None
+        if remaining <= 0:
             _placeholder()
             return (
                 "truncated",
                 *_node_descriptor(node),
                 _exact_tail_token(node, options, outer_path=tuple(path), memo=tail_memo),
-            )
-
-        depth_of[node_id] = len(path)
-        path.append(node_id)
-        placeholders_before = state["placeholders"]
-        try:
-            state["remaining"] -= 1
-            key = _build_node(node)
-        finally:
-            path.pop()
-            del depth_of[node_id]
-        if state["placeholders"] == placeholders_before:
-            memo[node_id] = key
-        return key
-
-    def _build_node(node: Expression) -> StructuralKey:
+            ), None
+        remaining -= 1
+        before = placeholders
         view = _key_view(node, options)
         if isinstance(view, _Redirect):
-            return _build(view.target)
+            redirecting.add(node_id)
+            return None, [node, view, (view.target,), [], before]
         if view.kind == "opaque":
             _placeholder()
-            return (*view.label, unidentified_identity("unknown_node_kind"))
-        if view.unidentified:
+            return (*view.label, unidentified_identity(view.reason)), None
+        if view.placeholder:
             _placeholder()
-        return _assemble_key(view, [_build(child) for child in view.children])
+        depth_of[node_id] = len(path)
+        path.append(node_id)
+        return None, [node, view, view.children, [], before]
 
-    key = _build(expr)
-    return key, state["placeholders"] > 0
+    first, frame = _enter(expr)
+    if frame is None:
+        return first, placeholders > 0
+    stack = [frame]
+    while True:
+        frame = stack[-1]
+        node, view, children, child_keys, before = frame
+        if len(child_keys) < len(children):
+            child_key, child_frame = _enter(children[len(child_keys)])
+            if child_frame is not None:
+                stack.append(child_frame)
+            else:
+                child_keys.append(child_key)
+            continue
+        stack.pop()
+        node_id = id(node)
+        if isinstance(view, _Redirect):
+            redirecting.discard(node_id)
+            key = child_keys[0]
+        else:
+            path.pop()
+            del depth_of[node_id]
+            key = _assemble_key(view, child_keys)
+        if placeholders == before:
+            memo[node_id] = key
+        if not stack:
+            return key, placeholders > 0
+        stack[-1][3].append(key)
 
 
 def exact_structural_identity(expr: Optional[Expression], **options: bool) -> StructuralKey:
@@ -862,37 +961,72 @@ _CANONICAL_SEQUENCE_TAGS = frozenset({"tuple", "list"})
 
 
 def _tags_of(item: Any) -> Tuple[str, ...]:
-    """列 `item` の tag（生の形の先頭と、`canonical_atom` が包んだ形の先頭）。
+    """列 `item` の tag（生の形の先頭と、`canonical_atom` が何重に包んでも見える先頭）。
 
     構造 key の token と placeholder は、別の値の atom として `canonical_atom` に包まれると
     ``("tuple", (("str", tag), …))`` になる（runtime ref の `stable_key()` が構造 key を持つ
-    場合など）。包まれても検出（C-K3）と昇格規則（Gate A）から見えなくならないよう、
-    tag はこの 1 か所で両方の形から読む。組み込みの型の値だけを読む（`live_values`）。
+    場合など）。その key を持つ式の key がさらに別の ref に包まれると二重に包まれる。何重に
+    包まれても検出（C-K3）と昇格規則（Gate A）から見えなくならないよう、tag はこの 1 か所で
+    包みを外しながら読む。組み込みの型の値だけを読む（`live_values`）。
     """
 
-    if not (type(item) is tuple or type(item) is list):
-        return ()
-    if not item:
-        return ()
-    head = item[0]
-    if type(head) is not str:
-        head = live_values.plain_scalar(head)
-        if type(head) is not str:
-            return ()
-    if head not in _CANONICAL_SEQUENCE_TAGS or len(item) != 2:
-        return (head,)
-    body = item[1]
-    if not (type(body) is tuple or type(body) is list):
-        return (head,)
-    if not body:
-        return (head,)
-    first = body[0]
-    if not (type(first) is tuple or type(first) is list):
-        return (head,)
-    if len(first) != 2 or live_values.plain_scalar(first[0]) != "str":
-        return (head,)
-    inner = live_values.plain_scalar(first[1])
-    return (head, inner) if type(inner) is str else (head,)
+    tags: list = []
+    level = item
+    while _is_sequence(level) and len(level):
+        head = _plain_str(level[0])
+        if head is None:
+            break
+        tags.append(head)
+        # `level` が包んだ列 ("tuple" | "list", (atom(v0), atom(v1), …)) なら、包まれていた列 V
+        # （要素 vi = atom(vi) を 1 段外した値）の先頭を次の段で読む
+        if head not in _CANONICAL_SEQUENCE_TAGS or len(level) != 2:
+            break
+        body = level[1]
+        if not _is_sequence(body) or not len(body):
+            break
+        level = _UnwrappedSequence(body)
+    return tuple(tags)
+
+
+def _plain_str(value: Any) -> Optional[str]:
+    if type(value) is str:
+        return value
+    value = live_values.plain_scalar(value)
+    return value if type(value) is str else None
+
+
+def _is_sequence(value: Any) -> bool:
+    return type(value) is tuple or type(value) is list or type(value) is _UnwrappedSequence
+
+
+class _UnwrappedSequence:
+    """`canonical_atom` が包んだ列の本体を、要素ごとに 1 段外して読む view（読んだ要素だけ外す）。"""
+
+    __slots__ = ("_atoms",)
+
+    def __init__(self, atoms: Any) -> None:
+        self._atoms = atoms
+
+    def __len__(self) -> int:
+        return len(self._atoms)
+
+    def __getitem__(self, index: int) -> Any:
+        return _unwrapped_atom(self._atoms[index])
+
+
+def _unwrapped_atom(atom: Any) -> Any:
+    """`canonical_atom` の atom を 1 段外した値（str は str、列は `_UnwrappedSequence`、他は None）。"""
+
+    if not _is_sequence(atom) or len(atom) != 2:
+        return None
+    kind = _plain_str(atom[0])
+    if kind == "str":
+        return _plain_str(atom[1])
+    if kind in _CANONICAL_SEQUENCE_TAGS:
+        body = atom[1]
+        if _is_sequence(body):
+            return _UnwrappedSequence(body)
+    return None
 
 
 def key_contains_placeholder(key: StructuralKey) -> bool:
