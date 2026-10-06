@@ -27,6 +27,7 @@ token を戻し、digest を求め、`retained_form` の写しを作る）で、
 **方針**（`_ElisionPolicy`。正しさに関わらない費用の判断）: pair の最初の `_POLICY_READS`（16）回の読みで、token に
 置いた葉の byte が、読みの作業量が数えた byte（`SnapshotRead.serialized_bytes`）の `_POLICY_MIN_SHARE`（1/4）に
 届かなければ、その pair の残りは token を置かず witness も作らない（memo を切ったときと同じ読みと組み立て）。
+割合が下限の 1/4 にも届かない pair は `_POLICY_EARLY_READS`（4）回目で止める。
 
 **token の権限**（C-RS7）: token を扱えるのは、単一の読みが自分の hook で置いた token（`snapshot.PlacedTokens`、
 identity で照合）を、その読みの内部の凍結（`snapshot.frozen_fingerprint_payload`）と展開・witness の比較に引数で渡す
@@ -433,6 +434,7 @@ class _ElisionPolicy:
     （式の葉の中の割合では量らない: 実 run には、葉はほぼ全部 closed でも、葉が直列化の 0.1 % しかない pair
     がある）。pair の最初の `_POLICY_READS` 回の読みで、その割合が `_POLICY_MIN_SHARE` に届かなければ、その
     pair の残りでは token を置かず、witness も作らない（読みと組み立ては同じ 1 回: memo を切ったときと同じ）。
+    割合が下限の 1/`_POLICY_EARLY_FACTOR` にも届かない pair は、`_POLICY_EARLY_READS` 回目で同じく止める。
     判断は数え上げだけで決まる（時間に依らない）。
     """
 
@@ -459,6 +461,14 @@ class _ElisionPolicy:
             if self.reads >= _POLICY_READS and self.elided * denominator < self.serialized * numerator:
                 self.elide = False
                 return True
+            if (
+                self.reads >= _POLICY_EARLY_READS
+                and self.elided * denominator * _POLICY_EARLY_FACTOR < self.serialized * numerator
+            ):
+                # 早い判断: 割合が下限の 1/`_POLICY_EARLY_FACTOR` にも届かない pair は、残りの読みで下限に届く見込みが
+                # 無い（token を置く読みは比べる費用だけを払う）
+                self.elide = False
+                return True
             return False
 
 
@@ -470,6 +480,14 @@ _POLICY_READS = 16
 #: 約 26〜33 ms で、損益の分かれ目は割合 0.26〜0.28（得をする variant の割合は 0.30〜0.58、実 run の
 #: 損をする pair は 0.001）
 _POLICY_MIN_SHARE = (1, 4)
+
+#: 早い判断をする読みの数と、その時点の割合の下限の倍率（割合 < 下限 / 倍率 なら止める）。最初の 1〜2 回の
+#: 読みでは得をする pair でも割合がほぼ 0（読みの後で pending な値を写し、以後の読みで closed になる）なので、
+#: 4 回目で判断する。4 回目の累積の割合は、recorded corpus の得をする variant が 0.155〜0.32、実 run の pair
+#: （最新 main + #241、固定 subset の 10 pair）が 0.022 以下で、下限の 1/4（0.0625）はその間のほぼ等比の中点
+#: （レビュー 7: 最初の 16 回の token を置く読みの比べる費用が、実 run の snapshot の時間の残りの増分だった）
+_POLICY_EARLY_READS = 4
+_POLICY_EARLY_FACTOR = 4
 
 
 _SCOPE_LOCK = threading.Lock()

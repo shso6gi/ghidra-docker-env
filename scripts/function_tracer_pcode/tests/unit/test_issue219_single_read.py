@@ -619,7 +619,11 @@ def test_the_policy_weighs_the_whole_read_all_leaves_closed_but_a_large_record_s
 
     metrics = _compare(factory, [("call", "canonical")] * (_POLICY_READS + 2), monkeypatch)
     counts = metrics["on"]["counts"]
-    assert counts["policy:elision_off"] == 1 and counts["bypass:elision_policy"] == 2
+    # 割合はほぼ 0（下限の 1/4 にも届かない）: 早い判断の読みで止める
+    from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import _POLICY_EARLY_READS
+
+    assert counts["policy:elision_off"] == 1
+    assert counts["bypass:elision_policy"] == _POLICY_READS + 2 - _POLICY_EARLY_READS
 
 
 def test_the_read_keeps_the_codec_copy_only_when_it_holds_tokens():
@@ -642,3 +646,63 @@ def test_the_read_keeps_the_codec_copy_only_when_it_holds_tokens():
     assert assemble_snapshot(tokens).semantic_fingerprint == body.semantic_fingerprint
     assert assemble_snapshot(plain).semantic_fingerprint == body.semantic_fingerprint
     assert not plain.placed and tokens.placed
+
+
+# ---------------------------------------------------------------------------
+# 方針の早い判断（レビュー 7: 実 run の pair が最初の 16 回の token を置く読みで比べる費用だけを払っていた）
+# ---------------------------------------------------------------------------
+
+
+def _policy_flip_read(shares) -> Any:
+    """読みごとの (直列化した byte, token に置いた byte) を方針へ渡し、止めた読みの番号（1 始まり。止めなければ None）。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import _ElisionPolicy
+
+    policy = _ElisionPolicy()
+    for index, (serialized, elided) in enumerate(shares, 1):
+        if policy.observe(serialized, elided):
+            return index
+    return None
+
+
+def test_the_policy_does_not_stop_on_the_first_reads_before_sealing_closes_values():
+    """得をする pair でも最初の読みでは割合がほぼ 0（読みの後で写した値が以後 closed になる）: 早い判断の前は止めない。"""
+
+    from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import _POLICY_EARLY_READS
+
+    reads = [(1000, 0)] * (_POLICY_EARLY_READS - 1) + [(1000, 900)] * 20
+    assert _policy_flip_read(reads) is None
+
+
+def test_the_policy_stops_at_the_early_read_when_the_share_is_far_below_the_bound():
+    from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import (
+        _POLICY_EARLY_FACTOR, _POLICY_EARLY_READS, _POLICY_MIN_SHARE,
+    )
+
+    numerator, denominator = _POLICY_MIN_SHARE
+    serialized = denominator * _POLICY_EARLY_FACTOR * 100
+    at_bound = numerator * 100  # ちょうど 下限 / 倍率
+    assert _policy_flip_read([(serialized, at_bound - 1)] * 30) == _POLICY_EARLY_READS
+    # 境界: ちょうど下限 / 倍率なら早い判断では止めない（16 回目の判断へ）
+    assert _policy_flip_read([(serialized, at_bound)] * 30) != _POLICY_EARLY_READS
+
+
+def test_the_policy_keeps_the_full_window_for_a_share_between_the_early_and_the_final_bound():
+    from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import _POLICY_READS
+
+    # 下限の 1/2（早い判断の下限より上、最終の下限より下）: 16 回目で止める
+    assert _policy_flip_read([(1000, 125)] * 30) == _POLICY_READS
+    # 下限以上: 止めない
+    assert _policy_flip_read([(1000, 250)] * 30) is None
+
+
+def test_the_policy_early_bound_separates_the_recorded_corpus_from_real_run_pairs():
+    """定数の根拠の固定（測った 4 回目の累積の割合: recorded corpus の得をする variant 0.155〜0.32、実 run の pair
+    0.022 以下）。どちらの側も早い判断の下限から 2 倍以上離れている。"""
+
+    from fractions import Fraction
+
+    from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import _POLICY_EARLY_FACTOR, _POLICY_MIN_SHARE
+
+    early = Fraction(*_POLICY_MIN_SHARE) / _POLICY_EARLY_FACTOR
+    assert Fraction(155, 1000) > 2 * early and Fraction(22, 1000) * 2 < early
