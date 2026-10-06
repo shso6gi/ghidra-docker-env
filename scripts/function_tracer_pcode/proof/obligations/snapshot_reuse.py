@@ -417,8 +417,7 @@ class SnapshotReuse:
             }
 
     def release(self) -> None:
-        """entry（token が持つ値への強参照、witness の写しと snapshot）を手放す（pair の終わりと、方針が
-        token を置かないに変わったとき。以後 entry を引く読みは無い）。"""
+        """entry（token が持つ値への強参照）を手放す。"""
 
         with self._lock:
             self._entries.clear()
@@ -598,9 +597,7 @@ def reuse_or_build(cls: Any, analysis: Any) -> Any:
     # 本体と同じ読み（1 回）。上げた例外はそのまま上げる（witness も snapshot も作らない）
     read = read_snapshot_inputs(analysis, hook)
     store.add_seconds("read", time.perf_counter() - started)
-    # この読みで方針が「置かない」に変わったか（変われば、以後この pair で witness を引くことは無い）
-    elision_ends = enabled and store.policy.observe(read.serialized_bytes, hook.elided)
-    if elision_ends:
+    if enabled and store.policy.observe(read.serialized_bytes, hook.elided):
         store.count("policy:elision_off")
     snapshot = None
     witness = None
@@ -624,7 +621,7 @@ def reuse_or_build(cls: Any, analysis: Any) -> Any:
         store.count("body_executions")
         snapshot = assemble_snapshot(read)
         store.add_seconds("body", time.perf_counter() - started)
-        if witness is not None and not elision_ends:
+        if witness is not None:
             try:
                 stored = store.put_if_absent(witness, snapshot)
             except RecursionError:
@@ -632,10 +629,6 @@ def reuse_or_build(cls: Any, analysis: Any) -> Any:
                 stored = False
             if stored:
                 store.count("stores")
-    if elision_ends:
-        # 以後の読みは witness を作らないので、保存した entry（witness の写しと snapshot）は二度と引かれない:
-        # pair の終わりまで持ち越さずに手放す（持ち越すと、残りの読みの間ずっと heap に残り GC の費用になる）
-        store.release()
     _seal_observed(store, hook.pending, read)
     return snapshot
 
