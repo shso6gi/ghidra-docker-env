@@ -550,6 +550,29 @@ def test_a_pair_that_elides_little_stops_eliding_and_still_matches_main(monkeypa
     assert counts["requests"] == _POLICY_READS + 4
 
 
+def test_a_pair_that_stops_eliding_releases_its_entries_and_stores_no_more(monkeypatch):
+    """方針が token を置かないに変わった読みで、保存した entry（witness の写しと snapshot）を手放し、以後は
+    保存しない（以後 entry を引く読みは無い: pair の残りの間 heap に残すと GC の費用になる。レビュー 7）。"""
+
+    from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse as reuse
+    from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import _POLICY_READS
+
+    seen = []
+    real = reuse.SnapshotReuse.put_if_absent
+
+    def put(self, witness, snapshot):
+        seen.append(("put", self.policy.elide))
+        return real(self, witness, snapshot)
+
+    monkeypatch.setattr(reuse.SnapshotReuse, "put_if_absent", put)
+    metrics = _compare(_open_state, [("call", "canonical")] * (_POLICY_READS + 4), monkeypatch)
+    on = metrics["on"]
+    assert on["counts"]["policy:elision_off"] == 1
+    # 陽性の対照: 方針を決める前の読みは保存していた
+    assert ("put", True) in seen and ("put", False) not in seen
+    assert on["entries"] == 0
+
+
 def test_a_pair_that_elides_most_keeps_reusing(monkeypatch):
     from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import _POLICY_READS
 

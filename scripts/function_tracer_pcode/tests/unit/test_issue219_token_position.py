@@ -113,3 +113,4 @@ def test_the_witness_compares_placed_tokens_only_in_the_semantic_fields():
     # 置いていない token は意味の値の位置でも token ではない
     stranger = reuse.ElidedSemanticValue(expr)
     assert reuse._Witness(("p",), (token_a,), placed_a) != reuse._Witness(("p",), (stranger,), placed_b)
+
