@@ -163,7 +163,7 @@ def test_a_fixed_read_overflow_is_recorded_as_a_pair_terminal_limitation():
     assert type(pending.exception) is FixedReadBoundExceeded
 
 
-_DEADLINE_OWNERS: frozenset = frozenset()
+_DEADLINE_OWNERS: frozenset = frozenset({"core/deadline.py"})
 """production で `DeadlineExceeded` を作ってよい module（#106 の deadline / checkpoint の owner が足す）。"""
 
 

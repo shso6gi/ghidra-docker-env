@@ -24,6 +24,13 @@ from scripts.function_tracer_pcode.core.errors import (
     AnalysisFailureError,
     pair_failure_scope,
 )
+# Issue #106 PR-106-A: 解析の期限。boundary が持つのは「どこで解析が終わり、どこからが
+# 確定処理か」の順序だけで、期限の規則は `core.deadline` にある。
+from scripts.function_tracer_pcode.core.deadline import (
+    ANALYSIS_COMPLETE_STAGE,
+    checkpoint as deadline_checkpoint,
+    finalization as deadline_finalization,
+)
 # Issue #22 PR-22-D: 式サイズ予算の scope（台帳と同じ寿命）と、authority 確定前の
 # 出力準備（G4-b）。boundary は順序だけを持ち、予算の値・大きさの勘定・payload の
 # 変換は `core.budget_policy` / `checker.output_preparation` が持つ。
@@ -343,6 +350,9 @@ def _run_legacy_with_pair_gate(
             function_name2,
             **kwargs,
         )
+        # Issue #106 PR-106-A: 解析の完了点。ここで期限を過ぎていれば、得られた結果
+        # （EQ / NOT_EQ を含む）を採らず G5 で deadline の限界として結果化する。
+        deadline_checkpoint(ANALYSIS_COMPLETE_STAGE)
     except AnalysisFailureError as exc:  # G5
         failure_result = pair_failure_result_for_exception(
             checker, exc, start_time=started, **names,
@@ -358,14 +368,17 @@ def _run_legacy_with_pair_gate(
             function_name2=function_name2,
             start_time=started,
         )
-    result = prepare_pair_output(  # G4-b
-        checker,
-        result,
-        function_name1=function_name1,
-        function_name2=function_name2,
-        start_time=started,
-        save_formula=bool(kwargs.get("save_formula", False)),
-    )
+    # 出力の準備は確定処理（期限で止めない。failure の結果化は `checker.pair_execution` が
+    # 自分で確定処理の区間を張る）
+    with deadline_finalization():
+        result = prepare_pair_output(  # G4-b
+            checker,
+            result,
+            function_name1=function_name1,
+            function_name2=function_name2,
+            start_time=started,
+            save_formula=bool(kwargs.get("save_formula", False)),
+        )
     return result
 
 
@@ -511,7 +524,8 @@ def run_check_from_binaries_with_v2_pilot(
         _attach_boundary_seconds(result, boundary_seconds)
         if getattr(result, "error_message", None):
             session.closed = True
-            error_artifact = _issue_legacy_boundary_error(session, result)
+            with deadline_finalization():
+                error_artifact = _issue_legacy_boundary_error(session, result)
             error_kind = error_artifact.error_kind.value
             error_artifact_digest = error_artifact.artifact_digest
             result.v2_legacy_error_authority = error_artifact
@@ -546,7 +560,9 @@ def run_check_from_binaries_with_v2_pilot(
         authority_finalize_started = time.monotonic()
         journal_stage_start("authority_finalize", {"kind": "boundary"})
         try:
-            evidence = _profiled_finish(connector, session, result)
+            # Issue #106 PR-106-A: authority の確定は期限で止めない（確定した判定を捨てない）
+            with deadline_finalization():
+                evidence = _profiled_finish(connector, session, result)
         except Exception as exc:
             boundary_seconds["authority_finalize"] = (
                 time.monotonic() - authority_finalize_started

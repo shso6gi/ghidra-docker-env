@@ -25,8 +25,9 @@ def main(argv) -> int:
     witnesses = []
     original_direct = z3_backend.Z3Solver.check_equivalence_direct
 
-    def _recording_direct(self, script, token=None):
-        result = original_direct(self, script, token)
+    # Issue #106 PR-106-A: adapter の `execute` は解析の期限（`not_after`）を keyword で渡す
+    def _recording_direct(self, script, token=None, **kwargs):
+        result = original_direct(self, script, token, **kwargs)
         if result.status.name == "SAT":
             witnesses.append(json.dumps(result.model, sort_keys=True))
         return result

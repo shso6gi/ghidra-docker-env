@@ -57,6 +57,22 @@ CLI_EPILOG = """
 """
 
 
+def _positive_seconds(text: str) -> float:
+    """正の有限な秒数（`--analysis-timeout`）。0・負・非数は起動時に拒む。
+
+    規則は `core.deadline.parse_budget_seconds`（runner の policy と共有）。
+    """
+
+    from scripts.function_tracer_pcode.core.deadline import parse_budget_seconds
+
+    try:
+        return parse_budget_seconds(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"must be a positive finite number of seconds: {text!r}"
+        ) from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     """CLI parser を構築する。"""
     parser = argparse.ArgumentParser(
@@ -91,6 +107,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=10,
         help="等価性判定のタイムアウト（秒）デフォルト: 10秒",
+    )
+    parser.add_argument(
+        "--analysis-timeout",
+        type=_positive_seconds,
+        default=None,
+        help=(
+            "解析全体の協調的な期限（秒、Issue #106）。check_from_binaries の開始から数え、"
+            "過ぎたら新しい解析・solver 問い合わせを始めず analysis_budget_exceeded の UNKNOWN "
+            "にする。デフォルト: 無し（期限なし）"
+        ),
     )
     parser.add_argument(
         "--save-formula",

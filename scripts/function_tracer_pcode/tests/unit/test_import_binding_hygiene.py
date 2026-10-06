@@ -30,6 +30,8 @@ import ast
 from collections import defaultdict
 from pathlib import Path
 
+from scripts.function_tracer_pcode.tests.unit._package_sources import parse_source
+
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -55,7 +57,7 @@ def _bound_names(stmt):
 
 def _duplicate_bindings(path):
     """`Module.body` 直下の import 文だけを見て、重複 binding を返す。"""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = parse_source(path)
     seen = defaultdict(list)
     for stmt in tree.body:
         if not isinstance(stmt, (ast.Import, ast.ImportFrom)):
@@ -86,7 +88,7 @@ def _shadowed_definitions(path):
     **どこからも呼ばれない死んだ code** にするので、読み手はそれを生きている
     実装だと思って読み、直したつもりで何も直らない。
     """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = parse_source(path)
     seen = defaultdict(list)
     for stmt in tree.body:
         if not isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -135,7 +137,7 @@ def _shadowed_class_members(path):
     代入なので同じ規則に入る。property の `setter` / `deleter` / `getter` と `@overload` は
     同じ名前を重ねるのが仕様なので除く。
     """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = parse_source(path)
     found = {}
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):

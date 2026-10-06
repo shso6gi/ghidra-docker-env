@@ -37,7 +37,8 @@ python3 -B -m scripts.function_tracer_pcode.cli.main \
           targets/EqBench/benchmarks/REVE/barthe2big/Eq/source/new-mips64-clang-O1 \
   -f f --emit-result-json -d
 # Other useful flags: --binary-ids A B, --equiv-timeout, --timeout (decompile), --pairwise-timeout[-hard],
-# --strategy, --list-functions, --assume-fp-non-nan, --no-retry-phases
+# --strategy, --list-functions, --assume-fp-non-nan, --no-retry-phases,
+# --analysis-timeout SECONDS (cooperative pair deadline, off by default; core/deadline.py)
 
 # Record a Ghidra P-code fixture (needs PyGhidra; see tests/fixtures/pcode/SCHEMA.md).
 # Binaries must come from a writable working root, not from targets/EqBench.
@@ -62,7 +63,7 @@ The suite is pure Python except one opt-in smoke test (`RUN_PYGHIDRA_REGRESSIONS
 
 ### EqBench matrix runs
 
-- `eqbench_run_all_32jobs.sh` — compiles every EqBench `Eq/newV.c`/`new.c` via `scripts/eqbench/compile_all_arm_mips.sh` (arm64/mips64 × gcc/clang × O0–O3), then runs the pairwise **Eq** matrix per function. `neqbench_run_all_32jobs.sh` — **Neq** same-ISA closure (8×8 ARM64 + 8×8 MIPS64 pairs per function). Both are driven entirely by env vars (`OUTPUT_BASE_DIR`, `PARALLEL_JOBS`, `EQBENCH_SAMPLE_FILTER`, `EQBENCH_PAIR_FILTER`, `EQBENCH_RUN_SCOPE=REPRESENTATIVE|FULL_EQBENCH`, `EQBENCH_BUILD_POLICY=REUSE_OR_COMPILE|PREBUILT_ONLY|FRESH_ONLY`, `SKIP_COMPLETED_RESULTS`, `ERROR_ONLY_RERUN`, `EQBENCH_RERUN_MANIFEST`, `DRY_RUN=1`, `EQBENCH_DEBUG=1`, timeouts). Outputs go to `logs/EqBench/...` (git-ignored, currently ~24 GB of history — don't delete without asking).
+- `eqbench_run_all_32jobs.sh` — compiles every EqBench `Eq/newV.c`/`new.c` via `scripts/eqbench/compile_all_arm_mips.sh` (arm64/mips64 × gcc/clang × O0–O3), then runs the pairwise **Eq** matrix per function. `neqbench_run_all_32jobs.sh` — **Neq** same-ISA closure (8×8 ARM64 + 8×8 MIPS64 pairs per function). Both are driven entirely by env vars (`OUTPUT_BASE_DIR`, `PARALLEL_JOBS`, `EQBENCH_SAMPLE_FILTER`, `EQBENCH_PAIR_FILTER`, `EQBENCH_RUN_SCOPE=REPRESENTATIVE|FULL_EQBENCH`, `EQBENCH_BUILD_POLICY=REUSE_OR_COMPILE|PREBUILT_ONLY|FRESH_ONLY`, `SKIP_COMPLETED_RESULTS`, `ERROR_ONLY_RERUN`, `EQBENCH_RERUN_MANIFEST`, `DRY_RUN=1`, `EQBENCH_DEBUG=1`, timeouts). `ANALYSIS_TIMEOUT` is the per-pair analysis deadline (default 410 s full / 110 s subset with margins 190 s / 130 s, `0` = off) and must satisfy `ANALYSIS_TIMEOUT + ANALYSIS_TIMEOUT_MARGIN <= PAIR_PROCESS_TIMEOUT`, checked by `reporting/runner_timeout_policy.py` before a run starts (exit 1 otherwise; `PAIR_PROCESS_TIMEOUT` is never raised automatically). Outputs go to `logs/EqBench/...` (git-ignored, currently ~24 GB of history — don't delete without asking).
 - `rerun_eqbench_errors.sh` — builds `logs/EqBench/error_rerun_manifest.tsv` via `scripts/eqbench/error_rerun_manifest.py` and re-runs only ERROR pairs through the two runners above.
 - Both runners `source scripts/validation_matrix_common.sh` (before/after snapshotting of `OUTPUT_BASE_DIR`, log classification, resume policy) and require bash ≥ 4.3 (`wait -n`).
 - Per-pair execution is wrapped by `equivalence.v2.process_supervisor_command`, which signs receipts with per-run worker/supervisor keys under `tmp/`; a pair's final status comes from `equivalence.v2.pair_status_authority` / `canonical_result`, never from grepping the log. Summaries come from `validation.result_summary`.

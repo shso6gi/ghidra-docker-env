@@ -17,6 +17,10 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.core.intrinsics import resolve_pcode_intrinsic
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+from scripts.function_tracer_pcode.core.deadline import hot_checkpoint as deadline_hot_checkpoint
+
+#: Issue #106 PR-106-A: 展開の checkpoint の stage
+EXPAND_STAGE = "expand"
 from scripts.function_tracer_pcode.analysis.condition import (
     ConditionSimplifier,
     ConditionNormalizer,
@@ -833,6 +837,8 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
         depth: int
     ) -> List[ExpandedValue]:
         """MULTIEQUAL入力内の演算を展開"""
+        # Issue #106 PR-106-A: 演算 1 つの展開を始める境界（頻繁なので時計は間引く）
+        deadline_hot_checkpoint(EXPAND_STAGE)
         mnemonic = pcode_op.getMnemonic()
         num_inputs = pcode_op.getNumInputs()
         

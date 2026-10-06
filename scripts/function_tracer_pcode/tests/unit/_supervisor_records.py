@@ -152,6 +152,12 @@ class ChildRecords:
         return self.directory / "stopped.json"
 
     @property
+    def finish(self) -> Path:
+        """``Stop(leader_exits_first=True)`` の worker が、残りの thread で process を終える合図
+        （FIFO。test が 1 byte 書く）。"""
+        return self.directory / "finish.fifo"
+
+    @property
     def faults(self) -> Path:
         return self.directory / "faults-fired.jsonl"
 

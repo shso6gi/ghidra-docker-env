@@ -28,6 +28,56 @@ print(_positive_int_setting(name, int(sys.argv[2]), {name: sys.argv[1]}))
     fi
 }
 
+# Issue #106 PR-106-B: 解析の期限（ANALYSIS_TIMEOUT）と process の期限の整合。
+#
+# 規則（書式・既定・OFF・`ANALYSIS_TIMEOUT + ANALYSIS_TIMEOUT_MARGIN <= PAIR_PROCESS_TIMEOUT`）は
+# `reporting/runner_timeout_policy.py` にだけあり、ここは呼んで結果を変数へ移すだけ。
+# 未指定・空の ANALYSIS_TIMEOUT / ANALYSIS_TIMEOUT_MARGIN は profile の既定になる: 第 2 引数に
+# profile の manifest（固定 subset の eqbench_subset.json）を渡せばその run_settings、空なら full。
+# 失敗（不正値・不整合・Python を呼べない）は 1 を返す: 呼び出し側は pair を始めずに exit 1 する
+# （`validation_positive_int_setting` と違って既定値へ戻さない。期限の取り違えは静かに直さない）。
+#
+# 成功すると次を設定する:
+#   ANALYSIS_TIMEOUT_MANIFEST_LINES  run manifest に書く key=value 行（key の一覧も module が持つ）
+#   ANALYSIS_TIMEOUT_SECONDS         実効値（0 = OFF）
+#   ANALYSIS_TIMEOUT_MARGIN_SECONDS  実効の余裕
+#   ANALYSIS_TIMEOUT_CLI_ARGS        pair の CLI へ足す引数（OFF なら空の配列）
+validation_resolve_analysis_timeout_policy() {
+    local python_bin="$1"
+    local profile_manifest="${2-}"
+    local repo_root="${3:-${SCRIPT_DIR:-.}}"
+    local -a default_args=()
+    if [[ -n "$profile_manifest" ]]; then
+        default_args=(--profile-manifest "$profile_manifest")
+    fi
+    local lines
+    lines="$(
+        cd "$repo_root" &&
+        "$python_bin" -B -m scripts.function_tracer_pcode.reporting.runner_timeout_policy \
+            resolve \
+            --analysis-timeout "${ANALYSIS_TIMEOUT-}" \
+            --analysis-timeout-margin "${ANALYSIS_TIMEOUT_MARGIN-}" \
+            --pair-process-timeout "${PAIR_PROCESS_TIMEOUT-}" \
+            ${default_args[@]+"${default_args[@]}"}
+    )" || return 1
+    local timeout enabled margin
+    timeout="$(printf '%s\n' "$lines" | awk -F= '$1 == "analysis_timeout" {print $2}')"
+    enabled="$(printf '%s\n' "$lines" | awk -F= '$1 == "analysis_timeout_enabled" {print $2}')"
+    margin="$(printf '%s\n' "$lines" | awk -F= '$1 == "analysis_timeout_margin" {print $2}')"
+    if [[ ! "$timeout" =~ ^[0-9]+([.][0-9]+)?$ || ! "$enabled" =~ ^[01]$ \
+        || ! "$margin" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "Error: the analysis timeout policy printed no effective values" >&2
+        return 1
+    fi
+    ANALYSIS_TIMEOUT_MANIFEST_LINES="$lines"
+    ANALYSIS_TIMEOUT_SECONDS="$timeout"
+    ANALYSIS_TIMEOUT_MARGIN_SECONDS="$margin"
+    ANALYSIS_TIMEOUT_CLI_ARGS=()
+    if [[ "$enabled" == "1" ]]; then
+        ANALYSIS_TIMEOUT_CLI_ARGS=(--analysis-timeout "$timeout")
+    fi
+}
+
 # 実行記録の 1 行に安全に埋め込める形へ整える（改行・復帰を潰す）。
 validation_manifest_value() {
     printf '%s' "${1-}" | tr '\r\n' '  '

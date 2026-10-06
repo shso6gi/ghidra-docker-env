@@ -77,12 +77,31 @@ class Envelope:
     #: 書き換えたあと ``envelope_digest`` を計算し直す（封は正しいまま、中身
     #: だけが食い違う envelope になる）。
     reseal: bool = False
+    #: その outcome を作る driver（``None`` なら ``OUTCOME_DRIVERS[outcome]``）。
+    #: Issue #106 PR-106-A: ``"deadline"`` は解析の期限の限界で UNKNOWN にする。
+    driver: Optional[str] = None
 
     def to_json(self) -> dict[str, Any]:
         return {
             "step": "envelope", "outcome": self.outcome,
-            "corrupt": self.corrupt, "reseal": self.reseal,
+            "corrupt": self.corrupt, "reseal": self.reseal, "driver": self.driver,
         }
+
+
+@dataclass(frozen=True)
+class StuckSolverWorker:
+    """Issue #106 PR-106-A（E14）: 止められない solver worker を解析の期限の中で走らせる。
+
+    production の `ParallelSolverRunner.run_parallel` が、中断に応じない backend（能力を
+    主張しない adapter）を ``budget`` 秒の期限つきで実行する。runner は止められないと
+    検出したら（その事実を child の記録へ書く）worker が自分で返るまで待つので、child は
+    結果を出さずに supervisor の deadline を迎える。
+    """
+
+    budget: float = 3.0
+
+    def to_json(self) -> dict[str, Any]:
+        return {"step": "stuck_solver_worker", "budget": self.budget}
 
 
 @dataclass(frozen=True)
@@ -106,13 +125,71 @@ class Stop:
     ignore_sigterm: bool = False
     exit_on_sigterm: Optional[int] = None
     exit_on_sigusr1: Optional[int] = None
+    #: Issue #226: SIGUSR1 で leader thread だけが先に終わり、test が ``finish`` に書いてから
+    #: 別の thread が process を終える（``_supervisor_faults.stop_here``）
+    leader_exits_first: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return {
             "step": "stop", "ignore_sigterm": self.ignore_sigterm,
             "exit_on_sigterm": self.exit_on_sigterm,
             "exit_on_sigusr1": self.exit_on_sigusr1,
+            "leader_exits_first": self.leader_exits_first,
         }
+
+
+#: ``PairDiagnostics.registration``: production の登録
+REGISTRATION_PRODUCTION = "production"
+#: 宣言（外れた後は無視）が成り立たない child: production の登録の後で、登録前の disposition を
+#: 既定（terminate）に置き換える（修正前の登録と同じ disposition で、readiness は宣言付き）。
+#: supervisor は宣言を信じて送るので、signal で死んだ child の結果を終端の規則が拒むことの対照
+REGISTRATION_DECLARATION_DOES_NOT_HOLD = "declaration_does_not_hold"
+
+
+@dataclass(frozen=True)
+class PairDiagnostics:
+    """Issue #204: production の ``cli.pair_diagnostics.install_pair_diagnostics`` で pair の
+    journal を開き、stack dump の handler（SIGUSR1）を登録する（supervisor の送信の readiness）。"""
+
+    journal: str
+    dump: str
+    registration: str = REGISTRATION_PRODUCTION
+
+    def to_json(self) -> dict[str, Any]:
+        return {"step": "pair_diagnostics", "journal": self.journal, "dump": self.dump,
+                "registration": self.registration}
+
+
+#: ``AwaitDiagnosticSignal.after``: signal を受けた後、CLI code で終わる（deadline の前の終了）
+AFTER_SIGNAL_EXIT = "exit"
+#: signal を受けた後も終わらない（deadline の SIGTERM で終わる）
+AFTER_SIGNAL_STAY = "stay"
+
+
+@dataclass(frozen=True)
+class AwaitDiagnosticSignal:
+    """Issue #204: 結果を出し終えた child が、終了処理の途中で supervisor の診断 signal を受ける。
+
+    ``finalized``: CPython の interpreter 終了処理（``_PyFaulthandler_Fini``）と同じく
+    ``faulthandler.unregister(SIGUSR1)`` で登録前の disposition へ戻す。``False`` なら handler を
+    残す（dump を書く対照）。
+
+    待ちは event だけ: child は開始時から SIGUSR1 を全 thread で block しており
+    （``_block_the_diagnostic_signal``）、supervisor の送った signal が pending になるのを待つ
+    （``records.directory / "diagnostic_signal.json"`` に記録）。block を外した瞬間に、その時点の
+    disposition で配送される（block していなければ届いた時点で配送されるのと同じ disposition）。
+    その後は ``after``: ``exit`` なら CLI code で終わり（``exiting.json``）、``stay`` なら deadline の
+    SIGTERM まで待つ。
+    """
+
+    finalized: bool
+    #: handler の dump の書き出し先（``PairDiagnostics.dump`` と同じ）
+    dump: str
+    after: str = AFTER_SIGNAL_EXIT
+
+    def to_json(self) -> dict[str, Any]:
+        return {"step": "await_diagnostic_signal", "finalized": self.finalized, "dump": self.dump,
+                "after": self.after}
 
 
 @dataclass(frozen=True)
@@ -343,11 +420,55 @@ def _drive_error(session: Any) -> bool:
     return False
 
 
+def _drive_deadline_limitation(session: Any) -> bool:
+    """解析の期限を production の `core.deadline` で切らせ、その限界を production の帰属で
+    authority の cause にする（Issue #106 PR-106-A、E6）。"""
+
+    import time
+
+    from scripts.function_tracer_pcode.authority.decision.limitation_attribution import (
+        attribute_analysis_limitation,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        production_signal_scope,
+    )
+    from scripts.function_tracer_pcode.core.deadline import (
+        DeadlinePolicy,
+        checkpoint,
+        deadline_scope,
+    )
+    from scripts.function_tracer_pcode.core.errors import DeadlineExceeded, pair_failure_scope
+
+    offset = [0.0]
+    policy = DeadlinePolicy(budget_seconds=1.0, clock=lambda: time.monotonic() + offset[0])
+    limitation = None
+    with production_signal_scope(session), pair_failure_scope(
+        ("supervisor-harness",), session.identity.result_occurrence_id,
+    ) as ledger:
+        with deadline_scope(policy):
+            offset[0] = 10.0
+            try:
+                checkpoint("solver")
+            except DeadlineExceeded as exc:
+                limitation = exc
+        if limitation is None or ledger.pending_failure() is None:
+            raise FixtureFailure("the deadline did not trip")
+        attribution = attribute_analysis_limitation(session, limitation)
+        if not attribution.is_attributed:
+            raise FixtureFailure(f"deadline limitation was not attributed: {attribution.detail}")
+    return False
+
+
 #: canonical outcome -> (session を駆動して legacy の is_timeout を返す関数)。
 OUTCOME_DRIVERS: dict[str, Callable[[Any], bool]] = {
     "TIMEOUT": _drive_solver_timeout,
     "UNKNOWN": _drive_open_requirement,
     "ERROR": _drive_error,
+}
+
+#: 名前つきの driver（``Envelope(driver=...)``）。outcome は ``Envelope.outcome`` で要求する。
+NAMED_OUTCOME_DRIVERS: dict[str, Callable[[Any], bool]] = {
+    "deadline": _drive_deadline_limitation,
 }
 
 
@@ -365,9 +486,10 @@ def _step_envelope(context: _ChildContext, step: Mapping[str, Any]) -> None:
     from scripts.function_tracer_pcode.smt.parallel import ParallelResult
 
     requested = step["outcome"]
-    driver = OUTCOME_DRIVERS.get(requested)
+    named = step.get("driver")
+    driver = NAMED_OUTCOME_DRIVERS.get(named) if named else OUTCOME_DRIVERS.get(requested)
     if driver is None:
-        raise FixtureFailure(f"no driver produces canonical {requested}")
+        raise FixtureFailure(f"no driver produces canonical {requested} ({named})")
     session = context.session
     is_timeout = driver(session)
     evidence = context.connector.finish(
@@ -442,7 +564,135 @@ def _step_stop(context: _ChildContext, step: Mapping[str, Any]) -> None:
     stop_here(
         context.records, point="step:stop", ignore_sigterm=step["ignore_sigterm"],
         exit_on_sigterm=step["exit_on_sigterm"], exit_on_sigusr1=step["exit_on_sigusr1"],
+        leader_exits_first=step["leader_exits_first"],
     )
+
+
+def _step_pair_diagnostics(context: _ChildContext, step: Mapping[str, Any]) -> None:
+    import faulthandler
+    import signal as signals
+    import types
+
+    from scripts.function_tracer_pcode.cli.pair_diagnostics import install_pair_diagnostics
+
+    state = install_pair_diagnostics(types.SimpleNamespace(
+        stage_journal=step["journal"], stack_dump_file=step["dump"], stack_dump_artifact=None,
+    ))
+    if not state.handler_registered:
+        raise FixtureFailure(f"the stack dump handler was not registered: {state.registration_error}")
+    if step["registration"] == REGISTRATION_DECLARATION_DOES_NOT_HOLD:
+        faulthandler.unregister(signals.SIGUSR1)
+        signals.signal(signals.SIGUSR1, signals.SIG_DFL)
+        faulthandler.register(signals.SIGUSR1, file=state.dump_file, all_threads=True, chain=False)
+    elif step["registration"] != REGISTRATION_PRODUCTION:
+        raise FixtureFailure(f"unknown registration: {step['registration']!r}")
+
+
+def _cli_code(context: _ChildContext) -> int:
+    from scripts.function_tracer_pcode.authority.contracts import (
+        CLI_EXIT_CODE_BY_OUTCOME,
+        Outcome,
+    )
+
+    return (
+        0 if context.emitted_outcome is None
+        else CLI_EXIT_CODE_BY_OUTCOME[Outcome(context.emitted_outcome)]
+    )
+
+
+def _step_await_diagnostic_signal(context: _ChildContext, step: Mapping[str, Any]) -> None:
+    import faulthandler
+    import signal as signals
+    import time
+
+    sys.stdout.flush()
+    dump = Path(step["dump"])
+    # SIGUSR1 は child の開始時から全 thread で block している（``_block_the_diagnostic_signal``）。
+    # block した signal は pending になり、無視の disposition でも捨てられない（Linux は block 中の
+    # signal を ignore 扱いにしない）。どの thread も受け取らないので、下の unblock まで pending のまま。
+    unblocked = [
+        task for task in os.listdir("/proc/self/task")
+        if not _signal_blocked_in(task, signals.SIGUSR1)
+    ]
+    if unblocked:
+        raise FixtureFailure(f"threads that do not block SIGUSR1: {unblocked}")
+    if step["finalized"]:
+        faulthandler.unregister(signals.SIGUSR1)
+    write_json(context.records.stopped, {"pid": os.getpid(), "point": "await_diagnostic_signal",
+                                          "finalized": step["finalized"], "epoch": time.time()})
+    while signals.SIGUSR1 not in signals.sigpending():
+        time.sleep(0.01)
+    write_json(context.records.directory / "diagnostic_signal.json", {
+        "pending_epoch": time.time(), "finalized": step["finalized"],
+        "dump_bytes_before_delivery": dump.stat().st_size if dump.is_file() else 0,
+    })
+    # ここで main thread に配送される: 無視なら何も起きず、handler なら dump を書き、既定なら
+    # child は死ぬ
+    signals.pthread_sigmask(signals.SIG_UNBLOCK, {signals.SIGUSR1})
+    write_json(context.records.directory / "exiting.json", {
+        "epoch": time.time(), "dump_bytes": dump.stat().st_size if dump.is_file() else 0,
+    })
+    if step["after"] == AFTER_SIGNAL_STAY:
+        while True:
+            signals.pause()
+    raise SystemExit(_cli_code(context))
+
+
+def _signal_blocked_in(task: str, number: int) -> bool:
+    for line in Path(f"/proc/self/task/{task}/status").read_text().splitlines():
+        if line.startswith("SigBlk:"):
+            return bool((int(line.split()[1], 16) >> (int(number) - 1)) & 1)
+    return False
+
+
+def _block_the_diagnostic_signal(spec: Mapping[str, Any]) -> None:
+    """``await_diagnostic_signal`` の script では、child の開始時に SIGUSR1 を block する。
+
+    後から作られる thread（native を含む）は mask を継承するので、supervisor の signal はどの
+    thread にも配送されず、step が block を外すまで pending で待つ。開始時に 1 thread である
+    ことが前提（既存の thread は mask を継承しない）。
+    """
+
+    import signal as signals
+
+    if not any(step["step"] == "await_diagnostic_signal" for step in spec["steps"]):
+        return
+    threads = os.listdir("/proc/self/task")
+    if len(threads) != 1:
+        raise FixtureFailure(f"the child must start single-threaded to block SIGUSR1: {threads}")
+    signals.pthread_sigmask(signals.SIG_BLOCK, {signals.SIGUSR1})
+
+
+def _step_stuck_solver_worker(context: _ChildContext, step: Mapping[str, Any]) -> None:
+    import threading
+
+    from scripts.function_tracer_pcode.core.deadline import DeadlinePolicy, deadline_scope
+    from scripts.function_tracer_pcode.smt import parallel
+    from scripts.function_tracer_pcode.smt.interface import SMTSolver
+
+    records = context.records.directory
+    never = threading.Event()
+
+    class _Blocking(SMTSolver):
+        @property
+        def name(self):
+            return "blocking"
+
+        def check_availability(self):
+            return True, "harness"
+
+        def check_equivalence_direct(self, smt_script, cancellation_token=None):
+            write_json(records / "stuck_worker_started.json", {"pid": os.getpid()})
+            never.wait()  # 中断にも timeout にも応じない
+
+    def _note(note, payload=None):
+        write_json(records / f"{note}.json", dict(payload or {}))
+
+    parallel.journal_note = _note
+    runner = parallel.ParallelSolverRunner(timeout=30, solver_classes=[_Blocking])
+    with deadline_scope(DeadlinePolicy(budget_seconds=float(step["budget"]), sub_operation_margin_seconds=0.0)):
+        runner.run_parallel("(check-sat)")
+    raise FixtureFailure("the runner returned while a worker could not be stopped")
 
 
 STEP_HANDLERS: dict[str, Callable[[_ChildContext, Mapping[str, Any]], None]] = {
@@ -450,6 +700,9 @@ STEP_HANDLERS: dict[str, Callable[[_ChildContext, Mapping[str, Any]], None]] = {
     "envelope": _step_envelope,
     "exit": _step_exit,
     "stop": _step_stop,
+    "stuck_solver_worker": _step_stuck_solver_worker,
+    "pair_diagnostics": _step_pair_diagnostics,
+    "await_diagnostic_signal": _step_await_diagnostic_signal,
 }
 
 
@@ -459,6 +712,11 @@ def main(arguments: list[str]) -> int:
     )
 
     spec = json.loads(arguments[0])
+    try:
+        _block_the_diagnostic_signal(spec)
+    except FixtureFailure as exc:
+        print(f"harness child: fixture failure: {exc}", file=sys.stderr)
+        return FIXTURE_FAILURE_EXIT
     # exec しても start time は変わらないので、Popen の直後に supervisor 側が
     # 記録した identity と同じものになる。
     records = HarnessRecords(Path(spec["records"])).child(

@@ -34,6 +34,11 @@ from scripts.function_tracer_pcode.checker.pair_execution import (
     pair_stop_state,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
+from scripts.function_tracer_pcode.core.deadline import checkpoint as deadline_checkpoint
+
+#: Issue #106 PR-106-A: phase / 再試行を始める境界の checkpoint の stage
+PHASE_STAGE = "phase_plan"
+PHASE_RETRY_STAGE = "phase_retry"
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixResult
 
 
@@ -269,6 +274,8 @@ def _run_phase_stages(
                 f"pair execution is terminal ({pair_stop_state().value})"
             )
             break
+        # Issue #106 PR-106-A: 期限を過ぎていれば phase を始めない（台帳にまだ何も無くても）
+        deadline_checkpoint(PHASE_STAGE)
 
         checker._debug_print("=" * 60)
         checker._debug_print(f"Phase {phase_id.value}: {phase_spec.description}")
@@ -404,6 +411,7 @@ def _run_phase_stages(
             if retry_with_type_fix and will_try_phase4b:
                 abi_constraints = checker.phase_handler.run_phase4_mips64_retry(result, ctx)
                 if abi_constraints:
+                    deadline_checkpoint(PHASE_RETRY_STAGE)
                     phase4b_result = checker._retry_with_iterative_abi_constraints(
                         ctx, abi_constraints, retry_count=retry_count + 1
                     )
@@ -546,6 +554,7 @@ def _run_phase4a_tail(
     type_fixer2,
     retry_with_type_fix: bool,
 ):
+    deadline_checkpoint(PHASE_RETRY_STAGE)
     phase4a_spec = PhaseSpec(PhaseID.P4A_MIPS64_ABI, "MIPS64 ABI param fix (conservative)")
     phase_timeline = phase_timeline_of(checker)
 
@@ -695,6 +704,7 @@ def _maybe_retry_sat_return_type_fix(
     if not (should_fix1 or should_fix2):
         return result, attempt_id, False
 
+    deadline_checkpoint(PHASE_RETRY_STAGE)
     checker._debug_print(
         "Phase 4-C: SAT persists, attempting suspicious return type fix"
     )

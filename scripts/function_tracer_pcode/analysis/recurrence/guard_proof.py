@@ -13,6 +13,7 @@ from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.core.structural import unidentified_identity
 from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
+from scripts.function_tracer_pcode.smt.parallel import run_backend_query
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     ConditionConstraintSet,
     ConditionNormalizer,
@@ -52,7 +53,7 @@ def _impl__condition_conjunction_unsat_with_solver(
     if not usable or not script:
         return None
     try:
-        result = Z3Solver(timeout=timeout, debug=False).check_equivalence_direct(script)
+        result = run_backend_query(Z3Solver(timeout=timeout, debug=False), script)
     except Exception:
         return None
     if result.status == SolverStatus.UNSAT:
@@ -743,8 +744,7 @@ def _impl__prove_expression_equivalence_under_conditions(
     query = self._build_expression_equivalence_query(left, right, conditions, parameters)
     if not query:
         return False
-    solver = Z3Solver(timeout=2, debug=self.debug)
-    result = solver.check_equivalence_direct(query)
+    result = run_backend_query(Z3Solver(timeout=2, debug=self.debug), query)
     return result.status == SolverStatus.UNSAT
 
 def _impl__negate_simple_condition_set(

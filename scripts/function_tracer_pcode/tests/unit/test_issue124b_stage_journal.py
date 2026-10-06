@@ -125,6 +125,17 @@ def restore_sigusr1():
         pass
 
 
+@pytest.fixture(autouse=True)
+def _keep_the_sigusr1_disposition():
+    """Issue #204: production の登録は SIGUSR1 を「無視」にしてから handler を付ける（外れた後も
+    無視のまま）。test の process にそれを残すと、後の test の subprocess が無視を継承するので、
+    登録を呼ぶ test の前後で disposition を元へ戻す。"""
+
+    before = signal.getsignal(STACK_DUMP_SIGNAL)
+    yield
+    signal.signal(STACK_DUMP_SIGNAL, before)
+
+
 # --------------------------------------------------------------------------
 # 1. 行 schema と seq
 # --------------------------------------------------------------------------
@@ -343,10 +354,19 @@ class _RecordingFaulthandler:
     def __init__(self, error=None):
         self.calls = []
         self.error = error
+        #: Issue #204: the order of unregister / register
+        self.order = []
+
+    def unregister(self, signum):
+        self.order.append("unregister")
+        return False
 
     def register(self, signum, file=None, all_threads=None, chain=None):
+        self.order.append("register")
         self.calls.append(
-            {"signum": signum, "file": file, "all_threads": all_threads, "chain": chain}
+            {"signum": signum, "file": file, "all_threads": all_threads, "chain": chain,
+             # Issue #204: faulthandler が「登録前の disposition」として覚える値
+             "disposition_at_register": signal.getsignal(signum)}
         )
         if self.error is not None:
             raise self.error
@@ -409,6 +429,63 @@ def test_registration_failure_writes_a_note_and_no_handler_registered(
     assert len(notes) == 1
     assert notes[0]["payload"]["note"] == "handler_registration_failed:RuntimeError"
     assert notes[0]["payload"]["phase"] == "register"
+
+
+def _python_handler(signum, frame):  # pragma: no cover - never delivered
+    pass
+
+
+def test_registration_ignores_the_signal_before_registering_and_declares_it(
+    tmp_path, journal, monkeypatch
+):
+    """Issue #204: faulthandler restores the disposition it saw at registration when it unloads.
+    The registration first drops an earlier registration (re-registering keeps the earlier
+    disposition), then sets SIG_IGN, then registers; the readiness declares the result."""
+
+    signal.signal(STACK_DUMP_SIGNAL, _python_handler)
+    stub = _RecordingFaulthandler()
+    monkeypatch.setattr(pair_diagnostics, "faulthandler", stub)
+
+    state = register_stack_dump_handler(_state(tmp_path))
+
+    assert state.handler_registered is True
+    assert stub.order == ["unregister", "register"]
+    assert stub.calls[0]["disposition_at_register"] is signal.SIG_IGN
+    assert state.payload["disposition_after_unregister"] == "ignore"
+    assert state.payload.get("replaced_registration") is False
+
+
+def test_a_failed_registration_restores_the_disposition_it_changed(
+    tmp_path, journal, monkeypatch
+):
+    """Issue #204: SIG_IGN is set only for the registration; a failure puts back what was there."""
+
+    signal.signal(STACK_DUMP_SIGNAL, _python_handler)
+    monkeypatch.setattr(
+        pair_diagnostics, "faulthandler", _RecordingFaulthandler(error=RuntimeError("no")))
+
+    state = register_stack_dump_handler(_state(tmp_path))
+
+    assert state.handler_registered is False
+    assert signal.getsignal(STACK_DUMP_SIGNAL) is _python_handler
+    rows, _ = read_journal(journal.path)
+    notes = [row for row in rows if row["event"] == EVENT_NOTE]
+    assert notes[0]["payload"].get("disposition") == "restored"
+
+
+def test_a_failure_before_the_disposition_changes_reports_it_unchanged(
+    tmp_path, journal, monkeypatch
+):
+    signal.signal(STACK_DUMP_SIGNAL, _python_handler)
+    state = PairDiagnostics(dump_path_tmp=str(tmp_path), dump_artifact_path=None)  # a directory
+
+    register_stack_dump_handler(state)
+
+    assert signal.getsignal(STACK_DUMP_SIGNAL) is _python_handler
+    rows, _ = read_journal(journal.path)
+    notes = [row for row in rows if row["event"] == EVENT_NOTE]
+    assert (notes[0]["payload"]["phase"], notes[0]["payload"].get("disposition")) == (
+        "open_dump_file", "unchanged")
 
 
 def test_an_unopenable_dump_file_never_claims_readiness(tmp_path, journal, monkeypatch):
@@ -991,6 +1068,8 @@ def test_no_module_reads_the_journal_to_decide_anything():
         "journal_event", "journal_stage_start", "journal_stage_end",
         "journal_counter", "journal_note", "journal_region_start",
         "journal_region_end", "journal_region_reentry",
+        # 行の語彙（Issue #106 PR-106-B review 4: 読み手は event の一覧と終わりの行で行の契約を確かめる）
+        "EVENT_JOURNAL_END", "JOURNAL_EVENTS",
     }
     # journal を「開いて所有する」ことが許されるのは CLI の設置点と再公開だけ。
     owners = {"cli.pair_diagnostics", "checker.diagnostics"}

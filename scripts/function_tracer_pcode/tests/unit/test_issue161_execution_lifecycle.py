@@ -317,8 +317,18 @@ def test_an_unknown_first_check_follows_the_interruption_rule(monkeypatch, reaso
     assert _standalone(ALREADY_CANONICAL, timeout=1, token=token).status == expected
 
 
-@pytest.mark.parametrize("stop, expected", [("cancel", UNKNOWN), ("deadline", TIMEOUT), (None, SolverStatus.ERROR)])
-def test_an_execution_that_raises_is_classified_by_the_same_rule(monkeypatch, stop, expected):
+# Issue #106 PR-106-A で改めた規則: 例外が中断によるものかは、中断の仕組みが働いた証拠で決める
+# （明示の中止は #206 のまま優先）。時計が期限を過ぎたことだけでは、独立した故障を時間切れに
+# しない。中止で止まった実行の独立した故障は `observed_failure` に残る
+@pytest.mark.parametrize("stop, signal, expected, failure_kept", [
+    ("cancel", False, UNKNOWN, True),               # 明示の中止が優先、故障の事実は残す
+    ("cancel", True, UNKNOWN, False),               # 中止の合図（想定内）
+    ("deadline", False, SolverStatus.ERROR, False),  # 時計の超過だけ: 独立した故障
+    ("deadline", True, TIMEOUT, False),             # 与えた時間を使い切り、z3 の中断の合図
+    (None, True, SolverStatus.ERROR, False),        # 合図だけで、中断の仕組みは働いていない
+    (None, False, SolverStatus.ERROR, False),
+])
+def test_an_execution_that_raises_is_classified_by_the_same_rule(monkeypatch, stop, signal, expected, failure_kept):
     token = _Token()
 
     def _raise():
@@ -326,10 +336,14 @@ def test_an_execution_that_raises_is_classified_by_the_same_rule(monkeypatch, st
             token.cancel()
         elif stop == "deadline":
             time.sleep(1.1)
+        if signal:
+            raise z3.Z3Exception("canceled")
         raise RuntimeError("backend failure")
 
     _script_solvers(monkeypatch, during_first_check=_raise)
-    assert _standalone(ALREADY_CANONICAL, timeout=1, token=token).status == expected
+    row = _standalone(ALREADY_CANONICAL, timeout=1, token=token)
+    assert row.status == expected
+    assert (row.observed_failure is not None) is failure_kept
 
 
 # ---------------------------------------------------------------------------

@@ -52,6 +52,8 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import pytest
 
+from scripts.function_tracer_pcode.tests.unit._package_sources import parse_source
+
 
 PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[2]
 PACKAGE_PREFIX = "scripts.function_tracer_pcode."
@@ -528,7 +530,8 @@ def _relative(path: pathlib.Path) -> str:
 
 
 def _parse(path: pathlib.Path) -> ast.Module:
-    return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    # 共有の AST（Issue #224）。受け取った側は書き換えない
+    return parse_source(path, filename=str(path))
 
 
 def _imported_modules(tree: ast.Module) -> List[Tuple[str, int]]:
@@ -2025,6 +2028,8 @@ _TO_DICT_WITHOUT_JSON_ITEMS = {
     "reporting/unknown_reason_summary.py", "reporting/timeout_hotspot_summary.py",
     "reporting/root_blocker_summary.py", "reporting/result_summary.py",
     "core/stage_journal_reader.py", "checker/cause_aggregate.py",
+    # deadline margin の観測と判定（run 後の result tree を読む報告。判定にも出力にも入力しない）
+    "reporting/deadline_margin_summary.py", "reporting/deadline_margin_acceptance.py",
     # proof の内部の証拠（出力へは producer が組んだ dict として入る）
     "proof/recurrence_promotion.py", "proof/call_effect/preflight.py",
     "proof/call_effect/candidates.py", "proof/call_effect/obligations.py",
@@ -2900,6 +2905,8 @@ _REGISTERED_WORK_SCOPES = {
     ("checker/unknown_reason.py", "iter_unknown_recovery_actions"): "J7 の登録（producer 時点の構築）",
     ("checker/debug_trace.py", "DebugTrace._iter_phase_usage"): "J7 の登録（人向けの一覧）",
     ("checker/cause_aggregate.py", "reason_detail_key"): "J7 の登録（作業量の scope の外）",
+    ("core/semantic_freeze.py", "_capture_runtime_ref"):
+        "closed の問い合わせでの表現の写し（上限は `CAPTURE_MAX_BYTES`。超えれば写さず、予算の owner の勘定に入れない）",
 }
 
 

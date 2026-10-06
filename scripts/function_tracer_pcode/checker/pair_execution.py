@@ -41,6 +41,9 @@ from scripts.function_tracer_pcode.core import live_values
 # （`core/read_limits`: 上限の外を型つきの限界として台帳へ記録する）が登録済みであることを保証する
 from scripts.function_tracer_pcode.core import read_limits  # noqa: F401
 from scripts.function_tracer_pcode.core.json_encoding import value_token
+# Issue #106 PR-106-A: failure を結果へ変えるのは確定処理（期限で止めない）。変換の唯一の
+# owner がこの module なので、区間を張るのもここ（呼び出し側の数だけ張らない）。
+from scripts.function_tracer_pcode.core.deadline import finalization as deadline_finalization
 from scripts.function_tracer_pcode.core.errors import (
     PairFailureKind,
     PairPendingFailure,
@@ -189,21 +192,22 @@ def pair_failure_result(
 
     `result` を渡した場合は、その結果の **診断だけ** を引き継いで判定面は作り直す。
     """
-    return _stamp_pair_failure_identity(
-        _build_result_for(
-            failure.kind,
-            checker,
+    with deadline_finalization():
+        return _stamp_pair_failure_identity(
+            _build_result_for(
+                failure.kind,
+                checker,
+                failure,
+                stop_state=failure.stop_state,
+                function_name1=function_name1,
+                function_name2=function_name2,
+                binary1_name=binary1_name,
+                binary2_name=binary2_name,
+                start_time=start_time,
+                carry_from=result,
+            ),
             failure,
-            stop_state=failure.stop_state,
-            function_name1=function_name1,
-            function_name2=function_name2,
-            binary1_name=binary1_name,
-            binary2_name=binary2_name,
-            start_time=start_time,
-            carry_from=result,
-        ),
-        failure,
-    )
+        )
 
 
 def pair_failure_result_from_check(
@@ -233,8 +237,8 @@ def pair_failure_result_from_check(
     failure = adopt_pair_failure(exc)
     if failure is None:
         return None
-    return _stamp_pair_failure_identity(
-        _build_result_with_analyses_for(
+    with deadline_finalization():
+        built = _build_result_with_analyses_for(
             failure.kind,
             checker,
             failure,
@@ -247,7 +251,9 @@ def pair_failure_result_from_check(
             retry_count=retry_count,
             original_signature1=original_signature1,
             original_signature2=original_signature2,
-        ),
+        )
+    return _stamp_pair_failure_identity(
+        built,
         failure,
     )
 

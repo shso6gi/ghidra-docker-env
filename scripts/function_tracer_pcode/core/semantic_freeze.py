@@ -43,12 +43,30 @@ PR-106-0 の経路で `internal_exception` の ERROR になる。
 **到達できる意味値をどう数えるか**（`_walk_semantic_carriers`）も 1 実装。
 freeze と公開は同じ到達規則に別の操作を載せるだけなので、「どこまでが 1 つの
 意味の入れ物か」の答えが 2 つに割れない。
+
+**直列化の不変性**（Issue #219 C-RS2。契約は `core/semantic_lifecycle.py`）も検証の
+一部として決める: storage の LEGACY 表現を凍結時に写し（`_storage_payload`）、closure 全体を
+積み終えた後に「LEGACY 表現が不変な状態だけの関数か」を子から上へ 1 回だけ畳む
+（`_serialization_closed`、`_derive_serialization_closure`）。runtime ref の表現は **検証の
+transaction の中では作らない**（ref の型の code は外の code で、値を書き換え得る）: 写せる ref は
+`SEAL_PENDING` の印だけを commit し、closed の問い合わせ（`seal_serialization`）で写す
+（`seal_runtime_ref`。直列化は状態を書かないので、写す前の node は生の ref を描く）。印の付いた値と、
+それに依存する値の答えは「保留」（`_serialization_pending`）で、`seal_serialization` が写して確定する。
+
+**transaction の中で外の code が値を書き換えたら commit しない**。検証は `stable_key`・projection の
+callback など外の code を呼ぶ。transaction が積んでいる値の意味 field への代入は
+`semantic_lifecycle.attribute_mutation_allowed` が拒み、それ以外の経路（入れ物の中身の書き換え・
+`__dict__` の直接の書き換え）は、派生値を作ったときに覚えた field の値（`pinned`）と commit の直前の
+値を比べて（`_verify_staging`）拒む。どちらも internal bug として台帳へ記録して raise し、何も書かない。
 """
 
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Dict, List, Optional, Tuple
+import enum
+import threading
+from types import MappingProxyType
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from scripts.function_tracer_pcode.core import structural as _structural
 from scripts.function_tracer_pcode.core.errors import (
@@ -57,12 +75,22 @@ from scripts.function_tracer_pcode.core.errors import (
     record_internal_bug,
 )
 from scripts.function_tracer_pcode.core.condition import Condition
+from scripts.function_tracer_pcode.core.condition import SEMANTIC_FIELDS as _CONDITION_SEMANTIC_FIELDS
 from scripts.function_tracer_pcode.core.expression import (
     Expression,
     ExpressionType,
+    SEMANTIC_FIELDS as _EXPRESSION_SEMANTIC_FIELDS,
+    PhiBranch,
     coerce_phi_branches,
+    runtime_ref_source,
 )
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
+    CONDITION_SERIALIZATION_INPUTS,
+    EXPRESSION_SERIALIZATION_INPUTS,
+    NON_INHERITED_FIELDS,
+    SerializationInput,
+    begin_validation,
+    end_validation,
     is_published,
     is_validated,
     mark_published,
@@ -74,6 +102,20 @@ from scripts.function_tracer_pcode.core.semantic_snapshot import (
     local_semantic_payload,
     ordered_semantic_edges,
     traverse_semantic_graph,
+)
+from scripts.function_tracer_pcode.core.storage import StorageInfo
+from scripts.function_tracer_pcode.core.frozen_representation import (
+    CAPTURE_MAX_BYTES,
+    SEAL_PENDING,
+    UNSEALABLE,
+    FrozenLegacyTree,
+    freeze_legacy_tree,
+)
+from scripts.function_tracer_pcode.core.json_encoding import (
+    RESULT_JSON_POLICY,
+    JsonBudget,
+    JsonBudgetExhausted,
+    JsonValueRejected,
 )
 
 
@@ -102,15 +144,22 @@ class _LifecycleStaging:
     中の式が元の node を指す）も、同じ値を 2 度積むこともここで止まる。
     """
 
-    __slots__ = ("entered", "derived", "expressions", "conditions")
+    __slots__ = ("entered", "derived", "expressions", "conditions", "storage_records", "ref_carries", "pinned")
 
     def __init__(self) -> None:
         self.entered: Dict[int, bool] = {}
-        #: `id(expression)` → 確定させる派生値（commit まで公開状態へ書かない）
+        #: `id(expression)` / `id(condition)` → 確定させる派生値（commit まで公開状態へ書かない）
         self.derived: Dict[int, Dict[str, Any]] = {}
         #: commit 順（子が先）
         self.expressions: List[Expression] = []
         self.conditions: List[Any] = []
+        #: `id(StorageInfo)` → (その object, 写し)。同じ storage を共有する node は 1 つの写しを持つ
+        self.storage_records: Dict[int, Tuple[Any, Any]] = {}
+        #: `id(runtime ref)` → (その object, 意味値を抱えるか)。closure の走査が数えた答え
+        self.ref_carries: Dict[int, Tuple[Any, bool]] = {}
+        #: `id(値)` → (その値, 比べる意味 field の名前, 派生値を作った時点のその値)。commit の前に同じ
+        #: object かを、**pin したときと同じ名前の組** で確かめる（型から名前を引き直さない）
+        self.pinned: Dict[int, Tuple[Any, Tuple[str, ...], Tuple[Any, ...]]] = {}
 
     def enter(self, value: Any) -> bool:
         """この操作で初めて見た値なら真。2 度目は偽（再入・back-reference）。"""
@@ -170,11 +219,23 @@ def _run_validation(stage: Any) -> None:
     """
 
     staging = _LifecycleStaging()
+    # 積んだ値は commit まで「検証の途中」: 意味 field の属性での書き換えを拒む（公開状態の
+    # bit は使わない。`core/semantic_lifecycle.validation_in_flight`）
+    begin_validation(staging.entered)
     try:
-        stage(staging)
-    except ExpressionCycleError as exc:
-        record_internal_bug(exc, site=FREEZE_SITE)
-        raise
+        try:
+            stage(staging)
+        except ExpressionCycleError as exc:
+            record_internal_bug(exc, site=FREEZE_SITE)
+            raise
+        # closure をすべて積み終えてから決める（runtime ref が抱える式は graph の後に積まれる）。
+        # commit の前なので、ここで失敗しても何も確定しない
+        _derive_serialization_closure(staging)
+        # 積んでいる間に走った生 object の code（ref の `stable_key` など）が、属性の protocol を
+        # 通らずに値を書き換えていないか。派生値を作ったときの状態と違えば commit しない
+        _verify_staging(staging)
+    finally:
+        end_validation(staging.entered)
     _commit_validation(staging)
 
 
@@ -200,12 +261,21 @@ def _stage_expression_validation(expr: Any, staging: _LifecycleStaging) -> None:
     # graph の辺では見えない closure（PHI の条件 object、runtime ref が抱える値）。
     for node in traversal.post_order:
         _stage_node_closure_validation(node, staging)
+    # 意味値を抱えない runtime ref は「closed の問い合わせで表現を写す」印を付ける（ref が意味値を
+    # 抱えるかは closure の走査が数えた答えを使う。同じ ref を 2 度辿らない）
+    for node in traversal.post_order:
+        runtime_ref = node.__dict__.get("runtime_ref")
+        if runtime_ref is not None and not _ref_carries_semantic_values(runtime_ref, staging):
+            staging.derived[id(node)]["_runtime_ref_payload"] = SEAL_PENDING
 
 
 def _stage_condition_validation(condition: Any, staging: _LifecycleStaging) -> None:
     if condition is None or is_validated(condition) or not staging.enter(condition):
         return
     staging.conditions.append(condition)
+    # 条件の派生値（closed の bit）は closure を積み終えた後に足す
+    staging.derived[id(condition)] = {}
+    _pin(staging, condition, CONDITION_SEMANTIC_FIELDS)
     _stage_expression_validation(getattr(condition, "expression", None), staging)
 
 
@@ -222,11 +292,19 @@ def _stage_node_closure_validation(node: Any, staging: _LifecycleStaging) -> Non
     runtime_ref = node.__dict__.get("runtime_ref")
     if runtime_ref is None or not staging.enter(runtime_ref):
         return
-    _walk_semantic_carriers(
-        runtime_ref,
-        lambda expr: _stage_expression_validation(expr, staging),
-        lambda cond: _stage_condition_validation(cond, staging),
-    )
+    carried: List[Any] = []
+
+    def _on_expression(expr: Any) -> None:
+        carried.append(expr)
+        _stage_expression_validation(expr, staging)
+
+    def _on_condition(cond: Any) -> None:
+        carried.append(cond)
+        _stage_condition_validation(cond, staging)
+
+    _walk_semantic_carriers(runtime_ref, _on_expression, _on_condition)
+    # 意味値を抱える ref は表現を写さない（写すのは `seal_runtime_ref`）
+    staging.ref_carries[id(runtime_ref)] = (runtime_ref, bool(carried))
 
 
 def _commit_validation(staging: _LifecycleStaging) -> None:
@@ -241,7 +319,9 @@ def _commit_validation(staging: _LifecycleStaging) -> None:
         fields.update(staging.derived[id(node)])
         mark_validated(fields)
     for condition in staging.conditions:
-        mark_validated(condition.__dict__)
+        fields = condition.__dict__
+        fields.update(staging.derived[id(condition)])
+        mark_validated(fields)
 
 
 def _phi_branch_conditions(node: Any):
@@ -463,19 +543,23 @@ def _commit_publication(staging: _LifecycleStaging) -> None:
 def _walk_semantic_carriers(container: Any, on_expression, on_condition) -> Any:
     """入れ物から到達できる意味値に操作を 1 回ずつ適用する。**到達規則の唯一の実装**。
 
-    走査の範囲は明示してある（黙って諦める経路を作らない）:
+    値をどう扱うかは `_carrier_rule` が **優先順位つきの 1 つの表** で決める（上から最初に
+    当てはまる規則）:
 
-    * 式 / 条件 → `on_expression` / `on_condition` を適用して、そこで止まる
-      （その先は操作側が graph を辿る）
-    * tuple / list / set / frozenset → 要素へ入る
-    * dict → **key と value の両方へ入る**。式を鍵にした cache が実在する
-      （`analysis/condition/bitvector.py` の `Dict[Expression, ...]`）ので、
-      「到達できる意味値をすべて」と言う以上 key を外す理由が無い
-    * dataclass / NamedTuple → field へ入る
-    * **この package で定義された** その他の object → `__dict__` の値へ入る。
-      新しい carrier 型が dataclass でなくても取りこぼさないため
-    * それ以外（Ghidra object・mock・標準ライブラリ）→ 葉。意味の入れ物ではない。
-      **属性を探らない**: 記録再生中の proxy に観測を作ってしまうため
+    1. 式 / 条件 → `on_expression` / `on_condition` を適用して、そこで止まる（その先は操作側が
+       graph を辿る）。意味値は宣言に依らず必ず意味値として扱う
+    2. 外の runtime object の代わりをすると宣言した型（`__semantic_opaque__`。記録再生の proxy・
+       test の Ghidra の代わり）→ 葉。**値を開く規則（3〜6）より先**に判定する: dataclass でも
+       容器の subclass でも、宣言した型の中は辿らない（本物の Ghidra object と同じ）
+    3. tuple / list / set / frozenset → 要素へ入る
+    4. dict → **key と value の両方へ入る**。式を鍵にした cache が実在する
+       （`analysis/condition/bitvector.py` の `Dict[Expression, ...]`）ので、
+       「到達できる意味値をすべて」と言う以上 key を外す理由が無い
+    5. dataclass / NamedTuple → field へ入る
+    6. **この package で定義された** その他の object → `__dict__` の値へ入る。新しい carrier 型が
+       dataclass でなくても取りこぼさないため
+    7. それ以外（Ghidra object・mock・標準ライブラリ）→ 葉。**属性を探らない**: 記録再生中の
+       proxy に観測を作ってしまうため
 
     深さで打ち切らない（明示 stack なので再帰上限も無い）。`id` で一度見た
     object は二度見ないので、循環があっても止まる。
@@ -491,39 +575,73 @@ def _walk_semantic_carriers(container: Any, on_expression, on_condition) -> Any:
         if value_id in seen:
             continue
         seen[value_id] = True
-
-        # 型は `isinstance` で見る。`hasattr` で属性を探ると、解析結果が抱えて
-        # いる Ghidra object（記録再生中は proxy）に観測が走ってしまう。
-        if isinstance(value, Expression):
+        rule = _carrier_rule(value)
+        if rule is CarrierRule.EXPRESSION:
             on_expression(value)
-            continue
-        if isinstance(value, Condition):
+        elif rule is CarrierRule.CONDITION:
             on_condition(value)
-            continue
-        if isinstance(value, (tuple, list, set, frozenset)):
+        elif rule is CarrierRule.SEQUENCE:
             stack.extend(value)
-            continue
-        if isinstance(value, dict):
+        elif rule is CarrierRule.MAPPING:
             stack.extend(value.keys())
             stack.extend(value.values())
-            continue
-        if dataclasses.is_dataclass(value) and not isinstance(value, type):
-            stack.extend(
-                getattr(value, field.name, None) for field in dataclasses.fields(value)
-            )
-            continue
-        if _is_owned_object(value):
+        elif rule is CarrierRule.FIELDS:
+            stack.extend(getattr(value, field.name, None) for field in dataclasses.fields(value))
+        elif rule is CarrierRule.OWNED_STATE:
             owned_state = getattr(value, "__dict__", None)
             if isinstance(owned_state, dict):
                 stack.extend(owned_state.values())
     return container
 
 
-def _is_owned_object(value: Any) -> bool:
-    """この package が定義した object か（外の object の属性は探らない）。"""
+class CarrierRule(enum.Enum):
+    """到達走査が値をどう扱うか（`_carrier_rule` の答え。表の順が優先順位）。"""
 
-    module = type(value).__module__ or ""
-    return module.startswith(_PACKAGE_PREFIX)
+    EXPRESSION = "expression"
+    CONDITION = "condition"
+    DECLARED_OPAQUE = "declared_opaque"
+    SEQUENCE = "sequence"
+    MAPPING = "mapping"
+    FIELDS = "fields"
+    OWNED_STATE = "owned_state"
+    LEAF = "leaf"
+
+
+def _carrier_rule(value: Any) -> CarrierRule:
+    """`value` に当てはまる最初の規則（`_walk_semantic_carriers` の表。型は `isinstance` と class の
+    辞書だけで見る: `hasattr` で属性を探ると、記録再生中の proxy に観測が走る）。"""
+
+    if isinstance(value, Expression):
+        return CarrierRule.EXPRESSION
+    if isinstance(value, Condition):
+        return CarrierRule.CONDITION
+    kind = type(value)
+    if declares_semantic_opaque(kind):
+        return CarrierRule.DECLARED_OPAQUE
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return CarrierRule.SEQUENCE
+    if isinstance(value, dict):
+        return CarrierRule.MAPPING
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return CarrierRule.FIELDS
+    if (kind.__module__ or "").startswith(_PACKAGE_PREFIX):
+        return CarrierRule.OWNED_STATE
+    return CarrierRule.LEAF
+
+
+def declares_semantic_opaque(kind: type) -> bool:
+    """型 `kind` が外の runtime object の代わりだと宣言しているか（`SEMANTIC_OPAQUE_DECLARATION`）。
+
+    宣言は class の辞書（MRO）だけから読む（instance の `__getattr__` を呼ばない）。subclass は
+    基底の宣言を継ぐ。宣言した型の中は走査しない: その状態（記録全体・観測の履歴…）は意味の
+    入れ物ではなく、辿ると費用が記録の大きさに比例し、本物の object では起きない仕事になる。
+    """
+
+    return any(base.__dict__.get(SEMANTIC_OPAQUE_DECLARATION) is True for base in kind.__mro__)
+
+
+#: 外の runtime object の代わりをする型が宣言する class 属性（`declares_semantic_opaque`）
+SEMANTIC_OPAQUE_DECLARATION = "__semantic_opaque__"
 
 
 def _derive_node_fields(node: Expression, staging: _LifecycleStaging) -> Dict[str, Any]:
@@ -549,6 +667,10 @@ def _derive_node_fields(node: Expression, staging: _LifecycleStaging) -> Dict[st
         # 正準化だけ（lifecycle は動かさない）。branch 条件の検証は
         # `_stage_node_closure_validation` が staging へ積む。
         fields["value"] = coerce_phi_branches(fields.get("value"))
+
+    # 派生値はこの状態から作る。生 object の code（投影の中の `stable_key` など）が走る前に
+    # 意味 field を pin し、commit の前に同じ object のままかを確かめる（`_verify_staging`）
+    _pin(staging, node, EXPRESSION_SEMANTIC_FIELDS)
 
     # snapshot を先に置く。candidate hash は `semantic_projection()` 経由で
     # snapshot を読むので、順番が逆だと生 object を読んでしまう。
@@ -577,6 +699,9 @@ def _derive_node_fields(node: Expression, staging: _LifecycleStaging) -> Dict[st
             candidate_children.append(None)
             equivalence_children.append(None)
             continue
+        if id(child) not in staging.derived and not is_validated(child):
+            # graph を辿った後で子が差し替わった（積んでいない・検証されていない子を指す）
+            raise frozen_mutation_error(node, "operands", during_validation=True)
         child_fields = staging.derived_fields(child)
         candidate_children.append(child_fields.get("_structural_hash"))
         equivalence_children.append(child_fields.get("_equivalence_digest"))
@@ -597,6 +722,16 @@ def _derive_node_fields(node: Expression, staging: _LifecycleStaging) -> Dict[st
         ),
         "_tree_size": min(TREE_SIZE_CAP, tree_size),
         "_identity_complete": identity_complete,
+        # LEGACY 表現の storage は凍結時の写しから描く（生の `StorageInfo` は可変）。
+        "_storage_payload": _captured_storage(fields.get("storage_info"), staging),
+        # runtime ref の表現の写しは凍結では作らない（ref の code を検証の transaction の中で
+        # 走らせない）。写せる ref は「closed の問い合わせで写す」印を closure の走査の後に置く
+        # （`_stage_expression_validation`、`seal_runtime_ref`）
+        "_runtime_ref_payload": None,
+        # closed かは closure 全体を積んだ後に `_derive_serialization_closure` が決める
+        # （runtime ref が抱える式は graph の後に積まれる）。決まるまでは closed でない
+        "_serialization_closed": False,
+        "_serialization_pending": False,
     }
 
 
@@ -619,17 +754,478 @@ def _projection_has_unsupported_value(snapshot: Any) -> bool:
     )
 
 
-def frozen_mutation_error(node: Any, field: str) -> FrozenExpressionError:
-    """凍結後の意味 field 書き換えを内部バグとして記録し、例外を作る。
+#: 派生値を作った時点と commit の前で比べる意味 field（順は固定）
+EXPRESSION_SEMANTIC_FIELDS = tuple(sorted(_EXPRESSION_SEMANTIC_FIELDS))
+CONDITION_SEMANTIC_FIELDS = tuple(sorted(_CONDITION_SEMANTIC_FIELDS))
+_ABSENT_FIELD = object()
+
+
+def _semantic_field_values(fields: Dict[str, Any], names: Tuple[str, ...]) -> Tuple[Any, ...]:
+    return tuple(fields.get(name, _ABSENT_FIELD) for name in names)
+
+
+def _pin(staging: _LifecycleStaging, value: Any, names: Tuple[str, ...]) -> None:
+    """派生値を作る前の意味 field の値を、比べる名前の組と一緒に覚える（`_verify_staging` が使う）。"""
+
+    staging.pinned[id(value)] = (value, names, _semantic_field_values(value.__dict__, names))
+
+
+def _verify_staging(staging: _LifecycleStaging) -> None:
+    """積んだ値の意味 field が、派生値を作った時点と同じ object のままか（commit の前に 1 回）。
+
+    積んでいる間に走る生 object の code（runtime ref の `stable_key`・宣言型の問い合わせなど）が、
+    属性の protocol を通らずに（`__dict__` へ直接・canonical にする前の list へ in-place で）値を
+    書き換えると、派生値（snapshot・digest・closure）は書き換え前の状態を述べ、commit される値は
+    書き換え後になる。違えば内部バグとして記録して上げ、何も commit しない。
+    """
+
+    for value, names, pinned in staging.pinned.values():
+        current = _semantic_field_values(value.__dict__, names)
+        for name, before, after in zip(names, pinned, current):
+            if before is not after:
+                raise frozen_mutation_error(value, name, during_validation=True)
+
+
+def frozen_mutation_error(node: Any, field: str, *, during_validation: Optional[bool] = None) -> FrozenExpressionError:
+    """凍結後の意味 field の書き換え・lifecycle が所有する field の書き換えを内部バグとして
+    記録し、例外を作る（規則は `core/semantic_lifecycle.attribute_mutation_allowed`）。
 
     記録してから raise するので、途中の `except Exception` に握り潰されても
     pair 境界が台帳から拾い直して `internal_exception` の ERROR にできる。
     """
 
+    owned = field in NON_INHERITED_FIELDS
+    if during_validation is None:
+        # 未凍結の値の意味 field を拒むのは、検証の途中（`validation_in_flight`）のときだけ
+        during_validation = not owned and node.__dict__.get("_frozen") is not True
+    if during_validation:
+        state = "changed while it was being validated"
+    elif owned:
+        state = "owned by the semantic lifecycle"
+    else:
+        state = "frozen"
     exc = FrozenExpressionError(
-        f"{type(node).__name__}.{field} is frozen "
+        f"{type(node).__name__}.{field} is {state} "
         f"({getattr(getattr(node, 'expr_type', None), 'name', None)}); "
         "derive a new value with clone_with(...) instead of mutating"
     )
     record_internal_bug(exc, site=f"core.semantic_freeze.frozen_mutation:{field}")
     return exc
+
+
+# ---------------------------------------------------------------------------
+# 直列化の不変性（Issue #219 C-RS2）
+# ---------------------------------------------------------------------------
+
+
+def _captured_storage(storage: Any, staging: _LifecycleStaging) -> Any:
+    """storage の LEGACY 表現の不変な写し（写せなければ `None`）。
+
+    写すのは `StorageInfo` そのもの（`_to_dict_active` が受ける唯一の型）だけ。それ以外・
+    scalar でない field を持つものは写さない: その node の表現は従来どおり生の値を読んで
+    同じ `TypeError` になり、closed にもならない。
+    """
+
+    if storage is None or type(storage) is not StorageInfo:
+        return None
+    memo = staging.storage_records
+    hit = memo.get(id(storage))
+    if hit is not None and hit[0] is storage:
+        return hit[1]
+    try:
+        record = storage.frozen_record()
+    except TypeError:
+        record = None
+    memo[id(storage)] = (storage, record)
+    return record
+
+
+def _ref_carries_semantic_values(runtime_ref: Any, staging: _LifecycleStaging) -> bool:
+    """ref が意味値（式・条件）を抱えるか。closure の走査が数えた答えを使う。"""
+
+    known = staging.ref_carries.get(id(runtime_ref))
+    if known is not None and known[0] is runtime_ref:
+        return known[1]
+    # closure の走査が辿らなかった ref（この操作より前に入った ref と同じ object など）
+    found: List[Any] = []
+    _walk_semantic_carriers(runtime_ref, found.append, found.append)
+    return bool(found)
+
+
+def seal_runtime_ref(node: Any) -> Optional[FrozenLegacyTree]:
+    """検証済みの node の runtime ref の表現を（まだなら）写して返す。写せなければ `None`。
+
+    **表現を作る code は検証の transaction の外で、closed の問い合わせのときに 1 回だけ走る**
+    （呼ぶのは `seal_serialization` だけ。直列化は状態を書かず、写す前の node は生の ref を描く）:
+
+    * 凍結（検証の transaction）は ref の表現を作らない。作る code が凍結中の値を書き換えたり、
+      未凍結の値では起きない失敗を凍結へ持ち込んだりしないため。凍結は「写せる ref か」（意味値を
+      抱えないか）だけを決め、`SEAL_PENDING` を置く
+    * 写すのは node が検証済みになった後なので、作る code が node の意味 field を書き換えようと
+      すれば凍結済みとして拒まれる
+    * 写す 1 回が上げる失敗のうち、表現を作れないという信号（walker の `JsonValueRejected` /
+      固定の上限の超過）と、写しの上限・閉路・JSON の値にならない葉は「写さない」（`UNSEALABLE`）
+      になり、生の ref から描く経路に残る。それ以外の失敗（`OSError`・内部バグなど）はそのまま
+      上がり、`SEAL_PENDING` のまま残る（生の ref から描く経路でも同じ code が同じ失敗を上げる）
+    * 入れ子（作る code が同じ node の closed の問い合わせへ入り直す）は写さない。写しの書き込みは
+      1 回だけ（`SEAL_PENDING` からの遷移を lock の中で 1 度）
+    """
+
+    if type(node) is not Expression:
+        raise TypeError("only an Expression holds a runtime ref payload")
+    current = node._runtime_ref_payload
+    if type(current) is FrozenLegacyTree:
+        return current
+    if current is not SEAL_PENDING:
+        return None
+    key = id(node)
+    with _SEAL_LOCK:
+        if key in _SEALING:
+            return None
+        _SEALING[key] = True
+    try:
+        record = _capture_runtime_ref(node.runtime_ref)
+    finally:
+        with _SEAL_LOCK:
+            _SEALING.pop(key, None)
+    with _SEAL_LOCK:
+        # 書くのは `SEAL_PENDING` からの 1 回だけ（並行に写した別の直列化が先に書いていればそれを使う）
+        fields = node.__dict__
+        if fields.get("_runtime_ref_payload") is SEAL_PENDING:
+            fields["_runtime_ref_payload"] = record if record is not None else UNSEALABLE
+        stored = fields.get("_runtime_ref_payload")
+    return stored if type(stored) is FrozenLegacyTree else None
+
+
+#: 写している最中の node（`id`）。入れ子の直列化は写さずに描く
+_SEALING: Dict[int, bool] = {}
+_SEAL_LOCK = threading.Lock()
+
+
+def _capture_runtime_ref(runtime_ref: Any) -> Optional[FrozenLegacyTree]:
+    """ref の表現を直列化の owner に 1 回作らせ、不変な写しにする（写せなければ `None`）。
+
+    表現を作るのは未凍結の値を描くときと同じ source と同じ walker（`runtime_ref_source` を LEGACY
+    で作る）。walker の予算は固定の上限（作業量の予算の外なので）。写しは表現の葉・容器を新しく
+    作り直す（`freeze_legacy_tree`。上限・閉路・組み込み以外の葉を拒む）。
+    """
+
+    try:
+        legacy = RESULT_JSON_POLICY.materialize(
+            runtime_ref_source(runtime_ref),
+            budget=JsonBudget(CAPTURE_MAX_BYTES, detached=True),
+        )
+    except _CAPTURE_REFUSALS:
+        return None
+    return freeze_legacy_tree(legacy)
+
+
+#: 表現を作れないという walker の信号（作る code の `TypeError` などは walker がこの型に包む）。
+#: これ以外の失敗は写す側では受けず、そのまま上げる
+_CAPTURE_REFUSALS = (JsonValueRejected, JsonBudgetExhausted)
+
+
+def _immutable_leaf(value: Any) -> bool:
+    """表現にそのまま置かれる葉が、組み込みの不変な型 **そのもの** か。
+
+    subclass・enum・任意の object は通さない: 描いた後で JSON の writer・snapshot codec・比較が
+    その型の method（外の状態を読み得る code）へ dispatch し得るので、不変と証明できない。
+    """
+
+    kind = type(value)
+    return value is None or kind is bool or kind is int or kind is float or kind is str or kind is bytes
+
+
+def _immutable_plain(value: Any) -> bool:
+    """意味値を含まない、不変な葉とその組み込みの `tuple` だけの値か（`value` の既定の形）。"""
+
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if _immutable_leaf(item):
+            continue
+        if type(item) is not tuple:
+            return False
+        pending.extend(tuple.__iter__(item))
+    return True
+
+
+def _scalar_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
+    return _immutable_leaf(value)
+
+
+def _kind_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
+    # 表現は member の名前（`_name_`）を置く。member とその名前は class の定義
+    return type(value) is ExpressionType
+
+
+def _value_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
+    if node.__dict__.get("expr_type") is not ExpressionType.PHI:
+        return _immutable_plain(value)
+    # PHI: 凍結で `PhiBranch` の tuple に畳んである。branch の条件と値が closed であること
+    if type(value) is not tuple:
+        return False
+    for branch in value:
+        if type(branch) is not PhiBranch:
+            return False
+        condition, branch_value = branch
+        if condition is not None:
+            if type(condition) is not Condition:
+                return False
+            dependencies.append(condition)
+        if type(branch_value) is not Expression:
+            return False
+        dependencies.append(branch_value)
+    return True
+
+
+def _operands_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
+    if type(value) is not tuple:
+        return False
+    for child in value:
+        if type(child) is not Expression:
+            return False
+        dependencies.append(child)
+    return True
+
+
+def _expression_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
+    if type(value) is not Expression:
+        return False
+    dependencies.append(value)
+    return True
+
+
+def _storage_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
+    if value is None:
+        return True
+    payload = staging.derived_fields(node).get("_storage_payload")
+    # 写しの値も葉と同じ規則（写しは `StorageInfo` の値をそのまま持つ）
+    return payload is not None and all(_immutable_leaf(item) for item in payload.values)
+
+
+def _runtime_ref_rule(node: Any, value: Any, staging: _LifecycleStaging, dependencies: List[Any]) -> bool:
+    if value is None:
+        return True
+    payload = staging.derived_fields(node).get("_runtime_ref_payload")
+    # 写した（`FrozenLegacyTree`）か、これから写す（`SEAL_PENDING`。closed の答えは写せたかで決まる）
+    return type(payload) is FrozenLegacyTree or payload is SEAL_PENDING
+
+
+SERIALIZATION_CLOSURE_RULES: Mapping[SerializationInput, Callable[..., bool]] = MappingProxyType({
+    SerializationInput.SCALAR: _scalar_rule,
+    SerializationInput.KIND: _kind_rule,
+    SerializationInput.VALUE: _value_rule,
+    SerializationInput.OPERANDS: _operands_rule,
+    SerializationInput.EXPRESSION: _expression_rule,
+    SerializationInput.STORAGE: _storage_rule,
+    SerializationInput.RUNTIME_REF: _runtime_ref_rule,
+})
+
+#: 型 → (field, 規則) の列。表（lifecycle）と規則（上）から組み立てるだけで、field を列挙しない。
+#: 表と規則はどちらも module の読み込み時に決まる（凍結は node ごとに通るので、ここで 1 度引く）。
+_CLOSURE_PLANS: Mapping[type, Tuple[Tuple[str, Callable[..., bool]], ...]] = MappingProxyType({
+    Expression: tuple((name, SERIALIZATION_CLOSURE_RULES[kind]) for name, kind in EXPRESSION_SERIALIZATION_INPUTS.items()),
+    Condition: tuple((name, SERIALIZATION_CLOSURE_RULES[kind]) for name, kind in CONDITION_SERIALIZATION_INPUTS.items()),
+})
+
+
+def _serialization_dependencies(value: Any, staging: _LifecycleStaging) -> Optional[List[Any]]:
+    """`value` の LEGACY 表現が読む field がすべて局所的に不変なら、closed であるべき依存の列。
+
+    どれか 1 つでも不変でなければ `None`。読む field は lifecycle の表から取る（ここで列挙しない）。
+    """
+
+    # 表と規則が述べているのは `Expression` / `Condition` の表現（その型の method）だけ。subclass は
+    # 表現を作る method を上書きし得るので closed にしない
+    plan = _CLOSURE_PLANS.get(type(value))
+    if plan is None:
+        return None
+    fields = value.__dict__
+    dependencies: List[Any] = []
+    for name, rule in plan:
+        if name not in fields:
+            # instance に無い field は class の値（共有の状態）を読むことになる
+            return None
+        if not rule(value, fields[name], staging, dependencies):
+            return None
+    return dependencies
+
+
+#: closed の答え（大きいほど強い。依存と自分の答えの最小が値の答え）
+_OPEN = 0
+_PENDING = 1
+_CLOSED = 2
+
+
+def _committed_verdict(value: Any) -> int:
+    """前の操作で確定した値の答え。
+
+    ここで出会う値は `Expression` / `Condition` の型そのもの（依存に積むのはそれだけ）なので、
+    状態の owner の module として instance の `__dict__` を直接読む（凍結は node ごとに通るので
+    読み口の汎用の型の確かめを繰り返さない）。
+    """
+
+    fields = value.__dict__
+    if fields.get("_frozen") is not True:
+        return _OPEN
+    if fields.get("_serialization_closed") is True:
+        return _CLOSED
+    if fields.get("_serialization_pending") is True:
+        return _PENDING
+    return _OPEN
+
+
+def _own_verdict(value: Any, staging: _LifecycleStaging) -> int:
+    """依存を除いた、値そのものの答え（表現が読む field が局所的に不変か、ref の写しが未了か）。"""
+
+    if type(value) is Expression and staging.derived_fields(value).get("_runtime_ref_payload") is SEAL_PENDING:
+        return _PENDING
+    return _CLOSED
+
+
+def _verdict_from_known_dependencies(
+    value: Any, staging: _LifecycleStaging, verdicts: Dict[int, Optional[int]],
+) -> Optional[int]:
+    """依存の答えがすべて出ているなら `value` の答え、出ていない依存があれば `None`。"""
+
+    dependencies = _serialization_dependencies(value, staging)
+    if dependencies is None:
+        return _OPEN
+    verdict = _own_verdict(value, staging)
+    staged = staging.derived
+    for dependency in dependencies:
+        known = verdicts.get(id(dependency))
+        if known is None:
+            if id(dependency) in staged:
+                return None
+            known = verdicts[id(dependency)] = _committed_verdict(dependency)
+        verdict = min(verdict, known)
+        if verdict == _OPEN:
+            return _OPEN
+    return verdict
+
+
+def _derive_serialization_closure(staging: _LifecycleStaging) -> None:
+    """この操作で積んだ式・条件の closed の答えを、子から上へ 1 回だけ畳む。
+
+    値の答えは 3 つ: closed（表現が不変な状態だけの関数）、pending（runtime ref の表現を写せれば
+    closed。`seal_serialization` が確定させる）、open。表現が読む field が局所的に
+    不変でなければ open、そうでなければ自分と依存（子・PHI の条件と値・runtime ref が抱える式と
+    条件）の答えの最小。依存が前の操作で確定済みなら、その答えを読む（入り直さない）。依存の閉路
+    （runtime ref が祖先を指す back-reference）は open: 表現が経路に依存し、不変とは言えない。
+
+    明示 stack（graph が深くても再帰上限に当たらない。module の他の走査と同じ形）。
+    """
+
+    verdicts: Dict[int, Optional[int]] = {}
+    pending_inputs: Dict[int, Optional[List[Any]]] = {}
+    staged = staging.derived
+    for root in (*staging.expressions, *staging.conditions):
+        if id(root) in verdicts:
+            continue
+        # 速い経路: graph の子は post-order で先に積まれているので、たいていの値は依存の答えが
+        # もう出ている（前の操作で確定済みか、この操作で先に決めた）。出ていない依存（runtime ref
+        # が抱える式など、後で積まれる値）があるときだけ、下の走査で畳む
+        verdict = _verdict_from_known_dependencies(root, staging, verdicts)
+        if verdict is not None:
+            verdicts[id(root)] = verdict
+            continue
+        stack: List[Tuple[Any, bool]] = [(root, False)]
+        while stack:
+            value, leaving = stack.pop()
+            key = id(value)
+            if leaving:
+                dependencies = pending_inputs.pop(key)
+                verdicts[key] = _fold(value, dependencies, staging, verdicts)
+                continue
+            if key in verdicts:
+                # 確定済み、または今の経路の上に在る（閉路: その依存は open として畳む）
+                continue
+            if key not in staged:
+                # この操作で積んでいない値: 前の操作で確定した答えを読む（未検証なら open）
+                verdicts[key] = _committed_verdict(value)
+                continue
+            verdicts[key] = None
+            dependencies = _serialization_dependencies(value, staging)
+            pending_inputs[key] = dependencies
+            stack.append((value, True))
+            for dependency in dependencies or ():
+                if id(dependency) not in verdicts:
+                    stack.append((dependency, False))
+    for value in (*staging.expressions, *staging.conditions):
+        verdict = verdicts[id(value)]
+        derived = staged[id(value)]
+        derived["_serialization_closed"] = verdict == _CLOSED
+        derived["_serialization_pending"] = verdict == _PENDING
+
+
+def _fold(value: Any, dependencies: Optional[List[Any]], staging: _LifecycleStaging, verdicts: Dict[int, Optional[int]]) -> int:
+    if dependencies is None:
+        return _OPEN
+    verdict = _own_verdict(value, staging)
+    for dependency in dependencies:
+        known = verdicts.get(id(dependency))
+        verdict = min(verdict, _OPEN if known is None else known)
+    return verdict
+
+
+def seal_serialization(value: Any) -> bool:
+    """`value` の closed の答えを確定させて返す（**安定 interface**。closed の問い合わせの入口）。
+
+    凍結は runtime ref の表現を写さないので、写せる ref を持つ値の答えは pending のまま残る。
+    ここで closure の pending な値を子から上へ辿り、各 node の ref の表現を写し
+    （`seal_runtime_ref`）、写せた値だけを closed にする。答えは 1 度だけ確定し（pending →
+    closed / open の 1 方向）、以後は読むだけ（`core/semantic_lifecycle.serialization_closed`）。
+
+    ref の表現を作る code が「表現を作れない」以外の失敗を上げたら、そのまま上げる（直列化した
+    ときと同じ失敗。確定させた値はそのまま、残りは pending のまま）。
+    """
+
+    if value is None or type(value) not in (Expression, Condition):
+        return False
+    verdict = _committed_verdict(value)
+    if verdict != _PENDING:
+        return verdict == _CLOSED
+    reader = _LifecycleStaging()
+    verdicts: Dict[int, Optional[int]] = {}
+    pending_inputs: Dict[int, Optional[List[Any]]] = {}
+    stack: List[Tuple[Any, bool]] = [(value, False)]
+    while stack:
+        current, leaving = stack.pop()
+        key = id(current)
+        if leaving:
+            folded = _fold(current, pending_inputs.pop(key), reader, verdicts)
+            if folded == _PENDING and type(current) is Expression:
+                # 依存は確定済み: 自分の ref の表現を写せたかで決まる
+                seal_runtime_ref(current)
+                folded = _refold_after_seal(current, reader, verdicts)
+            fields = current.__dict__
+            if folded == _CLOSED:
+                fields["_serialization_closed"] = True
+            if folded != _PENDING:
+                # 確定（closed / open）。pending のまま残るのは、別の直列化が同じ ref を写している
+                # 最中（入れ子）のときだけ
+                fields["_serialization_pending"] = False
+            verdicts[key] = folded
+            continue
+        if key in verdicts:
+            continue
+        known = _committed_verdict(current)
+        if known != _PENDING:
+            verdicts[key] = known
+            continue
+        verdicts[key] = None
+        dependencies = _serialization_dependencies(current, reader)
+        pending_inputs[key] = dependencies
+        stack.append((current, True))
+        for dependency in dependencies or ():
+            if id(dependency) not in verdicts:
+                stack.append((dependency, False))
+    return verdicts[id(value)] == _CLOSED
+
+
+def _refold_after_seal(node: Any, reader: _LifecycleStaging, verdicts: Dict[int, Optional[int]]) -> int:
+    """ref の表現を写した後の node の答え（写しの有無で自分の答えが決まり、依存は確定済み）。"""
+
+    return _fold(node, _serialization_dependencies(node, reader), reader, verdicts)

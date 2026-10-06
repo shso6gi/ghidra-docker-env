@@ -513,7 +513,7 @@ class SemanticTraversal(NamedTuple):
     post_order: Tuple[Any, ...]
 
 
-def traverse_semantic_graph(root: Any, *, prune=None) -> SemanticTraversal:
+def traverse_semantic_graph(root: Any, *, prune=None, poll=None) -> SemanticTraversal:
     """意味 graph を 1 回だけ走査する。**閉路判定の唯一の実装**。
 
     freeze（検証して凍らせる）も graph snapshot（表現を作る）も同じ不変条件
@@ -524,6 +524,10 @@ def traverse_semantic_graph(root: Any, *, prune=None) -> SemanticTraversal:
     `prune(node)` が真なら、その node と配下へ入らない。凍結済みの subtree を
     再走査しないために freeze が使う（凍結済み node は検証済みなので、そこに
     閉路が隠れることはない）。
+
+    `poll()`（Issue #106 PR-106-A）は node に入るたびに呼ぶ（解析の期限の checkpoint を
+    渡す呼び出し元用。走査は読むだけなので、途中で raise しても何も壊れない）。状態を
+    書き換える走査（freeze）は渡さない。
 
     閉路は通常入力として認めない内部不整合なので `ExpressionCycleError` を
     投げる。placeholder を置いて意味処理を続けない — 見えていない部分を無視した
@@ -559,6 +563,8 @@ def traverse_semantic_graph(root: Any, *, prune=None) -> SemanticTraversal:
             )
         if node_id in entered:
             continue
+        if poll is not None:
+            poll()
         entered[node_id] = True
         active[node_id] = True
         entry_order.append(node)
@@ -741,22 +747,26 @@ def walk_dag(root: Any) -> ImmutableSemanticGraph:
     return walk_dag_nodes(root)[0]
 
 
-def walk_dag_nodes(root: Any) -> Tuple[ImmutableSemanticGraph, Tuple[Any, ...]]:
+def walk_dag_nodes(root: Any, *, poll=None) -> Tuple[ImmutableSemanticGraph, Tuple[Any, ...]]:
     """`walk_dag` と同じ graph に、番号順の node object の並びを添えて返す。
 
     `nodes[i]` が `graph.nodes[i]`（`canonical_node_no == i`）の node。graph に
     載らない node ごとの値（solver が読む意味値など）を consumer が同じ番号で並べる
     ためのもので、番号の振り方はここ 1 箇所だけにある（consumer は走査を書かない）。
+
+    `poll` は `traverse_semantic_graph` と同じ（node ごとに呼ぶ。graph を読むだけの構築）。
     """
 
     if root is None:
         return ImmutableSemanticGraph(root_no=None, nodes=()), ()
 
-    traversal = traverse_semantic_graph(root)
+    traversal = traverse_semantic_graph(root, poll=poll)
     numbers = {id(node): index for index, node in enumerate(traversal.entry_order)}
 
     records = []
     for number, node in enumerate(traversal.entry_order):
+        if poll is not None:
+            poll()
         payload = local_semantic_payload(node)
         edges = tuple(
             (edge.label, None if edge.child is None else numbers[id(edge.child)])
