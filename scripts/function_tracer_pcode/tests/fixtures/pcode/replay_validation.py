@@ -517,6 +517,11 @@ def _assert_snapshot_bodies_match_distinct_witnesses(report: Mapping[str, Any], 
         where + ": the counted body executions are not the actual executions: "
         + json.dumps({"actual": observed["body_executions_in_scope"], **totals}, sort_keys=True)
     )
+    # 方針の早い判断（`snapshot_reuse._POLICY_EARLY_READS`）は、得をする pair を止めない前提で決めた: recorded corpus
+    # の variant はどれもこの判断で止まらない（止まれば定数の根拠が崩れている）
+    assert totals.get("policy:elision_off_early", 0) == 0, (
+        where + ": the elision policy stopped early on a recorded replay: " + json.dumps(totals, sort_keys=True)
+    )
     # pair の方針（token をほとんど置けない pair では再利用しない）で保存しない組み立ては理由つきで数える
     unstored = totals.get("bypass:elision_policy", 0)
     assert observed["body_executions_in_scope"] == entries + unstored, (

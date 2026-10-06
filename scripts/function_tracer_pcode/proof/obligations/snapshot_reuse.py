@@ -27,7 +27,8 @@ token を戻し、digest を求め、`retained_form` の写しを作る）で、
 **方針**（`_ElisionPolicy`。正しさに関わらない費用の判断）: pair の最初の `_POLICY_READS`（16）回の読みで、token に
 置いた葉の byte が、読みの作業量が数えた byte（`SnapshotRead.serialized_bytes`）の `_POLICY_MIN_SHARE`（1/4）に
 届かなければ、その pair の残りは token を置かず witness も作らない（memo を切ったときと同じ読みと組み立て）。
-割合が下限の 1/4 にも届かない pair は `_POLICY_EARLY_READS`（4）回目で止める。
+割合が下限の 1/`_POLICY_EARLY_FACTOR`（4）、すなわち 1/16 にも届かない pair は `_POLICY_EARLY_READS`（4）回目で止める
+（recorded corpus の得をする variant は 4 回目で 0.155 以上: 再生がこの判断で止まらないことを確かめる）。
 
 **token の権限**（C-RS7）: token を扱えるのは、単一の読みが自分の hook で置いた token（`snapshot.PlacedTokens`、
 identity で照合）を、その読みの内部の凍結（`snapshot.frozen_fingerprint_payload`）と展開・witness の比較に引数で渡す
@@ -438,7 +439,7 @@ class _ElisionPolicy:
     判断は数え上げだけで決まる（時間に依らない）。
     """
 
-    __slots__ = ("_lock", "reads", "serialized", "elided", "elide")
+    __slots__ = ("_lock", "reads", "serialized", "elided", "elide", "stopped_early")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -446,6 +447,8 @@ class _ElisionPolicy:
         self.serialized = 0
         self.elided = 0
         self.elide = True
+        #: 早い判断（`_POLICY_EARLY_READS` 回目）で止めたか（計測: recorded corpus はこれで止まらないことを再生が確かめる）
+        self.stopped_early = False
 
     def observe(self, serialized: int, elided: int) -> bool:
         """token を置いた読みの数え上げ（直列化した byte と、token に置いた葉の byte）を足し、方針が
@@ -468,6 +471,7 @@ class _ElisionPolicy:
                 # 早い判断: 割合が下限の 1/`_POLICY_EARLY_FACTOR` にも届かない pair は、残りの読みで下限に届く見込みが
                 # 無い（token を置く読みは比べる費用だけを払う）
                 self.elide = False
+                self.stopped_early = True
                 return True
             return False
 
@@ -485,7 +489,8 @@ _POLICY_MIN_SHARE = (1, 4)
 #: 読みでは得をする pair でも割合がほぼ 0（読みの後で pending な値を写し、以後の読みで closed になる）なので、
 #: 4 回目で判断する。4 回目の累積の割合は、recorded corpus の得をする variant が 0.155〜0.32、実 run の pair
 #: （最新 main + #241、固定 subset の 10 pair）が 0.022 以下で、下限の 1/4（0.0625）はその間のほぼ等比の中点
-#: （レビュー 7: 最初の 16 回の token を置く読みの比べる費用が、実 run の snapshot の時間の残りの増分だった）
+#: （レビュー 7: 最初の 16 回の token を置く読みの比べる費用が、実 run の snapshot の時間の残りの増分だった）。
+#: 値が 4 回の読みより遅れて closed になる pair は、16 回の判断なら残せたのに止まり得る（費用だけの危険: 結果は同じ）
 _POLICY_EARLY_READS = 4
 _POLICY_EARLY_FACTOR = 4
 
@@ -617,6 +622,8 @@ def reuse_or_build(cls: Any, analysis: Any) -> Any:
     store.add_seconds("read", time.perf_counter() - started)
     if enabled and store.policy.observe(read.serialized_bytes, hook.elided):
         store.count("policy:elision_off")
+        if store.policy.stopped_early:
+            store.count("policy:elision_off_early")
     snapshot = None
     witness = None
     if enabled:
