@@ -38,6 +38,7 @@ from types import MappingProxyType
 from enum import Enum
 from typing import Any, NamedTuple, Optional, Tuple
 
+from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.loop_lowering_semantics import (
     ABSENT_LOWERING,
     LoopLoweringSemantics,
@@ -84,29 +85,39 @@ def canonical_atom(value: Any) -> CanonicalAtoms:
 
     if value is None:
         return ("none", "")
-    if isinstance(value, bool):
+    if value is True or value is False:
         return ("bool", int(value))
-    if isinstance(value, int):
-        return ("int", value)
-    if type(value) is float:
-        # 値の bit 列（-0.0 と 0.0、NaN の payload も区別する）。float は immutable なので
-        # 値が identity。`object_id` に落とすと死後の `id()` 再利用で別の値と一致する（Issue #215）
-        return ("float", struct.pack(">d", value).hex())
-    if isinstance(value, str):
-        return ("str", value)
-    if isinstance(value, bytes):
-        return ("bytes", value.hex())
-    if type(value) is UnsupportedSemanticValue:
+    # scalar の値は `live_values` の規則（基底型の slot）で読む: subclass（JPype の `JInt`・
+    # mixin の enum）は基底型の値になり、atom の中身は常に exact な組み込みの値（Issue #215
+    # C-K1 / C-K7）。subclass の `__eq__` / `__hash__` を atom に持ち込むと、別の値の atom が
+    # 等しくなり得る（構造 key の owner は exact でない中身を識別不能として扱う）
+    scalar = live_values.json_scalar(value)
+    if scalar is not live_values.NOT_PLAIN:
+        if scalar is True or scalar is False:
+            return ("bool", int(scalar))
+        if type(scalar) is int:
+            return ("int", scalar)
+        if type(scalar) is float:
+            # 値の bit 列（-0.0 と 0.0、NaN の payload も区別する）。float は immutable なので
+            # 値が identity。`object_id` に落とすと死後の `id()` 再利用で別の値と一致する（Issue #215）
+            return ("float", struct.pack(">d", scalar).hex())
+        return ("str", scalar)
+    kind = type(value)
+    if issubclass(kind, bytes):
+        return ("bytes", bytes.hex(value))
+    if kind is UnsupportedSemanticValue:
         # 値として固定できなかったものの印（型名しか残っていない）。tuple として畳むと、
         # 同じ型の別の object どうしが同じ atom になり識別できたように見える。印の tag を
         # 残し、構造 key の owner（`core/structural`）が識別不能として扱う（Issue #215）
         return (UNSUPPORTED_VALUE_TAG, value.type_module, value.type_qualname)
-    if isinstance(value, tuple):
-        return ("tuple", tuple(canonical_atom(item) for item in value))
-    if isinstance(value, list):
-        return ("list", tuple(canonical_atom(item) for item in value))
-    if isinstance(value, (dict, MappingProxyType)):
-        items = [(canonical_atom(key), canonical_atom(item)) for key, item in value.items()]
+    # 容器は基底型の実装で辿る（subclass の `__iter__` / `items` を呼ばない）
+    if issubclass(kind, tuple):
+        return ("tuple", tuple(canonical_atom(item) for item in tuple.__iter__(value)))
+    if issubclass(kind, list):
+        return ("list", tuple(canonical_atom(item) for item in list.__iter__(value)))
+    if issubclass(kind, dict) or kind is MappingProxyType:
+        pairs = dict.items(value) if issubclass(kind, dict) else value.items()
+        items = [(canonical_atom(key), canonical_atom(item)) for key, item in pairs]
         items.sort()
         return ("dict", tuple(items))
     stable_key = getattr(value, "stable_key", None)
@@ -295,17 +306,14 @@ def semantic_runtime_ref_key(value: Any) -> Optional[CanonicalAtoms]:
 
     if value is None:
         return None
-    if isinstance(value, bool):
-        return ("bool", int(value))
-    if isinstance(value, int):
-        return ("int", value)
-    if isinstance(value, str):
-        return ("str", value)
-    if isinstance(value, bytes):
-        return ("bytes", value.hex())
+    scalar = live_values.json_scalar(value)
+    if (scalar is not live_values.NOT_PLAIN and type(scalar) is not float) or issubclass(type(value), bytes):
+        # bool / int / str / bytes（とその subclass）は `canonical_atom` と同じ規則（基底型の slot の
+        # exact な値）。float は従来どおり安定 key を出さない値として扱う（意味 key に入れない）
+        return canonical_atom(value)
     if isinstance(value, (tuple, list)):
         items = []
-        for item in value:
+        for item in (tuple.__iter__(value) if isinstance(value, tuple) else list.__iter__(value)):
             item_key = semantic_runtime_ref_key(item)
             if item_key is None:
                 return None

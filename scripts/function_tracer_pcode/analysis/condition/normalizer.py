@@ -10,7 +10,7 @@ from scripts.function_tracer_pcode.core import (
     StructuralKey,
     expression_key_status,
 )
-from scripts.function_tracer_pcode.core.structural import exact_structural_identity
+from scripts.function_tracer_pcode.core.structural import exact_structural_identity, identity_is_memoizable
 from scripts.function_tracer_pcode.analysis.condition.condition_cache import root_memo
 
 
@@ -432,6 +432,9 @@ class ConditionNormalizer:
             budget=cls._EXPR_KEY_MAX_NODES,
             **cls._key_options(include_memory_read_order),
         )
+        # 識別不能 token を含む key は覚えない（再計算で同じ token を返すと一致してしまう。C-K5）
+        if not rendered[1] and not identity_is_memoizable(rendered[0]):
+            return rendered
         if len(cls._expr_key_cache) >= cls._EXPR_KEY_CACHE_LIMIT:
             cls._expr_key_cache.clear()
         if cached_by_mode is None:
@@ -470,6 +473,7 @@ class ConditionNormalizer:
             f"{ConditionNormalizer.FALLBACK_KEY_MEMO}.read_order={options['include_memory_read_order']}",
             expr,
             lambda root: exact_structural_identity(root, **options),
+            store_if=identity_is_memoizable,
         )
     
     @staticmethod
