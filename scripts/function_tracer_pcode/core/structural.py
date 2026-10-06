@@ -308,7 +308,7 @@ def _identity_atom(value: Any) -> Tuple[Any, bool, bool]:
 
     atom = _atom_key(value)
     replaced = _identified_atom(atom)
-    if type(replaced) is tuple and replaced and type(replaced[0]) is str and replaced[0] in _SCALAR_ATOM_TAGS:
+    if _is_scalar_atom(replaced):
         return replaced, False, False
     return replaced, replaced is not atom, _key_has_tag(replaced, PLACEHOLDER_TAGS)
 
@@ -334,8 +334,21 @@ def _is_unidentified_atom(item: tuple) -> bool:
     return False
 
 
-#: 子を持たない `canonical_atom` の tag（置き換えの要らない atom の近道）
-_SCALAR_ATOM_TAGS = frozenset({"none", "bool", "int", "float", "str", "bytes"})
+#: 子を持たない `canonical_atom` の atom の tag と、その中身の型（置き換えの要らない atom の近道）
+_SCALAR_ATOM_PAYLOAD = {"none": str, "bool": int, "int": int, "float": str, "str": str, "bytes": str}
+
+
+def _is_scalar_atom(item: Any) -> bool:
+    """`canonical_atom` の scalar の atom（``("int", 3)`` など）か。形（2 要素・中身の型）まで照合する。
+
+    dataclass の atom の field の組 `(name, atom)` は、name が偶然 `int` などでも中身が atom
+    （tuple）なので scalar ではない（その下の `object_id` を見落とさない）。
+    """
+
+    if type(item) is not tuple or len(item) != 2 or type(item[0]) is not str:
+        return False
+    payload = _SCALAR_ATOM_PAYLOAD.get(item[0])
+    return payload is not None and type(item[1]) is payload
 
 
 def _identified_atom(atom: Any) -> Any:
@@ -346,7 +359,7 @@ def _identified_atom(atom: Any) -> Any:
     `RecursionError` にならない）。
     """
 
-    if type(atom) is not tuple or not atom or (type(atom[0]) is str and atom[0] in _SCALAR_ATOM_TAGS):
+    if type(atom) is not tuple or not atom or _is_scalar_atom(atom):
         return atom
     # 置き換えの要る tuple だけを作り直す: 子から先に決める（post-order）
     stack = [(atom, False)]
@@ -362,10 +375,7 @@ def _identified_atom(atom: Any) -> Any:
                 continue
             stack.append((item, True))
             for child in item:
-                if (
-                    type(child) is tuple and child and id(child) not in rebuilt
-                    and not (type(child[0]) is str and child[0] in _SCALAR_ATOM_TAGS)
-                ):
+                if type(child) is tuple and child and id(child) not in rebuilt and not _is_scalar_atom(child):
                     stack.append((child, False))
             continue
         changed = False

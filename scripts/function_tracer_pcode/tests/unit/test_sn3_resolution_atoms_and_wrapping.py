@@ -365,6 +365,28 @@ def test_a_dataclass_field_named_like_an_unidentified_tag_is_still_identified():
     assert key != expression_key_safe(Expression(ExpressionType.VARIABLE, name="v", value=Fields(2, "x"), size=4))
 
 
+def test_an_object_atom_under_a_field_named_like_a_scalar_tag_is_still_unidentified():
+    # dataclass の field の組 `("int", atom)` を scalar の atom と取り違えると、その下の
+    # `object_id`（`id()`）が比較可能な key に残り、id を再利用した別 object と一致する
+    from dataclasses import dataclass
+
+    @dataclass(frozen=True)
+    class Holder:
+        int: object
+
+    class Opaque:
+        __slots__ = ()
+
+    variable = Expression(ExpressionType.VARIABLE, name="v", value=Holder(Opaque()), size=4)
+    key, comparable = expression_key_status(variable)
+    assert comparable is False
+    assert '"object_id"' not in json.dumps(key)
+    assert key != expression_key(variable)
+    # 対照: 中身が scalar の field は比較可能
+    plain = Expression(ExpressionType.VARIABLE, name="v", value=Holder(3), size=4)
+    assert expression_key_safe(plain) is not None
+
+
 # --------------------------------------------------------------------------
 # 失敗の経路: 可換の順序と、深さ
 # --------------------------------------------------------------------------
