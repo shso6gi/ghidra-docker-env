@@ -332,30 +332,18 @@ class SnapshotFingerprintCodec:
         明示して渡す内部の凍結（`_freeze_placing`。意味の値の位置へだけ渡す `frozen_fingerprint_payload` が呼ぶ）だけ。
         """
 
-        return cls._freeze_placing(value, None)
-
-    @classmethod
-    def _freeze_placing(cls, value: Any, placed: Optional["PlacedTokens"]) -> Any:
-        """`_freeze_unmetered` の本体。`placed` は、この凍結がそのまま写しに置いてよい token（その読みの hook が
-        置いた object そのもの。identity で照合する）。`None` なら何も置かない（通常の codec）。
-
-        許可は引数でだけ渡る（thread や module の状態を読まない）: この凍結の中で走る入力の code（`stable_key` /
-        record の LEGACY 表現）が codec を呼べば、その呼び出しは `placed` を持たない通常の凍結になる。入力が作った
-        同じ型の object は `placed` に無いので token ではない（main と同じく opaque として拒む）。
-        """
-
         if value is None:
             return None
         kind = type(value)
         if kind is str or kind is int or kind is bool or kind is float:
             return value
-        recurse = cls._freeze_placing
+        freeze = cls._freeze_unmetered
         # 速い経路: 組み込みの型そのものの容器（組み込みの振る舞いと分かっている）
         if (type(value) is tuple or type(value) is list):
-            return tuple(recurse(v, placed) for v in value)
+            return tuple(freeze(v) for v in value)
         if type(value) is dict:
             return cls.sorted_mapping_items(
-                tuple((recurse(key, placed), recurse(item, placed)) for key, item in value.items())
+                tuple((freeze(key), freeze(item)) for key, item in value.items())
             )
         scalar = plain_scalar(value)
         if scalar is not NOT_PLAIN:
@@ -369,26 +357,54 @@ class SnapshotFingerprintCodec:
         mapping = builtin_mapping(value)
         if mapping is not None:
             return cls.sorted_mapping_items(
-                tuple((recurse(key, placed), recurse(item, placed)) for key, item in items_of(mapping))
+                tuple((freeze(key), freeze(item)) for key, item in items_of(mapping))
             )
         if builtin_sequence(value):
-            return tuple(recurse(v, placed) for v in elements_of(value))
+            return tuple(freeze(v) for v in elements_of(value))
         if builtin_set(value):
-            return _set_members(tuple(recurse(v, placed) for v in elements_of(value)))
-        if _is_placed_token(placed, value):
-            return value
+            return _set_members(tuple(freeze(v) for v in elements_of(value)))
         name = type_name(kind)
         has_key, identity_key = identity_key_of(value)
         if has_key:
-            # 入力の code（`stable_key`）が返した値: 入力の値なので token を通さない
-            return (name, recurse(identity_key, None))
+            return (name, freeze(identity_key))
         if is_json_record(value):
             # record の LEGACY 表現（`to_dict()` と同じ walker。解析 1 件分の作業量の中ならそこへ数える）
-            return (name, recurse(materialize(value), None))
+            return (name, freeze(materialize(value)))
         names = dataclass_field_names(value)
         if names is not None:
-            return (name, tuple((field_name, recurse(field_value(value, field_name), None)) for field_name in names))
+            return (name, tuple((field_name, freeze(field_value(value, field_name))) for field_name in names))
         raise TypeError(f"opaque object {name} has no object-derived stable identity")
+
+    @classmethod
+    def _freeze_placing(cls, value: Any, placed: Optional["PlacedTokens"]) -> Any:
+        """`_freeze_unmetered` と同じ値で、`placed` にある token（その読みの hook が置いた object そのもの。identity で
+        照合する）だけをそのまま写しに置く。`None` なら `_freeze_unmetered` そのもの（通常の codec）。
+
+        token を置くのは単一の読みの walk だけで、置く先は walk 自身が作る組み込みの容器（`dict` / `list`）の要素だけ。
+        そこで、許可のある凍結は組み込みの型 **そのもの** の容器（`tuple` / `list` / `dict`）の骨格だけを辿り、
+        `placed` にある token はそのまま置き、それ以外の値は `_freeze_unmetered` に委ねる（同じ順に辿るので、入力の
+        code を走らせる順も同じ）。値の規則を持つのは `_freeze_unmetered` だけで、許可の無い凍結（本体の `create`、
+        token を置かなかった読み）は main と同じ走査（要素ごとに許可を受け渡さない。レビュー 7: 受け渡す再帰は実 run の
+        snapshot の時間を約 2 % 増やした）。
+
+        許可は引数でだけ渡る（thread や module の状態を読まない）: 委ねた先で走る入力の code（`stable_key` / record の
+        LEGACY 表現）が codec を呼べば、その呼び出しは許可を持たない通常の凍結になる。入力が作った同じ型の object は
+        `placed` に無いので token ではない（main と同じく opaque として拒む）。
+        """
+
+        if placed is None:
+            return cls._freeze_unmetered(value)
+        kind = type(value)
+        recurse = cls._freeze_placing
+        if kind is tuple or kind is list:
+            return tuple(recurse(v, placed) for v in value)
+        if kind is dict:
+            return cls.sorted_mapping_items(
+                tuple((recurse(key, placed), recurse(item, placed)) for key, item in value.items())
+            )
+        if _is_placed_token(placed, value):
+            return value
+        return cls._freeze_unmetered(value)
 
     @classmethod
     def _freeze(cls, value: Any, meter: Any) -> Any:
@@ -726,9 +742,10 @@ def frozen_fingerprint_payload(
 
     version, identity, fields = fingerprint_payload(snapshot_id, semantic_fields, extraction_schema_version)
     return (
-        SnapshotFingerprintCodec._freeze_placing(version, None),
-        SnapshotFingerprintCodec._freeze_placing(identity, None),
-        SnapshotFingerprintCodec._freeze_placing(fields, placed),
+        SnapshotFingerprintCodec._freeze_unmetered(version),
+        SnapshotFingerprintCodec._freeze_unmetered(identity),
+        SnapshotFingerprintCodec._freeze_unmetered(fields) if placed is None
+        else SnapshotFingerprintCodec._freeze_placing(fields, placed),
     )
 
 

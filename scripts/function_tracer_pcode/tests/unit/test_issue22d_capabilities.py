@@ -46,7 +46,7 @@ def test_j19_live_values_are_read_only_through_the_owner():
 _IDENTITY_KEY_CALLERS = {
     ("core.analysis", "ReturnInfo.json_items"),
     ("proof.obligations.snapshot", "SnapshotFingerprintCodec._freeze"),
-    ("proof.obligations.snapshot", "SnapshotFingerprintCodec._freeze_placing"),
+    ("proof.obligations.snapshot", "SnapshotFingerprintCodec._freeze_unmetered"),
 }
 
 
@@ -1118,7 +1118,7 @@ _PROPORTIONAL_WORK_OWNERS = {
     **{("proof.cause_identity", name): _B_COUNTED for name in (
         "_tuple", "_tuple_item", "canonical_cause_tuple", "cause_key_from_dict",
     )},
-    ("proof.obligations.snapshot", "SnapshotFingerprintCodec._freeze_placing"): _B_FROZEN,
+    ("proof.obligations.snapshot", "SnapshotFingerprintCodec._freeze_unmetered"): _B_FROZEN,
     ("proof.obligations.snapshot", "SnapshotFingerprintCodec.sorted_mapping_items"): _B_FROZEN,
     ("proof.obligations.snapshot", "_frozen_repr"): _B_FROZEN,
     ("proof.obligations.snapshot", "_set_members"): _B_FROZEN,
