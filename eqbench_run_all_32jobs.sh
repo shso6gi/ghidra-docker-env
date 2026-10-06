@@ -566,6 +566,10 @@ run_pair() {
     # ものとして読まれてしまう。
     local stack_dump_status="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.stack-dump.status.json"
     rm -f -- "$stack_dump_status"
+    # Issue #204: 分類が失敗したときに分類器が残す record（projection の写しと durable な
+    # evidence の読み。store は cleanup で消える）。前回 execution の record も同じ境界で捨てる。
+    local classification_failure="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.classification-failure.json"
+    rm -f -- "$classification_failure"
     progress_receipt="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.progress.json"
     runtime_metrics_file="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.runtime.json"
     local started_at finished_at elapsed_seconds max_rss_kb
@@ -722,6 +726,7 @@ run_pair() {
         --pair-status-signing-private-key-file "$PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE" \
         --pair-status-verification-key-file "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
         --pair-execution-target-file "$pair_target_file" --classification-diagnostic-log "$log_file" \
+        --classification-failure-output "$classification_failure" \
         > "$pair_status_file"; then
         classification_ec=0
     else

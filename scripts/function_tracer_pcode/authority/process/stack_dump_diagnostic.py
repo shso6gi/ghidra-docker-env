@@ -14,7 +14,11 @@ supervisor は deadline まで child の終了を待つ。その待ちの中で�
    kill 開始時刻は `deadline` から `DEADLINE_JITTER_ALLOWANCE_SECONDS` 以内。
 2. **readiness を確認できなければ送らない。** 根拠は current execution segment の
    `handler_registered` 行だけ（`faulthandler.register()` が成功した事実）。
-   `/proc/<pid>/status` の `SigCgt` は根拠にしない。
+   `/proc/<pid>/status` の `SigCgt` は根拠にしない。登録は child の一生を覆わない:
+   CPython は interpreter の終了処理で faulthandler を外し、登録前の disposition へ戻す。
+   だから payload が「外れた後は無視」（``disposition_after_unregister``）と宣言していない
+   child には送らない（Issue #204: 既定の terminate のままだと、結果を出し終えて終了処理
+   の途中にいる child を殺し、結果を無効にする）。
 3. **送信先は child PID だけ。** process group へは送らない（`killpg` は使わない）。
    送信は同一プロセスへ束縛された pidfd から行い、束縛できない環境では送らない。
 4. **「送った」と「取れた」を同一視しない。** `signal_sent` / `dump_observed` /
@@ -106,6 +110,10 @@ UNAVAILABLE_PROCESS_EXITED = "process_exited"
 UNAVAILABLE_IDENTITY_BINDING = "identity_binding_unavailable"
 UNAVAILABLE_DUMP_PATH_MISMATCH = "dump_path_mismatch"
 UNAVAILABLE_SIGNAL_CONTRACT = "signal_contract_mismatch"
+#: Issue #204: handler が外れた後の disposition が無視だと宣言されていない（signal が child を殺し得る）
+UNAVAILABLE_UNREGISTER_TERMINATES = "signal_terminates_after_unregister"
+#: child（`cli.pair_diagnostics`）が readiness の payload に載せる「外れた後は無視」の値（唯一の定義）
+DISPOSITION_AFTER_UNREGISTER_IGNORE = "ignore"
 UNAVAILABLE_SIGNAL_FAILED = "signal_failed"
 UNAVAILABLE_START_FAILED = "diagnostic_start_failed"
 
@@ -386,6 +394,8 @@ class StackDumpDiagnostic:
             return UNAVAILABLE_SIGNAL_CONTRACT
         if payload.get("readiness_basis") != "faulthandler_register_returned":
             return UNAVAILABLE_SIGNAL_CONTRACT
+        if payload.get("disposition_after_unregister") != DISPOSITION_AFTER_UNREGISTER_IGNORE:
+            return UNAVAILABLE_UNREGISTER_TERMINATES
         declared_tmp = _absolute(payload.get("dump_path_tmp"))
         if declared_tmp != _absolute(self.config.dump_path_tmp):
             return UNAVAILABLE_DUMP_PATH_MISMATCH

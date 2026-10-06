@@ -70,8 +70,9 @@ violated / undetermined）は `reporting/deadline_margin_acceptance.py` だけ�
   照合し、食い違えば ``RunFacts.conflicts`` に両方を残す（片方で上書きしない）。終了は authority の
   5 値の `Outcome` だけ（他の綴りは ``termination_invalid``）。
 * 観測した最大は保証ではない（負荷・入力が変われば越え得る）。
-* ``lead`` は supervisor が SIGUSR1 を送る先行時間。child がその窓の中で終わると #204 の経路に
-  入るので、margin の中に取る。SIGTERM の後の grace（kill-after）は process の期限の **後** なので
+* ``lead`` は supervisor が SIGUSR1 を送る先行時間。child がその窓の中で終わると診断の signal を
+  受ける（#204 の修正の後は child の終了の仕方を変えないが、窓に入ったこと自体が margin の不足の
+  証拠）ので、margin の中に取る。SIGTERM の後の grace（kill-after）は process の期限の **後** なので
   margin には使えない（入れない）。
 * 止められない worker（能力を宣言しない backend）の join には上限が無い: その pair は
   supervisor の TIMEOUT（fallback）になる。margin には入れない。
