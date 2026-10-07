@@ -118,6 +118,10 @@ def canonical_atom(value: Any) -> CanonicalAtoms:
     if issubclass(kind, dict) or kind is MappingProxyType:
         pairs = dict.items(value) if issubclass(kind, dict) else value.items()
         items = [(canonical_atom(key), canonical_atom(item)) for key, item in pairs]
+        if len({key for key, _item in items}) != len(items):
+            # 別の key（hash を上書きした subclass と基底型の値など）が同じ atom になった: どの値が
+            # どの key のものかを atom では区別できない
+            return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
         items.sort()
         return ("dict", tuple(items))
     # 値が自分の identity を明示する method（型の属性だけを見る。instance の `__getattr__` を呼ばない）
@@ -140,7 +144,7 @@ def canonical_atom(value: Any) -> CanonicalAtoms:
     if type(qualname) is str and "<locals>" not in qualname:
         # 型の名前で型を識別できる（関数の中で作った class は同じ名前の別の型があり得る）
         names = live_values.dataclass_field_names(value)
-        if names is not None and _frozen_dataclass(kind):
+        if names is not None and _frozen_dataclass(kind, value, names):
             try:
                 return (
                     "dataclass",
@@ -170,11 +174,41 @@ def _declared_method(kind: type, value: Any, name: str) -> Any:
     return bound if callable(bound) else None
 
 
-def _frozen_dataclass(kind: type) -> bool:
-    """凍結した dataclass か（instance に field でない属性を後から足せない）。"""
+def _frozen_dataclass(kind: type, value: Any, names: Tuple[str, ...]) -> bool:
+    """`value` の状態が dataclass の field で尽きるか（凍結した dataclass で、field でない状態が無い）。
 
-    params = live_values.type_attribute(kind, "__dataclass_params__")
-    return params is not None and live_values.instance_state(params, "frozen", False) is True
+    - 型自身が凍結した dataclass として宣言されている（継承しただけの subclass は属性を足せる）
+    - instance の `__dict__` の key が field 名だけ（`object.__setattr__` で足した属性が無い）
+    - MRO のどの `__slots__` も field か `__dict__` / `__weakref__` だけ（slot に隠れた状態が無い）
+    """
+
+    own = _TYPE_DICT.__get__(kind)
+    params = own.get("__dataclass_params__")
+    if params is None or live_values.instance_state(params, "frozen", False) is not True:
+        return False
+    allowed = set(names)
+    holder = live_values.type_attribute(kind, "__dict__")
+    if holder is not None and live_values.type_attribute(type(holder), "__get__") is not None:
+        try:
+            state = holder.__get__(value, kind)
+        except (AttributeError, TypeError):
+            return False
+        if type(state) is not dict:
+            return False
+        if not all(type(key) is str and key in allowed for key in dict.__iter__(state)):
+            return False
+    for klass in _TYPE_MRO.__get__(kind):
+        slots = _TYPE_DICT.__get__(klass).get("__slots__", ())
+        slots = (slots,) if type(slots) is str else slots
+        for slot in (tuple.__iter__(slots) if type(slots) is tuple else list.__iter__(slots) if type(slots) is list else ()):
+            if not (type(slot) is str and (slot in allowed or slot in ("__dict__", "__weakref__"))):
+                return False
+    return True
+
+
+#: 型の属性の辞書と MRO を読む組み込みの descriptor（metaclass の hook を呼ばない）
+_TYPE_DICT = type.__dict__["__dict__"]
+_TYPE_MRO = type.__dict__["__mro__"]
 
 
 def canonical_value_key(value: Any) -> CanonicalAtoms:

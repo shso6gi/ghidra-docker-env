@@ -462,3 +462,75 @@ def test_the_contradiction_cache_never_returns_an_unidentified_identity_twice():
         first = ConditionNormalizer.normalize_for_contradiction(Condition(expr))
         second = ConditionNormalizer.normalize_for_contradiction(Condition(expr))
     assert first != second
+
+
+class _FrozenSub(_Frozen):
+    """凍結した dataclass を継承しただけの class（instance は属性を足せる）。"""
+
+
+class _SlottedBase:
+    __slots__ = ("hidden",)
+
+
+@dataclass(frozen=True)
+class _FrozenOverSlots(_SlottedBase):
+    a: int
+
+
+def test_a_frozen_dataclass_with_state_outside_its_fields_is_not_identified():
+    added = _Frozen(1)
+    object.__setattr__(added, "extra", 2)
+    subclass = _FrozenSub(1)
+    object.__setattr__(subclass, "extra", 2)
+    slotted, other = _FrozenOverSlots(1), _FrozenOverSlots(1)
+    object.__setattr__(slotted, "hidden", 1)
+    object.__setattr__(other, "hidden", 2)
+    for value in (added, subclass, slotted):
+        expr = _leaf(value)
+        assert expression_key_status(expr)[1] is False
+        assert expression_key(expr) != expression_key(_leaf(value))
+    assert expression_key(_leaf(slotted)) != expression_key(_leaf(other))
+    # 対照: field で状態が尽きる凍結 dataclass は値で識別される
+    assert expression_key(_leaf(_Frozen(1))) == expression_key(_leaf(_Frozen(1)))
+
+
+def test_a_phi_condition_subclass_is_not_read_through_its_properties():
+    from scripts.function_tracer_pcode.core.condition import Condition
+
+    class Disguised(Condition):
+        @property
+        def expression(self):
+            return Expression.constant(0, size=4)
+
+        @expression.setter
+        def expression(self, value):
+            object.__setattr__(self, "_hidden", value)
+
+    def phi(condition):
+        expr = Expression(ExpressionType.PHI, value=[(condition, Expression.constant(1, size=4))], size=4)
+        return expr
+
+    cond = Disguised(Expression.parameter("a", 0, size=4))
+    key, comparable = expression_key_status(phi(cond))
+    assert comparable is False
+    assert key != expression_key(phi(Disguised(Expression.parameter("b", 1, size=4))))
+
+
+def test_dict_keys_that_collapse_to_one_atom_are_not_identified():
+    class Twin(str):
+        def __hash__(self):
+            return 1
+
+        def __eq__(self, other):
+            return self is other
+
+    left = _leaf_dict({Twin("a"): 1, "a": 2})
+    right = _leaf_dict({Twin("a"): 2, "a": 1})
+    assert expression_key_status(left)[1] is False
+    assert expression_key(left) != expression_key(right)
+    # 対照: 区別できる key の dict は値で識別される
+    assert expression_key(_leaf_dict({"a": 1, "b": 2})) == expression_key(_leaf_dict({"b": 2, "a": 1}))
+
+
+def _leaf_dict(value):
+    return _leaf(value)

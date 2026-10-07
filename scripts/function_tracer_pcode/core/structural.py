@@ -677,6 +677,9 @@ def _key_view(node: Expression, options: ExactTailOptions):
             if pair is _UNREADABLE or len(pair) != 2:
                 return _KeyView("opaque", _opaque_label(current), reason="unreadable_phi")
             condition, value = pair
+            if condition is not None and type(condition) is not Condition:
+                # 条件は exact な `Condition` のときだけ読む（subclass の property を呼ばない）
+                return _KeyView("opaque", _opaque_label(current), reason="unreadable_phi")
             if condition is None:
                 shape.append((False, False))
             else:
