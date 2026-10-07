@@ -40,6 +40,11 @@ from enum import Enum
 from typing import Any, NamedTuple, Optional, Tuple
 
 from scripts.function_tracer_pcode.core import live_values
+from scripts.function_tracer_pcode.core.atom_validity import (  # noqa: F401  (tag は再 export)
+    OBJECT_ID_TAG,
+    UNSUPPORTED_VALUE_TAG,
+    atom_validity,
+)
 from scripts.function_tracer_pcode.core.loop_lowering_semantics import (
     ABSENT_LOWERING,
     LoopLoweringSemantics,
@@ -125,6 +130,12 @@ def _ordered_by_atom(pairs: list) -> Optional[list]:
         return None
 
 
+#: `canonical_atom` が値として読む入れ子の深さの上限（容器と object の段の数）。これより深い値は
+#: 値として固定できない（識別不能）。atom から作る表現（value key・runtime ref の key・identity の
+#: 形）の再帰の深さも、これで抑えられる
+MAX_VALUE_DEPTH = 64
+
+
 def canonical_atom(value: Any) -> CanonicalAtoms:
     """任意の値を structural key 用の atom へ落とす（**値の区別を落とさない**、Issue #215）。
 
@@ -166,15 +177,13 @@ def _canonical_atom(value: Any, active: set) -> CanonicalAtoms:
     kind = type(value)
     if issubclass(kind, bytes):
         return ("bytes", bytes.hex(value))
-    if kind is UnsupportedSemanticValue:
-        # 値として固定できなかったものの印（型名しか残っていない）。tuple として畳むと、
-        # 同じ型の別の object どうしが同じ atom になり識別できたように見える。印の tag を
-        # 残し、構造 key の owner（`core/structural`）が識別不能として扱う（Issue #215）
-        return (UNSUPPORTED_VALUE_TAG, value.type_module, value.type_qualname)
     value_id = id(value)
-    if value_id in active:
-        # 閉路（自分を含む容器・自分を返す stable_key）: 有限の atom で値を表せない
-        return ("object_id", type(value).__module__, type(value).__qualname__, value_id)
+    if value_id in active or len(active) >= MAX_VALUE_DEPTH:
+        # 閉路（自分を含む容器・自分を返す stable_key）: 有限の atom で値を表せない。値として
+        # 固定できない印にする（`object_id` と違い、読める object の「同じ object か」でもない）。
+        # 入れ子が上限より深い値も同じ（明示の制限: 読み手の再帰の深さをここで抑える。`active` は
+        # いま辿っている経路の容器・object なので、その数が入れ子の深さ）
+        return _unfixable_atom(value)
     active.add(value_id)
     try:
         return _composite_atom(value, kind, _atom)
@@ -194,13 +203,13 @@ def _composite_atom(value: Any, kind: type, _atom) -> CanonicalAtoms:
         if tag in _SET_TAGS:
             ordered = _ordered_by_atom([(_atom(item), None) for item in elements])
             if ordered is None:
-                return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
+                return _unfixable_atom(value)
             return (tag, tuple(atom for atom, _item in ordered))
         ordered = _ordered_by_atom([(_atom(key), _atom(item)) for key, item in elements])
         if ordered is None:
             # 別の key（hash を上書きした subclass と基底型の値など）が同じ atom になった: どの値が
             # どの key のものかを atom では区別できない
-            return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
+            return _unfixable_atom(value)
         return ("dict", tuple(ordered))
     # 値が自分の identity を明示する method（型の属性だけを見る。instance の `__getattr__` を呼ばない）
     stable_key = declared_method(kind, value, "stable_key")
@@ -239,6 +248,13 @@ def _composite_atom(value: Any, kind: type, _atom) -> CanonicalAtoms:
             if type(name) is str:
                 return ("enum", type(value).__module__, qualname, name)
     return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
+
+
+def _unfixable_atom(value: Any) -> CanonicalAtoms:
+    """値として固定できない値の印（型名だけ。`core/atom_validity` が識別不能と判定する）。"""
+
+    kind = type(value)
+    return (UNSUPPORTED_VALUE_TAG, str(kind.__module__), str(kind.__qualname__))
 
 
 def declared_method(kind: type, value: Any, name: str) -> Any:
@@ -290,166 +306,76 @@ _TYPE_MRO = type.__dict__["__mro__"]
 
 
 def canonical_value_key(value: Any) -> CanonicalAtoms:
-    """`value` の意味内容による表現。**container 種別を落とさない**。
+    """`value` の意味内容による表現（leaf の値の digest 用）。**`canonical_atom` の atom から作る**。
 
-    freeze は list を tuple へ畳むが、畳んだ事実で `["a"]` と `("a",)` を同一視
-    しては意味が変わる。`canonical_atom` と同じ tag 体系（`list` / `tuple` /
-    `dict`）を使うので、旧実装で異なった値は新実装でも異なる。
+    読み方は `canonical_atom` の 1 回の走査だけ（Issue #215: 容器の型・要素の対応・閉路・衝突の
+    判断を、読み手ごとに別に持たない）。atom との違いは process に依らないことだけ:
 
-    Python object そのものは `("opaque_value", module, qualname)` にする。
-    **process 依存の `id()` は入れない**ので digest が run 間で決定的になる。
-    「同じ object かどうか」の区別が要る比較側は `canonical_atom` を使う。
+    * 状態を読めない object（`object_id`）と値として固定できない印（閉路・衝突）は
+      ``("opaque_value", module, qualname)``（`id()` を入れない: digest が run 間で決定的）
+    * 型が宣言した key を持たない object（凍結 dataclass・enum・`to_dict`）も従来どおり opaque
+    * 型が宣言した key を持つ object は ``("stable", key の表現)``
+
+    opaque な値は値として支えない（`value_key_is_opaque`: digest は名乗らない）。「同じ object か」の
+    区別が要る比較側は `canonical_atom` を使う。
     """
 
-    if value is None:
-        return ("none", "")
-    if value is True or value is False:
-        return ("bool", int(value))
-    # 読み方は `canonical_atom` と同じ（Issue #215: scalar は基底型の slot、容器は `read_container`。
-    # subclass の `__iter__` / `__repr__` / `__eq__` を呼ばない）
-    scalar = live_values.json_scalar(value)
-    if scalar is not live_values.NOT_PLAIN:
-        if scalar is True or scalar is False:
-            return ("bool", int(scalar))
-        if type(scalar) is int:
-            return ("int", scalar)
-        if type(scalar) is float:
-            return ("float", float.__repr__(scalar))
-        return ("str", scalar)
-    kind = type(value)
-    if issubclass(kind, bytes):
-        return ("bytes", bytes.hex(value))
-    container = read_container(value)
-    if container is not None:
-        tag, elements = container
-        if tag in _SEQUENCE_TAGS:
-            return (tag, tuple(canonical_value_key(item) for item in elements))
-        if tag in _SET_TAGS:
-            ordered = _ordered_by_atom([(canonical_value_key(item), None) for item in elements])
-            if ordered is None:
-                return ("opaque_value", kind.__module__, kind.__qualname__)
-            return (tag, tuple(key for key, _item in ordered))
-        ordered = _ordered_by_atom([(canonical_value_key(key), canonical_value_key(item)) for key, item in elements])
-        if ordered is None:
-            # 別の key が同じ表現になった: どの値がどの key のものかを区別できない（値として支えない）
-            return ("opaque_value", kind.__module__, kind.__qualname__)
-        return ("dict", tuple(ordered))
-    raw = _stable_key_or_none(value)
-    if raw is not None:
-        return ("stable", canonical_value_key(raw))
-    return ("opaque_value", type(value).__module__, type(value).__qualname__)
+    return _value_key_of_atom(canonical_atom(value))
+
+
+def _value_key_of_atom(atom: CanonicalAtoms) -> CanonicalAtoms:
+    tag = atom[0]
+    if tag in _SCALAR_TAGS:
+        return atom
+    if tag in _SEQUENCE_TAGS or tag in _SET_TAGS:
+        return (tag, tuple(_value_key_of_atom(item) for item in atom[1]))
+    if tag == "dict":
+        return ("dict", tuple((_value_key_of_atom(key), _value_key_of_atom(item)) for key, item in atom[1]))
+    if tag == "stable":
+        return ("stable", _value_key_of_atom(atom[1]))
+    if tag in (OBJECT_ID_TAG, UNSUPPORTED_VALUE_TAG):
+        return ("opaque_value", atom[1], atom[2])
+    if tag in ("dataclass", "enum"):
+        return ("opaque_value", atom[1], atom[2])
+    # `to_dict` の値（型名を持たない）
+    return ("opaque_value", "", tag)
 
 
 def value_key_is_opaque(key: CanonicalAtoms) -> bool:
-    """`canonical_value_key` が object 表現へ落ちたか。"""
+    """`canonical_value_key` が値として支えられない部分を **どこかに** 含むか。
 
-    return bool(key) and key[0] == "opaque_value"
-
-
-#: snapshot がそのまま値として抱えてよい型。ここに無い型は「値」ではないので
-#: canonical な表現へ落とすか、落とせないなら unsupported として印を付ける。
-IMMUTABLE_SCALARS = (type(None), bool, int, float, str, bytes)
-
-
-#: `canonical_atom` が `UnsupportedSemanticValue` を表す atom の tag
-UNSUPPORTED_VALUE_TAG = "unsupported_value"
-
-
-class UnsupportedSemanticValue(NamedTuple):
-    """値として固定できなかったものの印。
-
-    `stable_key()` が可変な object を返したとき、それを snapshot が抱えると
-    「凍結後も中身が変わり得る値」を意味として持つことになる。かといって捨てると
-    別の値と同一視してしまうので、**型名だけを残して「支えられない」と明示**し、
-    identity の完全性（`identity_complete`）を落とす。
+    容器の中の opaque も数える（Issue #215）: 中の object が型名だけになった容器を値として支えると、
+    別の object を持つ容器と同じ表現になる。値が構造 key の識別不能 token を含むときも同じ
+    （`core/atom_validity` の判定。その値は何とも等しくならない）。`canonical_value_key` 以外の印
+    （PHI の ``("phi_branches",)`` など）は opaque ではない。
     """
 
-    type_module: str
-    type_qualname: str
-
-
-def immutable_value(value: Any) -> Any:
-    """`stable_key()` / `semantic_key()` の戻り値を不変な値へ畳む（snapshot・描画の identity 用）。
-
-    container は tuple へ、Enum は値へ、`stable_key()` を持つ object はその key へ
-    再帰的に落とす。どれでもない object は `UnsupportedSemanticValue` にする
-    （生 object を snapshot に残さない）。
-
-    読み方は `read_container` / `live_values` と同じ（基底型の実装。subclass の `__iter__` /
-    `__repr__` を呼ばない）。set と dict は `canonical_atom` の順に並べ、別の要素が同じ atom に
-    なる容器は `UnsupportedSemanticValue`（どの要素かを区別できない）。**この形は容器の型を
-    畳むので、構造 key には使わない**（構造 key は生の値を `canonical_atom` で読む:
-    `semantic_runtime_ref_key`）。
-    """
-
-    return _immutable_value(value, set())
-
-
-def _immutable_value(value: Any, active: set) -> Any:
-    """`immutable_value` の本体。`active` は辿っている容器・object の id（閉路は支えられない値）。"""
-
-    def _value(item: Any) -> Any:
-        return _immutable_value(item, active)
-
-    if value is None or value is True or value is False:
-        return value
-    scalar = live_values.json_scalar(value)
-    if scalar is not live_values.NOT_PLAIN and not issubclass(type(value), Enum):
-        return scalar
-    kind = type(value)
-    if issubclass(kind, bytes):
-        return bytes(bytes.__iter__(value)) if kind is not bytes else value
-    value_id = id(value)
-    if value_id in active:
-        # 閉路は有限の値で表せない
-        return UnsupportedSemanticValue(kind.__module__, kind.__qualname__)
-    container = read_container(value)
-    if container is not None:
-        tag, elements = container
-        active.add(value_id)
-        try:
-            return _container_value(kind, tag, elements, _value)
-        finally:
-            active.discard(value_id)
-    if issubclass(kind, Enum):
-        return _value(live_values.enum_value(value))
-    active.add(value_id)
-    try:
-        raw = _declared_key_raw(value, "stable_key")
-        nested = None if raw is None else _value(raw)
-    finally:
-        active.discard(value_id)
-    if nested is not None:
-        return nested
-    return UnsupportedSemanticValue(
-        type(value).__module__, type(value).__qualname__
-    )
-
-
-def _container_value(kind: type, tag: str, elements: tuple, _value) -> Any:
-    """`read_container` で読んだ容器の不変な値（set / dict は atom の順。衝突は支えられない値）。"""
-
-    if tag in _SEQUENCE_TAGS:
-        return tuple(_value(item) for item in elements)
-    if tag in _SET_TAGS:
-        ordered = _ordered_by_atom([(canonical_atom(item), _value(item)) for item in elements])
-    else:
-        ordered = _ordered_by_atom([
-            (canonical_atom(key), (_value(key), _value(item))) for key, item in elements
-        ])
-    if ordered is None:
-        return UnsupportedSemanticValue(kind.__module__, kind.__qualname__)
-    return tuple(item for _atom, item in ordered)
-
-
-def contains_unsupported_value(value: Any) -> bool:
-    """`immutable_value` が値として固定できなかったものを含むか。"""
-
-    if isinstance(value, UnsupportedSemanticValue):
+    if type(key) is not tuple or not key:
+        return False
+    if not atom_validity(key).identified:
         return True
-    if isinstance(value, tuple):
-        return any(contains_unsupported_value(item) for item in value)
+    return _value_key_has_opaque(key)
+
+
+def _value_key_has_opaque(key: CanonicalAtoms) -> bool:
+    if type(key) is not tuple or not key:
+        return False
+    tag = key[0]
+    if tag == "opaque_value":
+        return True
+    if len(key) != 2:
+        return False
+    if tag == "dict":
+        return any(_value_key_has_opaque(k) or _value_key_has_opaque(v) for k, v in key[1])
+    if tag == "stable":
+        return _value_key_has_opaque(key[1])
+    if tag in _SEQUENCE_TAGS or tag in _SET_TAGS:
+        return any(_value_key_has_opaque(item) for item in key[1])
     return False
+
+
+#: 子を持たない atom の tag
+_SCALAR_TAGS = frozenset({"none", "bool", "int", "float", "str", "bytes"})
 
 
 def _declared_key_raw(value: Any, name: str) -> Any:
@@ -464,64 +390,126 @@ def _declared_key_raw(value: Any, name: str) -> Any:
         return None
 
 
-def _stable_key_or_none(value: Any) -> Any:
-    key = _declared_key_raw(value, "stable_key")
-    return None if key is None else immutable_value(key)
-
-
-def _semantic_key_or_none(value: Any) -> Any:
-    key = _declared_key_raw(value, "semantic_key")
-    return None if key is None else immutable_value(key)
-
-
 def semantic_runtime_ref_key(value: Any) -> Optional[CanonicalAtoms]:
     """structural key に載せてよい runtime ref の意味 key（無ければ `None`）。
 
     任意の object 属性は見ない。debug 用・付随的な runtime object が構造の
     等価性を動かしてよいのは、明示的な安定 key を出しているときだけ。
 
-    **生の値を `canonical_atom` と同じ読み方で atom にする**（Issue #215）。`stable_key()` の
-    戻り値も `immutable_value` で畳まずに読む: 畳むと容器の型・要素の対応が落ち、後段の分類では
-    取り戻せない。安定 key を出さない object を含む容器は、従来どおり意味 key を持たない
-    （None）。別の要素が同じ atom になる容器は識別できない値（`unsupported_value`）にする。
+    **`canonical_atom` の atom から作る**（Issue #215: 読み方・閉路・衝突の判断は `canonical_atom`
+    の 1 回の走査だけ）。atom との違いは「意味 key を持つ値」の範囲だけで、従来と同じ:
+
+    * scalar（float を除く）・bytes はその atom、列と dict は要素ごとに同じ規則
+    * 型が宣言した `stable_key()` を持つ object は ``("stable_runtime_ref", key の atom)``
+    * float・set・宣言した key を持たない object（とそれを含む容器）は意味 key を持たない
+    * 意味 key を持たない ref と、値として固定できない印（閉路・要素の衝突）は、値として固定できない
+      印（`unsupported_value`）にする: 構造 key の owner がその node を識別不能にする（ref を落として
+      意味 key が無い式として扱うと、別の ref の式と同じ key になる）。None は ref が無いときだけ
     """
 
     if value is None:
         return None
-    scalar = live_values.json_scalar(value)
-    if (scalar is not live_values.NOT_PLAIN and type(scalar) is not float) or issubclass(type(value), bytes):
-        # bool / int / str / bytes（とその subclass）は `canonical_atom` と同じ規則（基底型の slot の
-        # exact な値）。float は従来どおり安定 key を出さない値として扱う（意味 key に入れない）
-        return canonical_atom(value)
-    container = read_container(value)
-    if container is not None:
-        tag, elements = container
-        if tag in _SEQUENCE_TAGS:
-            items = []
-            for item in elements:
-                item_key = semantic_runtime_ref_key(item)
-                if item_key is None:
-                    return None
-                items.append(item_key)
-            return (tag, tuple(items))
-        if tag == "dict":
-            pairs = []
-            for key, item in elements:
-                key_key = semantic_runtime_ref_key(key)
-                item_key = semantic_runtime_ref_key(item)
-                if key_key is None or item_key is None:
-                    return None
-                pairs.append((key_key, item_key))
-            ordered = _ordered_by_atom(pairs)
-            if ordered is None:
-                return (UNSUPPORTED_VALUE_TAG, type(value).__module__, type(value).__qualname__)
-            return ("dict", tuple(ordered))
-        # set は従来どおり安定 key を出さない値
+    key = _runtime_key_of_atom(canonical_atom(value))
+    if key is None:
+        # ref はあるが意味 key を出さない: 構造 key から ref を落とすと、別の ref の式（SMT では別の
+        # 記号になる）と同じ key になる。値として固定できない印にし、構造 key の owner がその node を
+        # 識別不能にする（Issue #215。recorded corpus の production の ref はすべて意味 key を持つ）
+        return _unfixable_atom(value)
+    return key
+
+
+def _runtime_key_of_atom(atom: CanonicalAtoms) -> Optional[CanonicalAtoms]:
+    tag = atom[0]
+    if tag == "float" or tag == "none":
         return None
-    stable = _declared_key_raw(value, "stable_key")
-    if stable is None:
+    if tag in _SCALAR_TAGS:
+        return atom
+    if tag in _SEQUENCE_TAGS:
+        items = []
+        for item in atom[1]:
+            item_key = _runtime_key_of_atom(item)
+            if item_key is None:
+                return None
+            items.append(item_key)
+        return (tag, tuple(items))
+    if tag == "dict":
+        pairs = []
+        for key, item in atom[1]:
+            key_key = _runtime_key_of_atom(key)
+            item_key = _runtime_key_of_atom(item)
+            if key_key is None or item_key is None:
+                return None
+            pairs.append((key_key, item_key))
+        ordered = _ordered_by_atom(pairs)
+        if ordered is None:
+            return (UNSUPPORTED_VALUE_TAG, "builtins", "dict")
+        return ("dict", tuple(ordered))
+    if tag == "stable":
+        return ("stable_runtime_ref", atom[1])
+    if tag == UNSUPPORTED_VALUE_TAG:
+        return atom
+    # set・宣言した key を持たない object（`object_id` / dataclass / enum / `to_dict`）
+    return None
+
+
+# ---------------------------------------------------------------------------
+# solver の identity（projection の identity の field の値）
+# ---------------------------------------------------------------------------
+
+
+def identity_value(value: Any) -> Optional[CanonicalAtoms]:
+    """identity（SMT の記号・条件 oracle の記号・provenance key・関数名）に使う値。無ければ None。
+
+    **`canonical_atom` の atom そのもの**（Issue #215）。atom は exact な str / int だけを中身に持ち、
+    容器の型（list と tuple、dict と組の列、set）・bool と int・float の bit 列・enum の member を
+    区別する: atom どうしの `==` は値の区別を落とさない。読む前に Python の値へ畳むと（旧
+    `immutable_value`）、`[1]` と `(1,)`、`{"a": 1}` と `(("a", 1),)`、`True` と `1` が同じ identity に
+    なり、別の ref が同じ solver symbol を共有した。
+
+    使ってよいのは `core/atom_validity.atom_validity` が identified かつ placeholder_free と判定した
+    atom だけ: 識別不能 token・状態を読めない object・型名だけの印（閉路・衝突）・構造 key の
+    placeholder を含む値は、別の ref と同じ値になり得るので identity を持たない（None）。process の
+    中だけの識別済み token（tail token・object identity token）は同じ process の中で同じものを指すので
+    受け付ける。
+    """
+
+    return _identity_of(value)[0]
+
+
+def _identity_of(value: Any) -> Tuple[Optional[CanonicalAtoms], bool]:
+    """(identity の値, 値はあったが identity にできなかったか)。"""
+
+    if value is None:
+        return None, False
+    atom = canonical_atom(value)
+    validity = atom_validity(atom)
+    if validity.identified and validity.placeholder_free:
+        return atom, False
+    return None, True
+
+
+def identity_view(atom: Any) -> Any:
+    """identity の atom を Python の値として読んだ形（**形の検査専用**。比較・hash・記号名に使わない）。
+
+    `("parameter", index, …)` のような schema の先頭や欠けた成分を調べる consumer（solver symbol の
+    安全性の判定、parameter ref の判定）のための読み口。list と tuple を区別しないなど値の区別を
+    落とすので、identity の等しさは必ず atom で比べる。読めない atom（object の印など）はそのまま返す。
+    """
+
+    if type(atom) is not tuple or not atom:
+        return atom
+    tag = atom[0]
+    if tag == "none":
         return None
-    return ("stable_runtime_ref", canonical_atom(stable))
+    if tag == "bool":
+        return bool(atom[1])
+    if tag in ("int", "str"):
+        return atom[1]
+    if tag in _SEQUENCE_TAGS:
+        return tuple(identity_view(item) for item in atom[1])
+    if tag == "stable":
+        return identity_view(atom[1])
+    return atom
 
 
 # ---------------------------------------------------------------------------
@@ -539,11 +527,11 @@ class RuntimeRefProjection:
 
     #: structural key に載せる意味 key
     structural_key: Optional[CanonicalAtoms]
-    #: `stable_key()`（不変化済み）
+    #: `stable_key()` の identity（`identity_value`: 検証済みの atom。固定できなければ None）
     stable_key: Any
-    #: `semantic_key()`（不変化済み）
+    #: `semantic_key()` の identity（`identity_value`）
     semantic_key: Any
-    #: `(origin_kind, origin_stable_key)`（unknown 宣言 identity 用）
+    #: `(origin_kind, origin_stable_key)` の identity（`identity_value`。unknown 宣言 identity 用）
     stable_origin: Optional[Tuple[Any, ...]]
     #: parameter を指す ref か（solver query identity 用）
     is_parameter_ref: bool
@@ -563,8 +551,7 @@ class RuntimeRefProjection:
     declares_variable_symbol: bool
     #: ref の identity（stable / semantic / origin / address の key）に値として固定できない部分が
     #: あった（Issue #215）。そのときは stable / semantic / origin の field を全部 None にし（address は
-    #: その key だけ外す）、identity の完全性と、
-    #: ref を持たない式との区別はこの印で判断する
+    #: その key だけ外す）、identity の完全性と、ref を持たない式との区別はこの印で判断する
     identity_unfixable: bool = False
 
 
@@ -591,6 +578,8 @@ class StorageProjection:
     identity: Optional[CanonicalAtoms]
     #: identity key を出す storage があったか（「無い」と「出せない」は別の意味）
     supported: bool
+    #: storage の key はあったが値として固定できなかった（identity は None。Issue #215）
+    identity_unfixable: bool = False
 
 
 _ABSENT_STORAGE = StorageProjection(identity=None, supported=False)
@@ -670,27 +659,19 @@ def project_runtime_ref(expr: Any, runtime_ref: Any) -> RuntimeRefProjection:
 
     if runtime_ref is None:
         return _ABSENT_RUNTIME
-    # identity の field は値として固定できる key だけを持つ（Issue #215 `identity_value`）。型名だけの
-    # 印を含む key を持たせると、それを読む全 consumer（SMT の unknown 記号・条件 oracle の記号・
-    # provenance key・loop lowering の関数名）で別の ref が同じ identity になる。外したことは
-    # `identity_unfixable` に残す
-    stable_raw = _stable_key_or_none(runtime_ref)
-    semantic_raw = _semantic_key_or_none(runtime_ref)
-    address_raw = _address_object_identity(runtime_ref)
-    stable = identity_value(stable_raw)
-    semantic = identity_value(semantic_raw)
-    address_identity = identity_value(address_raw)
-    origin = _stable_origin(runtime_ref)
-    unfixable = (
-        (stable_raw is not None and stable is None)
-        or (semantic_raw is not None and semantic is None)
-        or (address_raw is not None and address_identity is None)
-        or _origin_unfixable(runtime_ref)
-    )
+    # identity の field は `identity_value`（`canonical_atom` の atom で、`atom_validity` が identified
+    # かつ placeholder_free と判定したもの）だけを持つ（Issue #215）。値を読む前に Python の値へ畳まない:
+    # 畳むと容器の型・bool と int などの区別が落ち、それを読む全 consumer（SMT の unknown 記号・条件
+    # oracle の記号・provenance key・loop lowering の関数名）で別の ref が同じ identity になる
+    stable, stable_unfixable = _identity_of(_declared_key_raw(runtime_ref, "stable_key"))
+    semantic, semantic_unfixable = _identity_of(_declared_key_raw(runtime_ref, "semantic_key"))
+    origin, origin_unfixable = _stable_origin(runtime_ref)
+    address_identity, address_unfixable = _address_object_identity(runtime_ref)
+    unfixable = stable_unfixable or semantic_unfixable or origin_unfixable or address_unfixable
     if unfixable:
         # 一部でも固定できないなら、残りの key（stable・semantic・origin）にも頼らない: consumer は
         # semantic → stable → origin の順に退避するので、固定できない成分を落とした粗い key で別の
-        # ref と併合し得る
+        # ref と併合し得る。外したことは `identity_unfixable` に残す
         stable = semantic = origin = None
     lowering_identity = _lowering_identity(expr, runtime_ref, stable, semantic)
     return RuntimeRefProjection(
@@ -714,29 +695,6 @@ def project_runtime_ref(expr: Any, runtime_ref: Any) -> RuntimeRefProjection:
     )
 
 
-def _origin_unfixable(runtime_ref: Any) -> bool:
-    """origin の stable key が値として固定できなかったか（`_stable_origin` が外した）。"""
-
-    origin_ref = getattr(runtime_ref, "origin_ref", None)
-    if getattr(runtime_ref, "origin_kind", None) is None or origin_ref is None:
-        return False
-    raw = _stable_key_or_none(origin_ref)
-    return raw is not None and identity_value(raw) is None
-
-
-def identity_value(value: Any) -> Any:
-    """identity に使ってよい不変な値（`UnsupportedSemanticValue` を含むなら None: identity を持たない）。
-
-    projection の `stable_key` / `semantic_key` は完全性の判定（`contains_unsupported_value`）の
-    ために印を含んだまま持つ。**それを identity（SMT の記号・provenance key・関数名）に使う側は
-    この関数を通す**: 印は型名しか残っていないので、別の値どうしが同じ identity になる。
-    """
-
-    if value is None or contains_unsupported_value(value):
-        return None
-    return value
-
-
 def project_storage(storage_info: Any) -> StorageProjection:
     """storage identity を値にする。"""
 
@@ -749,9 +707,10 @@ def project_storage(storage_info: Any) -> StorageProjection:
         return StorageProjection(identity=None, supported=True)
     if storage_key is None:
         return StorageProjection(identity=None, supported=True)
-    return StorageProjection(
-        identity=canonical_value_key(immutable_value(storage_key)), supported=True
-    )
+    # solver の parameter symbol の identity にもなる（`parameter_storage`）: runtime ref の key と同じ
+    # 契約（`identity_value`）。固定できなければ identity を持たず、そのことを印に残す
+    identity, unfixable = _identity_of(storage_key)
+    return StorageProjection(identity=identity, supported=True, identity_unfixable=unfixable)
 
 
 def project_declared_type(
@@ -786,18 +745,17 @@ def _declared_name_is_pointer(declared_name: Optional[str]) -> bool:
     return declared_name.rstrip().endswith("*")
 
 
-def _stable_origin(runtime_ref: Any) -> Optional[Tuple[Any, ...]]:
+def _stable_origin(runtime_ref: Any) -> Tuple[Optional[CanonicalAtoms], bool]:
+    """(origin の identity, 値はあったが固定できなかったか)。identity は `(origin_kind, origin の key)` の atom。"""
+
     origin_kind = getattr(runtime_ref, "origin_kind", None)
     origin_ref = getattr(runtime_ref, "origin_ref", None)
     if origin_kind is None or origin_ref is None:
-        return None
-    if declared_method(type(origin_ref), origin_ref, "stable_key") is None:
-        return None
-    origin_key = identity_value(_stable_key_or_none(origin_ref))
+        return None, False
+    origin_key = _declared_key_raw(origin_ref, "stable_key")
     if origin_key is None:
-        return None
-    # 形は unknown 宣言 identity がそのまま使う（変えると symbol 名が動く）。
-    return (origin_kind, origin_key)
+        return None, False
+    return _identity_of((origin_kind, origin_key))
 
 
 def _is_parameter_ref(runtime_ref: Any, stable_key: Any) -> bool:
@@ -807,13 +765,14 @@ def _is_parameter_ref(runtime_ref: Any, stable_key: Any) -> bool:
             return bool(is_parameter())
         except IDENTITY_EVALUATION_ERRORS:
             return False
-    return bool(
-        isinstance(stable_key, tuple) and stable_key and stable_key[0] == "parameter"
-    )
+    return _parameter_stable_key(stable_key) is not None
 
 
 def _parameter_stable_key(stable_key: Any) -> Optional[CanonicalAtoms]:
-    if isinstance(stable_key, tuple) and stable_key and stable_key[0] == "parameter":
+    """`("parameter", …)` 形の stable key の identity（atom のまま返す。形は `identity_view` で調べる）。"""
+
+    view = identity_view(stable_key)
+    if type(view) is tuple and view and view[0] == "parameter":
         return stable_key
     return None
 
@@ -827,14 +786,29 @@ def _address_offset(runtime_ref: Any) -> Optional[int]:
         return None
 
 
-def _address_object_identity(runtime_ref: Any) -> Optional[Tuple[Any, ...]]:
+def _address_object_identity(runtime_ref: Any) -> Tuple[Optional[Tuple[str, int, int]], bool]:
+    """(名前付き global object のアドレス identity `(symbol, size, offset)`, 値はあったが固定できなかったか)。
+
+    consumer（`render_smt.unknowns`）は 3 つ組を分解して symbol 名と offset を描画に使うので、
+    schema（exact な str・int・int）を確かめてから exact な値で持つ（Issue #215: subclass の値・
+    別の形の値を identity に入れない）。
+    """
+
     if not isinstance(runtime_ref, AddressValueRef):
-        return None
+        return None, False
     try:
         identity = runtime_ref.global_object_identity()
     except IDENTITY_EVALUATION_ERRORS:
-        return None
-    return None if identity is None else immutable_value(identity)
+        return None, False
+    if identity is None:
+        return None, False
+    container = read_container(identity)
+    if container is None or container[0] != "tuple" or len(container[1]) != 3:
+        return None, True
+    symbol, size, offset = (live_values.json_scalar(item) for item in container[1])
+    if type(symbol) is not str or type(size) is not int or type(offset) is not int:
+        return None, True
+    return (symbol, size, offset), False
 
 
 def _lowering_identity(
@@ -842,7 +816,7 @@ def _lowering_identity(
 ) -> Optional[Tuple[Any, ...]]:
     """loop lowering が SMT function 名に使う identity。
 
-    形は既存の出力をそのまま保つ（変えると SMT symbol 名が動く）。証明が要る
+    ref の key を使うときは projection の identity（`identity_value` の atom）をそのまま使う。証明が要る
     loop summary と key を出せない ref だけが `id()` を含む process 依存の値に
     なる。**その値をここで凍結時に確定させる**ので、consumer が生 ref を読み
     直すことはなくなり、process 依存が残る場所もこの 1 関数だけになる。
@@ -873,7 +847,7 @@ def _lowering_identity(
                 ("ref_constant_bias", int(getattr(runtime_ref, "constant_bias", 0) or 0)),
                 method_b_key,
             )
-        if _stable_key_or_none(loop_summary) is None:
+        if _declared_key_raw(loop_summary, "stable_key") is None:
             return (
                 "opaque_loop_summary_identity",
                 type(runtime_ref).__module__,
@@ -885,7 +859,7 @@ def _lowering_identity(
             )
     if semantic_key is not None:
         return semantic_key
-    if stable_key is not None and declared_method(type(runtime_ref), runtime_ref, "stable_key") is not None:
+    if stable_key is not None:
         return stable_key
     return (
         "opaque_runtime_ref",

@@ -685,9 +685,6 @@
       "_OpenRegion.start": {"logged": 0, "unlogged": 1},
       "process_age_seconds": {"logged": 0, "unlogged": 1}
     },
-    "core.structural": {
-      "_stable_value_key": {"logged": 0, "unlogged": 1}
-    },
     "ghidra.decompilation_broker": {
       "_BrokeredDecompileResults.getHighFunction": {"logged": 0, "unlogged": 4},
       "_subordinate_decompile": {"logged": 0, "unlogged": 4},

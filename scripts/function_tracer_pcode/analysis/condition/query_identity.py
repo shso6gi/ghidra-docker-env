@@ -54,6 +54,7 @@ from scripts.function_tracer_pcode.analysis.condition.condition_cache import roo
 from scripts.function_tracer_pcode.core.condition_metrics import note
 from scripts.function_tracer_pcode.core.semantic_freeze import validated
 from scripts.function_tracer_pcode.core.deadline import poller as deadline_poller
+from scripts.function_tracer_pcode.core.semantic_projection import identity_view
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
     ImmutableSemanticGraph,
     encode_stable_atoms,
@@ -215,7 +216,7 @@ def solver_symbol_identity_is_safe(identity: Optional[Tuple[Any, ...]]) -> bool:
         return False
     if identity[0] == "parameter_generated_ordinal":
         return False
-    if _identity_contains_unsafe_parameter_key(identity):
+    if _identity_contains_unsafe_parameter_key(_identity_shape(identity)):
         return False
     if (
         identity[0] == "runtime_ref"
@@ -230,6 +231,24 @@ def solver_symbol_identity_is_safe(identity: Optional[Tuple[Any, ...]]) -> bool:
     ):
         return False
     return True
+
+
+def _identity_shape(identity: Tuple[Any, ...]) -> Tuple[Any, ...]:
+    """形の検査用に、runtime ref の identity の値（projection の atom）を Python の値として読んだ identity。
+
+    projection の identity は `canonical_atom` の atom で（Issue #215）、`("parameter", …)` の形は
+    `identity_view` で読む。比較・記号の割当には元の identity を使う。
+    """
+
+    if (
+        identity[0] == "runtime_ref"
+        and len(identity) >= 3
+        and isinstance(identity[2], tuple)
+        and len(identity[2]) == 2
+    ):
+        tag, value = identity[2]
+        return identity[:2] + ((tag, identity_view(value)),) + identity[3:]
+    return identity
 
 
 def _identity_contains_unsafe_parameter_key(value: Any) -> bool:

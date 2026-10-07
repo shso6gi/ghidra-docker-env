@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Issue #215 (SN3): 値の読み方の契約（`semantic_projection.read_container` / `canonical_atom`）。
 
-runtime ref の意味 key は、`stable_key()` の戻り値を不可逆に畳む前処理（`immutable_value` の
+runtime ref の意味 key は、`stable_key()` の戻り値を不可逆に畳む前処理（旧 `immutable_value` の
 tuple 化・`__iter__` の呼び出し・`repr` 順の並べ替え・key の衝突の無視）を通ると、後段の分類では
 取り戻せない区別を失う。契約（期待値はここから決める）:
 
@@ -425,6 +425,8 @@ def test_a_fixable_ref_identity_is_kept_and_shared():
     one = freeze_expression(Expression(ExpressionType.UNKNOWN, name="g", runtime_ref=_Fixed(), size=4))
     two = freeze_expression(Expression(ExpressionType.UNKNOWN, name="g", runtime_ref=_Fixed(), size=4))
     assert semantic_projection(one).runtime_identity_unfixable is False
-    assert semantic_projection(one).runtime_stable_key == ("glob", 1)
+    from scripts.function_tracer_pcode.core.semantic_projection import canonical_atom
+
+    assert semantic_projection(one).runtime_stable_key == canonical_atom(("glob", 1))
     assert _unknown_runtime_identity_key(one) == _unknown_runtime_identity_key(two)
     assert structural.expression_provenance_key(one) == structural.expression_provenance_key(two)

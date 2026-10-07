@@ -241,6 +241,27 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
         "scripts.function_tracer_pcode.smt",
         "os",
     ),
+    "core/atom_validity.py": (
+        # atom の語彙と妥当性の判定は、値の読み手（projection）にも identity の規則（structural・
+        # query identity）にも依存しない（Issue #215: 両方が共有する一番下の owner）。
+        "scripts.function_tracer_pcode.core.expression",
+        "scripts.function_tracer_pcode.core.condition",
+        "scripts.function_tracer_pcode.core.semantic_freeze",
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.semantic_projection",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.analysis",
+        "scripts.function_tracer_pcode.semantics",
+        "scripts.function_tracer_pcode.proof",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        "os",
+    ),
     "core/loop_lowering_semantics.py": (
         # 意味の owner は描画も identity も知らない（投影 owner から呼ばれる側）。
         "scripts.function_tracer_pcode.core.render_smt",

@@ -23,8 +23,21 @@ from scripts.function_tracer_pcode.core.atomic_tables import (
 from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.semantic_lifecycle import is_validated
-from scripts.function_tracer_pcode.core.semantic_projection import (
+from scripts.function_tracer_pcode.core.atom_validity import (  # noqa: F401  (tag の語彙は再 export)
+    EXACT_TAIL_TAG,
+    NON_STRUCTURAL_IDENTITY_TAGS,
+    PLACEHOLDER_TAGS,
+    PROCESS_OBJECT_TAG,
+    PROCESS_SCOPED_TAGS,
+    UNIDENTIFIED_TAG,
     UNSUPPORTED_VALUE_TAG,
+    atom_validity,
+    tags_of as _tags_of,
+)
+from scripts.function_tracer_pcode.core.semantic_projection import (
+    IDENTITY_EVALUATION_ERRORS,
+    identity_view,
+    MAX_VALUE_DEPTH,
     declared_method,
     read_container,
     canonical_atom as _atom_key,
@@ -96,21 +109,6 @@ def _is_all_ones_mask_for_size(expr: Optional[Expression], size: int) -> bool:
 #: tail token の domain separation（record の digest 専用）
 _EXACT_TAIL_DOMAIN = b"sn3-exact-structural-tail-v1\x00"
 
-#: 識別済みの tail token の tag
-EXACT_TAIL_TAG = "exact_tail"
-#: 識別できない token の tag（C-K5）
-UNIDENTIFIED_TAG = "exact_tail_unidentified"
-#: object identity fallback の token の tag（`expression_key_or_identity`）
-PROCESS_OBJECT_TAG = "process_object"
-
-#: 比較に使ってはいけない（どこまで見えているかを表す）key の tag（C-K3）
-PLACEHOLDER_TAGS = frozenset({"truncated", "cycle", "opaque", UNIDENTIFIED_TAG})
-#: その値が process の中でだけ意味を持つ token の tag（Gate A）
-PROCESS_SCOPED_TAGS = frozenset({EXACT_TAIL_TAG, UNIDENTIFIED_TAG, PROCESS_OBJECT_TAG})
-#: 構造ではなく「新しく発行した印」か「live object の identity」を表す tag。旧実装の
-#: `("object_id", …, id(value))` が担っていた意味の置き換えなので、`object_id` を
-#: 「安定しない identity」として拒んでいた consumer は同じくこれを拒む
-NON_STRUCTURAL_IDENTITY_TAGS = frozenset({UNIDENTIFIED_TAG, PROCESS_OBJECT_TAG})
 
 
 @dataclass(frozen=True)
@@ -296,109 +294,20 @@ def exact_tail_statistics() -> dict:
 # 置き換えなくても identified ではない。scalar の値は `live_values` の規則（基底型の slot）で読み、
 # subclass の `__eq__` / `__hash__` / `__int__` を呼ばない（`canonical_atom` も同じ規則）。
 
-#: atom の中身として受け付ける exact な型（`canonical_atom` は str / int しか出さない）
-_EXACT_ATOM_SCALARS = (str, int)
-#: 子を持たない `canonical_atom` の atom の tag と、その中身の型（分類の近道）
-_SCALAR_ATOM_PAYLOAD = {"none": str, "bool": int, "int": int, "float": str, "str": str, "bytes": str}
-
-
-def _is_scalar_atom(item: Any) -> bool:
-    """`canonical_atom` の scalar の atom（``("int", 3)`` など）か。形（2 要素・中身の型）まで照合する。
-
-    dataclass の atom の field の組 `(name, atom)` は、name が偶然 `int` などでも中身が atom
-    （tuple）なので scalar ではない（その下の `object_id` を見落とさない）。
-    """
-
-    if type(item) is not tuple or len(item) != 2 or type(item[0]) is not str:
-        return False
-    payload = _SCALAR_ATOM_PAYLOAD.get(item[0])
-    return payload is not None and type(item[1]) is payload
-
-
-def _is_unidentified_atom(item: tuple) -> bool:
-    """`canonical_atom` の `("object_id", module, qualname, id)` / `("unsupported_value", module, qualname)`。
-
-    `object_id` は「同じ object か」しか言わず、object の死後に `id()` が再利用されると別物と
-    一致する。`unsupported_value` は型名しか残っていない。形（要素数と型）まで照合する:
-    dataclass の atom の field の組 `(name, atom)` の name が偶然 `object_id` でも取り違えない。
-    """
-
-    if not item or type(item[0]) is not str:
-        return False
-    tag = item[0]
-    if tag == "object_id":
-        return len(item) == 4 and type(item[1]) is str and type(item[2]) is str and type(item[3]) is int
-    if tag == UNSUPPORTED_VALUE_TAG:
-        return len(item) == 3 and type(item[1]) is str and type(item[2]) is str
-    return False
-
-
-_NOT_COMPARABLE_TAGS = PLACEHOLDER_TAGS | PROCESS_SCOPED_TAGS
-#: 値を識別しない `canonical_atom` の atom の tag（`_is_unidentified_atom` が生の段で形を照合する）
-_UNIDENTIFIED_ATOM_TAGS = frozenset({"object_id", UNSUPPORTED_VALUE_TAG})
-
-
 def _classify_atom(atom: Any) -> Tuple[Any, bool, bool]:
     """`canonical_atom` の値を分類する: (key に入れる atom, identified, comparable)。
 
-    identified でない atom（値を識別しない atom・exact でない中身・既にある識別不能 token を
-    どこかに含む）は、atom ごと毎回新しい識別不能 token にする（その key は自分自身の再計算とも
-    等しくならない）。tag は `_tags_of` で、`canonical_atom` に何重に包まれていても読む。明示
-    stack で辿る。
+    判定は `core/atom_validity.atom_validity`（solver の identity と共有する唯一の規則）。identified で
+    ない atom（値を識別しない atom・exact でない中身・既にある識別不能 token をどこかに含む）は、atom
+    ごと毎回新しい識別不能 token 1 つで表す: 既にある token をそのまま持つと、同じ値を持つ別の
+    node・自分自身の再計算と key が等しくなる（C-K5）。
     """
 
-    if _is_scalar_atom(atom):
-        return atom, True, True
-    if type(atom) is not tuple:
-        if type(atom) in _EXACT_ATOM_SCALARS:
-            return atom, True, True
-        return unidentified_identity("non_exact_atom"), False, False
-    identified = True
-    comparable = True
-    stack = [(atom, False)]
-    rebuilt: dict = {}
-    while stack:
-        item, exiting = stack.pop()
-        item_id = id(item)
-        if not exiting:
-            if item_id in rebuilt:
-                continue
-            if _is_unidentified_atom(item):
-                rebuilt[item_id] = unidentified_identity("unidentified_atom")
-                identified = comparable = False
-                continue
-            tags = _tags_of(item)
-            if UNIDENTIFIED_TAG in tags or not _UNIDENTIFIED_ATOM_TAGS.isdisjoint(tags[1:]):
-                # 既にある識別不能 token と、`canonical_atom` に包み直された `object_id` / 型名だけの
-                # 印（包んだ段の先頭。生の段は上の形の照合が見る）は、どの深さでも識別できない
-                identified = False
-            if not _NOT_COMPARABLE_TAGS.isdisjoint(tags):
-                comparable = False
-            stack.append((item, True))
-            for child in item:
-                if type(child) is tuple:
-                    if child and id(child) not in rebuilt and not _is_scalar_atom(child):
-                        stack.append((child, False))
-                elif type(child) not in _EXACT_ATOM_SCALARS:
-                    identified = comparable = False
-            continue
-        changed = False
-        items = []
-        for child in item:
-            if type(child) is tuple:
-                replaced = rebuilt.get(id(child), child) if child else child
-            elif type(child) in _EXACT_ATOM_SCALARS:
-                replaced = child
-            else:
-                replaced = unidentified_identity("non_exact_atom")
-            changed = changed or replaced is not child
-            items.append(replaced)
-        rebuilt[item_id] = tuple(items) if changed else item
-    if not identified:
-        # 識別できない atom は、key の中でも毎回新しい識別不能 token 1 つで表す: 既にある token を
-        # そのまま持つと、同じ値を持つ別の node・自分自身の再計算と key が等しくなる（C-K5）
-        return unidentified_identity("unidentified_atom"), False, False
-    return rebuilt[id(atom)], True, comparable
+    validity = atom_validity(atom)
+    if not validity.identified:
+        reason = "non_exact_atom" if type(atom) is not tuple else "unidentified_atom"
+        return unidentified_identity(reason), False, False
+    return atom, True, validity.comparable
 
 
 class _LabelReader:
@@ -1198,90 +1107,6 @@ def _key_has_tag(key: Any, tags: frozenset) -> bool:
     return False
 
 
-#: `canonical_atom`（`core/semantic_projection`）が列を包むときの tag
-_CANONICAL_SEQUENCE_TAGS = frozenset({"tuple", "list"})
-
-
-def _tags_of(item: Any) -> Tuple[str, ...]:
-    """列 `item` の tag（生の形の先頭と、`canonical_atom` が何重に包んでも見える先頭）。
-
-    構造 key の token と placeholder は、別の値の atom として `canonical_atom` に包まれると
-    ``("tuple", (("str", tag), …))`` になる（runtime ref の `stable_key()` が構造 key を持つ
-    場合など）。その key を持つ式の key がさらに別の ref に包まれると二重に包まれる。何重に
-    包まれても検出（C-K3）と昇格規則（Gate A）から見えなくならないよう、tag はこの 1 か所で
-    包みを外しながら読む。組み込みの型の値だけを読む（`live_values`）。
-
-    段は (body, depth) で表す: 要素 i は `body[i]` の包みを depth 回外した値（`_decoded`）。
-    段の数は包みの深さまで（key の入れ子より深くならない）。
-    """
-
-    tags: list = []
-    body: Any = item
-    depth = 0
-    while True:
-        if not (type(body) is tuple or type(body) is list):
-            break
-        if len(body) == 0:
-            break
-        head = _decoded(body[0], depth)
-        if type(head) is not str:
-            break
-        tags.append(head)
-        if head not in _CANONICAL_SEQUENCE_TAGS or len(body) != 2:
-            break
-        # この段は包んだ列 ("tuple" | "list", (atom(v0), …)): 次の段は包まれていた列 V
-        inner = _decoded(body[1], depth)
-        if type(inner) is not tuple:
-            break
-        inner_depth = inner[2]
-        if type(inner_depth) is not int:
-            break
-        body, depth = inner[1], inner_depth + 1
-    return tuple(tags)
-
-
-def _decoded(atom: Any, depth: Any) -> Any:
-    """`atom` の `canonical_atom` の包みを depth 回外した値。
-
-    str はその str、列は ``("level", body, d)``（要素 k は `body[k]` を d 回外した値）、
-    どちらでもなければ None。包みの段ごとに 2 要素（種類と中身）だけを外す。再帰の深さは
-    depth（包みの段の数）まで。
-    """
-
-    if type(depth) is not int:
-        return None
-    if depth <= 0:
-        if type(atom) is str:
-            return atom
-        if type(atom) is tuple or type(atom) is list:
-            return ("level", atom, 0)
-        plain = live_values.plain_scalar(atom)
-        return plain if type(plain) is str else None
-    value = _decoded(atom, depth - 1)
-    if type(value) is not tuple:
-        return None
-    body = value[1]
-    inner_depth = value[2]
-    if type(inner_depth) is not int:
-        return None
-    if not (type(body) is tuple or type(body) is list):
-        return None
-    if len(body) != 2:
-        return None
-    kind = _decoded(body[0], inner_depth)
-    if type(kind) is not str:
-        return None
-    payload = _decoded(body[1], inner_depth)
-    if kind == "str":
-        return payload if type(payload) is str else None
-    if kind not in _CANONICAL_SEQUENCE_TAGS or type(payload) is not tuple:
-        return None
-    payload_depth = payload[2]
-    if type(payload_depth) is not int:
-        return None
-    return ("level", payload[1], payload_depth + 1)
-
-
 def key_contains_placeholder(key: StructuralKey) -> bool:
     """key のどこかに placeholder（truncated / cycle / opaque / 識別不能）があるか（C-K3）。"""
 
@@ -1430,6 +1255,10 @@ def expression_provenance_key(
 
     if projection.storage_identity is not None:
         return ("storage", projection.storage_identity)
+    if projection.storage_identity_unfixable:
+        # storage の key はあるが値として固定できない: 構造 key は storage を見ないので、そこへ
+        # 退避すると別の storage の式と等しくなる（Issue #215。毎回新しい識別不能 token）
+        return ("storage", unidentified_identity("unfixable_storage_identity"))
 
     if projection.runtime_stable_key is not None:
         return ("runtime_ref", projection.runtime_stable_key)
@@ -1447,6 +1276,12 @@ def expression_provenance_key(
     if safe is not None:
         return ("expression", safe)
 
+    if not _provenance_inputs_identified(expr):
+        # digest は値の表現の一致だけで決まる: 値として固定できない部分（型名だけの `opaque`・
+        # 識別不能な runtime ref の key・固定できない identity）を含む式の digest は、別の値を持つ式と
+        # 一致し得る（Issue #215 / #218 AC1）。何とも等しくならない token にする
+        return ("expression", unidentified_identity("unidentified_provenance_value"))
+
     payload, source_atoms, complete = _expression_provenance_payload(
         expr,
         max_nodes=max_digest_nodes,
@@ -1463,6 +1298,67 @@ def expression_provenance_key(
         ("root", _expression_descriptor(expr)),
         ("source_atoms", tuple(sorted(source_atoms, key=repr))),
     )
+
+
+def provenance_key_view(key: Any) -> Any:
+    """provenance key（とそれを部分に持つ key）を **形の検査用** に読んだ値。比較・identity に使わない。
+
+    `expression_provenance_key` の ``("runtime_ref", X)`` の X は projection の identity（`canonical_atom`
+    の atom: Issue #215）。`("parameter", program, function, index)` の program id・``opaque_unknown``
+    のような schema の形を調べる consumer（cross-binary の対応候補・診断の evidence）は、atom の形を
+    自分で照合せず、この読み口を通す。X は `semantic_projection.identity_view` で読み、それ以外の
+    部分はそのまま（list は tuple として）返す。値の区別を落とすので、結果を identity にしない。
+    """
+
+    if isinstance(key, list):
+        key = tuple(key)
+    if not isinstance(key, tuple):
+        return key
+    if len(key) == 2 and key[0] == "runtime_ref":
+        return ("runtime_ref", identity_view(key[1]))
+    return tuple(provenance_key_view(item) for item in key)
+
+
+def _provenance_inputs_identified(expr: Expression) -> bool:
+    """provenance digest に入る値が、どの node でも値として固定できるか（明示 stack、共有 node は 1 度）。
+
+    digest の preimage に入る node ごとの値（`_stable_value_key`）・runtime ref の構造 key・
+    storage / runtime ref の identity を、構造 key と同じ判定（`core/atom_validity`）で調べる。
+    """
+
+    stack: list = [expr]
+    seen: set = set()
+    while stack:
+        node = stack.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        projection = semantic_projection(node)
+        if projection.runtime_identity_unfixable or projection.storage_identity_unfixable:
+            return False
+        runtime_key = projection.runtime_structural_key
+        if runtime_key is not None and not atom_validity(runtime_key).identified:
+            return False
+        # 値は snapshot の判定（`value_key_is_opaque`: 型名だけの印・識別不能 token）と、digest の
+        # 表現（`_stable_value_key`）の両方で調べる
+        if projection.value_is_opaque or _value_key_has_opaque(_stable_value_key(getattr(node, "value", None))):
+            return False
+        stack.extend(getattr(node, "operands", ()) or ())
+    return True
+
+
+def _value_key_has_opaque(key: Any) -> bool:
+    """`_stable_value_key` の表現のどこかに型名だけの ``("opaque", module, qualname)`` があるか。"""
+
+    stack = [key]
+    while stack:
+        item = stack.pop()
+        if type(item) is not tuple:
+            continue
+        if len(item) == 3 and item[0] == "opaque" and type(item[1]) is str and type(item[2]) is str:
+            return True
+        stack.extend(item)
+    return False
 
 
 def _expression_provenance_payload(
@@ -1665,10 +1561,11 @@ def _expression_source_atom(expr: Expression) -> Optional[StructuralKey]:
     return None
 
 
-def _stable_value_key(value: Any) -> StructuralKey:
+def _stable_value_key(value: Any, _active: Optional[set] = None) -> StructuralKey:
     """provenance digest の値の表現。値の読み方は `semantic_projection` の reader と同じ（Issue #215:
-    scalar は基底型の slot、容器は `read_container`、`stable_key` は型の宣言だけ）。型名だけに落ちる
-    `("opaque", …)` の扱いは #218 の範囲。"""
+    scalar は基底型の slot、容器は `read_container`、`stable_key` は型の宣言だけ。閉路・入れ子の上限・
+    dict の key の衝突は `canonical_atom` と同じく値として固定できない）。型名だけに落ちる
+    `("opaque", …)` の扱い（識別できない値を含む provenance key の同一視）は #218 の範囲。"""
 
     if value is None:
         return ("none",)
@@ -1679,29 +1576,47 @@ def _stable_value_key(value: Any) -> StructuralKey:
         if type(scalar) is int:
             return ("int", scalar)
         if type(scalar) is float:
-            return ("float", float.__repr__(scalar))
+            return ("float", struct.pack(">d", scalar).hex())
         if type(scalar) is bool:
             return ("bool", int(scalar))
         return ("str", scalar)
     kind = type(value)
     if issubclass(kind, bytes):
         return ("bytes", bytes.hex(value))
-    if type(value) is Expression:
+    active = set() if _active is None else _active
+    value_id = id(value)
+    if value_id in active or len(active) >= MAX_VALUE_DEPTH:
+        return ("opaque", kind.__module__, kind.__qualname__)
+    active.add(value_id)
+    try:
+        return _stable_composite_value_key(value, kind, active)
+    finally:
+        active.discard(value_id)
+
+
+def _stable_composite_value_key(value: Any, kind: type, active: set) -> StructuralKey:
+    """`_stable_value_key` の式・条件・容器・object（閉路を見張りながら呼ばれる）。"""
+
+    if kind is Expression:
         return ("expression_ref", _expression_descriptor(value))
-    if type(value) is Condition:
+    if kind is Condition:
         return (
             "condition",
-            _stable_value_key(value.expression),
+            _stable_value_key(value.expression, active),
             ("negated", bool(value.negated)),
         )
     container = read_container(value)
     if container is not None:
         tag, elements = container
         if tag == "tuple" or tag == "list":
-            return (tag, tuple(_stable_value_key(item) for item in elements))
+            return (tag, tuple(_stable_value_key(item, active) for item in elements))
         if tag == "dict":
-            items = [(_stable_value_key(key), _stable_value_key(item)) for key, item in elements]
+            items = [(_stable_value_key(key, active), _stable_value_key(item, active)) for key, item in elements]
+            keys = [key for key, _item in items]
             try:
+                if len(set(keys)) != len(keys):
+                    # 別の key が同じ表現になった: どの値がどの key のものかを区別できない
+                    return ("opaque", kind.__module__, kind.__qualname__)
                 items.sort()
             except TypeError:
                 return ("opaque", kind.__module__, kind.__qualname__)
@@ -1710,8 +1625,8 @@ def _stable_value_key(value: Any) -> StructuralKey:
     stable_key = declared_method(kind, value, "stable_key")
     if stable_key is not None:
         try:
-            return ("stable", _stable_value_key(stable_key()))
-        except Exception:
+            return ("stable", _stable_value_key(stable_key(), active))
+        except IDENTITY_EVALUATION_ERRORS:
             pass
     return ("opaque", type(value).__module__, type(value).__qualname__)
 

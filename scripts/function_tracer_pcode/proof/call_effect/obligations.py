@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.core import (
     StorageInfo,
     expression_provenance_key,
 )
+from scripts.function_tracer_pcode.core.structural import provenance_key_view
 from scripts.function_tracer_pcode.proof.call_effect.candidates import (
     build_internal_call_correspondence_candidates,
 )
@@ -973,7 +974,10 @@ def _cross_binary_expression_shape(value: Any) -> Any:
         return ()
     kind = str(normalized[0])
     if kind == "runtime_ref" and len(normalized) >= 2:
-        return ("runtime_ref", _cross_binary_expression_shape(normalized[1]))
+        # provenance key の ref の identity は projection の atom（Issue #215）。形（`parameter` /
+        # `function` の program id など）は owner の読み口 `provenance_key_view` で読む（atom の形を
+        # ここで照合しない）
+        return ("runtime_ref", _cross_binary_expression_shape(provenance_key_view(normalized)[1]))
     if kind == "parameter":
         # Runtime parameter refs are (parameter, program, function, index).
         if len(normalized) >= 4 and isinstance(normalized[-1], int):

@@ -277,16 +277,50 @@ def test_c1_baseline_fixture_covers_the_surfaces_the_change_touched():
     assert len(cases) >= 30
 
 
+_RUNTIME_UNKNOWN_SYMBOL = re.compile(r"rtunk_[0-9a-f]{16}_[0-9]+")
+
+
+def _renamed_runtime_unknowns(recorded, spec):
+    """baseline の runtime unknown の記号名を、いまの記号名へ 1 対 1 に付け替えた (smt, 宣言)。
+
+    runtime unknown の記号名は ref の identity の digest（`render_smt.unknowns`）で、描画の意味ではない。
+    Issue #215（PR #216）で identity の符号化（`canonical_atom` の atom）が変わり名前だけが変わった。
+    名前の付け替えは自由定数の改名なので意味を変えない。ただし付け替えが一意に決まる（同じ幅の記号が
+    両側に 1 つずつ）ときだけ行い、決まらなければ付け替えない（差分は SAT のまま検出される）。
+    """
+
+    current = set(
+        _RUNTIME_UNKNOWN_SYMBOL.findall(
+            "\n".join(declaration_lines(spec["expression"], float_mode=spec.get("float_mode", "uf"),
+                                         address_context=bool(spec.get("address_context", False))))
+        )
+    )
+    old = set(_RUNTIME_UNKNOWN_SYMBOL.findall(recorded["smt"])) - current
+    new = current - set(_RUNTIME_UNKNOWN_SYMBOL.findall(recorded["smt"]))
+    smt = recorded["smt"]
+    declarations = list(recorded["declarations"])
+    by_width = {}
+    for name in new:
+        by_width.setdefault(name.rsplit("_", 1)[1], []).append(name)
+    for name in old:
+        candidates = by_width.get(name.rsplit("_", 1)[1], [])
+        if len(candidates) != 1 or sum(1 for other in old if other.rsplit("_", 1)[1] == name.rsplit("_", 1)[1]) != 1:
+            continue
+        smt = smt.replace(name, candidates[0])
+        declarations = [line.replace(name, candidates[0]) for line in declarations]
+    return smt, dict(recorded, smt=smt, declarations=declarations)
+
+
 @pytest.mark.parametrize("case", sorted(_baseline()["cases"]))
 def test_c1_rendering_means_the_same_as_before_the_change(case):
-    """C1: 変更前の描画と現在の描画の差分式が UNSAT。"""
+    """C1: 変更前の描画と現在の描画の差分式が UNSAT（runtime unknown の記号名の付け替えを除く）。"""
 
-    recorded = _baseline()["cases"][case]
     spec = build_corpus()[case]
+    smt, recorded = _renamed_runtime_unknowns(_baseline()["cases"][case], spec)
     _assert_difference_is_unsat(
         _declarations_for(case, recorded, spec),
         recorded["sort"],
-        recorded["smt"],
+        smt,
         render_case(spec),
         case,
     )

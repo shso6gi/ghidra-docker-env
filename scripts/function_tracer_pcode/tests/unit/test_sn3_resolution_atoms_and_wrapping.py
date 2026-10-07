@@ -244,7 +244,7 @@ def test_a_float_in_a_runtime_ref_is_identified_by_its_value_not_by_a_reused_id(
 
 
 class _Mutable:
-    """`immutable_value` が値として固定できない object（型名だけの印になる）。"""
+    """状態を読めない object（`canonical_atom` で値として固定できない）。"""
 
     def __init__(self, x):
         self.x = x

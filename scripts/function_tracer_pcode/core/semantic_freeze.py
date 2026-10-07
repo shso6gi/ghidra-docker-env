@@ -96,7 +96,8 @@ from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     mark_published,
     mark_validated,
 )
-from scripts.function_tracer_pcode.core.semantic_projection import contains_unsupported_value, read_container
+from scripts.function_tracer_pcode.core.atom_validity import atom_validity
+from scripts.function_tracer_pcode.core.semantic_projection import read_container
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
     build_semantic_snapshot,
     local_semantic_payload,
@@ -744,21 +745,16 @@ def _projection_has_unsupported_value(snapshot: Any) -> bool:
     """snapshot が「値として固定できなかったもの」を含むか。
 
     含むなら equivalence digest はその式を他と区別できないので、digest を
-    名乗らせない（`identity_complete` を落とす）。
+    名乗らせない（`identity_complete` を落とす）。identity の field は固定できる値しか
+    持たないので（`semantic_projection.identity_value`）、外したことを示す印だけを見る。
     """
 
-    runtime = snapshot.runtime
-    if runtime.identity_unfixable:
+    if snapshot.runtime.identity_unfixable or snapshot.storage.identity_unfixable:
         return True
-    return any(
-        contains_unsupported_value(value)
-        for value in (
-            runtime.stable_key,
-            runtime.semantic_key,
-            runtime.stable_origin,
-            snapshot.storage.identity,
-        )
-    )
+    # runtime ref の構造 key（digest の preimage に入る）が識別できない印（意味 key を持たない ref・
+    # 閉路・衝突）や識別不能 token を含めば、digest は別の ref の式と一致し得る（`core/atom_validity`）
+    structural_key = snapshot.runtime.structural_key
+    return structural_key is not None and not atom_validity(structural_key).identified
 
 
 #: 派生値を作った時点と commit の前で比べる意味 field（順は固定）
