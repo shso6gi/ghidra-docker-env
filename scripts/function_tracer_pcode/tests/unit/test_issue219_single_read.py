@@ -548,6 +548,8 @@ def test_a_pair_that_elides_little_stops_eliding_and_still_matches_main(monkeypa
     assert counts["policy:elision_off"] == 1
     assert counts["bypass:elision_policy"] == 4
     assert counts["requests"] == _POLICY_READS + 4
+    # 割合が早い判断の下限より上の pair は 16 回目で止める（早い判断では止めない）
+    assert "policy:elision_off_early" not in counts
 
 
 def test_a_pair_that_elides_most_keeps_reusing(monkeypatch):
@@ -624,6 +626,8 @@ def test_the_policy_weighs_the_whole_read_all_leaves_closed_but_a_large_record_s
 
     assert counts["policy:elision_off"] == 1
     assert counts["bypass:elision_policy"] == _POLICY_READS + 2 - _POLICY_EARLY_READS
+    # 早い判断で止めたことは別に数える（recorded corpus の replay はこれが 0 であることを確かめる）
+    assert counts.get("policy:elision_off_early", 0) == 1
 
 
 def test_the_read_keeps_the_codec_copy_only_when_it_holds_tokens():
