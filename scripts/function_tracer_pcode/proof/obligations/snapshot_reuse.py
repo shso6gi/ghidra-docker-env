@@ -533,14 +533,29 @@ def _active_store() -> Optional[SnapshotReuse]:
 
 
 def snapshot_reuse_metrics() -> Dict[str, Any]:
-    """今の scope の計測（scope の外では空）。判定には使わない。
+    """今の scope の計測（scope の外では空）。判定には使わない（pair の journal note と replay の検証だけが読む）。
 
-    `counts`:
-    `requests`（scope の中の入れ子でない呼び出し）、`body_executions`（本体を実際に実行した回数。
-    bypass・同時の重複を含む）、`hits`、`misses`、`stores`、`unstable`（前後の witness が違った・
-    後の witness を作れなかった）、`bypass:<理由>`、`sealed`（写して closed になった値）、
-    `seal_left_open`（写しても closed にならなかった値）。
-    `seconds`: `witness`（sealing を含まない抽出と複製）、`seal`、`body`。
+    `counts`（`reuse_or_build` の 1 回の呼び出しが足す数）:
+
+    * `requests`: canonical な経路で単一の読みをした呼び出し（下の `bypass:nested_serialization` /
+      `bypass:generation_path` で通常の本体へ回した呼び出しは含まない）
+    * `hits` / `misses`: token を置いた読み（方針が elision を続けている間）の witness の照合の結果
+    * `stores`: miss の後に witness と snapshot を保存できた回数（同時の miss で先に保存されていれば数えない）
+    * `body_executions`: 読んだ値から snapshot を組み立てた回数（`assemble_snapshot`。miss・方針で token を置かない
+      読み・witness を比べられなかった読み。通常の本体へ回した呼び出しは含まない）
+    * `bypass:<理由>`: `nested_serialization`（別の直列化の中）・`generation_path`（canonical でない生成経路）は
+      読む前に通常の本体へ回した数、`elision_policy` は方針で token も witness も作らずに読んで組み立てた数、
+      `witness_failed:RecursionError` は witness を比べられず保存せずに組み立てた数
+    * `policy:elision_off`: 方針が token を置かないに変わった回数（pair に高々 1）。`policy:elision_off_early` は
+      そのうち早い判断（`_POLICY_EARLY_READS` 回目）で変わったもの
+    * `sealed` / `seal_left_open`: 読みの後に、読みの中で pending だった値を読みが描いた表現から写して、closed に
+      なった値 / ならなかった値
+
+    `seconds`（その区間の壁時計の和）: `read`（単一の読み: 解析の view の walk・効果の要約の投影・fingerprint の
+    材料の凍結と digest・`retained_form` の写し。sealing を含まない）、`witness`（token を置いた読みの witness の
+    組み立てと store の照合）、`body`（`assemble_snapshot`）、`seal`（読みの後の写し）。
+
+    `entries`: その時点の store の entry の数（pair の終わりに手放す）。
     """
 
     store = _active_store()
