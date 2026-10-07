@@ -97,7 +97,9 @@ def test_normalizing_a_v3_config_does_not_erase_the_mode():
     pytest.param(v3_run("true"), "lacks typed analysis config", id="word-value"),
     pytest.param(v3_run("2"), "lacks typed analysis config", id="out-of-range"),
     pytest.param(
-        dict(BASE_RUN, analysis_config_schema="eqbench-analysis-config-v4",
+        # v4 is known since Issue #106 PR-106-B (the runner's analysis
+        # deadline); the next unused schema is the unknown one.
+        dict(BASE_RUN, analysis_config_schema="eqbench-analysis-config-v5",
              identical_fast_path="1"),
         "unknown analysis config schema", id="unknown-schema",
     ),

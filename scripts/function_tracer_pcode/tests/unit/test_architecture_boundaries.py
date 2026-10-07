@@ -2019,6 +2019,8 @@ _TO_DICT_WITHOUT_JSON_ITEMS = {
     "reporting/unknown_reason_summary.py", "reporting/timeout_hotspot_summary.py",
     "reporting/root_blocker_summary.py", "reporting/result_summary.py",
     "core/stage_journal_reader.py", "checker/cause_aggregate.py",
+    # deadline margin の観測と判定（run 後の result tree を読む報告。判定にも出力にも入力しない）
+    "reporting/deadline_margin_summary.py", "reporting/deadline_margin_acceptance.py",
     # proof の内部の証拠（出力へは producer が組んだ dict として入る）
     "proof/recurrence_promotion.py", "proof/call_effect/preflight.py",
     "proof/call_effect/candidates.py", "proof/call_effect/obligations.py",

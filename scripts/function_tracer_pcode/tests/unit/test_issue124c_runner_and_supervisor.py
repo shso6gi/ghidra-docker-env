@@ -163,6 +163,7 @@ _PYTHON_STUB = """#!/bin/sh
 # 呼ぶので、その呼び出しだけ順序 file に記録する。
 case " $* " in
   *process_authority_cleanup*) printf 'cleanup\\n' >> "$ORDER_FILE" ;;
+  *canonical_result*) printf 'classify %s\\n' "$*" >> "$ORDER_FILE" ;;
 esac
 echo stub
 exit 0
@@ -228,6 +229,30 @@ def test_previous_status_sidecar_is_dropped_before_the_child_starts(tmp_path, ru
     out_dir, name, _ = _harness(tmp_path, runner, pre=_seed)
     sidecar = out_dir / ".runtime-metrics" / f"{name}.stack-dump.status.json"
     assert not sidecar.exists()
+
+
+@pytest.mark.parametrize("runner", RUNNERS)
+def test_the_classifier_gets_the_failure_record_path_and_a_stale_record_is_dropped(
+    tmp_path, runner,
+):
+    """Issue #204 Scope 3: 分類が失敗したときの record は run dir の ``.runtime-metrics`` に
+    置かれ（store は cleanup で消える）、前回 execution の record は child の前に捨てる。"""
+
+    def _seed(out_dir, name):
+        metrics = out_dir / ".runtime-metrics"
+        metrics.mkdir(exist_ok=True)
+        (metrics / f"{name}.classification-failure.json").write_text("{}", encoding="utf-8")
+
+    out_dir, name, order = _harness(tmp_path, runner, pre=_seed)
+    record = out_dir / ".runtime-metrics" / f"{name}.classification-failure.json"
+    assert not record.exists()
+    classify = [line for line in order if line.startswith("classify ")]
+    assert len(classify) == 1, order
+    arguments = classify[0].split()
+    assert "--classification-failure-output" in arguments, classify[0]
+    assert arguments[arguments.index("--classification-failure-output") + 1] == str(record)
+    assert [line.split()[0] for line in order].index("classify") < [
+        line.split()[0] for line in order].index("cleanup"), order
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +475,7 @@ def test_real_supervisor_reports_missing_when_no_dump_was_written(tmp_path):
     assert not Path(config.stack_dump_artifact).exists()
 
 
+@pytest.mark.wall_clock  # 壁時計の上限を module の外の時計で確かめる（Issue #239）
 def test_kill_signal_jitter_is_measured_at_the_signal_not_at_the_path_entry(
     tmp_path, monkeypatch,
 ):

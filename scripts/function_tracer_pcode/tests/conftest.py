@@ -64,6 +64,12 @@ def pytest_addoption(parser):
     )
 
 
+#: 結果が壁時計に左右される test の印（Issue #239）: module の外の時計（production の時計・別の test module の
+#: helper）で測る上限、実の時計で動く短い期限。module の中で時計を読む test は印が無くても
+#: `_wall_clock_functions` が見つける。付け忘れは `tests/unit/test_issue239_gc_isolation.py` の静的な検査が見つける
+WALL_CLOCK_MARKER = "wall_clock"
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
@@ -76,6 +82,13 @@ def pytest_configure(config):
         f"{UNSCOPED_CONDITION_CACHE}: run the test outside any condition-cache scope "
         "(Issue #224). Only for tests that check the out-of-scope or nesting behaviour "
         "of the scope itself.",
+    )
+    config.addinivalue_line(
+        "markers",
+        f"{WALL_CLOCK_MARKER}: the test's result depends on the wall clock through a clock read "
+        "outside its module (a production clock, a helper of another test module) or a deadline "
+        "on the real clock. Its call runs with the older heap frozen (Issue #239, "
+        "`pytest_runtest_call`).",
     )
 
 
@@ -123,6 +136,98 @@ def _pair_condition_cache_scope(request):
 
     with condition_cache_scope():
         yield
+
+
+#: 壁時計を読む関数の名前（module の path ごとに 1 回だけ求める）
+_WALL_CLOCK_FUNCTIONS: Dict[str, frozenset] = {}
+_WALL_CLOCK_NAMES = frozenset({"perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns"})
+
+
+def _wall_clock_functions(path: str) -> frozenset:
+    """module の中で壁時計を読む関数の名前（直接読む関数と、それを module の中で呼ぶ関数の閉包）。
+
+    呼び出しは名前だけで照合する（束縛を解決しない）: module の中の時計を読む関数と同じ名前の別の呼び出し
+    （`subprocess.run` と module の `run` など）も読むと見なす。外れても freeze が増えるだけ（memory の費用で、
+    測定は正しいまま）。module の外で読む時計は見えないので、その test は `wall_clock` の印を付ける
+    （付け忘れは `test_issue239_gc_isolation.py` の静的な検査が見つける）。
+    """
+
+    known = _WALL_CLOCK_FUNCTIONS.get(path)
+    if known is not None:
+        return known
+    import ast
+
+    try:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        tree = None
+    calls: Dict[str, set] = {}
+    reading = set()
+    for node in ast.walk(tree) if tree is not None else ():
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        names = set()
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Call):
+                func = inner.func
+                name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+                if name is not None:
+                    names.add(name)
+        calls.setdefault(node.name, set()).update(names)
+        if names & _WALL_CLOCK_NAMES:
+            reading.add(node.name)
+    changed = True
+    while changed:
+        changed = False
+        for name, called in calls.items():
+            if name not in reading and called & reading:
+                reading.add(name)
+                changed = True
+    known = _WALL_CLOCK_FUNCTIONS[path] = frozenset(reading)
+    return known
+
+
+def _measures_wall_clock(item) -> bool:
+    """`item` の test 関数が壁時計を読むか（`wall_clock` の印、または module の中の関数の閉包）。"""
+
+    if item.get_closest_marker(WALL_CLOCK_MARKER) is not None:
+        return True
+    name = getattr(item, "originalname", None) or getattr(item, "name", "")
+    path = getattr(item, "path", None)
+    return path is not None and name in _wall_clock_functions(str(path))
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    """壁時計で時間を測る test の本体（call）の間だけ、それより前から在る object を GC の世代から外す（Issue #239）。
+
+    wall-clock の上限を持つ test は、被測定 code の仕事だけで時間が決まるべきで、先に走った test が
+    残した session の値（共有の AST の台帳など、数百万 object）の full collection が測定の区間に入ると
+    落ちる。call の前に `gc.freeze()` で既存の object を永続の世代へ移し、call の後に `gc.unfreeze()` で
+    最も古い世代へ戻す（世代の list のつなぎ替えだけで、費用は object の数に依らない）。
+
+    * call の中で作った object は今と同じく GC される（被測定 code が作る値の GC の時間は測定に入る）
+    * call より前（fixture の setup・前の test）から在る循環は call の間は集められず、call の後で集められる
+    * call より前から在る object の弱参照は call の間は消えない（call の中で、前から在る object が集められる
+      ことを確かめる test は、その object を call の中で作る）
+    * 対象は壁時計を読む test 関数だけ（`wall_clock` の印か、直接読むか、module の中の読む関数を呼ぶ:
+      `_measures_wall_clock`）。
+      それ以外の test の間は今と同じ GC で、古い循環の回収（full collection）を先送りし続けない（session の
+      memory を増やさない）
+    * GC の有効 / 無効・閾値は変えない。外で既に freeze されていれば何もしない（他の freeze を解かない）
+    """
+
+    import gc
+
+    if gc.get_freeze_count() or not _measures_wall_clock(item):
+        yield
+        return
+    gc.freeze()
+    try:
+        yield
+    finally:
+        gc.unfreeze()
+
 
 yaml = cast(Any, importlib.import_module("yaml"))
 from dataclasses import dataclass, field

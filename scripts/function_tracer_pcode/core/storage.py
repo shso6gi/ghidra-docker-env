@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from typing import Any, Dict, NamedTuple, Optional, Tuple
 from scripts.function_tracer_pcode.core.json_encoding import scalar_record_dict
+from scripts.function_tracer_pcode.core.live_values import exact_scalar
 
 
 @dataclass
@@ -40,6 +41,10 @@ class StorageInfo:
     bit_offset_in_base: int = 0
     is_stack_pointer: bool = False
     is_frame_pointer: bool = False
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # scalar の field は組み込みの型そのもの（Issue #235。JPype の整数を基底型の値へ写す: 構築と代入の入口）
+        object.__setattr__(self, name, exact_scalar(value))
 
     def __post_init__(self) -> None:
         self.size = int(self.size or 0)

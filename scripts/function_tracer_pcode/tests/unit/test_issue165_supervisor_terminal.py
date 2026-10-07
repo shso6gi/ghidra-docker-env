@@ -29,6 +29,11 @@ import time
 
 import pytest
 
+from scripts.function_tracer_pcode.authority.decision.classification_failure import (
+    ProjectionNotAdoptedError,
+    failure_record,
+)
+
 from scripts.function_tracer_pcode.authority.process import store_layout as layout
 from scripts.function_tracer_pcode.authority.contracts import authority_digest
 from scripts.function_tracer_pcode.authority.process import terminal_evidence as te
@@ -112,8 +117,24 @@ def _assert_terminal(run, expected):
         assert projection["error_code"] == detail, projection
         assert projection["error_detail"]
         assert run.exit_code == 2
-        with pytest.raises(ValueError, match="not a terminal authority"):
+        # Issue #204: the store is deleted with the pair, so the classifier carries the
+        # supervisor's verdict and the durable one into the message (the pair-status detail)
+        # and into the record the runner keeps
+        with pytest.raises(
+            ProjectionNotAdoptedError,
+            match=f"not a terminal authority: status='INVALID' error_code='{detail}' "
+                  f".*durable evidence: .*{detail}",
+        ) as raised:
             classify(run)
+        record = failure_record(
+            detail=str(raised.value), projection_path=run.records.projection,
+            durable=raised.value.durable,
+        )
+        assert record["projection"]["value"]["error_code"] == detail
+        assert record["durable"]["readable"] is True
+        assert record["durable"]["step"]["kind"] == "INVALID"
+        assert record["durable"]["snapshot"]["launch"]["presence"] == "VALID"
+        json.dumps(record)                                          # what the runner keeps
         return None
     classified = classify(run)
     assert classified["classification_valid"] is True

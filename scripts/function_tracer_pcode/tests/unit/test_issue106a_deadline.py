@@ -48,6 +48,11 @@ from scripts.function_tracer_pcode.core.errors import (
 )
 
 
+#: この module の test は実の時計で動く期限（`ShiftedClock` / `clock=` の無い `DeadlinePolicy`）の結果を確かめる:
+#: 短い予算では GC の一時停止が結果を変えるので、call の間は古い heap を freeze する（Issue #239）
+pytestmark = pytest.mark.wall_clock
+
+
 @pytest.fixture(autouse=True)
 def _clean_ledgers():
     reset_pair_failure_scopes()

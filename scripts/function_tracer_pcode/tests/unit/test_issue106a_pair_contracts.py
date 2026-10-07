@@ -35,6 +35,11 @@ from scripts.function_tracer_pcode.reporting.deadline_acceptance import (
 )
 from scripts.function_tracer_pcode.tests.unit.test_issue106a_deadline import ShiftedClock
 
+
+#: この module の test は実の時計で動く期限（`ShiftedClock` / `clock=` の無い `DeadlinePolicy`）の結果を確かめる:
+#: 短い予算では GC の一時停止が結果を変えるので、call の間は古い heap を freeze する（Issue #239）
+pytestmark = pytest.mark.wall_clock
+
 PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[2]
 BUDGET_REASON = DeadlineExceeded.REASON_ID
 
@@ -221,6 +226,9 @@ def _observation(**fields):
         key="ell|rd|B12|B16", guarantee_class=CLASS_A, before_outcome="TIMEOUT",
         after_outcome="UNKNOWN", after_reasons=(BUDGET_REASON,), limitation_site="identity_graph",
         pair_stop_state="PAIR_TERMINAL_DEADLINE", stack_snapshot=True,
+        # PR-106-B review 1: "before was TIMEOUT" counts as a process TIMEOUT only
+        # with the termination evidence that says so
+        before_timeout_kind="process_wall_clock",
     )
     base.update(fields)
     return TargetObservation(**base)
@@ -235,7 +243,13 @@ def _observation(**fields):
     ({"after_reasons": ()}, VERDICT_NOT_ACCEPTED, False, False),
     ({"limitation_evidence": ("worker_stop=not_stoppable",)}, VERDICT_NOT_ACCEPTED, False, False),
     ({"before_outcome": "UNKNOWN"}, VERDICT_ACCEPTED, False, False),
-    ({"guarantee_class": CLASS_B, "after_outcome": "TIMEOUT", "after_reasons": ()}, VERDICT_FALLBACK_SAFE, False, False),
+    # a TIMEOUT the checker resolved itself, or one without evidence, is not a process TIMEOUT
+    ({"before_timeout_kind": "child_solver_timeout"}, VERDICT_ACCEPTED, False, False),
+    ({"before_timeout_kind": "unknown"}, VERDICT_ACCEPTED, False, False),
+    ({"before_timeout_kind": None}, VERDICT_ACCEPTED, False, False),
+    ({"before_timeout_kind": "both_signals"}, VERDICT_ACCEPTED, True, False),
+    ({"guarantee_class": CLASS_B, "after_outcome": "TIMEOUT", "after_reasons": (), "after_timeout_kind": "process_wall_clock"}, VERDICT_FALLBACK_SAFE, False, False),
+    ({"guarantee_class": CLASS_B, "after_outcome": "TIMEOUT", "after_reasons": (), "after_timeout_kind": "child_solver_timeout"}, VERDICT_FALLBACK_SAFE, False, False),
     ({"guarantee_class": CLASS_B, "limitation_evidence": ("worker_stop=not_stoppable",)}, VERDICT_FALLBACK_SAFE, False, False),
     ({"guarantee_class": CLASS_B}, VERDICT_FALLBACK_SAFE, False, False),
     ({"guarantee_class": CLASS_B, "after_outcome": "ERROR", "after_reasons": ()}, VERDICT_UNSAFE, False, False),

@@ -71,6 +71,9 @@ def handler_payload(dump_tmp, artifact, *, pid=CHILD_PID, token=START_TOKEN):
         "all_threads": True,
         "chain": False,
         "readiness_basis": "faulthandler_register_returned",
+        # Issue #204: what the child declares since the fix (the signal is ignored once
+        # CPython unloads the handler at interpreter shutdown)
+        "disposition_after_unregister": "ignore",
         "sigcgt_probe": {"authoritative": False},
     }
 
@@ -163,6 +166,30 @@ def sender(monkeypatch):
 # ---------------------------------------------------------------------------
 # readiness / 送信（D8 / D9 と、送信契約）
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("declared", [None, "default"])
+def test_a_child_that_does_not_ignore_the_signal_after_the_unload_is_not_signalled(
+    pair, sender, declared,
+):
+    """Issue #204: registration does not cover the child's whole life -- CPython unloads the
+    handler at interpreter shutdown and restores the earlier disposition.  A child that does
+    not declare that disposition as "ignore" could be killed after writing its result, so the
+    supervisor does not send."""
+
+    payload = handler_payload(pair["dump_tmp"], pair["artifact"])
+    if declared is None:
+        del payload["disposition_after_unregister"]
+    else:
+        payload["disposition_after_unregister"] = declared
+    write_journal(pair["journal"], payload)
+    diagnostic = _diagnostic(pair)
+    diagnostic.request_async()
+    _join_worker(diagnostic)
+
+    assert diagnostic.signal_sent is False
+    assert sender.sent == []
+    assert diagnostic.unavailable_reason == "signal_terminates_after_unregister"
 
 
 def test_signal_is_sent_only_with_registered_handler_and_matching_identity(pair, sender):
