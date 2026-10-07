@@ -299,3 +299,20 @@ def test_a_cyclic_value_is_unidentified_instead_of_raising():
             key, comparable = expression_key_status(expr)
             assert comparable is False
             assert exact_structural_identity(expr) != exact_structural_identity(expr)
+
+
+@pytest.mark.parametrize("make", [
+    lambda inner: LyingList([inner]),
+    lambda inner: LyingDict({"k": inner}),
+    lambda inner: LyingDict({inner: 1}),
+], ids=["list_value", "dict_value", "dict_key"])
+def test_the_freeze_walk_reaches_expressions_hidden_from_a_subclass_iterator(make):
+    # 凍結の到達走査も基底 storage を読む: 上書きした iterator が隠した式も凍結の対象になる
+    from scripts.function_tracer_pcode.core.semantic_lifecycle import is_validated
+
+    inner = Expression.parameter("p", 0, size=4)
+    expr = Expression(ExpressionType.UNKNOWN, name="u", runtime_ref=make(inner), size=4)
+    del CALLS[:]
+    freeze_expression(expr)
+    assert is_validated(inner)
+    assert [call for call in CALLS if call.startswith(("list.", "dict."))] == []
