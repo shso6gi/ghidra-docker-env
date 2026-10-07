@@ -48,6 +48,11 @@ from scripts.function_tracer_pcode.core.errors import (
 )
 
 
+#: この module の test は実の時計で動く期限（`ShiftedClock` / `clock=` の無い `DeadlinePolicy`）の結果を確かめる:
+#: 短い予算では GC の一時停止が結果を変えるので、call の間は古い heap を freeze する（Issue #239）
+pytestmark = pytest.mark.wall_clock
+
+
 @pytest.fixture(autouse=True)
 def _clean_ledgers():
     reset_pair_failure_scopes()
@@ -281,7 +286,6 @@ def test_e9_bounded_timeout_rounding_rules():
         assert bounded_timeout(10, now - 1, unit, now=now) is None
 
 
-@pytest.mark.wall_clock  # 壁時計の上限を module の外の時計で確かめる（Issue #239）
 def test_e9_begin_below_the_margin_is_a_deadline_before_the_execution_starts():
     clock = ShiftedClock()
     with pair_failure_scope(("pair",), None) as ledger:

@@ -60,6 +60,11 @@ from scripts.function_tracer_pcode.smt.witness import INCONCLUSIVE
 from scripts.function_tracer_pcode.tests.unit.test_issue106a_deadline import ShiftedClock
 
 
+#: この module の test は実の時計で動く期限（`ShiftedClock` / `clock=` の無い `DeadlinePolicy`）の結果を確かめる:
+#: 短い予算では GC の一時停止が結果を変えるので、call の間は古い heap を freeze する（Issue #239）
+pytestmark = pytest.mark.wall_clock
+
+
 QUERY = "(declare-const x (_ BitVec 8))\n(assert (bvugt x #x00))\n(check-sat)"
 #: z3 が parse できない script（未宣言の関数）
 BAD_QUERY = "(declare-const x Int)\n(assert (undefined_fn x))\n(check-sat)"
@@ -337,7 +342,6 @@ def test_a_real_z3_normal_timeout_is_not_a_deadline():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.wall_clock  # 壁時計の上限を module の外の時計で確かめる（Issue #239）
 def test_a_seconds_backend_cut_by_the_deadline_stops_the_sequence_before_the_next_backend():
     """解析予算 1.9 s・余裕 0.5 s・設定 10 s。秒の backend は 1 s に切られて TIMEOUT → 後の z3 は 0 回。"""
     clock = ShiftedClock()

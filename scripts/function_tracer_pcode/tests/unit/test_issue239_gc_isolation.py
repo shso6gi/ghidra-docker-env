@@ -157,27 +157,65 @@ def _identifiers(node: ast.AST) -> Iterable[str]:
             yield inner.value
 
 
+#: 実の時計（`time.monotonic`）で動く期限を作る呼び出し: `ShiftedClock`（実の時計に足す test の時計）と、
+#: `clock=` を渡さない `DeadlinePolicy`（既定の時計が `time.monotonic`）。短い予算では、GC の一時停止が期限の
+#: 結果（窓の長さ・どの backend が走るか）を変える。偽の時計を `clock=` で渡す test は対象でない
+_REAL_CLOCK_CALLS = frozenset({"ShiftedClock"})
+_REAL_CLOCK_DEFAULTED = frozenset({"DeadlinePolicy"})
+
+
+def _call_name(node: ast.Call):
+    func = node.func
+    return func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+
+
+def _qualnames(tree: ast.AST) -> Dict[ast.AST, str]:
+    """関数の node → `Class.method` / `function` の名前（入れ子の class の中の test を区別する）。"""
+
+    out: Dict[ast.AST, str] = {}
+
+    def visit(node, prefix):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                visit(child, prefix + child.name + ".")
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out[child] = prefix + child.name
+                visit(child, prefix + child.name + ".")
+
+    visit(tree, "")
+    return out
+
+
 def timing_assertions(source: str) -> Set[str]:
-    """module の source のうち、壁時計の量を大小で比べる assert を持つ test 関数の名前（同じ module の helper
-    が持つものは、それを呼ぶ test 関数へ伝える）。"""
+    """壁時計に結果が左右される test 関数の名前（`Class.method` の形）。
+
+    * assert の大小比較の小さい側に時間の量がある（上限・二つの量の比）
+    * 実の時計で動く期限を作る（`_REAL_CLOCK_CALLS` / `clock=` の無い `_REAL_CLOCK_DEFAULTED`）
+    同じ module の helper が持つものは、それを呼ぶ test 関数へ伝える（helper の名前で照合）。
+    """
 
     tree = ast.parse(source)
-    functions = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    names = _qualnames(tree)
     direct: Set[str] = set()
     calls: Dict[str, Set[str]] = {}
-    for function in functions:
+    for function, qualname in names.items():
+        bare = qualname.rsplit(".", 1)[-1]
         clock_names = set()
         for node in ast.walk(function):
             if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
-                func = node.value.func
-                name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-                if name in _CLOCK_CALLS:
+                if _call_name(node.value) in _CLOCK_CALLS:
                     clock_names.update(target.id for target in node.targets if isinstance(target, ast.Name))
         def timing(operand: ast.AST) -> bool:
-            names = set(_identifiers(operand))
-            return bool(names & clock_names) or any(_TIMING_NAME.search(name) for name in names)
+            found = set(_identifiers(operand))
+            return bool(found & clock_names) or any(_TIMING_NAME.search(name) for name in found)
 
         for node in ast.walk(function):
+            if isinstance(node, ast.Call):
+                name = _call_name(node)
+                if name in _REAL_CLOCK_CALLS or (
+                    name in _REAL_CLOCK_DEFAULTED and not any(k.arg == "clock" for k in node.keywords)
+                ):
+                    direct.add(qualname)
             if isinstance(node, ast.Assert) and isinstance(node.test, ast.Compare):
                 operands = [node.test.left, *node.test.comparators]
                 for index, op in enumerate(node.test.ops):
@@ -189,8 +227,8 @@ def timing_assertions(source: str) -> Set[str]:
                     else:
                         continue
                     if timing(smaller):
-                        direct.add(function.name)
-        calls.setdefault(function.name, set()).update(
+                        direct.add(qualname)
+        calls.setdefault(qualname, set()).update(
             node.func.id for node in ast.walk(function)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         )
@@ -198,38 +236,67 @@ def timing_assertions(source: str) -> Set[str]:
     changed = True
     while changed:
         changed = False
-        for name, called in calls.items():
-            if name not in found and called & found:
-                found.add(name)
+        found_bare = {name.rsplit(".", 1)[-1] for name in found}
+        for qualname, called in calls.items():
+            if qualname not in found and called & found_bare:
+                found.add(qualname)
                 changed = True
-    return {name for name in found if name.startswith("test")}
+    return {name for name in found if name.rsplit(".", 1)[-1].startswith("test")}
+
+
+def _is_wall_clock_mark(node: ast.AST) -> bool:
+    """`pytest.mark.wall_clock`（呼び出しの有無を問わない）か。文字列の中の同じ綴りは数えない。"""
+
+    if isinstance(node, ast.Call):
+        node = node.func
+    return (
+        isinstance(node, ast.Attribute) and node.attr == conftest.WALL_CLOCK_MARKER
+        and isinstance(node.value, ast.Attribute) and node.value.attr == "mark"
+    )
+
+
+def _marks(value: ast.AST) -> bool:
+    return any(_is_wall_clock_mark(node) for node in ast.walk(value))
 
 
 def _marked(source: str) -> Set[str]:
-    """`wall_clock` の印を持つ test 関数の名前（module の `pytestmark` に印があれば全部）。"""
+    """`wall_clock` の印が効く test 関数（`Class.method` の形）。関数・class の decorator と、module の
+    `pytestmark`（注釈つきの代入を含む）。"""
 
     tree = ast.parse(source)
     module_marked = any(
-        isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets)
-        and conftest.WALL_CLOCK_MARKER in set(_identifiers(node.value))
+        (isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets)
+         or isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == "pytestmark")
+        and node.value is not None and _marks(node.value)
         for node in tree.body
     )
-    out = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
-            if module_marked or any(conftest.WALL_CLOCK_MARKER in set(_identifiers(d)) for d in node.decorator_list):
-                out.add(node.name)
+    out: Set[str] = set()
+
+    def visit(node, prefix, inherited):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                visit(child, prefix + child.name + ".", inherited or any(_marks(d) for d in child.decorator_list))
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name.startswith("test"):
+                if module_marked or inherited or any(_marks(d) for d in child.decorator_list):
+                    out.add(prefix + child.name)
+
+    visit(tree, "", False)
     return out
 
 
 def unselected_timing_tests(path: Path, source: str) -> Set[str]:
-    """壁時計の大小を確かめるのに、hook の対象（印か module の中の時計の閉包）でない test 関数。"""
+    """壁時計に結果が左右されるのに、hook の対象でない test 関数（hook と同じ選び方: 印は test ごと、module の
+    中の時計の閉包は関数の名前で）。"""
 
-    selected = _marked(source) | set(conftest._wall_clock_functions(str(path)))
-    return {f"{path.name}::{name}" for name in timing_assertions(source) - selected}
+    marked = _marked(source)
+    detected = set(conftest._wall_clock_functions(str(path)))
+    return {
+        f"{path.name}::{name}" for name in timing_assertions(source)
+        if name not in marked and name.rsplit(".", 1)[-1] not in detected
+    }
 
 
-def test_every_wall_clock_assertion_goes_through_the_shared_freeze():
+def test_every_wall_clock_dependent_test_goes_through_the_shared_freeze():
     offenders, seen = [], set()
     for path in sorted(UNIT_ROOT.glob("test_*.py")):
         source = path.read_text(encoding="utf-8")
@@ -242,7 +309,8 @@ def test_every_wall_clock_assertion_goes_through_the_shared_freeze():
 
 
 def test_the_wall_clock_guard_finds_an_unmarked_bound_through_an_outside_clock(tmp_path):
-    """陽性の対照: module の外の時計（production の時計・別 module の helper）で測る上限は、印が無ければ見つかる。"""
+    """陽性の対照: module の外の時計（production の時計・別 module の helper）で測る上限と、実の時計で動く期限の
+    test は、印が無ければ見つかる。偽の時計・下限・文字列の literal は対象でない。"""
 
     source = (
         "from scripts.function_tracer_pcode.core.stage_clock import StageClock\n"
@@ -262,7 +330,34 @@ def test_the_wall_clock_guard_finds_an_unmarked_bound_through_an_outside_clock(t
     )
     path = tmp_path / "test_sample.py"
     path.write_text(source)
-    assert unselected_timing_tests(path, source) == {"test_sample.py::test_outside", "test_sample.py::test_through_helper"}
-    marked = source.replace("def test_outside", "@pytest.mark.wall_clock\ndef test_outside")
+    real_clock = (
+        "def _policy(seconds):\n"
+        "    return DeadlinePolicy(seconds, margin=0.1)\n"
+        "def test_real_clock_deadline():\n"
+        "    assert run(_policy(0.3)) in (1, 2)\n"
+        "def test_fake_clock_deadline(fake):\n"
+        "    assert run(DeadlinePolicy(0.3, clock=fake)) in (1, 2)\n"
+        "def test_shifted_clock():\n"
+        "    clock = ShiftedClock()\n"
+        "class TestGroup:\n"
+        "    @pytest.mark.skipif(False, reason='wall_clock')\n"
+        "    def test_outside(self, clock):\n"
+        "        assert clock.snapshot()['seconds'] < 1.0\n"
+    )
+    source += real_clock
+    path.write_text(source)
+    expected = {
+        "test_sample.py::test_outside", "test_sample.py::test_through_helper",
+        "test_sample.py::test_real_clock_deadline", "test_sample.py::test_shifted_clock",
+        "test_sample.py::TestGroup.test_outside",
+    }
+    assert unselected_timing_tests(path, source) == expected
+    # 印は test ごと（同じ名前の別の test は印の無いまま）。文字列の中の綴りは印でない
+    marked = source.replace("def test_outside(clock)", "@pytest.mark.wall_clock\ndef test_outside(clock)")
     path.write_text(marked)
-    assert unselected_timing_tests(path, marked) == {"test_sample.py::test_through_helper"}
+    assert unselected_timing_tests(path, marked) == expected - {"test_sample.py::test_outside"}
+    # class の decorator と注釈つきの `pytestmark` も印
+    grouped = marked.replace("class TestGroup:", "@pytest.mark.wall_clock\nclass TestGroup:")
+    assert "test_sample.py::TestGroup.test_outside" not in unselected_timing_tests(path, grouped)
+    module = "import pytest\npytestmark: list = [pytest.mark.wall_clock]\n" + source
+    assert unselected_timing_tests(path, module) == set()

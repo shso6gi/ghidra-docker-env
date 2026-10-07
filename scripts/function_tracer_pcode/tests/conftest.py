@@ -64,6 +64,12 @@ def pytest_addoption(parser):
     )
 
 
+#: 結果が壁時計に左右される test の印（Issue #239）: module の外の時計（production の時計・別の test module の
+#: helper）で測る上限、実の時計で動く短い期限。module の中で時計を読む test は印が無くても
+#: `_wall_clock_functions` が見つける。付け忘れは `tests/unit/test_issue239_gc_isolation.py` の静的な検査が見つける
+WALL_CLOCK_MARKER = "wall_clock"
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",
@@ -79,9 +85,10 @@ def pytest_configure(config):
     )
     config.addinivalue_line(
         "markers",
-        f"{WALL_CLOCK_MARKER}: the test asserts a wall-clock bound through a clock read outside "
-        "its module (a production clock, a helper of another test module). Its call runs with "
-        "the older heap frozen (Issue #239, `pytest_runtest_call`).",
+        f"{WALL_CLOCK_MARKER}: the test's result depends on the wall clock through a clock read "
+        "outside its module (a production clock, a helper of another test module) or a deadline "
+        "on the real clock. Its call runs with the older heap frozen (Issue #239, "
+        "`pytest_runtest_call`).",
     )
 
 
@@ -130,10 +137,6 @@ def _pair_condition_cache_scope(request):
     with condition_cache_scope():
         yield
 
-
-#: 壁時計の上限を、module の外で読む時計（production の時計・別の test module の helper）で確かめる test の印
-#: （Issue #239）。module の中で時計を読む test は印が無くても `_wall_clock_functions` が見つける
-WALL_CLOCK_MARKER = "wall_clock"
 
 #: 壁時計を読む関数の名前（module の path ごとに 1 回だけ求める）
 _WALL_CLOCK_FUNCTIONS: Dict[str, frozenset] = {}
