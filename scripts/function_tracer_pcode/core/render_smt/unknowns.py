@@ -6,7 +6,7 @@ import hashlib
 import re
 from typing import Any, List, Optional, Tuple
 from scripts.function_tracer_pcode.core.render_smt.attributes import iter_expression_nodes
-from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
+from scripts.function_tracer_pcode.core.semantic_snapshot import identity_value, semantic_projection
 
 
 GLOBAL_ADDRESS_BITS = 64
@@ -116,16 +116,20 @@ def _unknown_runtime_identity_key(expr) -> Tuple[Any, ...]:
     """
 
     projection = semantic_projection(expr)
-    if projection.runtime_semantic_key is not None:
-        return ("runtime_ref_semantic", projection.runtime_semantic_key)
-    if projection.runtime_stable_key is not None:
+    # 値として固定できない部分を含む key は identity に使わない（Issue #215 `identity_value`: 型名だけの
+    # 印で、別の ref が同じ unknown 記号に併合されないように。その式は自分だけの記号になる）
+    semantic_key = identity_value(projection.runtime_semantic_key)
+    stable_key = identity_value(projection.runtime_stable_key)
+    if semantic_key is not None:
+        return ("runtime_ref_semantic", semantic_key)
+    if stable_key is not None:
         if projection.runtime_stable_origin is not None:
             return (
                 "runtime_ref_with_origin",
-                projection.runtime_stable_key,
+                stable_key,
                 projection.runtime_stable_origin,
             )
-        return ("runtime_ref", projection.runtime_stable_key)
+        return ("runtime_ref", stable_key)
     return (
         "expression_unknown_instance",
         id(expr),

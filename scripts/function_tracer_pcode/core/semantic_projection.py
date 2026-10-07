@@ -33,6 +33,7 @@ loop lowering はそれが一番大きいので、判断そのものは
 from __future__ import annotations
 
 from dataclasses import dataclass
+import gc
 import struct
 from types import MappingProxyType
 from enum import Enum
@@ -84,8 +85,7 @@ def read_container(value: Any) -> Optional[Tuple[str, Tuple[Any, ...]]]:
     返すのは ``(tag, 要素)``: tag は ``"tuple"`` / ``"list"`` / ``"set"`` / ``"frozenset"`` /
     ``"dict"``（dict の要素は ``(key, value)`` の組）。容器でなければ None。subclass の
     `__iter__` / `__getitem__` / `__len__` / `items` を呼ばない（基底型の storage を読む）。
-    `MappingProxyType` だけは包んだ mapping の `items()` を呼ぶ（package が作る proxy は exact な
-    dict だけを包む）。要素の順は storage の順で、並べ替えと同一視は呼び出し側が atom で行う。
+    `MappingProxyType` は包んだ dict を基底型の実装で読む（dict でない mapping を包む proxy は読めない）。要素の順は storage の順で、並べ替えと同一視は呼び出し側が atom で行う。
     """
 
     kind = type(value)
@@ -100,7 +100,12 @@ def read_container(value: Any) -> Optional[Tuple[str, Tuple[Any, ...]]]:
     if issubclass(kind, dict):
         return ("dict", tuple(dict.items(value)))
     if kind is MappingProxyType:
-        return ("dict", tuple(value.items()))
+        # 包んだ mapping を取り出し、組み込みの dict のときだけ基底型の実装で読む（それ以外の mapping
+        # の `items` は呼ばない: 読めない容器）
+        wrapped = [item for item in gc.get_referents(value) if issubclass(type(item), dict)]
+        if len(wrapped) != 1:
+            return None
+        return ("dict", tuple(dict.items(wrapped[0])))
     return None
 
 
@@ -129,6 +134,16 @@ def canonical_atom(value: Any) -> CanonicalAtoms:
     exact な組み込みの値だけ。
     """
 
+    return _canonical_atom(value, set())
+
+
+def _canonical_atom(value: Any, active: set) -> CanonicalAtoms:
+    """`canonical_atom` の本体。`active` は辿っている容器・object の id（閉路は識別できない値）。"""
+
+    def _atom(item: Any) -> CanonicalAtoms:
+        return _canonical_atom(item, active)
+
+
     if value is None:
         return ("none", "")
     if value is True or value is False:
@@ -156,34 +171,48 @@ def canonical_atom(value: Any) -> CanonicalAtoms:
         # 同じ型の別の object どうしが同じ atom になり識別できたように見える。印の tag を
         # 残し、構造 key の owner（`core/structural`）が識別不能として扱う（Issue #215）
         return (UNSUPPORTED_VALUE_TAG, value.type_module, value.type_qualname)
+    value_id = id(value)
+    if value_id in active:
+        # 閉路（自分を含む容器・自分を返す stable_key）: 有限の atom で値を表せない
+        return ("object_id", type(value).__module__, type(value).__qualname__, value_id)
+    active.add(value_id)
+    try:
+        return _composite_atom(value, kind, _atom)
+    finally:
+        active.discard(value_id)
+
+
+def _composite_atom(value: Any, kind: type, _atom) -> CanonicalAtoms:
+    """容器と object の atom（`_canonical_atom` が閉路を見張りながら呼ぶ）。"""
+
     # 容器は `read_container`（基底型の実装で、型と対応を保って読む）で辿る
     container = read_container(value)
     if container is not None:
         tag, elements = container
         if tag in _SEQUENCE_TAGS:
-            return (tag, tuple(canonical_atom(item) for item in elements))
+            return (tag, tuple(_atom(item) for item in elements))
         if tag in _SET_TAGS:
-            ordered = _ordered_by_atom([(canonical_atom(item), None) for item in elements])
+            ordered = _ordered_by_atom([(_atom(item), None) for item in elements])
             if ordered is None:
                 return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
             return (tag, tuple(atom for atom, _item in ordered))
-        ordered = _ordered_by_atom([(canonical_atom(key), canonical_atom(item)) for key, item in elements])
+        ordered = _ordered_by_atom([(_atom(key), _atom(item)) for key, item in elements])
         if ordered is None:
             # 別の key（hash を上書きした subclass と基底型の値など）が同じ atom になった: どの値が
             # どの key のものかを atom では区別できない
             return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
         return ("dict", tuple(ordered))
     # 値が自分の identity を明示する method（型の属性だけを見る。instance の `__getattr__` を呼ばない）
-    stable_key = _declared_method(kind, value, "stable_key")
+    stable_key = declared_method(kind, value, "stable_key")
     if stable_key is not None:
         try:
-            return ("stable", canonical_atom(stable_key()))
+            return ("stable", _atom(stable_key()))
         except IDENTITY_EVALUATION_ERRORS:
             pass
-    to_dict = _declared_method(kind, value, "to_dict")
+    to_dict = declared_method(kind, value, "to_dict")
     if to_dict is not None:
         try:
-            return ("object_dict", canonical_atom(to_dict()))
+            return ("object_dict", _atom(to_dict()))
         except IDENTITY_EVALUATION_ERRORS:
             pass
     # ここから先は、状態の全部を読めると確かめられる値だけを値で表す（Issue #215 C-K1）。読めない
@@ -199,7 +228,7 @@ def canonical_atom(value: Any) -> CanonicalAtoms:
                     "dataclass",
                     type(value).__module__,
                     qualname,
-                    tuple((name, canonical_atom(live_values.field_value(value, name))) for name in names),
+                    tuple((name, _atom(live_values.field_value(value, name))) for name in names),
                 )
             except TypeError:
                 pass
@@ -212,7 +241,7 @@ def canonical_atom(value: Any) -> CanonicalAtoms:
     return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
 
 
-def _declared_method(kind: type, value: Any, name: str) -> Any:
+def declared_method(kind: type, value: Any, name: str) -> Any:
     """型が宣言した method を `value` に束縛したもの（無ければ None）。"""
 
     declared = live_values.type_attribute(kind, name)
@@ -353,6 +382,15 @@ def immutable_value(value: Any) -> Any:
     `semantic_runtime_ref_key`）。
     """
 
+    return _immutable_value(value, set())
+
+
+def _immutable_value(value: Any, active: set) -> Any:
+    """`immutable_value` の本体。`active` は辿っている容器・object の id（閉路は支えられない値）。"""
+
+    def _value(item: Any) -> Any:
+        return _immutable_value(item, active)
+
     if value is None or value is True or value is False:
         return value
     scalar = live_values.json_scalar(value)
@@ -361,28 +399,47 @@ def immutable_value(value: Any) -> Any:
     kind = type(value)
     if issubclass(kind, bytes):
         return bytes(bytes.__iter__(value)) if kind is not bytes else value
+    value_id = id(value)
+    if value_id in active:
+        # 閉路は有限の値で表せない
+        return UnsupportedSemanticValue(kind.__module__, kind.__qualname__)
     container = read_container(value)
     if container is not None:
         tag, elements = container
-        if tag in _SEQUENCE_TAGS:
-            return tuple(immutable_value(item) for item in elements)
-        if tag in _SET_TAGS:
-            ordered = _ordered_by_atom([(canonical_atom(item), immutable_value(item)) for item in elements])
-        else:
-            ordered = _ordered_by_atom([
-                (canonical_atom(key), (immutable_value(key), immutable_value(item))) for key, item in elements
-            ])
-        if ordered is None:
-            return UnsupportedSemanticValue(kind.__module__, kind.__qualname__)
-        return tuple(item for _atom, item in ordered)
+        active.add(value_id)
+        try:
+            return _container_value(kind, tag, elements, _value)
+        finally:
+            active.discard(value_id)
     if issubclass(kind, Enum):
-        return immutable_value(live_values.enum_value(value))
-    nested = _stable_key_or_none(value)
+        return _value(live_values.enum_value(value))
+    active.add(value_id)
+    try:
+        raw = _declared_key_raw(value, "stable_key")
+        nested = None if raw is None else _value(raw)
+    finally:
+        active.discard(value_id)
     if nested is not None:
         return nested
     return UnsupportedSemanticValue(
         type(value).__module__, type(value).__qualname__
     )
+
+
+def _container_value(kind: type, tag: str, elements: tuple, _value) -> Any:
+    """`read_container` で読んだ容器の不変な値（set / dict は atom の順。衝突は支えられない値）。"""
+
+    if tag in _SEQUENCE_TAGS:
+        return tuple(_value(item) for item in elements)
+    if tag in _SET_TAGS:
+        ordered = _ordered_by_atom([(canonical_atom(item), _value(item)) for item in elements])
+    else:
+        ordered = _ordered_by_atom([
+            (canonical_atom(key), (_value(key), _value(item))) for key, item in elements
+        ])
+    if ordered is None:
+        return UnsupportedSemanticValue(kind.__module__, kind.__qualname__)
+    return tuple(item for _atom, item in ordered)
 
 
 def contains_unsupported_value(value: Any) -> bool:
@@ -398,7 +455,7 @@ def contains_unsupported_value(value: Any) -> bool:
 def _declared_key_raw(value: Any, name: str) -> Any:
     """型が宣言した `stable_key()` / `semantic_key()` の生の戻り値（無ければ・失敗すれば None）。"""
 
-    method = _declared_method(type(value), value, name)
+    method = declared_method(type(value), value, name)
     if method is None:
         return None
     try:
@@ -610,7 +667,9 @@ def project_runtime_ref(expr: Any, runtime_ref: Any) -> RuntimeRefProjection:
         return _ABSENT_RUNTIME
     stable = _stable_key_or_none(runtime_ref)
     semantic = _semantic_key_or_none(runtime_ref)
-    lowering_identity = _lowering_identity(expr, runtime_ref, stable, semantic)
+    # identity に使う値（loop lowering の関数名）は、値として固定できない部分を含むなら使わない
+    # （Issue #215: 型名だけの印で別の ref が同じ identity にならないように。`identity_value`）
+    lowering_identity = _lowering_identity(expr, runtime_ref, identity_value(stable), identity_value(semantic))
     return RuntimeRefProjection(
         structural_key=semantic_runtime_ref_key(runtime_ref),
         stable_key=stable,
@@ -629,6 +688,19 @@ def project_runtime_ref(expr: Any, runtime_ref: Any) -> RuntimeRefProjection:
             runtime_ref, (CanonicalLocation, PostStateReadRef, PostStateValueRef)
         ),
     )
+
+
+def identity_value(value: Any) -> Any:
+    """identity に使ってよい不変な値（`UnsupportedSemanticValue` を含むなら None: identity を持たない）。
+
+    projection の `stable_key` / `semantic_key` は完全性の判定（`contains_unsupported_value`）の
+    ために印を含んだまま持つ。**それを identity（SMT の記号・provenance key・関数名）に使う側は
+    この関数を通す**: 印は型名しか残っていないので、別の値どうしが同じ identity になる。
+    """
+
+    if value is None or contains_unsupported_value(value):
+        return None
+    return value
 
 
 def project_storage(storage_info: Any) -> StorageProjection:
@@ -685,9 +757,9 @@ def _stable_origin(runtime_ref: Any) -> Optional[Tuple[Any, ...]]:
     origin_ref = getattr(runtime_ref, "origin_ref", None)
     if origin_kind is None or origin_ref is None:
         return None
-    if _declared_method(type(origin_ref), origin_ref, "stable_key") is None:
+    if declared_method(type(origin_ref), origin_ref, "stable_key") is None:
         return None
-    origin_key = _stable_key_or_none(origin_ref)
+    origin_key = identity_value(_stable_key_or_none(origin_ref))
     if origin_key is None:
         return None
     # 形は unknown 宣言 identity がそのまま使う（変えると symbol 名が動く）。
@@ -779,7 +851,7 @@ def _lowering_identity(
             )
     if semantic_key is not None:
         return semantic_key
-    if _declared_method(type(runtime_ref), runtime_ref, "stable_key") is not None:
+    if stable_key is not None and declared_method(type(runtime_ref), runtime_ref, "stable_key") is not None:
         return stable_key
     return (
         "opaque_runtime_ref",

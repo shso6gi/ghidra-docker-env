@@ -245,3 +245,57 @@ def test_only_a_stable_key_declared_by_the_type_is_read(frozen):
     declared = _build("direct_ref", _DeclaredKey(), frozen)
     assert expression_key(declared) == expression_key(_build("direct_ref", _DeclaredKey(), frozen))
     assert expression_key(declared) != expression_key(_build("direct_ref", None, frozen))
+
+
+class _Opaque:
+    __slots__ = ()
+
+
+@pytest.mark.parametrize("frozen", [False, True], ids=["unfrozen", "frozen"])
+@pytest.mark.parametrize(
+    "make",
+    [
+        lambda tag: frozenset({Twin(tag), tag}),
+        lambda tag: {Twin(tag): 1, tag: 2},
+        lambda tag: ("x", _Opaque()),
+    ],
+    ids=["colliding_set", "colliding_dict", "opaque_inside"],
+)
+def test_an_identity_that_cannot_be_fixed_never_merges_two_refs(make, frozen):
+    # 値として固定できない部分を持つ安定 key は identity に使わない: 型名だけの印で、別の ref が
+    # 同じ SMT の unknown 記号・同じ provenance key にならない（修正前: 両方とも一致した）
+    from scripts.function_tracer_pcode.core.render_smt.unknowns import _unknown_runtime_identity_key
+
+    one, two = _build("stable_ref", make("a"), frozen), _build("stable_ref", make("b"), frozen)
+    assert _unknown_runtime_identity_key(one) != _unknown_runtime_identity_key(two)
+    assert structural.expression_provenance_key(one) != structural.expression_provenance_key(two)
+    assert expression_key_status(one)[1] is False
+
+
+def test_a_mapping_proxy_reads_only_the_dict_it_wraps():
+    from types import MappingProxyType
+
+    del CALLS[:]
+    one = _build("stable_ref", MappingProxyType(LyingDict({"k": 1})), False)
+    two = _build("stable_ref", MappingProxyType(LyingDict({"k": 2})), False)
+    assert expression_key(one) != expression_key(two)
+    assert "dict.items" not in CALLS
+    assert expression_key(_build("stable_ref", MappingProxyType({"k": 1}), False)) == expression_key(
+        _build("stable_ref", MappingProxyType({"k": 1}), False)
+    )
+
+
+class _SelfKey:
+    def stable_key(self):
+        return self
+
+
+def test_a_cyclic_value_is_unidentified_instead_of_raising():
+    cyclic = [1]
+    cyclic.append(cyclic)
+    for value in (cyclic, _SelfKey()):
+        for frozen in (False, True):
+            expr = _build("stable_ref", value, frozen) if value is cyclic else _build("direct_ref", value, frozen)
+            key, comparable = expression_key_status(expr)
+            assert comparable is False
+            assert exact_structural_identity(expr) != exact_structural_identity(expr)

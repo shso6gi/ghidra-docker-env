@@ -41,6 +41,7 @@ from scripts.function_tracer_pcode.core.semantic_projection import (
     absent_runtime_projection,
     absent_storage_projection,
     canonical_value_key,
+    identity_value,
     project_expression,
     value_key_is_opaque,
 )

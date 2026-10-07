@@ -25,6 +25,9 @@ from scripts.function_tracer_pcode.core.expression import Expression, Expression
 from scripts.function_tracer_pcode.core.semantic_lifecycle import is_validated
 from scripts.function_tracer_pcode.core.semantic_projection import (
     UNSUPPORTED_VALUE_TAG,
+    declared_method,
+    identity_value,
+    read_container,
     canonical_atom as _atom_key,
 )
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
@@ -1429,7 +1432,8 @@ def expression_provenance_key(
     if projection.storage_identity is not None:
         return ("storage", projection.storage_identity)
 
-    if projection.runtime_stable_key is not None:
+    # 値として固定できない部分を含む安定 key は identity にしない（Issue #215 `identity_value`）
+    if identity_value(projection.runtime_stable_key) is not None:
         return ("runtime_ref", projection.runtime_stable_key)
 
     safe = expression_key_safe(
@@ -1660,39 +1664,49 @@ def _expression_source_atom(expr: Expression) -> Optional[StructuralKey]:
 
 
 def _stable_value_key(value: Any) -> StructuralKey:
+    """provenance digest の値の表現。値の読み方は `semantic_projection` の reader と同じ（Issue #215:
+    scalar は基底型の slot、容器は `read_container`、`stable_key` は型の宣言だけ）。型名だけに落ちる
+    `("opaque", …)` の扱いは #218 の範囲。"""
+
     if value is None:
         return ("none",)
-    if isinstance(value, bool):
+    if value is True or value is False:
         return ("bool", int(value))
-    if isinstance(value, int):
-        return ("int", value)
-    if isinstance(value, float):
-        return ("float", repr(value))
-    if isinstance(value, str):
-        return ("str", value)
-    if isinstance(value, bytes):
-        return ("bytes", value.hex())
-    if isinstance(value, Expression):
+    scalar = live_values.json_scalar(value)
+    if scalar is not live_values.NOT_PLAIN:
+        if type(scalar) is int:
+            return ("int", scalar)
+        if type(scalar) is float:
+            return ("float", float.__repr__(scalar))
+        if type(scalar) is bool:
+            return ("bool", int(scalar))
+        return ("str", scalar)
+    kind = type(value)
+    if issubclass(kind, bytes):
+        return ("bytes", bytes.hex(value))
+    if type(value) is Expression:
         return ("expression_ref", _expression_descriptor(value))
-    if isinstance(value, Condition):
+    if type(value) is Condition:
         return (
             "condition",
             _stable_value_key(value.expression),
             ("negated", bool(value.negated)),
         )
-    if isinstance(value, tuple):
-        return ("tuple", tuple(_stable_value_key(item) for item in value))
-    if isinstance(value, list):
-        return ("list", tuple(_stable_value_key(item) for item in value))
-    if isinstance(value, dict):
-        items = [
-            (_stable_value_key(key), _stable_value_key(item))
-            for key, item in value.items()
-        ]
-        items.sort()
-        return ("dict", tuple(items))
-    stable_key = getattr(value, "stable_key", None)
-    if callable(stable_key):
+    container = read_container(value)
+    if container is not None:
+        tag, elements = container
+        if tag == "tuple" or tag == "list":
+            return (tag, tuple(_stable_value_key(item) for item in elements))
+        if tag == "dict":
+            items = [(_stable_value_key(key), _stable_value_key(item)) for key, item in elements]
+            try:
+                items.sort()
+            except TypeError:
+                return ("opaque", kind.__module__, kind.__qualname__)
+            return ("dict", tuple(items))
+        return ("opaque", kind.__module__, kind.__qualname__)
+    stable_key = declared_method(kind, value, "stable_key")
+    if stable_key is not None:
         try:
             return ("stable", _stable_value_key(stable_key()))
         except Exception:
