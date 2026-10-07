@@ -70,6 +70,11 @@ from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.tests.unit.test_issue106a_deadline import ShiftedClock
 
 
+#: この module の test は実の時計で動く期限（`ShiftedClock` / `clock=` の無い `DeadlinePolicy`）の結果を確かめる:
+#: 短い予算では GC の一時停止が結果を変えるので、call の間は古い heap を freeze する（Issue #239）
+pytestmark = pytest.mark.wall_clock
+
+
 QUERY = "(declare-const x (_ BitVec 8))\n(assert (bvugt x #x00))\n(check-sat)"
 MS = SolverBackendCapabilities(
     native_timeout=True, timeout_unit=TimeUnit.MILLISECONDS, absolute_deadline=True,

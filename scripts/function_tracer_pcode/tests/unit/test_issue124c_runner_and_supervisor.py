@@ -475,6 +475,7 @@ def test_real_supervisor_reports_missing_when_no_dump_was_written(tmp_path):
     assert not Path(config.stack_dump_artifact).exists()
 
 
+@pytest.mark.wall_clock  # 壁時計の上限を module の外の時計で確かめる（Issue #239）
 def test_kill_signal_jitter_is_measured_at_the_signal_not_at_the_path_entry(
     tmp_path, monkeypatch,
 ):

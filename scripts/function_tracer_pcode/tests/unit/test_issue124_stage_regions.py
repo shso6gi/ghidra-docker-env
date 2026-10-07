@@ -14,7 +14,6 @@ M-107（#107）が stage plan の 637.05s のうち 415.76s を帰属できな�
 * 診断を足しても semantic projection は変わらないこと（独立 finalization 2 本）
 """
 import concurrent.futures
-import gc
 import time
 from types import SimpleNamespace
 
@@ -56,6 +55,7 @@ def _node(regions, *path):
 # 1. region の inclusive / exclusive / calls
 # --------------------------------------------------------------------------
 
+@pytest.mark.wall_clock  # 壁時計の上限を module の外の時計で確かめる（Issue #239）
 def test_stage_clock_regions_exclusive_inclusive_calls():
     clock = StageClock()
     with clock.scope():
@@ -140,6 +140,7 @@ def _identities(rows):
     return {(row["identity"], row["region"]): row for row in rows}
 
 
+@pytest.mark.wall_clock  # 壁時計の上限を module の外の時計で確かめる（Issue #239）
 def test_stage_plan_identities_close_with_obligation_build_outside_check():
     """配置 A: obligation の構築が check の外（stage runner 相当）で起きる場合。"""
     clock = StageClock()
@@ -179,6 +180,7 @@ def test_stage_plan_identities_close_with_obligation_build_outside_check():
     assert orchestration["seconds_exclusive"] >= TICK
 
 
+@pytest.mark.wall_clock  # 壁時計の上限を module の外の時計で確かめる（Issue #239）
 def test_stage_plan_identities_close_with_obligation_build_inside_check():
     """配置 B: obligation の構築が check の内側（prepare_strategy_runtime 相当）。"""
     clock = StageClock()
@@ -445,6 +447,7 @@ def _solver_class(label, status, delay):
     return _FakeSolver
 
 
+@pytest.mark.wall_clock  # 壁時計の上限を module の外の時計で確かめる（Issue #239）
 def test_solver_counters_do_not_double_count():
     from scripts.function_tracer_pcode.smt.interface import SolverStatus
     from scripts.function_tracer_pcode.smt.parallel import (
@@ -454,17 +457,10 @@ def test_solver_counters_do_not_double_count():
     )
 
     def _measure(run):
-        """実時間を測る区間の外で世代 GC を済ませてから走らせる。
+        """計数を空にしてから走らせる。この test は 50ms の sleep に対して「2 倍未満」を主張する: 前の test が
+        残した object の世代 GC が測る区間に入らないことは、`wall_clock` の印で共有の仕組みが受け持つ
+        （Issue #239。以前ここで済ませていた `gc.collect()` の代わり）。"""
 
-        この test は 50ms の sleep に対して「2 倍未満」を主張する。suite を通しで
-        走らせると、測る区間のちょうど中で第 2 世代の回収（27 万 object 規模）が
-        起きることがあり、その 20-30ms が余裕をほぼ食い潰す。どの test が幾つ
-        object を作るかで回収の位相が変わるので、**この test と無関係な変更**で
-        赤くなる。回収を先に済ませておけば、測っているものは変わらないまま、
-        位相への依存だけが消える（主張は緩めない）。
-        """
-
-        gc.collect()
         reset_solver_counters()
         run()
         return solver_counter_snapshot()
@@ -618,6 +614,7 @@ def _boundary_environment(monkeypatch, *, finalize_seconds, lane_seconds, finish
     return production_boundary, checker
 
 
+@pytest.mark.wall_clock  # 壁時計の上限を module の外の時計で確かめる（Issue #239）
 def test_boundary_seconds_split_authority_and_conditional_lane(monkeypatch):
     boundary, checker = _boundary_environment(
         monkeypatch, finalize_seconds=0.05, lane_seconds=0.10
@@ -939,6 +936,7 @@ def test_check_region_opens_at_method_entry_without_widening_the_catch_scope():
     assert judgement[0].finalbody == []
 
 
+@pytest.mark.wall_clock  # 壁時計の上限を module の外の時計で確かめる（Issue #239）
 def test_check_inclusive_covers_the_signature_work_at_the_entry(monkeypatch):
     """`check()` 冒頭の非ゼロ処理が `check` の inclusive に入る（実行で確認）。"""
     from scripts.function_tracer_pcode.core.signature import FunctionSignature

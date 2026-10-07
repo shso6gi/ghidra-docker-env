@@ -3,6 +3,8 @@ auto-analysis, check) is recorded in the unsigned diagnostics block and shown in
 the result text."""
 import time
 
+import pytest
+
 from scripts.function_tracer_pcode.checker.diagnostics import (
     StageClock,
     attach_stage_timing,
@@ -12,6 +14,7 @@ from scripts.function_tracer_pcode.checker.diagnostics import (
 from scripts.function_tracer_pcode.checker.result import _format_stage_seconds
 
 
+@pytest.mark.wall_clock  # 壁時計の上限を module の外の時計で確かめる（Issue #239）
 def test_stage_clock_accumulates_in_order_and_snapshots():
     clock = StageClock()
     with clock.timed("jvm_start"):
