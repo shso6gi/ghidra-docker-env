@@ -76,6 +76,14 @@ class LyingDict(dict):
         CALLS.append("dict.__iter__")
         return iter(["k"])
 
+    def keys(self):
+        CALLS.append("dict.keys")
+        return iter(["k"])
+
+    def values(self):
+        CALLS.append("dict.values")
+        return iter([0])
+
 
 class Twin(str):
     """基底型の "a" と同じ値に読まれるが、dict の中では別の key になる str。"""
