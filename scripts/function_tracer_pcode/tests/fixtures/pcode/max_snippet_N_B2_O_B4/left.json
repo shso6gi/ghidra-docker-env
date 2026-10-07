@@ -1,6 +1,6 @@
 {
  "header": {
-  "analysis_source_digest": "4fbaf9f2a8cea00de0ff59a61b4f2cf0a9bb20084c8ec16a45dfb46fc3b125f3",
+  "analysis_source_digest": "40f6a241bc685cdc2b335431b7be13df6a90eb26f907142d7d470afab409fe46",
   "binary": {
    "binary_id": "B2",
    "eqbench_relative_path": "airy/MAX/Neq/source/newV-arm64-clang-O1",
@@ -15,9 +15,9 @@
   "fixture_id": "max_snippet_N_B2_O_B4",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-10-07T07:27:47+00:00",
+  "recorded_at_utc": "2026-10-07T16:14:09+00:00",
   "recorder_version": "2",
-  "recording_commit": "eba6ccf8d95a578efcd7bfba0c9599b3ad62d8cf",
+  "recording_commit": "1eac5bbe103ffaca7945c562edc4bccd512769b7",
   "recording_dirty": false,
   "recording_mode": {
    "connector": "production",
