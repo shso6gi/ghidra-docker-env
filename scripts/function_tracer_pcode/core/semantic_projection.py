@@ -44,6 +44,8 @@ from scripts.function_tracer_pcode.core.atom_validity import (  # noqa: F401  (t
     OBJECT_ID_TAG,
     UNSUPPORTED_VALUE_TAG,
     atom_validity,
+    parameter_schema_complete,
+    usable_as_symbol_identity,
 )
 from scripts.function_tracer_pcode.core.loop_lowering_semantics import (
     ABSENT_LOWERING,
@@ -412,6 +414,11 @@ def semantic_runtime_ref_key(value: Any) -> Optional[CanonicalAtoms]:
     if value is None:
         return None
     key = _runtime_key_of_atom(canonical_atom(value))
+    if key is not None and not parameter_schema_complete(key):
+        # schema の成分が欠けた key（index の無い parameter など）は、別の object に同じ値として現れる。
+        # solver の記号を共有しない（`_identity_of`）のに構造 key で等しくすると、別の記号に描画される
+        # 式が同じ key になる。値として固定できない印にする
+        return _unfixable_atom(value)
     if key is None:
         # ref はあるが意味 key を出さない: 構造 key から ref を落とすと、別の ref の式（SMT では別の
         # 記号になる）と同じ key になる。値として固定できない印にし、構造 key の owner がその node を
@@ -468,11 +475,15 @@ def identity_value(value: Any) -> Optional[CanonicalAtoms]:
     `immutable_value`）、`[1]` と `(1,)`、`{"a": 1}` と `(("a", 1),)`、`True` と `1` が同じ identity に
     なり、別の ref が同じ solver symbol を共有した。
 
-    使ってよいのは `core/atom_validity.atom_validity` が identified かつ placeholder_free と判定した
-    atom だけ: 識別不能 token・状態を読めない object・型名だけの印（閉路・衝突）・構造 key の
-    placeholder を含む値は、別の ref と同じ値になり得るので identity を持たない（None）。process の
-    中だけの識別済み token（tail token・object identity token）は同じ process の中で同じものを指すので
-    受け付ける。
+    使ってよいのは `core/atom_validity.usable_as_symbol_identity` が受け付けた atom だけ（identified・
+    placeholder_free・parameter の schema が完全）: 識別不能 token・状態を読めない object・型名だけの印
+    （閉路・衝突）・構造 key の placeholder・成分の欠けた schema（index の無い parameter など）を含む値は、
+    別の object と同じ値になり得るので identity を持たない（None）。process の中だけの識別済み token
+    （tail token・object identity token）は同じ process の中で同じものを指すので受け付ける。
+
+    **identity の入口はここ 1 つ**（`_identity_of`）: runtime ref の stable / semantic / origin、storage、
+    loop summary の Method B key は、すべてここを通って projection の field になる。identity の成分を
+    足すときもここを通す（`test_sn3_identity_entries` が全入口を同じ matrix で確かめる）。
     """
 
     return _identity_of(value)[0]
@@ -484,8 +495,7 @@ def _identity_of(value: Any) -> Tuple[Optional[CanonicalAtoms], bool]:
     if value is None:
         return None, False
     atom = canonical_atom(value)
-    validity = atom_validity(atom)
-    if validity.identified and validity.placeholder_free:
+    if usable_as_symbol_identity(atom):
         return atom, False
     return None, True
 
@@ -845,8 +855,21 @@ def _lowering_identity(
                 id(loop_summary),
                 id(expr),
             )
-        method_b_key = loop_summary_method_b_key(loop_summary)
-        if method_b_key is not None:
+        raw_method_b_key = loop_summary_method_b_key(loop_summary)
+        if raw_method_b_key is not None:
+            # loop summary の Method B key（`runtime_refs/loops.py` が組む）も、他の identity の成分と同じ
+            # 入口（`_identity_of`: 値の読み方・妥当性・schema の完全性）を通す。使えなければ記号を共有しない
+            method_b_key, method_b_unusable = _identity_of(raw_method_b_key)
+            if method_b_unusable:
+                return (
+                    "opaque_loop_summary_identity",
+                    type(runtime_ref).__module__,
+                    type(runtime_ref).__qualname__,
+                    "method_b_key_unusable",
+                    id(runtime_ref),
+                    id(loop_summary),
+                    id(expr),
+                )
             return (
                 "loop_summary_method_b_runtime",
                 type(runtime_ref).__module__,

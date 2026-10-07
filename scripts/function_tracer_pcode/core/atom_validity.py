@@ -235,3 +235,132 @@ def decoded(atom: Any, depth: Any) -> Any:
     if type(payload_depth) is not int:
         return None
     return ("level", payload[1], payload_depth + 1)
+
+
+# ---------------------------------------------------------------------------
+# identity の schema（記号の共有に使ってよいか）
+# ---------------------------------------------------------------------------
+#
+# 値として識別できても、schema の成分が欠けた key は「どの object か」を決めない。`("parameter", …)`
+# の index などが欠けた key は、別々の parameter に同じ値として現れる。そのような key を含む値を
+# solver の記号・unknown 宣言の記号の共有の根拠にすると、別の object が 1 つの記号になる（Issue #215）。
+# 判定はここ 1 か所に置き、projection の identity の入口（`semantic_projection._identity_of`）と、
+# solver symbol の安全性の判定（`query_identity.solver_symbol_identity_is_safe`）が呼ぶ。生の key と
+# `canonical_atom` の atom（何重に包まれていても）、どの入れ子でも同じ規則で読む。
+
+#: parameter の schema の先頭の tag
+PARAMETER_SCHEMA_TAG = "parameter"
+#: 包みの段の上限（`canonical_atom` の入れ子の上限より深い包みは作られない）
+_MAX_SCHEMA_WRAP = 8
+
+
+def _none_at(depth: int) -> Any:
+    """`None` を `canonical_atom` で depth 回包んだ値（depth 0 は `None` そのもの）。"""
+
+    value: Any = None
+    for level in range(depth):
+        value = ("none", "") if level == 0 else _atom_of_plain(value)
+    return value
+
+
+def _atom_of_plain(value: Any) -> Any:
+    """str と tuple だけからなる値の `canonical_atom`（`_none_at` の包みを作るためだけに使う）。"""
+
+    if type(value) is str:
+        return ("str", value)
+    return ("tuple", tuple(_atom_of_plain(part) for part in value))
+
+
+_NONE_AT = tuple(_none_at(depth) for depth in range(_MAX_SCHEMA_WRAP + 1))
+
+
+def _parameter_component_absence(item: Any) -> Any:
+    """`item` が parameter の schema なら、先頭の後の各成分が欠けているか（bool の list）。違えば None。
+
+    生の ``("parameter", c1, …)`` と、`canonical_atom` が何重に包んだ形の両方を読む（`decoded`）。
+    """
+
+    for depth in range(_MAX_SCHEMA_WRAP + 1):
+        level = decoded(item, depth)
+        if type(level) is not tuple or len(level) != 3 or level[0] != "level":
+            return None
+        body, body_depth = level[1], level[2]
+        if not (type(body) is tuple or type(body) is list) or not body or type(body_depth) is not int:
+            return None
+        if body_depth > _MAX_SCHEMA_WRAP:
+            return None
+        if decoded(body[0], body_depth) == PARAMETER_SCHEMA_TAG:
+            absent = _NONE_AT[body_depth]
+            return [component == absent and type(component) is type(absent) for component in body[1:]]
+    return None
+
+
+def _parameter_schema_incomplete(absent: list) -> bool:
+    """parameter の schema の欠けの規則（成分は `(program, entry, index, …)` / `(index, width)` の形）。"""
+
+    if not absent:
+        return True
+    if len(absent) == 1:
+        return absent[0]
+    if len(absent) == 2:
+        return absent[0] or absent[1]
+    return absent[2]
+
+
+def parameter_schema_complete(value: Any) -> bool:
+    """`value`（生の key・atom・identity の組）の中のどの parameter の schema も、成分が欠けていないか。
+
+    明示 stack で辿り、共有部分は 1 度だけ見る。tuple・list・set・frozenset・dict（exact な型）を辿る。
+    """
+
+    stack = [value]
+    seen: set = set()
+    while stack:
+        item = stack.pop()
+        elements = _base_elements(item)
+        if elements is None:
+            continue
+        item_id = id(item)
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        kind, members = elements
+        if kind is tuple:
+            absent = _parameter_component_absence(members)
+            if absent is not None and _parameter_schema_incomplete(absent):
+                return False
+        stack.extend(members)
+    return True
+
+
+def _base_elements(item: Any) -> Any:
+    """容器の要素を基底型の実装で読む: (列なら tuple・それ以外は None, 要素の tuple)。容器でなければ None。
+
+    subclass（NamedTuple など）の `__iter__` を呼ばない（`semantic_projection.read_container` と同じ規則。
+    この module は projection に依存しないので、同じ読み方をここに持つ）。列は exact な tuple に直して
+    schema を照合する。
+    """
+
+    kind = type(item)
+    if issubclass(kind, tuple):
+        return tuple, (item if kind is tuple else tuple(tuple.__iter__(item)))
+    if issubclass(kind, list):
+        return tuple, tuple(list.__iter__(item))
+    if issubclass(kind, frozenset):
+        return None, tuple(frozenset.__iter__(item))
+    if issubclass(kind, set):
+        return None, tuple(set.__iter__(item))
+    if issubclass(kind, dict):
+        return None, tuple(element for pair in dict.items(item) for element in pair)
+    return None
+
+
+def usable_as_symbol_identity(atom: Any) -> bool:
+    """`canonical_atom` の atom を、記号の共有の根拠（solver の identity）に使ってよいか。
+
+    identified（値を識別する）・placeholder_free（構造 key の打ち切りなどの印を含まない）・schema が
+    完全（`parameter_schema_complete`）の 3 つ。process の中だけの識別済み token は受け付ける。
+    """
+
+    validity = atom_validity(atom)
+    return validity.identified and validity.placeholder_free and parameter_schema_complete(atom)
