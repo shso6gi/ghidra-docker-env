@@ -355,8 +355,6 @@ LIVE_VALUES_WORK_OWNERS = {
     "_StorageRead.admit": _A,
     "_registered_meter": _A,
     "register_storage_meter": _A,
-    # 固定の 3 つの変換（int / str / float）を順に試すだけ（Issue #235）
-    "exact_scalar": _A,
 }
 
 #: `core/read_limits`（作業量を受け取らない読みの固定の上限の owner）の入力に比例する関数

@@ -135,18 +135,10 @@ SEMANTIC_FIELDS = frozenset({
 })
 
 #: 意味 field のうち scalar を持つ field（Issue #235）。構築と代入の入口で、scalar の subclass を
-#: 組み込みの型そのものへ写す（`_exact_scalar`）
+#: 組み込みの型そのものへ写す（`core/live_values.exact_scalar`）。式の意味 field の scalar を組み込みの型そのものに
+#: するのは、検証済みの値の直列化の不変性（#219 C-RS2）が組み込みの不変な型だけを受けるため（subclass は外の code
+#: へ dispatch し得る）
 SCALAR_SEMANTIC_FIELDS = frozenset({"value", "operator", "size", "name", "data_type", "read_order_key", "opcode"})
-
-
-def _exact_scalar(value: Any) -> Any:
-    """scalar の意味 field の値を組み込みの型そのものへ写す（`core/live_values.exact_scalar`）。
-
-    式の意味 field の scalar を組み込みの型そのものにするのは、検証済みの値の直列化の不変性（#219 C-RS2）が
-    組み込みの不変な型だけを受けるため（subclass は外の code へ dispatch し得る）。
-    """
-
-    return exact_scalar(value)
 
 
 class Expression:
@@ -208,20 +200,20 @@ class Expression:
             resolved_operands.append(operand)
         # 構築は必ず未凍結なので `__setattr__` の判定を通す必要がない。
         # `__dict__` へ直接置いて構築費用を増やさない。
-        # scalar の意味 field は組み込みの型そのものにする（Issue #235。`_exact_scalar`）
+        # scalar の意味 field は組み込みの型そのものにする（Issue #235。`exact_scalar`）
         self.__dict__.update(
             expr_type=expr_type,
-            value=_exact_scalar(value),
-            operator=_exact_scalar(operator),
+            value=exact_scalar(value),
+            operator=exact_scalar(operator),
             operands=resolved_operands,
-            size=_exact_scalar(size),
-            name=_exact_scalar(name),
-            data_type=_exact_scalar(data_type),
+            size=exact_scalar(size),
+            name=exact_scalar(name),
+            data_type=exact_scalar(data_type),
             data_type_obj=data_type_obj,
             storage_info=storage_info,
-            read_order_key=_exact_scalar(read_order_key),
+            read_order_key=exact_scalar(read_order_key),
             runtime_ref=runtime_ref,
-            opcode=_exact_scalar(opcode),
+            opcode=exact_scalar(opcode),
             call_argument_width_evidence=call_argument_width_evidence,
         )
         if recurrence_semantic_key is not None:
@@ -247,7 +239,7 @@ class Expression:
 
             raise frozen_mutation_error(self, name)
         if name in SCALAR_SEMANTIC_FIELDS:
-            value = _exact_scalar(value)
+            value = exact_scalar(value)
         object.__setattr__(self, name, value)
 
     def __delattr__(self, name: str) -> None:

@@ -970,21 +970,16 @@ def float_value(value: Any) -> Any:
 
 
 def exact_scalar(value: Any) -> Any:
-    """scalar の subclass（JPype の `JInt` / `JLong` / `JString` など外の runtime の型）を、基底型の値へ写す。
+    """scalar の subclass（JPype の `JInt` / `JLong` / `JDouble` など、組み込みの scalar の型を継承する外の
+    runtime の型）を、基底型の値へ写す（写し方は `plain_scalar` が唯一の owner）。
 
     基底型の slot で読む（subclass の `__int__` / `__str__` を呼ばない）。値と意味（整数値・文字列）は変えず、
     JSON・digest・式の文字列が読む基底型の値と同じ。bool・enum の member・scalar でない値はそのまま返す
     （Issue #235: 意味の値の scalar を組み込みの型そのものにする入口が使う）。
     """
 
-    kind = type(value)
-    if value is None or kind is int or kind is str or kind is float or kind is bool:
-        return value
-    for convert in (int_value, str_value, float_value):
-        exact = convert(value)
-        if exact is not NOT_PLAIN:
-            return exact
-    return value
+    plain = plain_scalar(value)
+    return value if plain is NOT_PLAIN else plain
 
 
 def as_int(value: Any) -> int:

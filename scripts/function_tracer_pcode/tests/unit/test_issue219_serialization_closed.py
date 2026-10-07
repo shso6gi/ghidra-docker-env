@@ -407,7 +407,7 @@ def _node_missing_a_represented_field():
 
 
 def _with_raw_value(expr: Expression, value: Any) -> Expression:
-    """構築と代入の入口（`_exact_scalar`）を通らずに意味 field へ置く（入口の外から来た値の模擬）。"""
+    """構築と代入の入口（`exact_scalar`）を通らずに意味 field へ置く（入口の外から来た値の模擬）。"""
 
     expr.__dict__["value"] = value
     return expr

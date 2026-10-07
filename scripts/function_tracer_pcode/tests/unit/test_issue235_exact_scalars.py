@@ -189,3 +189,54 @@ def test_a_validated_value_with_a_boxed_storage_is_serialization_closed():
     plain = published(Expression.parameter("a", 0, size=4, storage_info=storage(int)))
     assert seal_serialization(boxed)
     assert boxed.to_dict() == plain.to_dict()
+
+
+class JDouble(float):
+    """JPype の `JDouble` の模擬（上書きした method が呼ばれたら記録する）。"""
+
+    def __float__(self):  # pragma: no cover - must not be called
+        CALLS.append("JDouble.__float__")
+        return float.__float__(self)
+
+    def __repr__(self):
+        CALLS.append("JDouble.__repr__")
+        return "JDouble(%r)" % float.__float__(self)
+
+
+@pytest.mark.parametrize("raw", [-1, 0, 2 ** 31 - 1, -(2 ** 31), 2 ** 63 - 1, -(2 ** 63), 2 ** 63, 2 ** 64 - 1])
+@pytest.mark.parametrize("box", [JInt, JLong])
+def test_every_width_and_sign_keeps_its_integer_value(raw, box):
+    """符号・幅の端（32 / 64 bit の符号つき・符号なしの境界）でも、写した値は同じ整数（型は `int` そのもの）。"""
+
+    expr = Expression.constant(box(raw), size=box(8))
+    assert type(expr.value) is int and expr.value == raw
+    assert type(expr.size) is int and expr.size == 8
+    assert CALLS == []
+
+
+@pytest.mark.parametrize("raw", [1.5, -0.0, float("inf"), float("-inf"), float("nan")])
+def test_a_boxed_float_keeps_its_exact_bits(raw):
+    """float の subclass は基底型の値へ写し、bit の並び（`-0.0` の符号・NaN の payload）を変えない。"""
+
+    import struct
+
+    expr = Expression.constant(JDouble(raw), size=8)
+    assert type(expr.value) is float
+    assert struct.pack("<d", expr.value) == struct.pack("<d", raw)
+    assert CALLS == []
+
+
+@pytest.mark.parametrize("field, boxed, plain", [
+    ("operator", JString("INT_ADD"), "INT_ADD"),
+    ("opcode", JInt(19), 19),
+    ("read_order_key", JLong(7), 7),
+    ("name", JString("x"), "x"),
+    ("data_type", JString("int"), "int"),
+])
+def test_every_scalar_field_is_written_as_the_builtin_on_assignment(field, boxed, plain):
+    """代入の入口（`__setattr__`）は scalar の意味 field の全部で写す（構築の後に置く経路）。"""
+
+    expr = Expression.parameter("a", 0, size=4)
+    setattr(expr, field, boxed)
+    assert type(getattr(expr, field)) is type(plain) and getattr(expr, field) == plain
+    assert CALLS == []
