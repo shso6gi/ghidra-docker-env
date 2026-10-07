@@ -685,7 +685,7 @@ def _stable_origin(runtime_ref: Any) -> Optional[Tuple[Any, ...]]:
     origin_ref = getattr(runtime_ref, "origin_ref", None)
     if origin_kind is None or origin_ref is None:
         return None
-    if not callable(getattr(origin_ref, "stable_key", None)):
+    if _declared_method(type(origin_ref), origin_ref, "stable_key") is None:
         return None
     origin_key = _stable_key_or_none(origin_ref)
     if origin_key is None:
@@ -779,7 +779,7 @@ def _lowering_identity(
             )
     if semantic_key is not None:
         return semantic_key
-    if callable(getattr(runtime_ref, "stable_key", None)):
+    if _declared_method(type(runtime_ref), runtime_ref, "stable_key") is not None:
         return stable_key
     return (
         "opaque_runtime_ref",

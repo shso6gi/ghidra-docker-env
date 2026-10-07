@@ -216,3 +216,32 @@ def test_the_validated_identity_api_reads_values_the_same_way():
     two = freeze_expression(_leaf(LyingList([2])))
     assert not structural.structural_equals(one, two)
     assert structural.structural_equals(one, freeze_expression(_leaf(LyingList([1]))))
+
+
+class _DynamicKey:
+    """`stable_key` を型が宣言せず、instance の `__getattr__` が作る object。"""
+
+    def __getattr__(self, name):
+        if name == "stable_key":
+            CALLS.append("dynamic.stable_key")
+            return lambda: ("dynamic",)
+        raise AttributeError(name)
+
+
+class _DeclaredKey:
+    def stable_key(self):
+        return ("declared",)
+
+
+@pytest.mark.parametrize("frozen", [False, True], ids=["unfrozen", "frozen"])
+def test_only_a_stable_key_declared_by_the_type_is_read(frozen):
+    # instance の hook が作る method は、型の宣言ではない（値の user code を identity にしない）
+    del CALLS[:]
+    dynamic = _build("direct_ref", _DynamicKey(), frozen)
+    expression_key_status(dynamic)
+    exact_structural_identity(dynamic)
+    assert "dynamic.stable_key" not in CALLS
+    # 対照: 型が宣言した stable_key は読まれ、同じ key は再利用できる
+    declared = _build("direct_ref", _DeclaredKey(), frozen)
+    assert expression_key(declared) == expression_key(_build("direct_ref", _DeclaredKey(), frozen))
+    assert expression_key(declared) != expression_key(_build("direct_ref", None, frozen))
