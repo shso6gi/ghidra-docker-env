@@ -324,3 +324,37 @@ def test_the_freeze_walk_reaches_expressions_hidden_from_a_subclass_iterator(mak
     freeze_expression(expr)
     assert is_validated(inner)
     assert [call for call in CALLS if call.startswith(("list.", "dict."))] == []
+
+
+class _UnfixableRef:
+    """`stable_key()` が値として固定できない object を含む ref（型名だけの印になる）。"""
+
+    __slots__ = ("payload",)
+
+    def __init__(self):
+        self.payload = _Opaque()
+
+    def stable_key(self):
+        return ("glob", self.payload)
+
+
+@pytest.mark.parametrize("kind", [ExpressionType.UNKNOWN, ExpressionType.VARIABLE])
+def test_an_unfixable_ref_identity_reaches_no_consumer_as_an_identity(kind):
+    # projection が identity の field から外すので、全 consumer（SMT の unknown 記号・条件 oracle の
+    # 記号・provenance key）で別の ref と併合されず、ref を持たない式とも区別される
+    from scripts.function_tracer_pcode.analysis.condition.query_identity import solver_symbol_identity
+    from scripts.function_tracer_pcode.core.render_smt.unknowns import _unknown_runtime_identity_key
+
+    def make(ref):
+        return freeze_expression(Expression(kind, name="g", runtime_ref=ref, size=4))
+
+    one, two, bare = make(_UnfixableRef()), make(_UnfixableRef()), make(None)
+    assert structural.expression_provenance_key(one) != structural.expression_provenance_key(two)
+    assert structural.expression_provenance_key(one) != structural.expression_provenance_key(bare)
+    if kind is ExpressionType.UNKNOWN:
+        assert _unknown_runtime_identity_key(one) != _unknown_runtime_identity_key(two)
+    try:
+        first, second = solver_symbol_identity(one), solver_symbol_identity(two)
+    except (TypeError, ValueError):
+        first = second = None
+    assert first is None or first != second

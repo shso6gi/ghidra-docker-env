@@ -561,6 +561,10 @@ class RuntimeRefProjection:
     loop_lowering: LoopLoweringSemantics
     #: VARIABLE がそのまま unknown symbol として宣言される種別か
     declares_variable_symbol: bool
+    #: ref の identity（stable / semantic / origin / address の key）に値として固定できない部分が
+    #: あった（Issue #215）。その key は identity の field から外してある（None）。identity の完全性と、
+    #: ref を持たない式との区別はこの印で判断する
+    identity_unfixable: bool = False
 
 
 _ABSENT_RUNTIME = RuntimeRefProjection(
@@ -665,21 +669,34 @@ def project_runtime_ref(expr: Any, runtime_ref: Any) -> RuntimeRefProjection:
 
     if runtime_ref is None:
         return _ABSENT_RUNTIME
-    stable = _stable_key_or_none(runtime_ref)
-    semantic = _semantic_key_or_none(runtime_ref)
-    # identity に使う値（loop lowering の関数名）は、値として固定できない部分を含むなら使わない
-    # （Issue #215: 型名だけの印で別の ref が同じ identity にならないように。`identity_value`）
-    lowering_identity = _lowering_identity(expr, runtime_ref, identity_value(stable), identity_value(semantic))
+    # identity の field は値として固定できる key だけを持つ（Issue #215 `identity_value`）。型名だけの
+    # 印を含む key を持たせると、それを読む全 consumer（SMT の unknown 記号・条件 oracle の記号・
+    # provenance key・loop lowering の関数名）で別の ref が同じ identity になる。外したことは
+    # `identity_unfixable` に残す
+    stable_raw = _stable_key_or_none(runtime_ref)
+    semantic_raw = _semantic_key_or_none(runtime_ref)
+    address_raw = _address_object_identity(runtime_ref)
+    stable = identity_value(stable_raw)
+    semantic = identity_value(semantic_raw)
+    address_identity = identity_value(address_raw)
+    origin = _stable_origin(runtime_ref)
+    unfixable = (
+        (stable_raw is not None and stable is None)
+        or (semantic_raw is not None and semantic is None)
+        or (address_raw is not None and address_identity is None)
+        or _origin_unfixable(runtime_ref)
+    )
+    lowering_identity = _lowering_identity(expr, runtime_ref, stable, semantic)
     return RuntimeRefProjection(
         structural_key=semantic_runtime_ref_key(runtime_ref),
         stable_key=stable,
         semantic_key=semantic,
-        stable_origin=_stable_origin(runtime_ref),
+        stable_origin=origin,
         is_parameter_ref=_is_parameter_ref(runtime_ref, stable),
         parameter_stable_key=_parameter_stable_key(stable),
         is_address_value_ref=isinstance(runtime_ref, AddressValueRef),
         address_offset=_address_offset(runtime_ref),
-        address_object_identity=_address_object_identity(runtime_ref),
+        address_object_identity=address_identity,
         lowering_identity=lowering_identity,
         loop_lowering=project_loop_lowering(
             expr, runtime_ref, identity=lowering_identity
@@ -687,7 +704,18 @@ def project_runtime_ref(expr: Any, runtime_ref: Any) -> RuntimeRefProjection:
         declares_variable_symbol=isinstance(
             runtime_ref, (CanonicalLocation, PostStateReadRef, PostStateValueRef)
         ),
+        identity_unfixable=unfixable,
     )
+
+
+def _origin_unfixable(runtime_ref: Any) -> bool:
+    """origin の stable key が値として固定できなかったか（`_stable_origin` が外した）。"""
+
+    origin_ref = getattr(runtime_ref, "origin_ref", None)
+    if getattr(runtime_ref, "origin_kind", None) is None or origin_ref is None:
+        return False
+    raw = _stable_key_or_none(origin_ref)
+    return raw is not None and identity_value(raw) is None
 
 
 def identity_value(value: Any) -> Any:

@@ -41,7 +41,6 @@ from scripts.function_tracer_pcode.core.semantic_projection import (
     absent_runtime_projection,
     absent_storage_projection,
     canonical_value_key,
-    identity_value,
     project_expression,
     value_key_is_opaque,
 )
@@ -157,6 +156,12 @@ class SemanticSnapshot:
     @property
     def address_object_identity(self) -> Optional[Tuple[Any, ...]]:
         return self.runtime.address_object_identity
+
+    @property
+    def runtime_identity_unfixable(self) -> bool:
+        """ref の identity の key に値として固定できない部分があった（その key は外してある）。"""
+
+        return self.runtime.identity_unfixable
 
     @property
     def runtime_lowering_identity(self) -> Optional[Tuple[Any, ...]]:

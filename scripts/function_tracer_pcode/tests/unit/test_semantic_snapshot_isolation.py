@@ -516,11 +516,12 @@ def test_unsupported_values_are_not_kept_as_raw_objects():
     expr.freeze()
 
     projection = semantic_projection(expr)
-    assert contains_unsupported_value(projection.runtime_stable_key)
-    assert any(
-        isinstance(item, UnsupportedSemanticValue)
-        for item in projection.runtime_stable_key
-    )
+    # Issue #215: 値として固定できない部分を含む key は identity の field に持たない（型名だけの印で
+    # 別の ref と同じ identity になるため）。外したことは `runtime_identity_unfixable` に残る
+    assert projection.runtime_stable_key is None
+    assert projection.runtime_identity_unfixable is True
+    assert not contains_unsupported_value(projection.runtime_semantic_key)
+    assert UnsupportedSemanticValue  # 印の型は残る（`immutable_value` の戻り値）
     # 区別できない値を digest に載せない。
     from scripts.function_tracer_pcode.core.structural import structural_identity_digest
 

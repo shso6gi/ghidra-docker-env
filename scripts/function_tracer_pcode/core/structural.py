@@ -26,7 +26,6 @@ from scripts.function_tracer_pcode.core.semantic_lifecycle import is_validated
 from scripts.function_tracer_pcode.core.semantic_projection import (
     UNSUPPORTED_VALUE_TAG,
     declared_method,
-    identity_value,
     read_container,
     canonical_atom as _atom_key,
 )
@@ -1432,9 +1431,12 @@ def expression_provenance_key(
     if projection.storage_identity is not None:
         return ("storage", projection.storage_identity)
 
-    # 値として固定できない部分を含む安定 key は identity にしない（Issue #215 `identity_value`）
-    if identity_value(projection.runtime_stable_key) is not None:
+    if projection.runtime_stable_key is not None:
         return ("runtime_ref", projection.runtime_stable_key)
+    if projection.runtime_identity_unfixable:
+        # ref はあるが identity を値で固定できない: ref を持たない式とも別の ref とも等しくしない
+        # （Issue #215。`id()` を入れず、毎回新しい識別不能 token）
+        return ("runtime_ref", unidentified_identity("unfixable_runtime_identity"))
 
     safe = expression_key_safe(
         expr,

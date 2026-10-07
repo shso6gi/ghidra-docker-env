@@ -748,6 +748,8 @@ def _projection_has_unsupported_value(snapshot: Any) -> bool:
     """
 
     runtime = snapshot.runtime
+    if runtime.identity_unfixable:
+        return True
     return any(
         contains_unsupported_value(value)
         for value in (
