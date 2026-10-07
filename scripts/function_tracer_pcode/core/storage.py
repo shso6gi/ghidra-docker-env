@@ -79,6 +79,11 @@ class StorageInfo:
             if not self.is_frame_pointer and normalized_base in {"rbp", "ebp", "bp", "fp", "s8", "x29"}:
                 self.is_frame_pointer = True
 
+    def _space_identity(self) -> int:
+        """identity に入れる space の id。無いときだけ -1（space 0 を「無い」と同じ値に畳まない: Issue #215）。"""
+
+        return -1 if self.space_id is None else int(self.space_id)
+
     @staticmethod
     def _synthetic_space_id(name: str) -> int:
         normalized = str(name or "").strip().lower()
@@ -115,7 +120,7 @@ class StorageInfo:
         if self.base_register_size_bits <= 0 or other.base_register_size_bits <= 0:
             return False
 
-        same_space = int(self.space_id or -1) == int(other.space_id or -1)
+        same_space = self._space_identity() == other._space_identity()
         if not same_space:
             same_space = (
                 self._normalize_reg_name(self.space_name) == self._normalize_reg_name(other.space_name)
@@ -218,7 +223,7 @@ class StorageInfo:
             return None
         return (
             "register_storage",
-            int(self.space_id or -1),
+            self._space_identity(),
             int(self.base_register_offset),
             int(self.base_register_size_bits),
             int(self.bit_offset_in_base),
@@ -230,7 +235,7 @@ class StorageInfo:
             return self.register_identity_key()
         return (
             "memory_storage",
-            int(self.space_id or -1),
+            self._space_identity(),
             int(self.offset),
             int(self.size),
         )

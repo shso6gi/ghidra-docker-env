@@ -309,3 +309,53 @@ def test_every_projection_identity_component_goes_through_the_single_entry(monke
     assert sorted(map(repr, seen)) == sorted(
         map(repr, [("stable", 1), ("semantic", 1), ("loop", ("origin", 1)), ("method_b", 1), ("storage", 1)])
     )
+
+
+# ---------------------------------------------------------------------------
+# identity の producer が情報を落とさないこと・粗い退避をしないこと（round 8 の反証レビュー）
+# ---------------------------------------------------------------------------
+
+
+def test_storage_identity_keeps_space_zero_apart_from_an_absent_space():
+    # `int(space_id or -1)` は space 0（`register` の合成 id も 0）を「space が無い」と同じ値に畳んだ
+    from scripts.function_tracer_pcode.core.storage import StorageInfo
+
+    zero = StorageInfo(space_id=0, offset=8, size=4)
+    absent = StorageInfo(offset=8, size=4)
+    assert absent.space_id is None
+    assert zero.storage_identity_key() != absent.storage_identity_key()
+    assert zero.storage_identity_key() == StorageInfo(space_id=0, offset=8, size=4).storage_identity_key()
+    register = StorageInfo(is_register=True, space_name="register", register_name="a1", base_register_name="a1",
+                           base_register_offset=16, base_register_size_bits=64, size_bits=64, size=8)
+    unknown_space = StorageInfo(is_register=True, register_name="a1", base_register_name="a1",
+                                base_register_offset=16, base_register_size_bits=64, size_bits=64, size=8)
+    assert register.space_id == 0 and unknown_space.space_id is None
+    assert register.storage_identity_key() != unknown_space.storage_identity_key()
+
+
+class _Keyless:
+    __slots__ = ()
+
+
+@pytest.mark.parametrize("kind", [ExpressionType.PARAMETER, ExpressionType.VARIABLE])
+def test_a_keyless_ref_never_falls_back_to_an_index_or_name_symbol(kind):
+    # key を出さない ref は identity を固定できない: index・名前の粗い identity へ退避しない（構造 key と同じ判断）
+    def build():
+        return freeze_expression(Expression(kind, name="p", value=0, size=4, runtime_ref=_Keyless()))
+
+    left, right = build(), build()
+    assert semantic_projection(left).runtime_identity_unfixable is True
+    assert solver_symbol_identity(left) is None
+    verdict, distinct = _notequal(left, right)
+    assert verdict is not True, distinct
+    assert not _shares_symbol(distinct), distinct
+    assert structural.expression_provenance_key(left) != structural.expression_provenance_key(right)
+
+
+def test_an_index_parameter_without_a_ref_still_shares_its_index_symbol():
+    # 対照: ref を持たない PARAMETER は従来どおり index と名前で 1 つの記号（関数の parameter の対応）
+    left = freeze_expression(Expression(ExpressionType.PARAMETER, name="p", value=0, size=4))
+    right = freeze_expression(Expression(ExpressionType.PARAMETER, name="p", value=0, size=4))
+    assert solver_symbol_identity(left) == ("parameter_index_name", 0, "p")
+    verdict, distinct = _notequal(left, right)
+    assert verdict is True, distinct

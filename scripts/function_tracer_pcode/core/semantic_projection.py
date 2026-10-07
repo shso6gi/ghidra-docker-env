@@ -680,11 +680,16 @@ def project_runtime_ref(expr: Any, runtime_ref: Any) -> RuntimeRefProjection:
     # かつ placeholder_free と判定したもの）だけを持つ（Issue #215）。値を読む前に Python の値へ畳まない:
     # 畳むと容器の型・bool と int などの区別が落ち、それを読む全 consumer（SMT の unknown 記号・条件
     # oracle の記号・provenance key・loop lowering の関数名）で別の ref が同じ identity になる
-    stable, stable_unfixable = _identity_of(_declared_key_raw(runtime_ref, "stable_key"))
-    semantic, semantic_unfixable = _identity_of(_declared_key_raw(runtime_ref, "semantic_key"))
+    stable_raw = _declared_key_raw(runtime_ref, "stable_key")
+    semantic_raw = _declared_key_raw(runtime_ref, "semantic_key")
+    stable, stable_unfixable = _identity_of(stable_raw)
+    semantic, semantic_unfixable = _identity_of(semantic_raw)
+    # key を出さない ref も identity を固定できない: index・名前・storage の粗い identity へ退避すると、
+    # 構造 key（識別不能にする: `semantic_runtime_ref_key`）とも食い違い、別の ref の式が同じ記号になる
+    keyless = stable_raw is None and semantic_raw is None
     origin, origin_unfixable = _stable_origin(runtime_ref)
     address_identity, address_unfixable = _address_object_identity(runtime_ref)
-    unfixable = stable_unfixable or semantic_unfixable or origin_unfixable or address_unfixable
+    unfixable = keyless or stable_unfixable or semantic_unfixable or origin_unfixable or address_unfixable
     if unfixable:
         # 一部でも固定できないなら、残りの key（stable・semantic・origin）にも頼らない: consumer は
         # semantic → stable → origin の順に退避するので、固定できない成分を落とした粗い key で別の

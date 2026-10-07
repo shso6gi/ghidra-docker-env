@@ -439,9 +439,9 @@ def test_an_incomplete_parameter_key_is_still_rejected_as_a_solver_symbol(key):
     # 読む: atom の形のまま照合すると、欠けた key を見落として symbol を共有させる
     from scripts.function_tracer_pcode.analysis.condition.query_identity import solver_symbol_identity_is_safe
 
+    # round 8: 成分の欠けた schema は projection の入口で identity にならない（None）。どちらでも記号は共有しない
     identity = solver_symbol_identity(freeze_expression(_variable(_StableRef(key))))
-    assert identity is not None
-    assert solver_symbol_identity_is_safe(identity) is False
+    assert identity is None or solver_symbol_identity_is_safe(identity) is False
     # 対照: 欠けていない parameter key を入れ子に持つ ref は symbol にしてよい
     complete = solver_symbol_identity(freeze_expression(_variable(_StableRef(("loop", ("parameter", 1, 2))))))
     assert solver_symbol_identity_is_safe(complete) is True
