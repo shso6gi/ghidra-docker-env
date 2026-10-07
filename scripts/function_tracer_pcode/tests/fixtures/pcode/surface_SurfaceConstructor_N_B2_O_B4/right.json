@@ -1,6 +1,6 @@
 {
  "header": {
-  "analysis_source_digest": "a4dc857173a29d11131693816e868b6e798881566c16f4dfe53ad8f9e79aa678",
+  "analysis_source_digest": "4fbaf9f2a8cea00de0ff59a61b4f2cf0a9bb20084c8ec16a45dfb46fc3b125f3",
   "binary": {
    "binary_id": "B4",
    "eqbench_relative_path": "raytrace/surface/Neq/source/oldV-arm64-clang-O3",
@@ -15,9 +15,9 @@
   "fixture_id": "surface_SurfaceConstructor_N_B2_O_B4",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-10-07T00:47:31+00:00",
+  "recorded_at_utc": "2026-10-07T07:23:48+00:00",
   "recorder_version": "2",
-  "recording_commit": "77d18790df971331727c599fb7ff7639416c20b5",
+  "recording_commit": "eba6ccf8d95a578efcd7bfba0c9599b3ad62d8cf",
   "recording_dirty": false,
   "recording_mode": {
    "connector": "production",
