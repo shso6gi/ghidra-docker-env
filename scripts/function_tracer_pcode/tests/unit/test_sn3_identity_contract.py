@@ -576,3 +576,14 @@ def test_a_fully_readable_frozen_dataclass_with_to_dict_stays_an_identity():
     assert identity_value(("ref", Point(1))) == identity_value(("ref", Point(1)))
     assert identity_value(("ref", Point(1))) != identity_value(("ref", Point(2)))
     assert identity_value(("ref", _Serialized())) is None
+
+
+def test_constants_with_different_opaque_values_never_share_a_provenance_key():
+    # #218 の再現（AC1）: 型名だけに落ちる値を持つ別々の式は、digest 経路でも同じ provenance key にならない
+    class _Object:
+        pass
+
+    left, right = Expression.constant(0, size=4), Expression.constant(0, size=4)
+    left.value, right.value = _Object(), _Object()
+    assert structural.expression_provenance_key(left) != structural.expression_provenance_key(right)
+    assert structural.expression_provenance_key(left) != structural.expression_provenance_key(left)
