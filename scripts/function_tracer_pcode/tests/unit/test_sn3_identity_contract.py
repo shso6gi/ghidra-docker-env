@@ -394,3 +394,60 @@ def test_a_cyclic_or_deep_value_stops_every_reader(make, placement, frozen):
     solver_symbol_identity(expr)
     verdict, _distinct = _notequal_verdict(expr, _maybe_frozen(builders[placement](make()), frozen))
     assert verdict is not True
+
+
+# ---------------------------------------------------------------------------
+# 形を調べる consumer は owner の読み口を通す（identity の atom を自分で照合しない）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key",
+    [("loop", ("parameter",)), ("loop", ("parameter", None)), ("loop", ("parameter", 1, None)), ("loop", ("x", ("parameter", 1, 2, None)))],
+    ids=["no_index", "none_index", "none_width", "deeper"],
+)
+def test_an_incomplete_parameter_key_is_still_rejected_as_a_solver_symbol(key):
+    # solver symbol の安全性の判定（欠けた parameter key の拒否）は identity の atom を `identity_view` で
+    # 読む: atom の形のまま照合すると、欠けた key を見落として symbol を共有させる
+    from scripts.function_tracer_pcode.analysis.condition.query_identity import solver_symbol_identity_is_safe
+
+    identity = solver_symbol_identity(freeze_expression(_variable(_StableRef(key))))
+    assert identity is not None
+    assert solver_symbol_identity_is_safe(identity) is False
+    # 対照: 欠けていない parameter key を入れ子に持つ ref は symbol にしてよい
+    complete = solver_symbol_identity(freeze_expression(_variable(_StableRef(("loop", ("parameter", 1, 2))))))
+    assert solver_symbol_identity_is_safe(complete) is True
+
+
+def test_the_cross_binary_shape_reads_the_parameter_identity_through_the_view():
+    # 対応候補の形（artifact に固有の program id を外す）は provenance key を `provenance_key_view` で読む
+    from scripts.function_tracer_pcode.core.runtime_refs import LocationBaseRef
+    from scripts.function_tracer_pcode.proof.call_effect.obligations import _cross_binary_expression_shape
+
+    def parameter(program_id):
+        ref = LocationBaseRef.parameter("p", index=2, owner_program_id=program_id, owner_entry_offset=0x1000)
+        return freeze_expression(Expression.parameter("p", 2, "int", size=4, runtime_ref=ref))
+
+    left, right = (structural.expression_provenance_key(parameter(program)) for program in (11, 22))
+    assert left != right
+    assert _cross_binary_expression_shape(left) == _cross_binary_expression_shape(right) == ("runtime_ref", ("parameter", 2))
+
+
+def test_an_address_identity_outside_its_schema_is_not_an_identity():
+    # global object のアドレス identity は (str, int, int) の schema を確かめてから exact な値で持つ
+    from scripts.function_tracer_pcode.core.runtime_refs import AddressValueRef
+
+    class _ListIdentity(AddressValueRef):
+        def global_object_identity(self):
+            return ["g", 4, 0]
+
+    class _TupleIdentity(AddressValueRef):
+        def global_object_identity(self):
+            return ("g", 4, 0)
+
+    odd = freeze_expression(Expression(ExpressionType.CONSTANT, value=0x1000, size=8, runtime_ref=_ListIdentity(address_offset=0x1000)))
+    assert semantic_projection(odd).address_object_identity is None
+    assert semantic_projection(odd).runtime_identity_unfixable is True
+    good = freeze_expression(Expression(ExpressionType.CONSTANT, value=0x1000, size=8, runtime_ref=_TupleIdentity(address_offset=0x1000)))
+    assert semantic_projection(good).address_object_identity == ("g", 4, 0)
+    assert semantic_projection(good).runtime_identity_unfixable is False
