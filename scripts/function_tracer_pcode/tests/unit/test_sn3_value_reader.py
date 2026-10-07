@@ -338,17 +338,68 @@ class _UnfixableRef:
         return ("glob", self.payload)
 
 
+class _UnfixableSemanticRef:
+    """`semantic_key()` だけが固定できない ref。`stable_key()` は全 instance で等しい（粗い key）。"""
+
+    __slots__ = ("payload",)
+
+    def __init__(self):
+        self.payload = _Opaque()
+
+    def semantic_key(self):
+        return ("sem", self.payload)
+
+    def stable_key(self):
+        return ("glob",)
+
+
+class _UnfixableSemanticOnlyRef:
+    __slots__ = ("payload",)
+
+    def __init__(self):
+        self.payload = _Opaque()
+
+    def semantic_key(self):
+        return ("sem", self.payload)
+
+
+class _UnfixableOriginRef:
+    """origin の stable key だけが固定できない ref。自分の `stable_key()` は全 instance で等しい。"""
+
+    __slots__ = ("origin_kind", "origin_ref")
+
+    def __init__(self):
+        self.origin_kind = "loop"
+        self.origin_ref = _UnfixableRef()
+
+    def stable_key(self):
+        return ("glob",)
+
+
+_UNFIXABLE_REFS = [_UnfixableRef, _UnfixableSemanticRef, _UnfixableSemanticOnlyRef, _UnfixableOriginRef]
+
+
+@pytest.mark.parametrize("ref_type", _UNFIXABLE_REFS, ids=lambda t: t.__name__.strip("_"))
 @pytest.mark.parametrize("kind", [ExpressionType.UNKNOWN, ExpressionType.VARIABLE])
-def test_an_unfixable_ref_identity_reaches_no_consumer_as_an_identity(kind):
+def test_an_unfixable_ref_identity_reaches_no_consumer_as_an_identity(kind, ref_type):
     # projection が identity の field から外すので、全 consumer（SMT の unknown 記号・条件 oracle の
-    # 記号・provenance key）で別の ref と併合されず、ref を持たない式とも区別される
+    # 記号・provenance key）で別の ref と併合されず、ref を持たない式とも区別される。一部の成分だけが
+    # 固定できない ref も、残りの粗い key（全 instance で等しい stable key）に退避して併合しない
     from scripts.function_tracer_pcode.analysis.condition.query_identity import solver_symbol_identity
     from scripts.function_tracer_pcode.core.render_smt.unknowns import _unknown_runtime_identity_key
+    from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
+    from scripts.function_tracer_pcode.core.structural import structural_identity_digest
 
     def make(ref):
         return freeze_expression(Expression(kind, name="g", runtime_ref=ref, size=4))
 
-    one, two, bare = make(_UnfixableRef()), make(_UnfixableRef()), make(None)
+    one, two, bare = make(ref_type()), make(ref_type()), make(None)
+    projection = semantic_projection(one)
+    assert projection.runtime_identity_unfixable is True
+    assert projection.runtime_stable_key is None
+    assert projection.runtime_semantic_key is None
+    assert projection.runtime_stable_origin is None
+    assert structural_identity_digest(one) is None
     assert structural.expression_provenance_key(one) != structural.expression_provenance_key(two)
     assert structural.expression_provenance_key(one) != structural.expression_provenance_key(bare)
     if kind is ExpressionType.UNKNOWN:
@@ -358,3 +409,22 @@ def test_an_unfixable_ref_identity_reaches_no_consumer_as_an_identity(kind):
     except (TypeError, ValueError):
         first = second = None
     assert first is None or first != second
+
+
+def test_a_fixable_ref_identity_is_kept_and_shared():
+    # 対照: 固定できる key の ref は identity を持ち、同じ key の ref は同じ記号になる
+    from scripts.function_tracer_pcode.core.render_smt.unknowns import _unknown_runtime_identity_key
+    from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
+
+    class _Fixed:
+        __slots__ = ()
+
+        def stable_key(self):
+            return ("glob", 1)
+
+    one = freeze_expression(Expression(ExpressionType.UNKNOWN, name="g", runtime_ref=_Fixed(), size=4))
+    two = freeze_expression(Expression(ExpressionType.UNKNOWN, name="g", runtime_ref=_Fixed(), size=4))
+    assert semantic_projection(one).runtime_identity_unfixable is False
+    assert semantic_projection(one).runtime_stable_key == ("glob", 1)
+    assert _unknown_runtime_identity_key(one) == _unknown_runtime_identity_key(two)
+    assert structural.expression_provenance_key(one) == structural.expression_provenance_key(two)

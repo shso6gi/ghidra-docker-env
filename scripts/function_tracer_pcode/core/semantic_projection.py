@@ -562,7 +562,8 @@ class RuntimeRefProjection:
     #: VARIABLE がそのまま unknown symbol として宣言される種別か
     declares_variable_symbol: bool
     #: ref の identity（stable / semantic / origin / address の key）に値として固定できない部分が
-    #: あった（Issue #215）。その key は identity の field から外してある（None）。identity の完全性と、
+    #: あった（Issue #215）。そのときは stable / semantic / origin の field を全部 None にし（address は
+    #: その key だけ外す）、identity の完全性と、
     #: ref を持たない式との区別はこの印で判断する
     identity_unfixable: bool = False
 
@@ -686,6 +687,11 @@ def project_runtime_ref(expr: Any, runtime_ref: Any) -> RuntimeRefProjection:
         or (address_raw is not None and address_identity is None)
         or _origin_unfixable(runtime_ref)
     )
+    if unfixable:
+        # 一部でも固定できないなら、残りの key（stable・semantic・origin）にも頼らない: consumer は
+        # semantic → stable → origin の順に退避するので、固定できない成分を落とした粗い key で別の
+        # ref と併合し得る
+        stable = semantic = origin = None
     lowering_identity = _lowering_identity(expr, runtime_ref, stable, semantic)
     return RuntimeRefProjection(
         structural_key=semantic_runtime_ref_key(runtime_ref),
