@@ -451,3 +451,11 @@ def test_the_provenance_key_reads_phi_branches():
     assert structural.expression_provenance_key(one) == structural.expression_provenance_key(same)
     hidden = freeze_expression(_phi(1, Expression(ExpressionType.UNKNOWN, name="u", size=4, runtime_ref=_Stable(("parameter", None)))))
     assert structural.expression_provenance_key(hidden) != structural.expression_provenance_key(hidden)
+
+
+def test_the_shape_view_expands_every_container_for_inspection():
+    # `identity_view` は形の検査専用の読み口で、dict / set / dataclass の中の schema も見せる
+    from scripts.function_tracer_pcode.core.semantic_projection import canonical_atom, identity_view
+
+    assert identity_view(canonical_atom({"k": ("parameter", 1, None)})) == (("k", ("parameter", 1, None)),)
+    assert identity_view(canonical_atom(frozenset({("parameter", 2)}))) == (("parameter", 2),)
