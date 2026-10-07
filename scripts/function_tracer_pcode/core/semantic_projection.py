@@ -74,13 +74,59 @@ IDENTITY_EVALUATION_ERRORS = (
 # ---------------------------------------------------------------------------
 
 
-def canonical_atom(value: Any) -> CanonicalAtoms:
-    """任意の値を structural key 用の安定な atom へ落とす。
+_SEQUENCE_TAGS = frozenset({"tuple", "list"})
+_SET_TAGS = frozenset({"set", "frozenset"})
 
-    `stable_key()` が返した list を list のまま抱え込まないよう、container は
-    すべて tuple へ畳む。最後の手段の `object_id` だけは process 依存だが、
-    これは「同じ object かどうか」しか言っていない（identity digest には
-    使わない — `canonical_value_key` を使うこと）。
+
+def read_container(value: Any) -> Optional[Tuple[str, Tuple[Any, ...]]]:
+    """容器の中身を **基底型の実装で、型と対応を保って** 読む（値の読み方の唯一の入口、Issue #215）。
+
+    返すのは ``(tag, 要素)``: tag は ``"tuple"`` / ``"list"`` / ``"set"`` / ``"frozenset"`` /
+    ``"dict"``（dict の要素は ``(key, value)`` の組）。容器でなければ None。subclass の
+    `__iter__` / `__getitem__` / `__len__` / `items` を呼ばない（基底型の storage を読む）。
+    `MappingProxyType` だけは包んだ mapping の `items()` を呼ぶ（package が作る proxy は exact な
+    dict だけを包む）。要素の順は storage の順で、並べ替えと同一視は呼び出し側が atom で行う。
+    """
+
+    kind = type(value)
+    if issubclass(kind, tuple):
+        return ("tuple", tuple(tuple.__iter__(value)))
+    if issubclass(kind, list):
+        return ("list", tuple(list.__iter__(value)))
+    if issubclass(kind, frozenset):
+        return ("frozenset", tuple(frozenset.__iter__(value)))
+    if issubclass(kind, set):
+        return ("set", tuple(set.__iter__(value)))
+    if issubclass(kind, dict):
+        return ("dict", tuple(dict.items(value)))
+    if kind is MappingProxyType:
+        return ("dict", tuple(value.items()))
+    return None
+
+
+def _ordered_by_atom(pairs: list) -> Optional[list]:
+    """(atom, 付随する値) の組を atom の順に並べる。atom が重複するか順序が付かなければ None。
+
+    別の要素が同じ atom になった（hash を上書きした subclass と基底型の値など）なら、atom では
+    どの要素かを区別できない。呼び出し側はその容器を識別できない値として扱う。
+    """
+
+    atoms = [atom for atom, _item in pairs]
+    try:
+        if len(set(atoms)) != len(atoms):
+            return None
+        return sorted(pairs, key=lambda pair: pair[0])
+    except TypeError:
+        return None
+
+
+def canonical_atom(value: Any) -> CanonicalAtoms:
+    """任意の値を structural key 用の atom へ落とす（**値の区別を落とさない**、Issue #215）。
+
+    scalar は基底型の slot の exact な値、容器は `read_container` で型の tag と対応を保つ
+    （list と tuple、set と tuple、dict と組の列を同一視しない）。object を値で表すのは状態の
+    全部を読めるときだけで、それ以外は `object_id`（構造 key では識別不能）。atom の中身は
+    exact な組み込みの値だけ。
     """
 
     if value is None:
@@ -110,20 +156,23 @@ def canonical_atom(value: Any) -> CanonicalAtoms:
         # 同じ型の別の object どうしが同じ atom になり識別できたように見える。印の tag を
         # 残し、構造 key の owner（`core/structural`）が識別不能として扱う（Issue #215）
         return (UNSUPPORTED_VALUE_TAG, value.type_module, value.type_qualname)
-    # 容器は基底型の実装で辿る（subclass の `__iter__` / `items` を呼ばない）
-    if issubclass(kind, tuple):
-        return ("tuple", tuple(canonical_atom(item) for item in tuple.__iter__(value)))
-    if issubclass(kind, list):
-        return ("list", tuple(canonical_atom(item) for item in list.__iter__(value)))
-    if issubclass(kind, dict) or kind is MappingProxyType:
-        pairs = dict.items(value) if issubclass(kind, dict) else value.items()
-        items = [(canonical_atom(key), canonical_atom(item)) for key, item in pairs]
-        if len({key for key, _item in items}) != len(items):
+    # 容器は `read_container`（基底型の実装で、型と対応を保って読む）で辿る
+    container = read_container(value)
+    if container is not None:
+        tag, elements = container
+        if tag in _SEQUENCE_TAGS:
+            return (tag, tuple(canonical_atom(item) for item in elements))
+        if tag in _SET_TAGS:
+            ordered = _ordered_by_atom([(canonical_atom(item), None) for item in elements])
+            if ordered is None:
+                return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
+            return (tag, tuple(atom for atom, _item in ordered))
+        ordered = _ordered_by_atom([(canonical_atom(key), canonical_atom(item)) for key, item in elements])
+        if ordered is None:
             # 別の key（hash を上書きした subclass と基底型の値など）が同じ atom になった: どの値が
             # どの key のものかを atom では区別できない
             return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
-        items.sort()
-        return ("dict", tuple(items))
+        return ("dict", tuple(ordered))
     # 値が自分の identity を明示する method（型の属性だけを見る。instance の `__getattr__` を呼ばない）
     stable_key = _declared_method(kind, value, "stable_key")
     if stable_key is not None:
@@ -225,31 +274,37 @@ def canonical_value_key(value: Any) -> CanonicalAtoms:
 
     if value is None:
         return ("none", "")
-    if isinstance(value, bool):
+    if value is True or value is False:
         return ("bool", int(value))
-    if isinstance(value, int):
-        return ("int", value)
-    if isinstance(value, float):
-        return ("float", repr(value))
-    if isinstance(value, str):
-        return ("str", value)
-    if isinstance(value, bytes):
-        return ("bytes", value.hex())
-    if isinstance(value, tuple):
-        return ("tuple", tuple(canonical_value_key(item) for item in value))
-    if isinstance(value, list):
-        return ("list", tuple(canonical_value_key(item) for item in value))
-    if isinstance(value, frozenset):
-        return ("frozenset", tuple(sorted(canonical_value_key(item) for item in value)))
-    if isinstance(value, set):
-        return ("set", tuple(sorted(canonical_value_key(item) for item in value)))
-    if isinstance(value, (dict, MappingProxyType)):
-        items = [
-            (canonical_value_key(key), canonical_value_key(item))
-            for key, item in value.items()
-        ]
-        items.sort()
-        return ("dict", tuple(items))
+    # 読み方は `canonical_atom` と同じ（Issue #215: scalar は基底型の slot、容器は `read_container`。
+    # subclass の `__iter__` / `__repr__` / `__eq__` を呼ばない）
+    scalar = live_values.json_scalar(value)
+    if scalar is not live_values.NOT_PLAIN:
+        if scalar is True or scalar is False:
+            return ("bool", int(scalar))
+        if type(scalar) is int:
+            return ("int", scalar)
+        if type(scalar) is float:
+            return ("float", float.__repr__(scalar))
+        return ("str", scalar)
+    kind = type(value)
+    if issubclass(kind, bytes):
+        return ("bytes", bytes.hex(value))
+    container = read_container(value)
+    if container is not None:
+        tag, elements = container
+        if tag in _SEQUENCE_TAGS:
+            return (tag, tuple(canonical_value_key(item) for item in elements))
+        if tag in _SET_TAGS:
+            ordered = _ordered_by_atom([(canonical_value_key(item), None) for item in elements])
+            if ordered is None:
+                return ("opaque_value", kind.__module__, kind.__qualname__)
+            return (tag, tuple(key for key, _item in ordered))
+        ordered = _ordered_by_atom([(canonical_value_key(key), canonical_value_key(item)) for key, item in elements])
+        if ordered is None:
+            # 別の key が同じ表現になった: どの値がどの key のものかを区別できない（値として支えない）
+            return ("opaque_value", kind.__module__, kind.__qualname__)
+        return ("dict", tuple(ordered))
     raw = _stable_key_or_none(value)
     if raw is not None:
         return ("stable", canonical_value_key(raw))
@@ -285,28 +340,43 @@ class UnsupportedSemanticValue(NamedTuple):
 
 
 def immutable_value(value: Any) -> Any:
-    """`stable_key()` / `semantic_key()` の戻り値を不変な値へ畳む。
+    """`stable_key()` / `semantic_key()` の戻り値を不変な値へ畳む（snapshot・描画の identity 用）。
 
     container は tuple へ、Enum は値へ、`stable_key()` を持つ object はその key へ
     再帰的に落とす。どれでもない object は `UnsupportedSemanticValue` にする
     （生 object を snapshot に残さない）。
+
+    読み方は `read_container` / `live_values` と同じ（基底型の実装。subclass の `__iter__` /
+    `__repr__` を呼ばない）。set と dict は `canonical_atom` の順に並べ、別の要素が同じ atom に
+    なる容器は `UnsupportedSemanticValue`（どの要素かを区別できない）。**この形は容器の型を
+    畳むので、構造 key には使わない**（構造 key は生の値を `canonical_atom` で読む:
+    `semantic_runtime_ref_key`）。
     """
 
-    if isinstance(value, IMMUTABLE_SCALARS):
+    if value is None or value is True or value is False:
         return value
-    if isinstance(value, (tuple, list)):
-        return tuple(immutable_value(item) for item in value)
-    if isinstance(value, (set, frozenset)):
-        return tuple(sorted((immutable_value(item) for item in value), key=repr))
-    if isinstance(value, (dict, MappingProxyType)):
-        return tuple(
-            sorted(
-                ((immutable_value(key), immutable_value(item)) for key, item in value.items()),
-                key=repr,
-            )
-        )
-    if isinstance(value, Enum):
-        return immutable_value(value.value)
+    scalar = live_values.json_scalar(value)
+    if scalar is not live_values.NOT_PLAIN and not issubclass(type(value), Enum):
+        return scalar
+    kind = type(value)
+    if issubclass(kind, bytes):
+        return bytes(bytes.__iter__(value)) if kind is not bytes else value
+    container = read_container(value)
+    if container is not None:
+        tag, elements = container
+        if tag in _SEQUENCE_TAGS:
+            return tuple(immutable_value(item) for item in elements)
+        if tag in _SET_TAGS:
+            ordered = _ordered_by_atom([(canonical_atom(item), immutable_value(item)) for item in elements])
+        else:
+            ordered = _ordered_by_atom([
+                (canonical_atom(key), (immutable_value(key), immutable_value(item))) for key, item in elements
+            ])
+        if ordered is None:
+            return UnsupportedSemanticValue(kind.__module__, kind.__qualname__)
+        return tuple(item for _atom, item in ordered)
+    if issubclass(kind, Enum):
+        return immutable_value(live_values.enum_value(value))
     nested = _stable_key_or_none(value)
     if nested is not None:
         return nested
@@ -325,25 +395,25 @@ def contains_unsupported_value(value: Any) -> bool:
     return False
 
 
-def _stable_key_or_none(value: Any) -> Any:
-    stable_key = getattr(value, "stable_key", None)
-    if not callable(stable_key):
+def _declared_key_raw(value: Any, name: str) -> Any:
+    """型が宣言した `stable_key()` / `semantic_key()` の生の戻り値（無ければ・失敗すれば None）。"""
+
+    method = _declared_method(type(value), value, name)
+    if method is None:
         return None
     try:
-        key = stable_key()
+        return method()
     except IDENTITY_EVALUATION_ERRORS:
         return None
+
+
+def _stable_key_or_none(value: Any) -> Any:
+    key = _declared_key_raw(value, "stable_key")
     return None if key is None else immutable_value(key)
 
 
 def _semantic_key_or_none(value: Any) -> Any:
-    semantic_key = getattr(value, "semantic_key", None)
-    if not callable(semantic_key):
-        return None
-    try:
-        key = semantic_key()
-    except IDENTITY_EVALUATION_ERRORS:
-        return None
+    key = _declared_key_raw(value, "semantic_key")
     return None if key is None else immutable_value(key)
 
 
@@ -352,6 +422,11 @@ def semantic_runtime_ref_key(value: Any) -> Optional[CanonicalAtoms]:
 
     任意の object 属性は見ない。debug 用・付随的な runtime object が構造の
     等価性を動かしてよいのは、明示的な安定 key を出しているときだけ。
+
+    **生の値を `canonical_atom` と同じ読み方で atom にする**（Issue #215）。`stable_key()` の
+    戻り値も `immutable_value` で畳まずに読む: 畳むと容器の型・要素の対応が落ち、後段の分類では
+    取り戻せない。安定 key を出さない object を含む容器は、従来どおり意味 key を持たない
+    （None）。別の要素が同じ atom になる容器は識別できない値（`unsupported_value`）にする。
     """
 
     if value is None:
@@ -361,26 +436,32 @@ def semantic_runtime_ref_key(value: Any) -> Optional[CanonicalAtoms]:
         # bool / int / str / bytes（とその subclass）は `canonical_atom` と同じ規則（基底型の slot の
         # exact な値）。float は従来どおり安定 key を出さない値として扱う（意味 key に入れない）
         return canonical_atom(value)
-    kind = type(value)
-    if issubclass(kind, (tuple, list)):
-        items = []
-        for item in (tuple.__iter__(value) if issubclass(kind, tuple) else list.__iter__(value)):
-            item_key = semantic_runtime_ref_key(item)
-            if item_key is None:
-                return None
-            items.append(item_key)
-        return ("tuple" if issubclass(kind, tuple) else "list", tuple(items))
-    if issubclass(kind, dict) or kind is MappingProxyType:
-        items = []
-        for key, item in (dict.items(value) if issubclass(kind, dict) else value.items()):
-            key_key = semantic_runtime_ref_key(key)
-            item_key = semantic_runtime_ref_key(item)
-            if key_key is None or item_key is None:
-                return None
-            items.append((key_key, item_key))
-        items.sort()
-        return ("dict", tuple(items))
-    stable = _stable_key_or_none(value)
+    container = read_container(value)
+    if container is not None:
+        tag, elements = container
+        if tag in _SEQUENCE_TAGS:
+            items = []
+            for item in elements:
+                item_key = semantic_runtime_ref_key(item)
+                if item_key is None:
+                    return None
+                items.append(item_key)
+            return (tag, tuple(items))
+        if tag == "dict":
+            pairs = []
+            for key, item in elements:
+                key_key = semantic_runtime_ref_key(key)
+                item_key = semantic_runtime_ref_key(item)
+                if key_key is None or item_key is None:
+                    return None
+                pairs.append((key_key, item_key))
+            ordered = _ordered_by_atom(pairs)
+            if ordered is None:
+                return (UNSUPPORTED_VALUE_TAG, type(value).__module__, type(value).__qualname__)
+            return ("dict", tuple(ordered))
+        # set は従来どおり安定 key を出さない値
+        return None
+    stable = _declared_key_raw(value, "stable_key")
     if stable is None:
         return None
     return ("stable_runtime_ref", canonical_atom(stable))

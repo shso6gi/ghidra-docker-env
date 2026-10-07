@@ -96,7 +96,7 @@ from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     mark_published,
     mark_validated,
 )
-from scripts.function_tracer_pcode.core.semantic_projection import contains_unsupported_value
+from scripts.function_tracer_pcode.core.semantic_projection import contains_unsupported_value, read_container
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
     build_semantic_snapshot,
     local_semantic_payload,
@@ -580,11 +580,16 @@ def _walk_semantic_carriers(container: Any, on_expression, on_condition) -> Any:
             on_expression(value)
         elif rule is CarrierRule.CONDITION:
             on_condition(value)
-        elif rule is CarrierRule.SEQUENCE:
-            stack.extend(value)
-        elif rule is CarrierRule.MAPPING:
-            stack.extend(value.keys())
-            stack.extend(value.values())
+        elif rule is CarrierRule.SEQUENCE or rule is CarrierRule.MAPPING:
+            # 容器は基底型の実装で読む（Issue #215 `read_container`）: subclass の `__iter__` /
+            # `keys` が中身を隠すと、到達できる意味値を取りこぼす
+            _tag, elements = read_container(value)
+            if rule is CarrierRule.MAPPING:
+                for key, item in elements:
+                    stack.append(key)
+                    stack.append(item)
+            else:
+                stack.extend(elements)
         elif rule is CarrierRule.FIELDS:
             stack.extend(getattr(value, field.name, None) for field in dataclasses.fields(value))
         elif rule is CarrierRule.OWNED_STATE:
