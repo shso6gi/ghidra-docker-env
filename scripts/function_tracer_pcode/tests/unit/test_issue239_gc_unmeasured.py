@@ -10,6 +10,8 @@ from __future__ import annotations
 import gc
 import weakref
 
+import pytest
+
 
 class _Node:
     def __init__(self) -> None:
@@ -26,8 +28,6 @@ def test_an_older_cycle_is_collected_during_an_unmeasured_call(older_cycle):
     gc.collect()
     assert ref() is None
 
-
-import pytest  # noqa: E402
 
 
 @pytest.fixture

@@ -77,6 +77,12 @@ def pytest_configure(config):
         "(Issue #224). Only for tests that check the out-of-scope or nesting behaviour "
         "of the scope itself.",
     )
+    config.addinivalue_line(
+        "markers",
+        f"{WALL_CLOCK_MARKER}: the test asserts a wall-clock bound through a clock read outside "
+        "its module (a production clock, a helper of another test module). Its call runs with "
+        "the older heap frozen (Issue #239, `pytest_runtest_call`).",
+    )
 
 
 #: 条件 cache の scope の外で走らせる test の印（Issue #224。`_pair_condition_cache_scope`）
@@ -124,13 +130,24 @@ def _pair_condition_cache_scope(request):
     with condition_cache_scope():
         yield
 
+
+#: 壁時計の上限を、module の外で読む時計（production の時計・別の test module の helper）で確かめる test の印
+#: （Issue #239）。module の中で時計を読む test は印が無くても `_wall_clock_functions` が見つける
+WALL_CLOCK_MARKER = "wall_clock"
+
 #: 壁時計を読む関数の名前（module の path ごとに 1 回だけ求める）
 _WALL_CLOCK_FUNCTIONS: Dict[str, frozenset] = {}
 _WALL_CLOCK_NAMES = frozenset({"perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns"})
 
 
 def _wall_clock_functions(path: str) -> frozenset:
-    """module の中で壁時計を読む関数の名前（直接読む関数と、それを module の中で呼ぶ関数の閉包）。"""
+    """module の中で壁時計を読む関数の名前（直接読む関数と、それを module の中で呼ぶ関数の閉包）。
+
+    呼び出しは名前だけで照合する（束縛を解決しない）: module の中の時計を読む関数と同じ名前の別の呼び出し
+    （`subprocess.run` と module の `run` など）も読むと見なす。外れても freeze が増えるだけ（memory の費用で、
+    測定は正しいまま）。module の外で読む時計は見えないので、その test は `wall_clock` の印を付ける
+    （付け忘れは `test_issue239_gc_isolation.py` の静的な検査が見つける）。
+    """
 
     known = _WALL_CLOCK_FUNCTIONS.get(path)
     if known is not None:
@@ -168,10 +185,13 @@ def _wall_clock_functions(path: str) -> frozenset:
 
 
 def _measures_wall_clock(item) -> bool:
-    """`item` の test 関数が壁時計を読むか（その module の中の関数の閉包。`_wall_clock_functions`）。"""
+    """`item` の test 関数が壁時計を読むか（`wall_clock` の印、または module の中の関数の閉包）。"""
 
+    if item.get_closest_marker(WALL_CLOCK_MARKER) is not None:
+        return True
     name = getattr(item, "originalname", None) or getattr(item, "name", "")
-    return name in _wall_clock_functions(str(getattr(item, "fspath", "") or ""))
+    path = getattr(item, "path", None)
+    return path is not None and name in _wall_clock_functions(str(path))
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -185,7 +205,10 @@ def pytest_runtest_call(item):
 
     * call の中で作った object は今と同じく GC される（被測定 code が作る値の GC の時間は測定に入る）
     * call より前（fixture の setup・前の test）から在る循環は call の間は集められず、call の後で集められる
-    * 対象は壁時計を読む test 関数だけ（直接読むか、module の中の読む関数を呼ぶ: `_measures_wall_clock`）。
+    * call より前から在る object の弱参照は call の間は消えない（call の中で、前から在る object が集められる
+      ことを確かめる test は、その object を call の中で作る）
+    * 対象は壁時計を読む test 関数だけ（`wall_clock` の印か、直接読むか、module の中の読む関数を呼ぶ:
+      `_measures_wall_clock`）。
       それ以外の test の間は今と同じ GC で、古い循環の回収（full collection）を先送りし続けない（session の
       memory を増やさない）
     * GC の有効 / 無効・閾値は変えない。外で既に freeze されていれば何もしない（他の freeze を解かない）

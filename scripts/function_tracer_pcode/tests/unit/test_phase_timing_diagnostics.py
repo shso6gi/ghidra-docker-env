@@ -315,6 +315,7 @@ class TestPhaseTimingThroughTheWorkflow:
 
         return _make
 
+    @pytest.mark.wall_clock  # 壁時計の上限を module の外の時計で確かめる（Issue #239）
     def test_applied_phase_records_its_cost_breakdown_and_reason_transition(
         self, checker, program, program2
     ):
@@ -538,6 +539,7 @@ class TestPhaseTimingThroughTheWorkflow:
             changed_binary2=False,
         )
 
+    @pytest.mark.wall_clock  # 壁時計の上限を module の外の時計で確かめる（Issue #239）
     def test_sat_tail_records_the_p4c_and_p4a_phases(self, checker, program, program2):
         """SAT が残る経路で P4-C / P4-A の phase 行と attempt が閉じられる。"""
         # P4-C（戻り値型リトライ）は binary2、P4-A（MIPS64 ABI）は binary1 を変更する。

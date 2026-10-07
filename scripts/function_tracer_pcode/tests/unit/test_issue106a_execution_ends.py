@@ -337,6 +337,7 @@ def test_a_real_z3_normal_timeout_is_not_a_deadline():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.wall_clock  # 壁時計の上限を module の外の時計で確かめる（Issue #239）
 def test_a_seconds_backend_cut_by_the_deadline_stops_the_sequence_before_the_next_backend():
     """解析予算 1.9 s・余裕 0.5 s・設定 10 s。秒の backend は 1 s に切られて TIMEOUT → 後の z3 は 0 回。"""
     clock = ShiftedClock()

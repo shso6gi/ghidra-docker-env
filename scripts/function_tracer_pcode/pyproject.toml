@@ -38,6 +38,7 @@ addopts = "-v --tb=short"
 markers = [
     "recorded_replay: runs a recorded P-code replay (Issue #109); deselected by the per-PR unit-fast job",
     "unscoped_condition_cache: runs outside any condition-cache scope (Issue #224); only for tests of the scope itself",
+    "wall_clock: asserts a wall-clock bound through a clock read outside the test module (Issue #239); its call runs with the older heap frozen",
 ]
 
 [tool.coverage.run]
