@@ -1,6 +1,6 @@
 {
  "header": {
-  "analysis_source_digest": "ab6abfb5bf4902462dbc1d1cbf2e568b2953addd4498641e0004cee855ee5c3d",
+  "analysis_source_digest": "a4dc857173a29d11131693816e868b6e798881566c16f4dfe53ad8f9e79aa678",
   "binary": {
    "binary_id": "B2",
    "eqbench_relative_path": "raytrace/sphere/Neq/source/newV-arm64-clang-O1",
@@ -15,9 +15,9 @@
   "fixture_id": "sphere_SphereConstructor_N_B2_O_B4",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-10-06T16:40:24+00:00",
+  "recorded_at_utc": "2026-10-07T00:52:16+00:00",
   "recorder_version": "2",
-  "recording_commit": "67e135c03c87ae5e2b35cfaf2e59ab1a1d8f71a6",
+  "recording_commit": "77d18790df971331727c599fb7ff7639416c20b5",
   "recording_dirty": false,
   "recording_mode": {
    "connector": "production",
