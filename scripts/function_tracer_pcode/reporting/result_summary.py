@@ -35,6 +35,10 @@ from scripts.function_tracer_pcode.proof.unknown_reason import (
     UNKNOWN_TUPLE_MISSING,
 )
 from scripts.function_tracer_pcode.reporting.unknown_reason_summary import (
+    ANALYSIS_BUDGET_KINDS,
+    ANALYSIS_BUDGET_UNKNOWN_BY_KIND_KEY,
+    ANALYSIS_BUDGET_UNKNOWN_KEY,
+    ANALYSIS_DEADLINE_STOPPED_KEY,
     RESULT_JSON_BEGIN,
     RESULT_JSON_END,
     compare_validation_unknowns,
@@ -42,6 +46,7 @@ from scripts.function_tracer_pcode.reporting.unknown_reason_summary import (
     format_validation_unknown_diff,
     format_validation_unknown_diff_unavailable,
     format_validation_unknown_summary,
+    summarize_analysis_budget_unknowns,
     summarize_validation_unknowns,
 )
 
@@ -1472,6 +1477,12 @@ def build_run_health_summary(
         "proof_backlog_by_reason": dict(unknown_summary.proof_backlog_by_reason),
         "proof_backlog_by_proof_kind": dict(unknown_summary.proof_backlog_by_proof_kind),
         "operational_unknown_by_reason": dict(unknown_summary.operational_unknown_by_reason),
+        # Issue #106 PR-106-B: `unknown_by_reason["analysis_budget_exceeded"]` の別名と、
+        # その内訳（解析の期限 / その他の限界 / 停止状態の無い結果）、期限で止めた UNKNOWN の
+        # pair 数。TIMEOUT（supervisor の wall clock の kill も、checker 自身の solver の
+        # timeout event も）は final_result_counts の TIMEOUT に残り、ここへは入らない
+        # （どちらの TIMEOUT かは `timeout_kind`）。
+        **analysis_budget_health(unknown_summary.unknown_by_reason, payloads),
         # Issue #125 PR-125-B: 診断専用の次元。canonical unknown reason の集計
         # 契約とは独立で、decision authority へは接続しない。
         **summarize_failure_diagnostics(summary.overall.records).to_dict(),
@@ -1508,6 +1519,41 @@ def build_run_health_summary(
     return health
 
 
+def analysis_budget_health(
+    unknown_by_reason: Mapping[str, int], payloads: Iterable[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Issue #106 PR-106-B: health の `analysis_budget_unknown` 節（reason count の別名 + 内訳）。"""
+
+    from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
+        ANALYSIS_BUDGET_REASON_ID,
+    )
+
+    return {
+        ANALYSIS_BUDGET_UNKNOWN_KEY: int(unknown_by_reason.get(ANALYSIS_BUDGET_REASON_ID, 0)),
+        **summarize_analysis_budget_unknowns(payloads),
+    }
+
+
+def format_analysis_budget_health_line(health: Mapping[str, Any]) -> Optional[str]:
+    """`analysis_budget_unknown` の 1 行（key の無い health では ``None`` = 行を出さない）。"""
+
+    count = health.get(ANALYSIS_BUDGET_UNKNOWN_KEY)
+    if not isinstance(count, int) or isinstance(count, bool):
+        return None
+    line = f"  analysis_budget_unknown: {count}"
+    by_kind = health.get(ANALYSIS_BUDGET_UNKNOWN_BY_KIND_KEY)
+    if isinstance(by_kind, Mapping):
+        line += " (" + " ".join(
+            f"{kind}={int(by_kind.get(kind, 0))}" for kind in ANALYSIS_BUDGET_KINDS
+        ) + ")"
+    stopped = health.get(ANALYSIS_DEADLINE_STOPPED_KEY)
+    if isinstance(stopped, int) and not isinstance(stopped, bool):
+        # UNKNOWN pairs the deadline stopped (any primary reason).  TIMEOUTs are
+        # not here: they are in final_results, split by `timeout_kind`.
+        line += f"; deadline_stopped_unknown={stopped}"
+    return line
+
+
 def format_run_health_summary(health: Mapping[str, Any]) -> str:
     counts = health.get("final_result_counts") if isinstance(health, Mapping) else {}
     if not isinstance(counts, Mapping):
@@ -1526,6 +1572,9 @@ def format_run_health_summary(health: Mapping[str, Any]) -> str:
         ),
         f"  unknown_units: {health.get('unknown_units', 0)}",
     ]
+    analysis_budget_line = format_analysis_budget_health_line(health)
+    if analysis_budget_line is not None:
+        lines.append(analysis_budget_line)
     baseline = health.get("baseline_comparison")
     if isinstance(baseline, Mapping):
         lines.extend(

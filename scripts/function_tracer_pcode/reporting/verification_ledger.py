@@ -74,6 +74,9 @@ from scripts.function_tracer_pcode.reporting.pair_outcomes import (
     OUTCOME_ORDER,
     load_pair_outcomes,
 )
+from scripts.function_tracer_pcode.reporting.runner_timeout_policy import (
+    MANIFEST_KEYS as ANALYSIS_TIMEOUT_MANIFEST_KEYS,
+)
 
 LEDGER_SCHEMA = "verification-ledger-v1"
 DEFAULT_LEDGER = Path("logs/EqBench/verification_ledger.jsonl")
@@ -188,6 +191,9 @@ SETTING_KEYS = (
     # Issue #15 PR-15-B: an oracle run (fast path off) and a feature run differ
     # in nothing else, so the row has to say which one it was.
     "identical_fast_path", "analysis_config_schema",
+    # Issue #106 PR-106-B: a run with the analysis deadline and one without it
+    # (ANALYSIS_TIMEOUT=0) are different measurements of the same pairs.
+    *ANALYSIS_TIMEOUT_MANIFEST_KEYS,
 )
 
 

@@ -62,6 +62,7 @@ def _handler(pid, token, *, dump="/cp/stack-dump.txt"):
         "all_threads": True,
         "chain": False,
         "readiness_basis": "faulthandler_register_returned",
+        "disposition_after_unregister": "ignore",                     # Issue #204
     }
 
 

@@ -99,6 +99,13 @@ GROUND_TRUTH_FILE = "function_diff_manifest.json"
 ANALYSIS_CONFIG_SCHEMA_KEY = "analysis_config_schema"
 IDENTICAL_FAST_PATH_KEY = "identical_fast_path"
 ANALYSIS_CONFIG_V3_SCHEMA = "eqbench-analysis-config-v3"
+#: Issue #106 PR-106-B: v4 adds the runner's analysis deadline and keeps the v3
+#: fast-path flag.  Every schema here carries ``identical_fast_path``; the set
+#: is pinned to ``execution_receipt.ANALYSIS_CONFIG_SCHEMAS_WITH_FAST_PATH`` by a
+#: unit test (this gate stays standard-library only and does not import it).
+ANALYSIS_CONFIG_SCHEMAS_WITH_FAST_PATH = frozenset({
+    ANALYSIS_CONFIG_V3_SCHEMA, "eqbench-analysis-config-v4",
+})
 
 MODE_ON = "on"
 MODE_OFF = "off"
@@ -344,7 +351,7 @@ def resolve_run_mode(manifest_path: Path) -> RunMode:
     schema = fields.get(ANALYSIS_CONFIG_SCHEMA_KEY)
     flag = fields.get(IDENTICAL_FAST_PATH_KEY)
     if schema is not None:
-        if schema != ANALYSIS_CONFIG_V3_SCHEMA:
+        if schema not in ANALYSIS_CONFIG_SCHEMAS_WITH_FAST_PATH:
             return RunMode(
                 MODE_INVALID, f"unknown_analysis_config_schema: {schema}",
                 str(manifest_path),
@@ -355,7 +362,8 @@ def resolve_run_mode(manifest_path: Path) -> RunMode:
                 f"identical_fast_path_invalid: {flag!r}",
                 str(manifest_path),
             )
-        return RunMode(MODE_ON if flag == "1" else MODE_OFF, "analysis_config_v3",
+        return RunMode(MODE_ON if flag == "1" else MODE_OFF,
+                       "analysis_config_" + schema.rsplit("-", 1)[-1],
                        str(manifest_path))
     if flag is None:
         return RunMode(MODE_LEGACY_UNKNOWN, "no_fast_path_field", str(manifest_path))
