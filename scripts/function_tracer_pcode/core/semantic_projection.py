@@ -218,12 +218,6 @@ def _composite_atom(value: Any, kind: type, _atom) -> CanonicalAtoms:
             return ("stable", _atom(stable_key()))
         except IDENTITY_EVALUATION_ERRORS:
             pass
-    to_dict = declared_method(kind, value, "to_dict")
-    if to_dict is not None:
-        try:
-            return ("object_dict", _atom(to_dict()))
-        except IDENTITY_EVALUATION_ERRORS:
-            pass
     # ここから先は、状態の全部を読めると確かめられる値だけを値で表す（Issue #215 C-K1）。読めない
     # 状態（slot・組み込みの基底型の中身・field でない属性）を落として残りで表すと、それだけが違う
     # 2 つの値が同じ atom になる。確かめられなければ `object_id`（構造 key では識別不能）
@@ -247,6 +241,14 @@ def _composite_atom(value: Any, kind: type, _atom) -> CanonicalAtoms:
             name = live_values.str_value(live_values.enum_name(value))
             if type(name) is str:
                 return ("enum", type(value).__module__, qualname, name)
+    # `to_dict()` は直列化の宣言（状態の一部を落とし得る）: 値は残すが identity にはしない
+    # （`core/atom_validity` が識別しない）。状態の全部を読める凍結 dataclass・enum は上で値になる
+    to_dict = declared_method(kind, value, "to_dict")
+    if to_dict is not None:
+        try:
+            return ("object_dict", _atom(to_dict()))
+        except IDENTITY_EVALUATION_ERRORS:
+            pass
     return (OBJECT_ID_TAG, str(type(value).__module__), str(type(value).__qualname__), id(value))
 
 

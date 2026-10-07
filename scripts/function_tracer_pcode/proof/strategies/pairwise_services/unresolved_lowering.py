@@ -649,7 +649,8 @@ def _impl__deferred_call_runtime_refs_from_value(cls, value: Any) -> Tuple[Any, 
     seen = set()
 
     def visit(node: Any) -> None:
-        normalized = cls._normalize_nested_tuple(node)
+        # provenance key の ref の identity（projection の atom）は owner の読み口で形を読む（Issue #215）
+        normalized = provenance_key_view(cls._normalize_nested_tuple(node))
         if isinstance(normalized, tuple):
             if (
                 len(normalized) == 2
@@ -679,7 +680,7 @@ def _impl__deferred_call_runtime_refs_from_value(cls, value: Any) -> Tuple[Any, 
 def _impl__deferred_call_semantic_refs(cls, refs: Tuple[Any, ...]) -> Tuple[Any, ...]:
     grouped: Dict[str, Dict[str, Any]] = {}
     for ref in refs:
-        normalized = cls._normalize_nested_tuple(ref)
+        normalized = provenance_key_view(cls._normalize_nested_tuple(ref))
         if (
             not isinstance(normalized, tuple)
             or len(normalized) != 2

@@ -537,3 +537,42 @@ def test_semantic_and_stable_lowering_identities_never_share_a_name():
     semantic = freeze_expression(_variable(_SemanticRef(("ref", 1))))
     stable = freeze_expression(_variable(_StableRef(("ref", 1))))
     assert semantic_projection(semantic).runtime_lowering_identity != semantic_projection(stable).runtime_lowering_identity
+
+
+def test_a_semantic_only_ref_is_read_through_the_provenance_view_too():
+    # `runtime_semantic_ref` の identity も owner の読み口で形を読む（形の照合が atom を見落とさない）
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+
+    expr = freeze_expression(_variable(_SemanticRef(("opaque_unknown", "void", 7))))
+    key = structural.expression_provenance_key(expr)
+    assert key[0] == "runtime_semantic_ref"
+    assert structural.provenance_key_view(key) == ("runtime_semantic_ref", ("opaque_unknown", "void", 7))
+    assert PairwiseStrategy._object_target_contains_void_opaque_unknown(("target", key)) is True
+
+
+def test_deferred_call_refs_are_found_inside_identity_atoms():
+    from scripts.function_tracer_pcode.core.semantic_projection import canonical_atom
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+
+    raw = ("deferred_call", "call_out_of_scope", ("function", 22, 0x4000), None)
+    target = ("target", ("runtime_ref", canonical_atom(raw)))
+    assert PairwiseStrategy._deferred_call_runtime_refs_from_value(target) == (("runtime_ref", raw),)
+
+
+def test_a_fully_readable_frozen_dataclass_with_to_dict_stays_an_identity():
+    # 状態の全部を読める凍結 dataclass は `to_dict()` を宣言していても値（identity）になる。`to_dict()`
+    # だけで表した object は識別しない
+    import dataclasses
+
+    @dataclasses.dataclass(frozen=True)
+    class Point:
+        x: int
+
+        def to_dict(self):
+            return {"x": self.x}
+
+    Point.__qualname__ = "Point"  # 関数の外で定義した型と同じ扱い（`<locals>` は識別しない）
+    assert identity_value(("ref", Point(1))) is not None
+    assert identity_value(("ref", Point(1))) == identity_value(("ref", Point(1)))
+    assert identity_value(("ref", Point(1))) != identity_value(("ref", Point(2)))
+    assert identity_value(("ref", _Serialized())) is None

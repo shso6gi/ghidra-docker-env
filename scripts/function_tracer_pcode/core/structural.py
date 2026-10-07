@@ -1304,6 +1304,10 @@ def expression_provenance_key(
     )
 
 
+#: provenance key の中で、2 番目の要素が projection の identity（atom）である組の tag
+_PROVENANCE_IDENTITY_TAGS = frozenset({"runtime_ref", "runtime_semantic_ref"})
+
+
 def provenance_key_view(key: Any) -> Any:
     """provenance key（とそれを部分に持つ key）を **形の検査用** に読んだ値。比較・identity に使わない。
 
@@ -1318,8 +1322,8 @@ def provenance_key_view(key: Any) -> Any:
         key = tuple(key)
     if not isinstance(key, tuple):
         return key
-    if len(key) == 2 and key[0] == "runtime_ref":
-        return ("runtime_ref", identity_view(key[1]))
+    if len(key) == 2 and key[0] in _PROVENANCE_IDENTITY_TAGS:
+        return (key[0], identity_view(key[1]))
     return tuple(provenance_key_view(item) for item in key)
 
 
