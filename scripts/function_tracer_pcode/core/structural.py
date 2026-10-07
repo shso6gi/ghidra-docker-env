@@ -138,6 +138,10 @@ class ExactTailOptions:
         return astuple(self)
 
 
+#: canonical encoding が 10 進で書く int の範囲（それより大きい int は 16 進の tag で書く）
+_DECIMAL_ENCODING_LIMIT = 10 ** 4000
+
+
 class _NotCanonical(Exception):
     """canonical encoding が受け付けない値（C-K5 で識別不能になる）。"""
 
@@ -156,8 +160,13 @@ def _encode_canonical(value: Any, out: bytearray) -> None:
     elif kind is bool:
         out += b"T" if value else b"F"
     elif kind is int:
-        text = b"%d" % value
-        out += b"I%d:" % len(text)
+        if -_DECIMAL_ENCODING_LIMIT < value < _DECIMAL_ENCODING_LIMIT:
+            text = b"%d" % value
+            out += b"I%d:" % len(text)
+        else:
+            # 10 進の変換に上限がある大きさの int は 16 進（tag で範囲を分けるので単射のまま）
+            text = b"%x" % value
+            out += b"H%d:" % len(text)
         out += text
     elif kind is str:
         data = value.encode("utf-8", "surrogatepass")
@@ -530,7 +539,7 @@ _UNREADABLE = object()
 
 
 def _sequence_of(value: Any) -> Any:
-    """容器の中身を基底型の実装で読んだ tuple（None は空）。exact な list / tuple 以外は `_UNREADABLE`。
+    """容器の中身を基底型の実装で読んだ tuple（None は空）。list / tuple（と subclass）以外は `_UNREADABLE`。
 
     subclass の `__getitem__` / `__len__` / `__iter__` を呼ばない（未凍結の node は任意の容器を
     持ち得る）。
@@ -539,10 +548,16 @@ def _sequence_of(value: Any) -> Any:
     if value is None:
         return ()
     kind = type(value)
-    if kind is list:
-        return tuple(list.__iter__(value))
     if kind is tuple:
         return value
+    if kind is list:
+        return tuple(list.__iter__(value))
+    # subclass（PHI の `PhiBranch` は NamedTuple）は基底型の storage を読む: scalar と同じく、容器の
+    # 中身は基底型の実装が持つ値（subclass の `__iter__` / `__getitem__` / `__len__` を呼ばない）
+    if issubclass(kind, tuple):
+        return tuple(tuple.__iter__(value))
+    if issubclass(kind, list):
+        return tuple(list.__iter__(value))
     return _UNREADABLE
 
 

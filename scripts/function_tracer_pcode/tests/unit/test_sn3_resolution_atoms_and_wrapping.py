@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 import subprocess
 import sys
 import textwrap
@@ -350,14 +351,19 @@ def test_a_leaf_value_that_holds_a_placeholder_is_not_comparable(value):
     assert expression_key_status(token_leaf)[1] is False
 
 
+@dataclass(frozen=True)
+class _TagNamedFields:
+    object_id: int
+    unsupported_value: str
+
+
+@dataclass(frozen=True)
+class _ScalarNamedField:
+    int: object
+
+
 def test_a_dataclass_field_named_like_an_unidentified_tag_is_still_identified():
-    from dataclasses import dataclass
-
-    @dataclass(frozen=True)
-    class Fields:
-        object_id: int
-        unsupported_value: str
-
+    Fields = _TagNamedFields
     variable = Expression(ExpressionType.VARIABLE, name="v", value=Fields(1, "x"), size=4)
     key = expression_key_safe(variable)
     assert key is not None
@@ -368,11 +374,7 @@ def test_a_dataclass_field_named_like_an_unidentified_tag_is_still_identified():
 def test_an_object_atom_under_a_field_named_like_a_scalar_tag_is_still_unidentified():
     # dataclass の field の組 `("int", atom)` を scalar の atom と取り違えると、その下の
     # `object_id`（`id()`）が比較可能な key に残り、id を再利用した別 object と一致する
-    from dataclasses import dataclass
-
-    @dataclass(frozen=True)
-    class Holder:
-        int: object
+    Holder = _ScalarNamedField
 
     class Opaque:
         __slots__ = ()

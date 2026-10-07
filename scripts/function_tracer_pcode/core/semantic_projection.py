@@ -120,53 +120,61 @@ def canonical_atom(value: Any) -> CanonicalAtoms:
         items = [(canonical_atom(key), canonical_atom(item)) for key, item in pairs]
         items.sort()
         return ("dict", tuple(items))
-    stable_key = getattr(value, "stable_key", None)
-    if callable(stable_key):
+    # 値が自分の identity を明示する method（型の属性だけを見る。instance の `__getattr__` を呼ばない）
+    stable_key = _declared_method(kind, value, "stable_key")
+    if stable_key is not None:
         try:
             return ("stable", canonical_atom(stable_key()))
         except IDENTITY_EVALUATION_ERRORS:
             pass
-    to_dict = getattr(value, "to_dict", None)
-    if callable(to_dict):
+    to_dict = _declared_method(kind, value, "to_dict")
+    if to_dict is not None:
         try:
             return ("object_dict", canonical_atom(to_dict()))
         except IDENTITY_EVALUATION_ERRORS:
             pass
-    from dataclasses import fields, is_dataclass
-
-    if is_dataclass(value):
-        return (
-            "dataclass",
-            type(value).__module__,
-            type(value).__qualname__,
-            tuple(
-                (field.name, canonical_atom(getattr(value, field.name)))
-                for field in fields(value)
-            ),
-        )
-    if issubclass(kind, Enum):
-        # 値を持たない enum の member は singleton で、名前が member を識別する（mixin の enum は
-        # 上の scalar の規則で基底型の値になる）。属性の辞書（`_value_` など private だけ）に落とすと
-        # 同じ enum の全 member が同じ atom になる（Issue #215 C-K1）
-        name = live_values.str_value(live_values.instance_state(value, "_name_", None))
-        if type(name) is str:
-            return ("enum", type(value).__module__, type(value).__qualname__, name)
-    obj_dict = getattr(value, "__dict__", None)
-    if type(obj_dict) is dict and obj_dict:
-        # 公開された属性だけで状態が尽きる object だけを属性の値で表す。private な属性を落とすと、
-        # それだけが違う 2 つの object が同じ atom になる（Issue #215 C-K1）。落とすものがあれば
-        # 値として識別できない（`object_id`、構造 key では識別不能）
-        attributes = list(dict.items(obj_dict))
-        if all(type(key) is str and not key.startswith("_") for key, _item in attributes):
-            items = [(canonical_atom(key), canonical_atom(item)) for key, item in attributes]
-            items.sort()
-            return (
-                "object_attrs",
-                type(value).__module__,
-                type(value).__qualname__,
-                tuple(items),
-            )
+    # ここから先は、状態の全部を読めると確かめられる値だけを値で表す（Issue #215 C-K1）。読めない
+    # 状態（slot・組み込みの基底型の中身・field でない属性）を落として残りで表すと、それだけが違う
+    # 2 つの値が同じ atom になる。確かめられなければ `object_id`（構造 key では識別不能）
+    qualname = type(value).__qualname__
+    if type(qualname) is str and "<locals>" not in qualname:
+        # 型の名前で型を識別できる（関数の中で作った class は同じ名前の別の型があり得る）
+        names = live_values.dataclass_field_names(value)
+        if names is not None and _frozen_dataclass(kind):
+            try:
+                return (
+                    "dataclass",
+                    type(value).__module__,
+                    qualname,
+                    tuple((name, canonical_atom(live_values.field_value(value, name))) for name in names),
+                )
+            except TypeError:
+                pass
+        if issubclass(kind, Enum):
+            # 値を持たない enum の member は singleton で、名前が member を識別する（mixin の enum は
+            # 上の scalar の規則で基底型の値になる）
+            name = live_values.str_value(live_values.enum_name(value))
+            if type(name) is str:
+                return ("enum", type(value).__module__, qualname, name)
     return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
+
+
+def _declared_method(kind: type, value: Any, name: str) -> Any:
+    """型が宣言した method を `value` に束縛したもの（無ければ None）。"""
+
+    declared = live_values.type_attribute(kind, name)
+    if declared is None:
+        return None
+    binder = live_values.type_attribute(type(declared), "__get__")
+    bound = declared.__get__(value, kind) if binder is not None else declared
+    return bound if callable(bound) else None
+
+
+def _frozen_dataclass(kind: type) -> bool:
+    """凍結した dataclass か（instance に field でない属性を後から足せない）。"""
+
+    params = live_values.type_attribute(kind, "__dataclass_params__")
+    return params is not None and live_values.instance_state(params, "frozen", False) is True
 
 
 def canonical_value_key(value: Any) -> CanonicalAtoms:

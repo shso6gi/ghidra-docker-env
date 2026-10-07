@@ -17,6 +17,9 @@
 
 from __future__ import annotations
 
+import enum
+from dataclasses import dataclass
+
 import pytest
 
 from scripts.function_tracer_pcode.analysis.condition.condition_cache import condition_cache_scope
@@ -327,20 +330,29 @@ def test_an_object_or_unsupported_atom_wrapped_again_is_still_unidentified(place
             assert _tag(exact_structural_identity(expr)) == UNIDENTIFIED_TAG
 
 
+class _Color(enum.Enum):
+    RED = 1
+    BLUE = 2
+
+
+@dataclass(frozen=True)
+class _Frozen:
+    a: int
+
+
+@dataclass
+class _Mutable:
+    a: int
+
+
 def test_enum_members_are_identified_by_their_name():
-    import enum
-
-    class Color(enum.Enum):
-        RED = 1
-        BLUE = 2
-
-    red, blue = _leaf(Color.RED), _leaf(Color.BLUE)
+    red, blue = _leaf(_Color.RED), _leaf(_Color.BLUE)
     assert expression_key(red) != expression_key(blue)
-    assert expression_key(red) == expression_key(_leaf(Color.RED))
+    assert expression_key(red) == expression_key(_leaf(_Color.RED))
     assert expression_key_status(red)[1] is True
 
 
-def test_an_object_whose_state_is_partly_private_is_not_identified_by_its_public_attributes():
+def test_a_value_is_identified_only_when_its_whole_state_is_read():
     class Holder:
         def __init__(self, public, private):
             self.public = public
@@ -350,12 +362,27 @@ def test_an_object_whose_state_is_partly_private_is_not_identified_by_its_public
         def __init__(self, public):
             self.public = public
 
-    left, right = _leaf(Holder(1, "a")), _leaf(Holder(1, "b"))
-    assert expression_key_status(left)[1] is False
-    assert expression_key(left) != expression_key(right)
-    # 対照: 公開された属性で状態が尽きる object は値で識別される
-    assert expression_key(_leaf(Public(1))) == expression_key(_leaf(Public(1)))
-    assert expression_key(_leaf(Public(1))) != expression_key(_leaf(Public(2)))
+    # 属性の一部（private・slot・field でない属性）を落として残りで表すと、それだけが違う 2 つの値が
+    # 一致する: 状態の全部を読めると確かめられない object は識別不能
+    for make in (lambda v: Holder(1, v), Public, _Mutable):
+        left, right = _leaf(make(1)), _leaf(make(2))
+        assert expression_key_status(left)[1] is False
+        assert expression_key(left) != expression_key(right)
+        assert expression_key(left) != expression_key(left)
+    # 対照: 凍結した dataclass は field で状態が尽きるので値で識別される
+    assert expression_key(_leaf(_Frozen(1))) == expression_key(_leaf(_Frozen(1)))
+    assert expression_key(_leaf(_Frozen(1))) != expression_key(_leaf(_Frozen(2)))
+    assert expression_key_status(_leaf(_Frozen(1)))[1] is True
+
+    # 関数の中で作った型は、同じ名前の別の型があり得る（名前で型を識別できない）
+    def make_enum():
+        class Local(enum.Enum):
+            A = 1
+        return Local
+
+    first, second = make_enum(), make_enum()
+    assert expression_key_status(_leaf(first.A))[1] is False
+    assert expression_key(_leaf(first.A)) != expression_key(_leaf(second.A))
 
 
 def test_a_node_kind_or_container_that_is_not_exact_is_not_read():
@@ -375,19 +402,52 @@ def test_a_node_kind_or_container_that_is_not_exact_is_not_read():
     assert key != expression_key(Expression.constant(1, size=4))
 
     class HostileList(list):
+        calls = []
+
         def __getitem__(self, index):
+            HostileList.calls.append("getitem")
             return Expression.constant(0, size=4)
 
         def __len__(self):
+            HostileList.calls.append("len")
             return 2
+
+        def __iter__(self):
+            HostileList.calls.append("iter")
+            return iter(())
 
     real = Expression.binary_op("INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4))
     real.size = 4
     odd = Expression.binary_op("INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4))
     odd.size = 4
     odd.operands = HostileList(odd.operands)
-    assert expression_key_status(odd)[1] is False
-    assert expression_key(odd) != expression_key(real)
+    # 容器は基底型の storage で読む（subclass の method を呼ばない）: 中身は real と同じ
+    assert expression_key(odd) == expression_key(real)
+    assert HostileList.calls == []
+    # 容器でない値は読めない: 識別不能
+    weird = Expression.binary_op("INT_ADD", Expression.parameter("a", 0, size=4), Expression.constant(1, size=4))
+    weird.operands = {"a": 1}
+    assert expression_key_status(weird)[1] is False
+
+
+@pytest.mark.parametrize("frozen", [False, True], ids=["unfrozen", "frozen"])
+def test_a_phi_with_namedtuple_branches_keeps_its_comparable_key(frozen):
+    from scripts.function_tracer_pcode.core.condition import Condition
+
+    def phi(constant):
+        cond = Condition(Expression.binary_op("INT_EQUAL", Expression.parameter("a", 0, size=4),
+                                              Expression.constant(0, size=4)))
+        expr = Expression.phi([(cond, Expression.constant(constant, size=4)), (None, Expression.constant(9, size=4))])
+        expr.size = 4
+        return freeze_expression(expr) if frozen else expr
+
+    one = phi(1)
+    assert type(one.value[0]).__name__ == "PhiBranch"
+    key, comparable = expression_key_status(one)
+    assert comparable is True and key[0] == "phi"
+    assert key == expression_key(phi(1))
+    assert key != expression_key(phi(2))
+    assert exact_structural_identity(one) == exact_structural_identity(phi(1))
 
 
 def test_the_contradiction_cache_never_returns_an_unidentified_identity_twice():
