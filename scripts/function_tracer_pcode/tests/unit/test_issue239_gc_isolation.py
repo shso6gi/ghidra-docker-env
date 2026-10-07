@@ -142,7 +142,12 @@ _CLOCK_CALLS = frozenset({"perf_counter", "perf_counter_ns", "monotonic", "monot
 _ORDER = (ast.Lt, ast.LtE, ast.Gt, ast.GtE)
 
 #: 規則に掛かるが壁時計の大小ではない test（理由つき。規則に掛からなくなれば stale として落ちる）
-NOT_WALL_CLOCK: Dict[str, str] = {}
+NOT_WALL_CLOCK: Dict[str, str] = {
+    "test_issue106b_review2_counterexamples.py::test_the_complete_scenario_alone_is_the_control": (
+        "`required_margin_seconds` は margin の受け入れの tool が test の書いた profile の file から計算する値で、"
+        "壁時計を読まない"
+    ),
+}
 
 
 def _identifiers(node: ast.AST) -> Iterable[str]:

@@ -239,6 +239,7 @@ def _assert_the_signal_reached_the_waiting_child(status, child):
     assert child["waiting"]["epoch"] < status["signal_sent_epoch"]
 
 
+@pytest.mark.wall_clock  # 実の時計で動く期限への信号の時刻を確かめる（Issue #239）
 def test_a_child_whose_handler_was_unloaded_keeps_its_result_after_the_diagnostic_signal(tmp_path):
     """The case of the issue: before the fix this ended INVALID with rc -10."""
 
@@ -254,6 +255,7 @@ def test_a_child_whose_handler_was_unloaded_keeps_its_result_after_the_diagnosti
     assert child["exiting"]["dump_bytes"] == 0 and status["dump_observed"] is False
 
 
+@pytest.mark.wall_clock  # 実の時計で動く期限への信号の時刻を確かめる（Issue #239）
 def test_a_child_whose_handler_is_still_installed_dumps_and_keeps_its_result(tmp_path):
     run, status, evidence, child, _ = _run(tmp_path, finalized=False)
 
@@ -265,6 +267,7 @@ def test_a_child_whose_handler_is_still_installed_dumps_and_keeps_its_result(tmp
     assert run.projection["status"] == "RESOLVED"
 
 
+@pytest.mark.wall_clock  # 実の時計で動く期限への信号の時刻を確かめる（Issue #239）
 def test_a_child_that_outlives_the_ignored_signal_ends_by_the_deadline(tmp_path):
     """After the deadline: the ignored signal changes nothing, and the deadline rule decides."""
 
@@ -277,6 +280,7 @@ def test_a_child_that_outlives_the_ignored_signal_ends_by_the_deadline(tmp_path)
     assert run.projection["status"] == "TIMEOUT"
 
 
+@pytest.mark.wall_clock  # 実の時計で動く期限への信号の時刻を確かめる（Issue #239）
 def test_a_child_killed_by_the_signal_after_its_result_stays_invalid_and_leaves_the_reason(tmp_path):
     """The control for an abnormal end: the terminal rule is unchanged.
 
