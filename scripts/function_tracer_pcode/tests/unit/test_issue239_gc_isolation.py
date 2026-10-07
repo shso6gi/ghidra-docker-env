@@ -166,7 +166,7 @@ def _identifiers(node: ast.AST) -> Iterable[str]:
 #: `clock=` を渡さない `DeadlinePolicy`（既定の時計が `time.monotonic`）。短い予算では、GC の一時停止が期限の
 #: 結果（窓の長さ・どの backend が走るか）を変える。偽の時計を `clock=` で渡す test は対象でない
 _REAL_CLOCK_CALLS = frozenset({"ShiftedClock"})
-_REAL_CLOCK_DEFAULTED = frozenset({"DeadlinePolicy"})
+_REAL_CLOCK_DEFAULTED = frozenset({"DeadlinePolicy", "ExecutionBound"})
 
 
 def _call_name(node: ast.Call):
