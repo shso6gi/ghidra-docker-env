@@ -1262,6 +1262,10 @@ def expression_provenance_key(
 
     if projection.runtime_stable_key is not None:
         return ("runtime_ref", projection.runtime_stable_key)
+    if projection.runtime_semantic_key is not None:
+        # stable key を持たず semantic key だけを持つ ref: 構造 key（VARIABLE / PARAMETER の leaf は ref を
+        # 見ない）へ退避すると、別の ref の式と等しくなる（solver の記号は semantic key で分かれる）
+        return ("runtime_semantic_ref", projection.runtime_semantic_key)
     if projection.runtime_identity_unfixable:
         # ref はあるが identity を値で固定できない: ref を持たない式とも別の ref とも等しくしない
         # （Issue #215。`id()` を入れず、毎回新しい識別不能 token）

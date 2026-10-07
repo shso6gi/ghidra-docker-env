@@ -170,6 +170,10 @@ def solver_symbol_identity(expr: Any) -> Optional[Tuple[Any, ...]]:
         return None
     if kind in _SYMBOL_KINDS:
         projection = semantic_projection(expr)
+        if projection.runtime_identity_unfixable:
+            # ref はあるが identity を値で固定できない: index・名前・storage の粗い identity へ退避すると、
+            # 別の ref の式と同じ symbol になる（Issue #215。projection が外した identity を補わない）
+            return None
         runtime_identity = runtime_identity_from_projection(projection)
         if runtime_identity is not None:
             return (

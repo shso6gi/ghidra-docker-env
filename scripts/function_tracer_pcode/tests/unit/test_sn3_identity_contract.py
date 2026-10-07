@@ -208,6 +208,24 @@ class _Twin(str):
         return self is other
 
 
+class _Serialized:
+    """型が `to_dict()` だけを宣言する object（直列化の宣言で identity の宣言ではない: 状態の一部を落とす）。"""
+
+    __slots__ = ("hidden",)
+
+    def __init__(self):
+        self.hidden = object()
+
+    def to_dict(self):
+        return {"kind": "summary"}
+
+
+class _OddModule:
+    __slots__ = ()
+
+
+_OddModule.__module__ = 7  # 型名が str でない型の object（`object_id` の印の形を崩す）
+
 _SHARED_TOKEN = unidentified_identity("unresolved")
 
 #: 値として固定できない値（2 回作ると別の値。同じ token は同じ object を返す）
@@ -220,6 +238,8 @@ UNFIXABLE = {
     "too_deep": lambda: _deep(MAX_VALUE_DEPTH + 5),
     "colliding_dict": lambda: {_Twin("a"): 1, "a": 2},
     "placeholder_key": lambda: ("truncated", "INT_ADD", None, 4),
+    "to_dict_object": lambda: ("ref", _Serialized()),
+    "odd_module_object": lambda: ("ref", _OddModule()),
 }
 
 
@@ -403,8 +423,16 @@ def test_a_cyclic_or_deep_value_stops_every_reader(make, placement, frozen):
 
 @pytest.mark.parametrize(
     "key",
-    [("loop", ("parameter",)), ("loop", ("parameter", None)), ("loop", ("parameter", 1, None)), ("loop", ("x", ("parameter", 1, 2, None)))],
-    ids=["no_index", "none_index", "none_width", "deeper"],
+    [
+        ("loop", ("parameter",)),
+        ("loop", ("parameter", None)),
+        ("loop", ("parameter", 1, None)),
+        ("loop", ("x", ("parameter", 1, 2, None))),
+        ("loop", {"k": ("parameter", 1, 2, None)}),
+        ("loop", frozenset({("parameter", 1, 2, None)})),
+        ("loop", [("parameter", 1, None)]),
+    ],
+    ids=["no_index", "none_index", "none_width", "deeper", "in_dict", "in_frozenset", "in_list"],
 )
 def test_an_incomplete_parameter_key_is_still_rejected_as_a_solver_symbol(key):
     # solver symbol の安全性の判定（欠けた parameter key の拒否）は identity の atom を `identity_view` で
@@ -451,3 +479,61 @@ def test_an_address_identity_outside_its_schema_is_not_an_identity():
     good = freeze_expression(Expression(ExpressionType.CONSTANT, value=0x1000, size=8, runtime_ref=_TupleIdentity(address_offset=0x1000)))
     assert semantic_projection(good).address_object_identity == ("g", 4, 0)
     assert semantic_projection(good).runtime_identity_unfixable is False
+
+
+@pytest.mark.parametrize("make", [_cyclic_list, _cyclic_dict, lambda: _deep(MAX_VALUE_DEPTH * 4)], ids=["list", "dict", "deep"])
+def test_the_provenance_value_reader_stops_on_cycles_by_itself(make):
+    # provenance の digest は識別できない値の前に止まるが（`_provenance_inputs_identified`）、値の表現の
+    # reader 自身も閉路と深い入れ子で止まる（読み手ごとの guard に頼らない: 入口を足しても再帰しない）
+    key = structural._stable_value_key(make())
+    assert structural._value_key_has_opaque(key)
+
+
+def test_shape_matchers_and_forbidden_tag_checks_see_inside_identity_atoms():
+    # provenance key の ref の identity（atom）の中の schema と印は、owner の読み口（`provenance_key_view` /
+    # `tags_of`）で読む consumer から見える
+    from scripts.function_tracer_pcode.analysis.returns.summary_returns import _key_contains_forbidden_identity
+    from scripts.function_tracer_pcode.core.runtime_refs import UnknownValueRef
+    from scripts.function_tracer_pcode.core.semantic_projection import canonical_atom
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+
+    class _Op:
+        __slots__ = ()
+
+        def stable_key(self):
+            return ("pcode_op", 1, 2)
+
+    unknown = freeze_expression(
+        Expression.unknown("phi", runtime_ref=UnknownValueRef.phi_circular(pcode_op_ref=_Op()))
+    )
+    target = ("object_target", structural.expression_provenance_key(unknown))
+    assert PairwiseStrategy._object_target_contains_originated_phi_circular(target) is True
+    assert PairwiseStrategy._value_contains_originated_phi_circular(target) is True
+    for tag in ("process_object", structural.UNIDENTIFIED_TAG, "object_id"):
+        wrapped = ("runtime_ref", canonical_atom((tag, 1, "n")))
+        assert _key_contains_forbidden_identity(wrapped) is True
+        assert PairwiseStrategy._return_coverage_identity_contains_forbidden_atoms(wrapped) is True
+
+
+def test_an_unfixable_parameter_ref_does_not_fall_back_to_its_index_or_name():
+    # projection が外した identity を、index・名前の粗い identity で補わない
+    def parameter():
+        return freeze_expression(Expression(ExpressionType.PARAMETER, name="p", value=0, size=4, runtime_ref=_StableRef(("ref", _Opaque()))))
+
+    assert solver_symbol_identity(parameter()) is None
+    verdict, _distinct = _notequal_verdict(parameter(), parameter())
+    assert verdict is not True
+
+
+def test_a_semantic_only_ref_keeps_its_identity_in_the_provenance_key():
+    left = freeze_expression(_variable(_SemanticRef(("ref", 1))))
+    right = freeze_expression(_variable(_SemanticRef(("ref", 2))))
+    same = freeze_expression(_variable(_SemanticRef(("ref", 1))))
+    assert structural.expression_provenance_key(left) != structural.expression_provenance_key(right)
+    assert structural.expression_provenance_key(left) == structural.expression_provenance_key(same)
+
+
+def test_semantic_and_stable_lowering_identities_never_share_a_name():
+    semantic = freeze_expression(_variable(_SemanticRef(("ref", 1))))
+    stable = freeze_expression(_variable(_StableRef(("ref", 1))))
+    assert semantic_projection(semantic).runtime_lowering_identity != semantic_projection(stable).runtime_lowering_identity

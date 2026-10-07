@@ -31,6 +31,7 @@ from scripts.function_tracer_pcode.core.recurrence_contracts import (
     RetainedExactReturnRef,
 )
 from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
+from scripts.function_tracer_pcode.core.atom_validity import tags_of
 from scripts.function_tracer_pcode.core.structural import (
     NON_STRUCTURAL_IDENTITY_TAGS,
     key_contains_placeholder,
@@ -2320,7 +2321,8 @@ _FORBIDDEN_IDENTITY_TAGS = frozenset({
 
 def _key_contains_forbidden_identity(value: Any) -> bool:
     if isinstance(value, tuple):
-        if value and value[0] in _FORBIDDEN_IDENTITY_TAGS:
+        # tag は `tags_of` で読む: identity の atom（`canonical_atom` に包まれた key）の中の印も見る（Issue #215）
+        if value and not _FORBIDDEN_IDENTITY_TAGS.isdisjoint(tags_of(value)):
             return True
         return any(_key_contains_forbidden_identity(item) for item in value)
     if isinstance(value, list):

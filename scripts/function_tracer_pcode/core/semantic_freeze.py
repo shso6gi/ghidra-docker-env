@@ -630,7 +630,9 @@ def _carrier_rule(value: Any) -> CarrierRule:
         return CarrierRule.MAPPING
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return CarrierRule.FIELDS
-    if (kind.__module__ or "").startswith(_PACKAGE_PREFIX):
+    module = kind.__module__
+    # 型の module 名は exact な str のときだけ読む（Issue #215: 型が持つ値も検証してから使う）
+    if type(module) is str and module.startswith(_PACKAGE_PREFIX):
         return CarrierRule.OWNED_STATE
     return CarrierRule.LEAF
 

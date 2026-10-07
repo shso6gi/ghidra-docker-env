@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import json
 from scripts.function_tracer_pcode.core import Condition, ExpressionType, FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.render_smt import expression_contains_unsupported_smt_ops, expression_smt_bit_width
+from scripts.function_tracer_pcode.core.structural import provenance_key_view
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     ReturnCase,
     UnknownRecoveryActionStatus,
@@ -1107,7 +1108,8 @@ def _impl__unresolved_expression_action_status(
     return None
 
 def _impl__object_target_contains_deferred_call_unknown(cls, value: Any) -> bool:
-    normalized = cls._normalize_nested_tuple(value)
+    # provenance key の ref の identity（projection の atom）は owner の読み口で形を読む（Issue #215）
+    normalized = provenance_key_view(cls._normalize_nested_tuple(value))
     if isinstance(normalized, tuple):
         if (
             len(normalized) >= 4

@@ -52,6 +52,9 @@ NON_STRUCTURAL_IDENTITY_TAGS = frozenset({UNIDENTIFIED_TAG, PROCESS_OBJECT_TAG})
 UNSUPPORTED_VALUE_TAG = "unsupported_value"
 #: `canonical_atom` が状態を読めない object を表す印の tag（`id()` で「同じ object か」だけを言う）
 OBJECT_ID_TAG = "object_id"
+#: `canonical_atom` が型の宣言した `to_dict()` で表した object の tag。`to_dict()` は直列化の宣言で
+#: identity の宣言ではない（状態の一部を落とし得る）ので、値を識別しない
+OBJECT_DICT_TAG = "object_dict"
 
 #: atom の中身として受け付ける exact な型（`canonical_atom` は str / int しか出さない）
 EXACT_ATOM_SCALARS = (str, int)
@@ -62,7 +65,7 @@ CANONICAL_SEQUENCE_TAGS = frozenset({"tuple", "list"})
 
 _NOT_COMPARABLE_TAGS = PLACEHOLDER_TAGS | PROCESS_SCOPED_TAGS
 #: 値を識別しない `canonical_atom` の atom の tag（`is_unidentified_atom` が生の段で形を照合する）
-_UNIDENTIFIED_ATOM_TAGS = frozenset({OBJECT_ID_TAG, UNSUPPORTED_VALUE_TAG})
+_UNIDENTIFIED_ATOM_TAGS = frozenset({OBJECT_ID_TAG, UNSUPPORTED_VALUE_TAG, OBJECT_DICT_TAG})
 _UNIDENTIFIED_TOKEN_TAGS = frozenset({UNIDENTIFIED_TAG})
 
 
@@ -92,7 +95,8 @@ def is_scalar_atom(item: Any) -> bool:
 
 
 def is_unidentified_atom(item: tuple) -> bool:
-    """`canonical_atom` の `("object_id", module, qualname, id)` / `("unsupported_value", module, qualname)`。
+    """`canonical_atom` の `("object_id", module, qualname, id)` / `("unsupported_value", module, qualname)` /
+    `("object_dict", atom)`。
 
     `object_id` は「同じ object か」しか言わず、object の死後に `id()` が再利用されると別物と
     一致する。`unsupported_value` は型名しか残っていない。形（要素数と型）まで照合する:
@@ -106,6 +110,8 @@ def is_unidentified_atom(item: tuple) -> bool:
         return len(item) == 4 and type(item[1]) is str and type(item[2]) is str and type(item[3]) is int
     if tag == UNSUPPORTED_VALUE_TAG:
         return len(item) == 3 and type(item[1]) is str and type(item[2]) is str
+    if tag == OBJECT_DICT_TAG:
+        return len(item) == 2 and type(item[1]) is tuple
     return False
 
 

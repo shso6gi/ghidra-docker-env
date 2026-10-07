@@ -247,7 +247,7 @@ def _composite_atom(value: Any, kind: type, _atom) -> CanonicalAtoms:
             name = live_values.str_value(live_values.enum_name(value))
             if type(name) is str:
                 return ("enum", type(value).__module__, qualname, name)
-    return ("object_id", type(value).__module__, type(value).__qualname__, id(value))
+    return (OBJECT_ID_TAG, str(type(value).__module__), str(type(value).__qualname__), id(value))
 
 
 def _unfixable_atom(value: Any) -> CanonicalAtoms:
@@ -505,10 +505,15 @@ def identity_view(atom: Any) -> Any:
         return bool(atom[1])
     if tag in ("int", "str"):
         return atom[1]
-    if tag in _SEQUENCE_TAGS:
+    if tag in _SEQUENCE_TAGS or tag in _SET_TAGS:
         return tuple(identity_view(item) for item in atom[1])
+    if tag == "dict":
+        # dict は (key, value) の組の列として読む（形の検査が入れ子の schema を見落とさない）
+        return tuple((identity_view(key), identity_view(item)) for key, item in atom[1])
     if tag == "stable":
         return identity_view(atom[1])
+    if tag == "dataclass" and len(atom) == 4:
+        return tuple((name, identity_view(item)) for name, item in atom[3])
     return atom
 
 
@@ -857,10 +862,11 @@ def _lowering_identity(
                 id(loop_summary),
                 id(expr),
             )
+    # semantic と stable は別の名前空間（atom が偶然等しい別種の key で関数名を共有しない）
     if semantic_key is not None:
-        return semantic_key
+        return ("semantic_key", semantic_key)
     if stable_key is not None:
-        return stable_key
+        return ("stable_key", stable_key)
     return (
         "opaque_runtime_ref",
         type(runtime_ref).__module__,
