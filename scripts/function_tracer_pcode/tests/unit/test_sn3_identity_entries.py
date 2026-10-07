@@ -359,3 +359,95 @@ def test_an_index_parameter_without_a_ref_still_shares_its_index_symbol():
     assert solver_symbol_identity(left) == ("parameter_index_name", 0, "p")
     verdict, distinct = _notequal(left, right)
     assert verdict is True, distinct
+
+
+# ---------------------------------------------------------------------------
+# owner の規則そのもの（生の形・atom の形・容器の種類）と、identity を直接与えた安全性の判定
+# ---------------------------------------------------------------------------
+
+
+class _NamedSchema(tuple):
+    """`("parameter", …)` を持つ tuple の subclass（NamedTuple と同じ形の読み方を確かめる）。"""
+
+
+@pytest.mark.parametrize(
+    "value, complete",
+    [
+        (("parameter",), False),
+        (("parameter", None), False),
+        (("parameter", None, 4), False),
+        (("parameter", 1, None), False),
+        (("parameter", 1, 4), True),
+        (("parameter", 1), True),
+        (("parameter", 1, 2, None), False),
+        (("parameter", None, None, 0), True),
+        (["parameter", 1, None], False),
+        (_NamedSchema(("parameter", None)), False),
+        (("x", _NamedSchema(("parameter", None))), False),
+        ({("parameter", None): 1}, False),
+        ({"k": ("parameter", None)}, False),
+        ({("parameter", None)}, False),
+        (frozenset({("parameter", 1, 2, None)}), False),
+        (("loop", ("parameter", 1, 2, 3)), True),
+    ],
+)
+def test_the_owner_schema_rule_reads_raw_and_atom_forms_alike(value, complete):
+    from scripts.function_tracer_pcode.core.atom_validity import parameter_schema_complete
+    from scripts.function_tracer_pcode.core.semantic_projection import canonical_atom
+
+    assert parameter_schema_complete(value) is complete
+    if not isinstance(value, set):
+        assert parameter_schema_complete(canonical_atom(value)) is complete
+        assert parameter_schema_complete(canonical_atom(("wrap", canonical_atom(value)))) is complete
+
+
+@pytest.mark.parametrize("encoded", [False, True], ids=["raw", "atom"])
+def test_the_safety_check_rejects_an_incomplete_schema_in_any_identity_position(encoded):
+    # 入口を通らない identity（将来の経路）を直接与えても、安全性の判定が owner の規則で拒む
+    from scripts.function_tracer_pcode.core.semantic_projection import canonical_atom
+
+    def form(value):
+        return canonical_atom(value) if encoded else value
+
+    for identity in (
+        ("runtime_ref", "variable", ("stable", form(("parameter", None)))),
+        ("runtime_ref", "variable", ("semantic", form(("loop", {"k": ("parameter", 1, None)})))),
+        ("parameter_storage", form(("parameter", 1, 2, None))),
+        ("new_route", (form(("parameter",)),)),
+    ):
+        assert solver_symbol_identity_is_safe(identity) is False, identity
+    assert solver_symbol_identity_is_safe(("parameter_storage", form(("memory_storage", 1, 8, 4)))) is True
+
+
+def test_the_storage_space_rule_is_shared_by_every_storage_identity():
+    from scripts.function_tracer_pcode.core.storage import StorageInfo, storage_space_identity
+
+    assert storage_space_identity(StorageInfo(space_id=0)) == 0
+    assert storage_space_identity(StorageInfo()) == -1
+
+
+def _deep_chain(constant):
+    expr = Expression.parameter("a", 0, size=4)
+    for _ in range(300):
+        expr = Expression.binary_op("INT_ADD", expr, Expression.constant(1, size=4))
+    return Expression.binary_op("INT_EQUAL", Expression.binary_op("INT_ADD", expr, Expression.constant(constant, size=4)), Expression.constant(0, size=4))
+
+
+def _phi(condition_constant, value):
+    phi = Expression.phi(
+        [(Condition(_deep_chain(condition_constant), False), value), (None, Expression.constant(0, size=4))]
+    )
+    phi.size = 4
+    return phi
+
+
+def test_the_provenance_key_reads_phi_branches():
+    # PHI の branch（条件と値）は `operands` ではなく `value` にある。provenance の digest と識別の検査は
+    # 構造 key と同じ辺（`ordered_semantic_edges`）を辿る
+    one = freeze_expression(_phi(1, Expression.constant(5, size=4)))
+    two = freeze_expression(_phi(2, Expression.constant(5, size=4)))
+    same = freeze_expression(_phi(1, Expression.constant(5, size=4)))
+    assert structural.expression_provenance_key(one) != structural.expression_provenance_key(two)
+    assert structural.expression_provenance_key(one) == structural.expression_provenance_key(same)
+    hidden = freeze_expression(_phi(1, Expression(ExpressionType.UNKNOWN, name="u", size=4, runtime_ref=_Stable(("parameter", None)))))
+    assert structural.expression_provenance_key(hidden) != structural.expression_provenance_key(hidden)

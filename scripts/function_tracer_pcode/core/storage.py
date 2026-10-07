@@ -7,6 +7,17 @@ from scripts.function_tracer_pcode.core.json_encoding import scalar_record_dict
 from scripts.function_tracer_pcode.core.live_values import exact_scalar
 
 
+def storage_space_identity(storage: Any) -> int:
+    """storage の identity に入れる space の id（owner の唯一の規則）。
+
+    space が無いときだけ -1。space 0（`register` の合成 id も 0）を「無い」と同じ値に畳まない
+    （Issue #215: identity の成分を、検証の前に不可逆に変換しない）。
+    """
+
+    space_id = getattr(storage, "space_id", None)
+    return -1 if space_id is None else int(space_id)
+
+
 @dataclass
 class StorageInfo:
     """
@@ -80,9 +91,7 @@ class StorageInfo:
                 self.is_frame_pointer = True
 
     def _space_identity(self) -> int:
-        """identity に入れる space の id。無いときだけ -1（space 0 を「無い」と同じ値に畳まない: Issue #215）。"""
-
-        return -1 if self.space_id is None else int(self.space_id)
+        return storage_space_identity(self)
 
     @staticmethod
     def _synthetic_space_id(name: str) -> int:

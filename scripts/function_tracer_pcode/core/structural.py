@@ -1327,6 +1327,20 @@ def provenance_key_view(key: Any) -> Any:
     return tuple(provenance_key_view(item) for item in key)
 
 
+def _provenance_children(node: Any) -> Tuple[Any, ...]:
+    """provenance の digest と識別の検査が辿る子（`ordered_semantic_edges` の順。欠けた子は None）。
+
+    PHI の branch（条件と値）は `operands` ではなく `value` にあるので、`operands` を辿ると PHI の中身が
+    digest にも識別の検査にも入らず、branch だけが違う PHI が同じ provenance key になる（Issue #215）。
+    構造 key・完全比較と同じ辺を辿る。辺の規則を持たない種別は従来どおり `operands`。
+    """
+
+    edges = ordered_semantic_edges(node)
+    if edges:
+        return tuple(edge.child for edge in edges)
+    return tuple(getattr(node, "operands", ()) or ())
+
+
 def _provenance_inputs_identified(expr: Expression) -> bool:
     """provenance digest に入る値が、どの node でも値として固定できるか（明示 stack、共有 node は 1 度）。
 
@@ -1351,7 +1365,7 @@ def _provenance_inputs_identified(expr: Expression) -> bool:
         # 表現（`_stable_value_key`）の両方で調べる
         if projection.value_is_opaque or _value_key_has_opaque(_stable_value_key(getattr(node, "value", None))):
             return False
-        stack.extend(getattr(node, "operands", ()) or ())
+        stack.extend(_provenance_children(node))
     return True
 
 
@@ -1392,7 +1406,7 @@ def _expression_provenance_payload(
         if exiting:
             active.discard(node_id)
             operand_digests = []
-            for operand in getattr(node, "operands", ()) or ():
+            for operand in _provenance_children(node):
                 operand_digests.append(
                     none_digest if operand is None else digest_by_id.get(id(operand), none_digest)
                 )
@@ -1443,7 +1457,7 @@ def _expression_provenance_payload(
             source_atoms.add(source_atom)
 
         stack.append((node, True))
-        for operand in reversed(getattr(node, "operands", ()) or ()):
+        for operand in reversed(_provenance_children(node)):
             if operand is not None:
                 stack.append((operand, False))
 
@@ -1476,7 +1490,7 @@ def _expression_subtree_digest_and_source_atoms(
         if exiting:
             active.discard(node_id)
             operand_digests = []
-            for operand in getattr(node, "operands", ()) or ():
+            for operand in _provenance_children(node):
                 operand_digests.append(
                     none_digest if operand is None else digest_by_id.get(id(operand), none_digest)
                 )
@@ -1511,7 +1525,7 @@ def _expression_subtree_digest_and_source_atoms(
             source_atoms.add(source_atom)
 
         stack.append((node, True))
-        for operand in reversed(getattr(node, "operands", ()) or ()):
+        for operand in reversed(_provenance_children(node)):
             if operand is not None:
                 stack.append((operand, False))
 

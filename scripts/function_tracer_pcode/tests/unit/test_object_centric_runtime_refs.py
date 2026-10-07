@@ -1313,7 +1313,8 @@ def test_readonly_count_storage_relation_records_same_register_projection_withou
     assert not strategy._readonly_count_identities_compatible(wide_ref, narrow_ref)
     assert strategy._readonly_count_storage_relation_key(wide_ref, narrow_ref) == (
         "same_register_base_projection",
-        ("base", (-1, 0x31D4, 64)),
+        # Issue #215: register の合成 space id 0 は「space が無い」(-1) に畳まない
+        ("base", (0, 0x31D4, 64)),
         ("left_bits", 0, 64),
         ("right_bits", 32, 32),
         ("projection", "left_contains_right"),
