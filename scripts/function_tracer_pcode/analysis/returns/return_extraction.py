@@ -45,9 +45,7 @@ from scripts.function_tracer_pcode.core import (
     TerminationPathEffectEvidence,
     VarnodeFlowRef,
 )
-from scripts.function_tracer_pcode.core.structural import (
-    expression_key_safe as _outcome_expression_key_safe,
-)
+from scripts.function_tracer_pcode.core.structural import expression_key
 from scripts.function_tracer_pcode.core.structural import expression_provenance_key
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     _expressions_equivalent_under_conditions,
@@ -854,7 +852,9 @@ def _build_function_outcome_seed(analysis: FunctionReturnAnalysis) -> None:
                 info.return_path_evidence.stable_key(),
             ) if info is not None and info.return_path_evidence is not None else (
                 "return_path_evidence_missing",
-                _outcome_expression_key_safe(getattr(outcome, "value", None)),
+                # 比較不能な値を `None` に潰すと別の outcome の region と同じ鍵になる
+                # （Issue #215）。構造 key は打ち切りを含んでも「等しい ⇒ 構造が等しい」
+                expression_key(getattr(outcome, "value", None)),
             ),
             observed_value=getattr(outcome, "value", None),
         ))
@@ -1257,8 +1257,9 @@ def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Tuple[Any,
     fallback は実際には使われておらず、外しても鍵は変わらない — この site の
     dedup 関係は base と同一。
 
-    鍵の同値関係そのもの（予算付き key の切り詰めや可換正規化）はここでは
-    変えない。それは identity の owner（PR-22-B / #181）の話。
+    鍵の同値関係は identity の owner（`core/structural`）が決める。値の key は
+    打ち切りを含んでも「等しい ⇒ 構造が等しい」（Issue #215 C-K1）なので、比較
+    不能な値を `None` に潰さずそのまま使う（潰すと深い値どうしがすべて同じ鍵になる）。
     """
 
     return (
@@ -1268,7 +1269,7 @@ def _impl__return_info_summary_identity_key(self, ret: ReturnInfo) -> Tuple[Any,
             condition.structural_key()
             for condition in tuple(getattr(ret, "conditions", ()) or ())
         ),
-        expression_key_safe(getattr(ret, "value", None)),
+        expression_key(getattr(ret, "value", None)),
     )
 
 

@@ -15,6 +15,7 @@ from typing import Any, Mapping, Sequence, Tuple
 from scripts.function_tracer_pcode.core.json_encoding import each, materialize
 from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
+from scripts.function_tracer_pcode.core.storage import storage_space_identity
 
 
 RECURRENCE_UNARY_DOMAIN = "recurrence_summary_v1"
@@ -316,7 +317,7 @@ class ImmutableRecurrenceExpression:
             else:
                 storage_identity = (
                     "storage", str(getattr(storage, "space_name", "")),
-                    int(getattr(storage, "space_id", -1) or -1),
+                    storage_space_identity(storage),
                     int(getattr(storage, "offset", 0) or 0),
                     int(getattr(storage, "size_bits", 0) or 0),
                 )

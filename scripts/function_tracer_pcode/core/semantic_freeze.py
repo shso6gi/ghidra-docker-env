@@ -96,7 +96,8 @@ from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     mark_published,
     mark_validated,
 )
-from scripts.function_tracer_pcode.core.semantic_projection import contains_unsupported_value
+from scripts.function_tracer_pcode.core.atom_validity import atom_validity
+from scripts.function_tracer_pcode.core.semantic_projection import read_container
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
     build_semantic_snapshot,
     local_semantic_payload,
@@ -580,11 +581,16 @@ def _walk_semantic_carriers(container: Any, on_expression, on_condition) -> Any:
             on_expression(value)
         elif rule is CarrierRule.CONDITION:
             on_condition(value)
-        elif rule is CarrierRule.SEQUENCE:
-            stack.extend(value)
-        elif rule is CarrierRule.MAPPING:
-            stack.extend(value.keys())
-            stack.extend(value.values())
+        elif rule is CarrierRule.SEQUENCE or rule is CarrierRule.MAPPING:
+            # 容器は基底型の実装で読む（Issue #215 `read_container`）: subclass の `__iter__` /
+            # `keys` が中身を隠すと、到達できる意味値を取りこぼす
+            _tag, elements = read_container(value)
+            if rule is CarrierRule.MAPPING:
+                for key, item in elements:
+                    stack.append(key)
+                    stack.append(item)
+            else:
+                stack.extend(elements)
         elif rule is CarrierRule.FIELDS:
             stack.extend(getattr(value, field.name, None) for field in dataclasses.fields(value))
         elif rule is CarrierRule.OWNED_STATE:
@@ -624,7 +630,9 @@ def _carrier_rule(value: Any) -> CarrierRule:
         return CarrierRule.MAPPING
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return CarrierRule.FIELDS
-    if (kind.__module__ or "").startswith(_PACKAGE_PREFIX):
+    module = kind.__module__
+    # 型の module 名は exact な str のときだけ読む（Issue #215: 型が持つ値も検証してから使う）
+    if type(module) is str and module.startswith(_PACKAGE_PREFIX):
         return CarrierRule.OWNED_STATE
     return CarrierRule.LEAF
 
@@ -739,19 +747,16 @@ def _projection_has_unsupported_value(snapshot: Any) -> bool:
     """snapshot が「値として固定できなかったもの」を含むか。
 
     含むなら equivalence digest はその式を他と区別できないので、digest を
-    名乗らせない（`identity_complete` を落とす）。
+    名乗らせない（`identity_complete` を落とす）。identity の field は固定できる値しか
+    持たないので（`semantic_projection.identity_value`）、外したことを示す印だけを見る。
     """
 
-    runtime = snapshot.runtime
-    return any(
-        contains_unsupported_value(value)
-        for value in (
-            runtime.stable_key,
-            runtime.semantic_key,
-            runtime.stable_origin,
-            snapshot.storage.identity,
-        )
-    )
+    if snapshot.runtime.identity_unfixable or snapshot.storage.identity_unfixable:
+        return True
+    # runtime ref の構造 key（digest の preimage に入る）が識別できない印（意味 key を持たない ref・
+    # 閉路・衝突）や識別不能 token を含めば、digest は別の ref の式と一致し得る（`core/atom_validity`）
+    structural_key = snapshot.runtime.structural_key
+    return structural_key is not None and not atom_validity(structural_key).identified
 
 
 #: 派生値を作った時点と commit の前で比べる意味 field（順は固定）

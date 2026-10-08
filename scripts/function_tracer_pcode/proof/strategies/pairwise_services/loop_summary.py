@@ -21,6 +21,7 @@ from scripts.function_tracer_pcode.core import (
     compare_loop_summaries,
 )
 from scripts.function_tracer_pcode.core.render_smt import _counted_loop_sum_has_exact_lowering, expression_smt_bit_width
+from scripts.function_tracer_pcode.core.structural import provenance_key_view
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     ConditionNormalizer,
     ParameterInfo,
@@ -967,7 +968,8 @@ def _impl__collect_phi_circular_origin_details(self, expr: Any) -> Tuple[Any, ..
 
 
 def _impl__value_contains_originated_phi_circular(cls, value: Any) -> bool:
-    normalized = cls._normalize_nested_tuple(value)
+    # provenance key の ref の identity（projection の atom）は owner の読み口で形を読む（Issue #215）
+    normalized = provenance_key_view(cls._normalize_nested_tuple(value))
     if isinstance(normalized, tuple):
         if cls._tuple_is_originated_phi_circular_runtime_ref(normalized):
             return True
@@ -984,6 +986,8 @@ def _impl__value_contains_originated_phi_circular(cls, value: Any) -> bool:
 
 
 def _impl__object_target_contains_originated_phi_circular(cls, value: Any) -> bool:
+    # provenance key の ref の identity（projection の atom）は owner の読み口で形を読む（Issue #215）
+    value = provenance_key_view(value)
     if isinstance(value, tuple):
         if cls._tuple_is_originated_phi_circular_runtime_ref(value):
             return True

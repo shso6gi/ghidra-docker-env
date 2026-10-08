@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from scripts.function_tracer_pcode.core.semantic_projection import canonical_atom
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
 from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
@@ -151,7 +152,8 @@ def test_projection_is_pinned_at_freeze_time():
 
     again = semantic_projection(expr)
     assert again is projection
-    assert again.runtime_stable_key == pinned_runtime == ("parameter", 0, "a")
+    # Issue #215: projection の identity は `canonical_atom` の atom（値の区別を落とさない）
+    assert again.runtime_stable_key == pinned_runtime == canonical_atom(("parameter", 0, "a"))
     assert again.storage_identity == pinned_storage
     assert again.declared_signedness == pinned_signedness is True
 
@@ -213,15 +215,15 @@ def test_freeze_then_mutate_then_first_read_keeps_the_meaning():
     data_type.signed = False
 
     projection = semantic_projection(expr)
-    assert projection.runtime_stable_key == ("parameter", 0, "a")
-    assert projection.runtime_semantic_key == ("parameter", 0, "a")
+    assert projection.runtime_stable_key == canonical_atom(("parameter", 0, "a"))
+    assert projection.runtime_semantic_key == canonical_atom(("parameter", 0, "a"))
     assert projection.storage_identity is not None
     assert projection.declared_signedness is True
     assert _expr_prefers_signed_extension(expr) is True
     assert ConditionSMTOracle._expression_identity_key(expr) == (
         "runtime_ref",
         "parameter",
-        ("semantic", ("parameter", 0, "a")),
+        ("semantic", canonical_atom(("parameter", 0, "a"))),
     )
 
 
@@ -498,11 +500,6 @@ def test_expressions_inside_a_runtime_ref_are_published_with_the_node():
 def test_unsupported_values_are_not_kept_as_raw_objects():
     """値として固定できないものを snapshot がそのまま抱えないこと。"""
 
-    from scripts.function_tracer_pcode.core.semantic_projection import (
-        UnsupportedSemanticValue,
-        contains_unsupported_value,
-    )
-
     class Wobbly:
         pass
 
@@ -516,11 +513,11 @@ def test_unsupported_values_are_not_kept_as_raw_objects():
     expr.freeze()
 
     projection = semantic_projection(expr)
-    assert contains_unsupported_value(projection.runtime_stable_key)
-    assert any(
-        isinstance(item, UnsupportedSemanticValue)
-        for item in projection.runtime_stable_key
-    )
+    # Issue #215: 値として固定できない部分を含む key は identity の field に持たない（型名だけの印で
+    # 別の ref と同じ identity になるため）。外したことは `runtime_identity_unfixable` に残る
+    assert projection.runtime_stable_key is None
+    assert projection.runtime_semantic_key is None
+    assert projection.runtime_identity_unfixable is True
     # 区別できない値を digest に載せない。
     from scripts.function_tracer_pcode.core.structural import structural_identity_digest
 

@@ -73,10 +73,7 @@ from scripts.function_tracer_pcode.core.render_smt.render import (
 )
 from scripts.function_tracer_pcode.core.runtime_refs.locations import AddressValueRef
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
-from scripts.function_tracer_pcode.core.structural import (
-    condition_key,
-    expression_key_safe,
-)
+from scripts.function_tracer_pcode.core.structural import condition_key
 from scripts.function_tracer_pcode.tests.fixtures.render.corpus import build_corpus
 from scripts.function_tracer_pcode.tests.tools.record_render_baseline import (
     declaration_lines,
@@ -280,16 +277,50 @@ def test_c1_baseline_fixture_covers_the_surfaces_the_change_touched():
     assert len(cases) >= 30
 
 
+_RUNTIME_UNKNOWN_SYMBOL = re.compile(r"rtunk_[0-9a-f]{16}_[0-9]+")
+
+
+def _renamed_runtime_unknowns(recorded, spec):
+    """baseline の runtime unknown の記号名を、いまの記号名へ 1 対 1 に付け替えた (smt, 宣言)。
+
+    runtime unknown の記号名は ref の identity の digest（`render_smt.unknowns`）で、描画の意味ではない。
+    Issue #215（PR #216）で identity の符号化（`canonical_atom` の atom）が変わり名前だけが変わった。
+    名前の付け替えは自由定数の改名なので意味を変えない。ただし付け替えが一意に決まる（同じ幅の記号が
+    両側に 1 つずつ）ときだけ行い、決まらなければ付け替えない（差分は SAT のまま検出される）。
+    """
+
+    current = set(
+        _RUNTIME_UNKNOWN_SYMBOL.findall(
+            "\n".join(declaration_lines(spec["expression"], float_mode=spec.get("float_mode", "uf"),
+                                         address_context=bool(spec.get("address_context", False))))
+        )
+    )
+    old = set(_RUNTIME_UNKNOWN_SYMBOL.findall(recorded["smt"])) - current
+    new = current - set(_RUNTIME_UNKNOWN_SYMBOL.findall(recorded["smt"]))
+    smt = recorded["smt"]
+    declarations = list(recorded["declarations"])
+    by_width = {}
+    for name in new:
+        by_width.setdefault(name.rsplit("_", 1)[1], []).append(name)
+    for name in old:
+        candidates = by_width.get(name.rsplit("_", 1)[1], [])
+        if len(candidates) != 1 or sum(1 for other in old if other.rsplit("_", 1)[1] == name.rsplit("_", 1)[1]) != 1:
+            continue
+        smt = smt.replace(name, candidates[0])
+        declarations = [line.replace(name, candidates[0]) for line in declarations]
+    return smt, dict(recorded, smt=smt, declarations=declarations)
+
+
 @pytest.mark.parametrize("case", sorted(_baseline()["cases"]))
 def test_c1_rendering_means_the_same_as_before_the_change(case):
-    """C1: 変更前の描画と現在の描画の差分式が UNSAT。"""
+    """C1: 変更前の描画と現在の描画の差分式が UNSAT（runtime unknown の記号名の付け替えを除く）。"""
 
-    recorded = _baseline()["cases"][case]
     spec = build_corpus()[case]
+    smt, recorded = _renamed_runtime_unknowns(_baseline()["cases"][case], spec)
     _assert_difference_is_unsat(
         _declarations_for(case, recorded, spec),
         recorded["sort"],
-        recorded["smt"],
+        smt,
         render_case(spec),
         case,
     )
@@ -1209,26 +1240,35 @@ def _c6_corpus():
     ]
 
 
-def _base_summary_identity_key(ret, site_key):
-    """base（`15e05826`）の実装そのまま。dedup 関係の比較対象。"""
+def _complete_relation(left, right):
+    """予算を事実上外した完全比較（否定を含む）。C6 の同値関係の正解。"""
 
-    return (
-        "return_info",
-        site_key,
-        tuple(
-            getattr(condition, "structural_key", lambda: ("condition", condition.to_string()))()
-            for condition in tuple(getattr(ret, "conditions", ()) or ())
-        ),
-        expression_key_safe(getattr(ret, "value", None)),
-    )
+    from scripts.function_tracer_pcode.core.semantic_freeze import freeze_expression
+    from scripts.function_tracer_pcode.core.structural import structural_equals
+
+    if left is None or right is None:
+        return left is right
+    if isinstance(left, Condition):
+        return bool(left.negated) == bool(right.negated) and structural_equals(
+            freeze_expression(left.expression), freeze_expression(right.expression), budget=10 ** 6
+        )
+    return structural_equals(freeze_expression(left), freeze_expression(right), budget=10 ** 6)
 
 
-def test_c6_the_summary_identity_dedup_relation_is_unchanged_from_base():
-    """**置換前後で dedup 同一**: base と head で同値関係が一致すること。
+def _has_opaque_value(item):
+    """`canonical_atom` が値として固定できない atom を持つか（C-K5: identity は反射的でない）。"""
 
-    比べるのは鍵の値そのものではなく `key(x) == key(y)` の真偽。C6 は表示文字列
-    依存を外すことを求めているだけで、既存の同値関係（深い式の切り詰めや可換
-    正規化を含む）を直すことは求めていない。直すなら別 owner の仕事。
+    return "opaque_value" in item
+
+
+def test_c6_the_summary_identity_dedup_relation_is_the_complete_structural_relation():
+    """summary identity の dedup 関係は、完全比較の同値関係と一致する（Issue #215）。
+
+    PR-22-C の時点では「base の同値関係（深い式の切り詰めによる取り違えを含む）を
+    変えない」ことを固定していた。Issue #215 で構造 key の owner が
+    「key が等しい ⇒ 構造が等しい」（C-K1）を満たすようにしたので、ここでは
+    identity の一致 ⇔ 予算 10^6 の完全比較（否定を含む）の一致を固定する。
+    値として固定できない atom を含むものは何とも一致しない（C-K5）。
     """
 
     from scripts.function_tracer_pcode.analysis.returns.return_extraction import (
@@ -1241,7 +1281,6 @@ def test_c6_the_summary_identity_dedup_relation_is_unchanged_from_base():
 
     site = _Site()
     corpus = _c6_corpus()
-    # 条件の組 + 戻り値の有無 / 深さ違いを掛け合わせる
     values = [
         ("absent", None),
         ("param", _param("a", 0)),
@@ -1252,25 +1291,30 @@ def test_c6_the_summary_identity_dedup_relation_is_unchanged_from_base():
     for condition_name, condition in corpus:
         for value_name, value in values:
             rets.append(
-                (f"{condition_name}/{value_name}", SimpleNamespace(value=value, conditions=[condition]))
+                (f"{condition_name}/{value_name}", condition, value,
+                 SimpleNamespace(value=value, conditions=[condition]))
             )
 
     mismatches = []
-    for left_name, left in rets:
-        for right_name, right in rets:
-            old_same = _base_summary_identity_key(left, "same-site") == _base_summary_identity_key(
-                right, "same-site"
-            )
-            new_same = _impl__return_info_summary_identity_key(
+    for left_name, left_condition, left_value, left in rets:
+        for right_name, right_condition, right_value, right in rets:
+            same_identity = _impl__return_info_summary_identity_key(
                 site, left
             ) == _impl__return_info_summary_identity_key(site, right)
-            if old_same != new_same:
-                mismatches.append((left_name, right_name, old_same, new_same))
+            if _has_opaque_value(left_name) or _has_opaque_value(right_name):
+                expected = False
+            else:
+                expected = _complete_relation(left_condition, right_condition) and _complete_relation(
+                    left_value, right_value
+                )
+            if same_identity != expected:
+                mismatches.append((left_name, right_name, expected, same_identity))
     assert mismatches == [], mismatches[:8]
 
-    # 関係が「全部同じ」や「全部違う」に潰れていないこと（比較が意味を持つ）
-    keys = [_impl__return_info_summary_identity_key(site, ret) for _name, ret in rets]
-    assert 1 < len({repr(key) for key in keys}) < len(keys)
+    # 末尾だけ違う深い条件・深い値は別の identity（main では同じだった）
+    keys = {name: _impl__return_info_summary_identity_key(site, ret) for name, _c, _v, ret in rets}
+    assert keys["deep_tail_1/param"] != keys["deep_tail_2/param"]
+    assert keys["add_ab/deep_1"] != keys["add_ab/deep_2"]
 
 
 def _c6_deep_value(tail: int, depth: int = 400):
@@ -1280,31 +1324,24 @@ def _c6_deep_value(tail: int, depth: int = 400):
     return _binary("INT_ADD", node, _const(tail))
 
 
-def test_c6_the_proof_target_keys_are_the_base_relation():
-    """証明側の dedup 関係も base のままであること。
+def test_c6_the_proof_target_keys_are_the_complete_structural_relation():
+    """証明側の dedup 関係（`divergence_proofs.condition_identity_key`）も完全比較と一致する。
 
-    structural proof で実際に比較されるのは `target_guard_keys`
-    （`divergence_proofs.condition_identity_key`）。この PR はそこを触っていない
-    ので、関係は base と同一。
+    main では比較不能な条件が `None` に潰れ、深い条件どうしがすべて同じ鍵だった。
     """
 
     from scripts.function_tracer_pcode.analysis.returns.divergence_proofs import (
         condition_identity_key,
     )
 
-    def base_condition_identity_key(condition):
-        return (
-            "condition",
-            expression_key_safe(getattr(condition, "expression", None)),
-            bool(getattr(condition, "negated", False)),
-        )
-
     corpus = _c6_corpus()
-    for _left_name, left in corpus:
-        for _right_name, right in corpus:
-            assert (
-                base_condition_identity_key(left) == base_condition_identity_key(right)
-            ) == (condition_identity_key(left) == condition_identity_key(right))
+    for left_name, left in corpus:
+        for right_name, right in corpus:
+            same = condition_identity_key(left) == condition_identity_key(right)
+            if _has_opaque_value(left_name) or _has_opaque_value(right_name):
+                assert same is False, (left_name, right_name)
+            else:
+                assert same == _complete_relation(left, right), (left_name, right_name)
 
 
 def test_c6_no_rendered_text_is_used_as_an_identity():

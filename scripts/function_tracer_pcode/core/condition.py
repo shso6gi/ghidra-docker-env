@@ -263,15 +263,9 @@ class Condition:
         return None to avoid treating those expressions as equal by construction.
         """
 
-        from scripts.function_tracer_pcode.core.structural import (
-            condition_key,
-            key_contains_placeholder,
-        )
+        from scripts.function_tracer_pcode.core.structural import condition_key_safe
 
-        key = condition_key(self, budget=budget)
-        if key_contains_placeholder(key):
-            return None
-        return key
+        return condition_key_safe(self, budget=budget)
 
     @classmethod
     def combine_and(cls, conditions: List[Optional["Condition"]]) -> Optional["Condition"]:

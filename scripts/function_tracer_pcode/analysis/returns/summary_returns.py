@@ -31,7 +31,12 @@ from scripts.function_tracer_pcode.core.recurrence_contracts import (
     RetainedExactReturnRef,
 )
 from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
-from scripts.function_tracer_pcode.core.structural import key_contains_placeholder
+from scripts.function_tracer_pcode.core.atom_validity import tags_of
+from scripts.function_tracer_pcode.core.structural import (
+    NON_STRUCTURAL_IDENTITY_TAGS,
+    key_contains_placeholder,
+    unidentified_identity,
+)
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 import scripts.function_tracer_pcode.analysis.effects.summary as effect_summary
 from scripts.function_tracer_pcode.analysis.effects.summary import canonicalize_location
@@ -2279,7 +2284,9 @@ def _conditions_key(conditions: Sequence[Condition]) -> Tuple[Any, ...]:
         try:
             keys.append(condition.structural_key(budget=256))
         except Exception:
-            keys.append(("opaque_condition", type(condition).__name__))
+            # 型名に潰すと失敗した条件どうしが同じ鍵になる（Issue #215）。何とも等しく
+            # ならない印にする（`_FORBIDDEN_IDENTITY_TAGS` が拒む）
+            keys.append(unidentified_identity("condition_key_failed"))
     keys.sort(key=repr)
     return ("conditions", tuple(keys))
 
@@ -2295,21 +2302,27 @@ def _expression_key(expr: Optional[Expression]) -> Tuple[Any, ...]:
             include_semantic_runtime_refs=True,
         )
     except Exception:
-        return ("opaque_expression", type(expr).__name__)
+        return unidentified_identity("expression_key_failed")
+
+
+#: 安定した identity を持たない atom の tag。`NON_STRUCTURAL_IDENTITY_TAGS` は構造 key の
+#: owner が `object_id` の代わりに出す印（Issue #215）
+_FORBIDDEN_IDENTITY_TAGS = frozenset({
+    "opaque",
+    "object_id",
+    "opaque_condition",
+    "opaque_expression",
+    "expression_object",
+    "varnode_id",
+    "block_id",
+    "id",
+}) | NON_STRUCTURAL_IDENTITY_TAGS
 
 
 def _key_contains_forbidden_identity(value: Any) -> bool:
     if isinstance(value, tuple):
-        if value and value[0] in {
-            "opaque",
-            "object_id",
-            "opaque_condition",
-            "opaque_expression",
-            "expression_object",
-            "varnode_id",
-            "block_id",
-            "id",
-        }:
+        # tag は `tags_of` で読む: identity の atom（`canonical_atom` に包まれた key）の中の印も見る（Issue #215）
+        if value and not _FORBIDDEN_IDENTITY_TAGS.isdisjoint(tags_of(value)):
             return True
         return any(_key_contains_forbidden_identity(item) for item in value)
     if isinstance(value, list):

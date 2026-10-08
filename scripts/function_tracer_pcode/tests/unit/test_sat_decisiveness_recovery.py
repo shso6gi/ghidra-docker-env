@@ -1035,7 +1035,12 @@ def test_expression_provenance_key_prefers_parameter_runtime_ref_over_storage():
 
     key = expression_provenance_key(expr)
 
-    assert key == ("runtime_ref", ("parameter", 1234, 0x401000, 0))
+    # Issue #215: provenance key の ref の identity は projection の atom。形は owner の読み口で読む
+    from scripts.function_tracer_pcode.core.semantic_projection import canonical_atom
+    from scripts.function_tracer_pcode.core.structural import provenance_key_view
+
+    assert key == ("runtime_ref", canonical_atom(("parameter", 1234, 0x401000, 0)))
+    assert provenance_key_view(key) == ("runtime_ref", ("parameter", 1234, 0x401000, 0))
     assert key[0] != "storage"
 
 def test_artifact_stable_key_rewrites_parameter_runtime_ref_program_ids():

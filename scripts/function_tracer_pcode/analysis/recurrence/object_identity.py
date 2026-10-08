@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.core import (
     ReturnInfo,
     StorageInfo,
 )
+from scripts.function_tracer_pcode.core.structural import unidentified_identity
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     ConditionNormalizer,
     CountedLoopAccumulator,
@@ -205,7 +206,8 @@ def _impl__summary_return_expression_key(self, expr: Optional[Expression]) -> Tu
             include_semantic_runtime_refs=True,
         )
     except Exception:
-        return ("opaque_expression", type(expr).__name__)
+        # 型名に潰さない（失敗した値どうしが同じ鍵になる。Issue #215）
+        return unidentified_identity("expression_key_failed")
 
 def _impl__counter_parameter_identity_key(
     self,

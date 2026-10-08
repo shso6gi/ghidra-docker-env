@@ -116,16 +116,20 @@ def _unknown_runtime_identity_key(expr) -> Tuple[Any, ...]:
     """
 
     projection = semantic_projection(expr)
-    if projection.runtime_semantic_key is not None:
-        return ("runtime_ref_semantic", projection.runtime_semantic_key)
-    if projection.runtime_stable_key is not None:
+    # projection の identity の field は値として固定できる key だけ（Issue #215: 固定できない ref は
+    # None になり、その式は自分だけの記号になる）
+    semantic_key = projection.runtime_semantic_key
+    stable_key = projection.runtime_stable_key
+    if semantic_key is not None:
+        return ("runtime_ref_semantic", semantic_key)
+    if stable_key is not None:
         if projection.runtime_stable_origin is not None:
             return (
                 "runtime_ref_with_origin",
-                projection.runtime_stable_key,
+                stable_key,
                 projection.runtime_stable_origin,
             )
-        return ("runtime_ref", projection.runtime_stable_key)
+        return ("runtime_ref", stable_key)
     return (
         "expression_unknown_instance",
         id(expr),

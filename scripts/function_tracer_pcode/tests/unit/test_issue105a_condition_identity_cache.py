@@ -336,12 +336,16 @@ def test_d2_combine_and_and_basis_do_not_depend_on_the_hash_prefilter(monkeypatc
 
 
 def test_d2_deep_distinct_conditions_are_no_longer_equal_through_a_truncated_key():
-    """旧 signature（`condition_key(budget=256)` の tuple）は予算の外の違いを見落としていた。"""
+    """旧 signature（`condition_key(budget=256)` の tuple）は予算の外の違いを見落としていた。
+
+    Issue #215 の後は `condition_key` 自身も予算の外を識別する（打ち切りは起きるが、key は
+    別になる）。signature はそれとは独立に、bucket + 完全比較で区別すること。
+    """
 
     left = Condition(_deep_chain(_param("param_1", 0), 300))
     right = Condition(_deep_chain(_param("param_2", 1), 300))
     old_left, old_right = condition_key(left, budget=256), condition_key(right, budget=256)
-    assert key_contains_placeholder(old_left) and old_left == old_right
+    assert key_contains_placeholder(old_left) and old_left != old_right
 
     assert ConditionSimplifier.object_centric_conditions_signature([left]) != (
         ConditionSimplifier.object_centric_conditions_signature([right])

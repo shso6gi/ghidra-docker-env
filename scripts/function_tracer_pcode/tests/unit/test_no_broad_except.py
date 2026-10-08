@@ -309,11 +309,12 @@ def test_baseline_is_a_frozen_snapshot_with_stable_totals():
 
     entries = load_baseline()
     # Issue #22 PR-22-D: `Expression._serialize_runtime_ref` の broad except を撤去（main の値から -1）
+    # Issue #215 PR #216: `structural._stable_value_key` の broad except を列挙した型に狭めた（-1）
     assert baseline_totals(entries) == {
-        "keys": 586,
+        "keys": 585,
         "logged": 0,
-        "unlogged": 911,
-        "handlers": 911,
+        "unlogged": 910,
+        "handlers": 910,
     }
 
 

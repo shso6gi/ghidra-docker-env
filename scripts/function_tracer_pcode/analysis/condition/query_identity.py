@@ -54,6 +54,7 @@ from scripts.function_tracer_pcode.analysis.condition.condition_cache import roo
 from scripts.function_tracer_pcode.core.condition_metrics import note
 from scripts.function_tracer_pcode.core.semantic_freeze import validated
 from scripts.function_tracer_pcode.core.deadline import poller as deadline_poller
+from scripts.function_tracer_pcode.core.atom_validity import parameter_schema_complete
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
     ImmutableSemanticGraph,
     encode_stable_atoms,
@@ -169,6 +170,10 @@ def solver_symbol_identity(expr: Any) -> Optional[Tuple[Any, ...]]:
         return None
     if kind in _SYMBOL_KINDS:
         projection = semantic_projection(expr)
+        if projection.runtime_identity_unfixable:
+            # ref はあるが identity を値で固定できない: index・名前・storage の粗い identity へ退避すると、
+            # 別の ref の式と同じ symbol になる（Issue #215。projection が外した identity を補わない）
+            return None
         runtime_identity = runtime_identity_from_projection(projection)
         if runtime_identity is not None:
             return (
@@ -215,7 +220,10 @@ def solver_symbol_identity_is_safe(identity: Optional[Tuple[Any, ...]]) -> bool:
         return False
     if identity[0] == "parameter_generated_ordinal":
         return False
-    if _identity_contains_unsafe_parameter_key(identity):
+    # 成分の欠けた schema（index の無い parameter など）を含む identity は、別の object に同じ値として
+    # 現れる。判定は owner（`core/atom_validity.parameter_schema_complete`）の 1 つの規則で、identity の
+    # どの位置・どの符号化（生の key / projection の atom）でも同じに読む（Issue #215）
+    if not parameter_schema_complete(identity):
         return False
     if (
         identity[0] == "runtime_ref"
@@ -230,30 +238,6 @@ def solver_symbol_identity_is_safe(identity: Optional[Tuple[Any, ...]]) -> bool:
     ):
         return False
     return True
-
-
-def _identity_contains_unsafe_parameter_key(value: Any) -> bool:
-    if isinstance(value, tuple):
-        if _is_unsafe_parameter_key(value):
-            return True
-        return any(_identity_contains_unsafe_parameter_key(item) for item in value)
-    if isinstance(value, (list, set, frozenset)):
-        return any(_identity_contains_unsafe_parameter_key(item) for item in value)
-    return False
-
-
-def _is_unsafe_parameter_key(value: Tuple[Any, ...]) -> bool:
-    if not value or value[0] != "parameter":
-        return False
-    if len(value) == 1:
-        return True
-    if len(value) == 2:
-        return value[1] is None
-    if len(value) == 3:
-        return value[1] is None or value[2] is None
-    if len(value) >= 4:
-        return value[3] is None
-    return False
 
 
 # ---------------------------------------------------------------------------

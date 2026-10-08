@@ -129,6 +129,15 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
         "scripts.function_tracer_pcode.reporting",
         "scripts.function_tracer_pcode.config",
         "os",
+        # Issue #215 Gate B: 構造 identity の意味（intern の方針・C-K 契約）と同期の実装は
+        # 変更軸が違う。不可分な表の操作は `core/atomic_tables` が持ち、ここは lock を持たない。
+        "threading",
+        "multiprocessing",
+    ),
+    "core/atomic_tables.py": (
+        # 同期の実装だけを持つ: 何を登録し何を identity とするかを知らない。
+        "scripts.function_tracer_pcode",
+        "os",
     ),
     "core/render_smt/loop_lowering.py": (
         # ref の class を知らない = どの lowering かを renderer が判定しない。
@@ -224,6 +233,27 @@ _BANNED_IMPORTS: Dict[str, Tuple[str, ...]] = {
         # 人向け表示を変えても SMT 側は動かない（逆向きも同じ）。
         "scripts.function_tracer_pcode.core.render_smt",
         "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.authority",
+        "scripts.function_tracer_pcode.checker",
+        "scripts.function_tracer_pcode.cli",
+        "scripts.function_tracer_pcode.reporting",
+        "scripts.function_tracer_pcode.config",
+        "scripts.function_tracer_pcode.smt",
+        "os",
+    ),
+    "core/atom_validity.py": (
+        # atom の語彙と妥当性の判定は、値の読み手（projection）にも identity の規則（structural・
+        # query identity）にも依存しない（Issue #215: 両方が共有する一番下の owner）。
+        "scripts.function_tracer_pcode.core.expression",
+        "scripts.function_tracer_pcode.core.condition",
+        "scripts.function_tracer_pcode.core.semantic_freeze",
+        "scripts.function_tracer_pcode.core.semantic_snapshot",
+        "scripts.function_tracer_pcode.core.semantic_projection",
+        "scripts.function_tracer_pcode.core.structural",
+        "scripts.function_tracer_pcode.core.render_smt",
+        "scripts.function_tracer_pcode.analysis",
+        "scripts.function_tracer_pcode.semantics",
+        "scripts.function_tracer_pcode.proof",
         "scripts.function_tracer_pcode.authority",
         "scripts.function_tracer_pcode.checker",
         "scripts.function_tracer_pcode.cli",

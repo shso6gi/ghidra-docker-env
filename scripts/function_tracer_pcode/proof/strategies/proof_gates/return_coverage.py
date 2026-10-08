@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 import hashlib
 from scripts.function_tracer_pcode.core import Condition, Expression, FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
+from scripts.function_tracer_pcode.core.atom_validity import tags_of
+from scripts.function_tracer_pcode.core.structural import NON_STRUCTURAL_IDENTITY_TAGS
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     ConditionSMTOracle,
     ReturnCoverageCheckResult,
@@ -1907,13 +1909,19 @@ def _impl__return_coverage_object_target_key_is_valid(cls, object_target_key: Tu
         return False
     return not cls._return_coverage_identity_contains_forbidden_atoms(object_target_key)
 
+#: 安定した identity を持たない atom の tag（`NON_STRUCTURAL_IDENTITY_TAGS` は構造 key の
+#: owner が `object_id` の代わりに出す印。Issue #215）
+_FORBIDDEN_RETURN_COVERAGE_TAGS = frozenset({"object_id", "program_uid", "opaque"}) | NON_STRUCTURAL_IDENTITY_TAGS
+
+
 def _impl__return_coverage_identity_contains_forbidden_atoms(cls, value: Any) -> bool:
     if isinstance(value, Mapping):
         return True
     if isinstance(value, (list, set, frozenset)):
         return True
     if isinstance(value, tuple):
-        if value and value[0] in {"object_id", "program_uid", "opaque"}:
+        # tag は `tags_of` で読む: identity の atom（`canonical_atom` に包まれた key）の中の印も見る（Issue #215）
+        if value and not _FORBIDDEN_RETURN_COVERAGE_TAGS.isdisjoint(tags_of(value)):
             return True
         if len(value) == 2 and value[0] == "int" and isinstance(value[1], int) and value[1] < 0:
             return False

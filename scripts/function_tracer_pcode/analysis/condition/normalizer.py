@@ -8,10 +8,9 @@ from scripts.function_tracer_pcode.core import (
     Condition,
     ExpressionType,
     StructuralKey,
-    expression_key,
-    key_is_comparable,
-    expression_key_or_identity,
+    expression_key_status,
 )
+from scripts.function_tracer_pcode.core.structural import exact_structural_identity, identity_is_memoizable
 from scripts.function_tracer_pcode.analysis.condition.condition_cache import root_memo
 
 
@@ -407,6 +406,9 @@ class ConditionNormalizer:
         key: Tuple[Expression, bool],
         value: Tuple[StructuralKey, str, StructuralKey, bool],
     ) -> None:
+        # 識別不能な identity を持つ結果は覚えない（再計算で同じ token を返すと一致してしまう。C-K5）
+        if not (identity_is_memoizable(value[0]) and identity_is_memoizable(value[2])):
+            return
         if len(cls._contradiction_cache) >= cls._CONTRADICTION_CACHE_LIMIT:
             cls._contradiction_cache.clear()
         cls._contradiction_cache[key] = value
@@ -417,21 +419,25 @@ class ConditionNormalizer:
         expr: Optional[Expression],
         *,
         include_memory_read_order: bool = True,
-    ) -> StructuralKey:
+    ) -> Tuple[StructuralKey, bool]:
+        """(小さい予算の構造 key, 比較可能か)。比較可否も key と一緒に保持する（毎回 key を走査しない）。"""
+
         if expr is None:
-            return ("none",)
+            return ("none",), True
 
         cache_mode = bool(include_memory_read_order)
         cached_by_mode = cls._expr_key_cache.get(expr)
         if cached_by_mode is not None and cache_mode in cached_by_mode:
             return cached_by_mode[cache_mode]
 
-        rendered = expression_key(
+        rendered = expression_key_status(
             expr,
             budget=cls._EXPR_KEY_MAX_NODES,
-            normalize_commutative=True,
-            include_memory_read_order=include_memory_read_order,
+            **cls._key_options(include_memory_read_order),
         )
+        # 識別不能 token を含む key は覚えない（再計算で同じ token を返すと一致してしまう。C-K5）
+        if not rendered[1] and not identity_is_memoizable(rendered[0]):
+            return rendered
         if len(cls._expr_key_cache) >= cls._EXPR_KEY_CACHE_LIMIT:
             cls._expr_key_cache.clear()
         if cached_by_mode is None:
@@ -441,6 +447,12 @@ class ConditionNormalizer:
         return rendered
 
     @staticmethod
+    def _key_options(include_memory_read_order: bool) -> Dict[str, bool]:
+        """署名の key と、その代わりの厳密な identity が共有する option（同じ同値関係で比べる）。"""
+
+        return {"normalize_commutative": True, "include_memory_read_order": bool(include_memory_read_order)}
+
+    @staticmethod
     def _condition_expr_key(
         expr: Optional[Expression],
         *,
@@ -448,17 +460,23 @@ class ConditionNormalizer:
     ) -> StructuralKey:
         if expr is None:
             return ("none",)
-        key = ConditionNormalizer._expr_key(
+        key, comparable = ConditionNormalizer._expr_key(
             expr,
             include_memory_read_order=include_memory_read_order,
         )
-        if key_is_comparable(key):
+        if comparable:
             return key
         # Issue #105 PR-105-B: 小さい予算の key で比べられない（大きい）式の key は、式 object
         # だけで決まる値なので pair の中で式 object ごとに 1 回だけ作る（expander は組み合わせ
         # ごとに同じ式の署名を求め、毎回 256 node 分の key を作り直していた）
+        # Issue #215: その key は予算の無い厳密な identity（O(1) の大きさ、構造が等しい式どうし
+        # だけが一致）。予算付き key と同じ option で作り、memo も option ごとに分ける
+        options = ConditionNormalizer._key_options(include_memory_read_order)
         return root_memo(
-            ConditionNormalizer.FALLBACK_KEY_MEMO, expr, expression_key_or_identity
+            f"{ConditionNormalizer.FALLBACK_KEY_MEMO}.read_order={options['include_memory_read_order']}",
+            expr,
+            lambda root: exact_structural_identity(root, **options),
+            store_if=identity_is_memoizable,
         )
     
     @staticmethod

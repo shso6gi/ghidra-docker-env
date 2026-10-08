@@ -7,8 +7,6 @@ from scripts.function_tracer_pcode.core import (
     Expression,
     Condition,
     ExpressionType,
-    condition_key,
-    key_contains_placeholder,
 )
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
@@ -18,6 +16,7 @@ from scripts.function_tracer_pcode.core.deadline import checkpoint as deadline_c
 CONDITION_SIMPLIFY_STAGE = "condition_simplify"
 from scripts.function_tracer_pcode.core.structural import (
     ConditionsSignature,
+    condition_key_safe,
     expression_provenance_key,
 )
 from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
@@ -983,10 +982,10 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
             if cond is None:
                 continue
             try:
-                key = condition_key(cond, budget=96)
+                comparable = condition_key_safe(cond, budget=96) is not None
             except _CONDITION_RECOVERABLE_ERRORS:
-                key = ("unsafe",)
-            if key_contains_placeholder(key):
+                comparable = False
+            if not comparable:
                 return True
             metrics = cls._condition_metrics(cond)
             if metrics["has_unknown"] and metrics["phi_depth"] > 0 and metrics["node_count"] > 24:

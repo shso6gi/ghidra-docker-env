@@ -21,6 +21,7 @@ from scripts.function_tracer_pcode.checker.cause_aggregate import (
     FINAL_UNKNOWN_TRANSITIONS as _FINAL_TRANSITIONS,
     aggregate_is_usable,
     freeze_identity as _freeze,
+    identity_is_unmatchable_here,
     identity_tuple as _tuple,
     resolve_cause_identity,
     resolve_occurrence_transitions as _resolve_transitions,
@@ -762,10 +763,12 @@ def _add_cause_group(builders, blocker_id, group, stable, provenance, pool=()):
         _freeze(item)
         for item in resolve_pool_refs(pool, group.get("legacy_proof_obligation_id_refs"))
     )
-    builder.required.update(
-        _freeze(item) for item in resolve_pool_refs(pool, group.get("required_proof_id_refs"))
-    )
-    if not group.get("proof_requirements_complete", True):
+    required = [_freeze(item) for item in resolve_pool_refs(pool, group.get("required_proof_id_refs"))]
+    builder.required.update(required)
+    # 別の process の token を含む requirement は過分割される: 件数を完全とは名乗らない（Issue #215）
+    if not group.get("proof_requirements_complete", True) or any(
+        identity_is_unmatchable_here(item) for item in required
+    ):
         builder.proof_requirements_complete = False
     for case_pair in group.get("case_pairs") or ():
         frozen = _freeze(case_pair)

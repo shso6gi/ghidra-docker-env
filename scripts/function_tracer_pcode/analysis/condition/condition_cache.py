@@ -345,7 +345,10 @@ class ConditionCacheStore:
         with self._lock:
             self.table(name, limit).store(key, value)
 
-    def root_memo(self, kind: str, root: Any, build: Callable[[Any], Any]) -> Any:
+    def root_memo(
+        self, kind: str, root: Any, build: Callable[[Any], Any],
+        store_if: Optional[Callable[[Any], bool]] = None,
+    ) -> Any:
         with self._lock:
             memo = self._roots.get(kind)
             if memo is not None:
@@ -354,6 +357,8 @@ class ConditionCacheStore:
                     note(f"memo.{kind}.hit")
                     return value
         value = build(root)
+        if store_if is not None and not store_if(value):
+            return value
         with self._lock:
             memo = self._roots.get(kind)
             if memo is None:
@@ -441,13 +446,19 @@ def cache_store(name: str, key: Any, value: Any, *, limit: int = DEFAULT_TABLE_L
         store.store(name, key, value, limit=limit)
 
 
-def root_memo(kind: str, root: Any, build: Callable[[Any], Any]) -> Any:
-    """root だけに依存する値の memo（scope の外・`root is None` では毎回作る）。"""
+def root_memo(
+    kind: str, root: Any, build: Callable[[Any], Any], store_if: Optional[Callable[[Any], bool]] = None,
+) -> Any:
+    """root だけに依存する値の memo（scope の外・`root is None` では毎回作る）。
+
+    `store_if` を渡すと、それが偽を返す値は保存しない（毎回作り直す値。例: 識別不能 token を
+    含む identity は memo してはいけない — `core.structural.identity_is_memoizable`）。
+    """
 
     store = active_condition_cache()
     if store is None or root is None:
         return build(root)
-    return store.root_memo(kind, root, build)
+    return store.root_memo(kind, root, build, store_if)
 
 
 def sequence_lookup(kind: str, items: Tuple[Any, ...]) -> Tuple[bool, Any]:

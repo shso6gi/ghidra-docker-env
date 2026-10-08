@@ -1101,6 +1101,13 @@ _PROPORTIONAL_WORK_OWNERS = {
         "_field_values", "make_internal_v2_reason_diagnostic", "make_unknown_reason",
     )},
     ("core.budget_policy", "raise_expression_size_budget_exceeded"): _A_FIXED,
+    # Issue #215: 永続化した cause key の process 独立性の判定（`resolve_cause_identity` が
+    # 数えて写した canonical cause key だけを辿る）
+    ("core.structural", "_key_has_tag"): _B_COUNTED,
+    # 同じ key の 1 つの列の、`canonical_atom` の包みの段を外しながら tag を読む（段の数は列の深さまで）
+    ("core.atom_validity", "tags_of"): _B_COUNTED,
+    # 包みを 1 段外す（再帰の深さは包みの段の数まで。各段で読むのは 2 要素だけ）
+    ("core.atom_validity", "decoded"): _B_COUNTED,
     ("core.canonical_digest", "_emit"): _B_BOUND,
     ("core.expression", "Expression._to_dict_active"): _B_SIZED,
     ("core.frozen_representation", "_thaw"): _B_CAPTURED,

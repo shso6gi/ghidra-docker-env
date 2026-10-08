@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Set, Tuple
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
-from scripts.function_tracer_pcode.core.structural import expression_key_safe
+from scripts.function_tracer_pcode.core.structural import expression_key_safe, unidentified_identity
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     CanonicalLocation,
     ConditionNormalizer,
@@ -589,7 +589,9 @@ class ExpressionCaseService:
                 try:
                     key = guard.structural_key(budget=256)
                 except Exception:
-                    key = (id(guard),)
+                    # key を作れない guard は何とも重複しない（`id()` は object の死後に再利用される。
+                    # Issue #215 C-K5）
+                    key = unidentified_identity("runtime_guard_key_failed")
                 if key in seen:
                     continue
                 seen.add(key)
