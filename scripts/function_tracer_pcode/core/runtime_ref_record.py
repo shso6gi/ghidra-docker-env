@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import dataclasses
 import typing
-from typing import Any, Callable, Dict, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 from scripts.function_tracer_pcode.core.live_values import NOT_PLAIN, exact_scalar, int_value
 
@@ -39,7 +39,7 @@ _SCALAR_KINDS = {int: "scalar", float: "scalar", str: "scalar", bool: "bool"}
 _FIELD_KINDS: Dict[type, Tuple[Tuple[str, str], ...]] = {}
 
 #: この decorator が置いた `__post_init__` / `__init__` → 包んだ元の関数（無ければ `None`）。
-#: 継承した包みを二重に包まないため、また ref の class がこの owner を通ることを確かめるために使う。
+#: ref の class がこの owner を通ることを確かめる読み口（`is_runtime_ref_record`）が使う。
 _WRAPPERS: Dict[Callable[..., Any], Any] = {}
 
 
@@ -127,40 +127,52 @@ def _exact_tree(value: Tuple[Any, ...]) -> Tuple[Any, ...]:
     return value if items is None else tuple(items)
 
 
-def _normalize(instance: Any, kinds: Tuple[Tuple[str, str], ...]) -> None:
+#: 写さなくてよい値の型（exact な組み込みの scalar。`None` は値で見る）
+_EXACT_SCALARS = (int, str, bool, float)
+
+
+def _normalize(instance: Any, kinds: Tuple[Tuple[str, str], ...]) -> List[Any]:
+    """`kinds` の field を写し、写した後の値の列を返す（検証の後に、書き直された field を見分けるため）。"""
+
+    state = _instance_state(instance)
+    values = []
     for name, kind in kinds:
-        value = object.__getattribute__(instance, name)
-        holder = type(value)
-        if value is None or holder is int or holder is str or holder is bool or holder is float:
-            continue
-        new = exact_field_value(value, kind)
-        if new is not value:
-            object.__setattr__(instance, name, new)
+        value = state[name] if state is not None else object.__getattribute__(instance, name)
+        if value is not None and type(value) not in _EXACT_SCALARS:
+            new = exact_field_value(value, kind)
+            if new is not value:
+                object.__setattr__(instance, name, new)
+                value = new
+        values.append(value)
+    return values
+
+
+def _renormalize_rewritten(instance: Any, kinds: Tuple[Tuple[str, str], ...], before: List[Any]) -> None:
+    """class 自身の `__post_init__`（検証）が書き直した field だけを、もう一度写す。"""
+
+    state = _instance_state(instance)
+    rewritten = [
+        entry
+        for entry, old in zip(kinds, before)
+        if (state[entry[0]] if state is not None else object.__getattribute__(instance, entry[0])) is not old
+    ]
+    if rewritten:
+        _normalize(instance, tuple(rewritten))
+
+
+def _instance_state(instance: Any) -> Any:
+    """instance の `__dict__`（`slots=True` の class なら `None`。そのときは属性を 1 つずつ読む）。"""
+
+    try:
+        return object.__getattribute__(instance, "__dict__")
+    except AttributeError:
+        return None
 
 
 def normalize_fields(instance: Any) -> None:
     """`instance` の scalar / tuple の field を規則で写す（frozen でも書く）。"""
 
     _normalize(instance, field_kinds(type(instance)))
-
-
-def _run_and_renormalize(instance: Any, run: Callable[[], None]) -> None:
-    """class 自身の `__post_init__`（検証）を走らせ、その中で書き直された field だけを写し直す。"""
-
-    kinds = field_kinds(type(instance))
-    before = [object.__getattribute__(instance, name) for name, _kind in kinds]
-    run()
-    changed = tuple(
-        entry for entry, old in zip(kinds, before) if object.__getattribute__(instance, entry[0]) is not old
-    )
-    if changed:
-        _normalize(instance, changed)
-
-
-def _original_of(function: Any) -> Any:
-    """継承した包みなら、その包みが包んだ元の関数（包みを二重にしない）。"""
-
-    return _WRAPPERS.get(function, function) if function is not None else None
 
 
 def runtime_ref_record(cls: type) -> type:
@@ -171,26 +183,27 @@ def runtime_ref_record(cls: type) -> type:
     custom_init = cls.__dict__.get("__init__")
     if custom_init is not None:
         # `init=False` で自前の `__init__` を持つ class（`CanonicalLocation`）: その後で写す
-        original_init = _original_of(custom_init)
-
         def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
-            original_init(self, *args, **kwargs)
+            custom_init(self, *args, **kwargs)
             normalize_fields(self)
 
         __init__.__qualname__ = f"{cls.__qualname__}.__init__"
-        _WRAPPERS[__init__] = original_init
+        _WRAPPERS[__init__] = custom_init
         cls.__init__ = __init__  # type: ignore[misc]
         return cls
-    # 自分の `__post_init__` が無ければ継承したもの（包みなら元の関数）を呼ぶ
-    original = _original_of(cls.__dict__.get("__post_init__") or getattr(cls, "__post_init__", None))
+    # 自分の `__post_init__` が無ければ継承したものを呼ぶ（継承したものが包みなら、その中でもう 1 度
+    # 写すだけで、検証は 1 度）
+    original = cls.__dict__.get("__post_init__") or getattr(cls, "__post_init__", None)
 
     if original is None:
         def __post_init__(self: Any, *init_vars: Any) -> None:
             normalize_fields(self)
     else:
         def __post_init__(self: Any, *init_vars: Any) -> None:
-            normalize_fields(self)
-            _run_and_renormalize(self, lambda: original(self, *init_vars))
+            kinds = field_kinds(type(self))
+            before = _normalize(self, kinds)
+            original(self, *init_vars)
+            _renormalize_rewritten(self, kinds, before)
 
     __post_init__.__qualname__ = f"{cls.__qualname__}.__post_init__"
     _WRAPPERS[__post_init__] = original
