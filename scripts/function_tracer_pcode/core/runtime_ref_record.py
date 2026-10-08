@@ -180,36 +180,46 @@ def _exact_tree(root: Tuple[Any, ...]) -> Tuple[Any, ...]:
     return done[id(root)]
 
 
-def _read(instance: Any, name: str) -> Any:
-    """field の値（`__dict__`・slot・class の既定値のどこに在っても属性として読む。無ければ `_ABSENT`）。"""
-
-    try:
-        return object.__getattribute__(instance, name)
-    except AttributeError:
-        return _ABSENT
-
-
 def _normalize(instance: Any, kinds: Tuple[Tuple[str, str], ...]) -> List[Any]:
-    """`kinds` の field を写し、写した後の値の列を返す（検証の後に、書き直された field を見分けるため）。"""
+    """`kinds` の field を写し、写した後の値の列を返す（検証の後に、書き直された field を見分けるため）。
 
-    values = []
+    field は属性として読む（`__dict__`・slot・class の既定値のどこに在っても同じ）。値が無い field は
+    `_ABSENT`。構築ごとに通る hot path なので、`_exact` と同じ判定をここでは展開して書く。
+    """
+
+    values: List[Any] = []
+    append = values.append
+    read = object.__getattribute__
     for name, kind in kinds:
-        value = _read(instance, name)
-        if value is not _ABSENT and not _exact(value):
+        try:
+            value = read(instance, name)
+        except AttributeError:
+            append(_ABSENT)
+            continue
+        holder = type(value)
+        if not (value is None or holder is int or holder is str or holder is bool or holder is float):
             new = exact_field_value(value, kind)
             if new is not value:
                 object.__setattr__(instance, name, new)
                 value = new
-        values.append(value)
+        append(value)
     return values
 
 
 def _renormalize_rewritten(instance: Any, kinds: Tuple[Tuple[str, str], ...], before: List[Any]) -> None:
     """class 自身の `__post_init__`（検証）が書き直した field だけを、もう一度写す。"""
 
-    rewritten = tuple(entry for entry, old in zip(kinds, before) if _read(instance, entry[0]) is not old)
+    read = object.__getattribute__
+    rewritten = []
+    for entry, old in zip(kinds, before):
+        try:
+            current = read(instance, entry[0])
+        except AttributeError:
+            current = _ABSENT
+        if current is not old:
+            rewritten.append(entry)
     if rewritten:
-        _normalize(instance, rewritten)
+        _normalize(instance, tuple(rewritten))
 
 
 def normalize_fields(instance: Any) -> None:

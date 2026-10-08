@@ -991,6 +991,8 @@ def scalar_int(value: Any) -> int:
     容器の中や注釈が `Any` の値を整数として読む入口。
     """
 
+    if type(value) is int:
+        return value
     return int(exact_scalar(value))
 
 
@@ -1000,6 +1002,8 @@ def scalar_text(value: Any) -> str:
     subclass の `__str__` / `__repr__` を呼ばない。それ以外は `str()` のまま（Issue #242、`scalar_int` と同じ）。
     """
 
+    if type(value) is str:
+        return value
     return str(exact_scalar(value))
 
 
