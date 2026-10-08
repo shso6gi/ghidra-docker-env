@@ -57,16 +57,20 @@ def _digest(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:24]
 
 
-def _without_unidentified_tokens(key: Any) -> Any:
-    """構造 key の「識別できない値」の印（object ごとに新しい token）を、token を除いた印にする。
+#: process の中でだけ identity になる token の tag（`core/structural.py` の説明。通し番号と nonce を持つ）
+_PROCESS_LOCAL_TOKENS = ("exact_tail_unidentified", "process_object")
 
-    印は同じ object の 2 度の構築でも別の token なので、run の間で比べられない。印の種類は残す
-    （識別できる値と識別できない値の差は消さない）。
+
+def _without_unidentified_tokens(key: Any) -> Any:
+    """構造 key の process 内だけの token（通し番号と nonce）を、その 2 つを除いた印にする。
+
+    通し番号は同じ process の前の仕事の量で変わり、nonce は token ごとの乱数なので、run の間で比べ
+    られない。印の種類（tag と、識別できない理由）は残す（識別できる値と識別できない値の差は消さない）。
     """
 
     if type(key) is tuple:
-        if key and key[0] == "exact_tail_unidentified":
-            return key[:-1] + ("<token>",)
+        if key and key[0] in _PROCESS_LOCAL_TOKENS:
+            return key[:-2] + ("<serial>", "<nonce>")
         return tuple(_without_unidentified_tokens(item) for item in key)
     return key
 
