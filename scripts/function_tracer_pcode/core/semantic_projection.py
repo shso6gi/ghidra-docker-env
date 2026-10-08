@@ -483,7 +483,8 @@ def identity_value(value: Any) -> Optional[CanonicalAtoms]:
 
     **identity の入口はここ 1 つ**（`_identity_of`）: runtime ref の stable / semantic / origin、storage、
     loop summary の Method B key は、すべてここを通って projection の field になる。identity の成分を
-    足すときもここを通す（`test_sn3_identity_entries` が全入口を同じ matrix で確かめる）。
+    足すときもここを通す。`test_sn3_identity_entries` は現行 5 成分の通過を検証する（別の経路の新しい
+    成分は検出できない）。成分を足すときは、入口の一覧・網羅 test・契約の matrix を更新する。
     """
 
     return _identity_of(value)[0]

@@ -273,13 +273,14 @@ def test_a_usable_method_b_key_still_names_one_shared_loop_function(monkeypatch)
 
 
 # ---------------------------------------------------------------------------
-# 入口の網羅（新しい identity の成分が `_identity_of` を通ること）
+# 現行の identity の成分が `_identity_of` を通ること
 # ---------------------------------------------------------------------------
 
 
 def test_every_projection_identity_component_goes_through_the_single_entry(monkeypatch):
-    # projection が identity として持つ値（stable / semantic / origin / storage / Method B key）は、すべて
-    # `_identity_of` を通る。入口を通らない成分を足すと、ここで数が合わなくなる
+    # 現行 5 成分（stable / semantic / origin / storage / Method B key）の `_identity_of` の通過を検証する。
+    # 別の経路を通る新しい成分は、既存 5 成分の呼び出しが変わらなければこの test では検出できない:
+    # identity の成分を足すときは、入口の一覧（module の docstring）・この test・契約の matrix を更新する
     seen = []
     original = projection_module._identity_of
 
