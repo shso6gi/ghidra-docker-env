@@ -234,9 +234,12 @@ def test_every_runtime_ref_class_goes_through_the_owner_and_is_in_the_corpus():
 
 @pytest.mark.parametrize("cls", sorted(_package_ref_classes(), key=lambda cls: cls.__qualname__))
 def test_ref_classes_stay_package_types_and_classify_their_fields(cls):
+    # owner が class の namespace に置くのは包んだ `__post_init__` / `__init__` だけ: 信頼する型のまま
     assert live_values.package_type(cls)
-    hints_kinds = dict(field_kinds(cls))
-    assert all(kind in ("scalar", "bool", "tuple") for kind in hints_kinds.values())
+    # 注釈（前方参照を含む）が解決でき、分類は dataclass の field の部分集合
+    kinds = dict(field_kinds(cls))
+    assert set(kinds) <= {item.name for item in dataclasses.fields(cls)}
+    assert set(kinds.values()) <= {"scalar", "bool", "tuple"}
 
 
 def test_decorator_must_be_below_dataclass():
