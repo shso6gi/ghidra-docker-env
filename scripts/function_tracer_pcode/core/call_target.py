@@ -23,7 +23,7 @@ def _is_jvm_not_running_error(error: Exception) -> bool:
         JVMNotRunning = ()  # type: ignore[assignment]
     return (
         isinstance(error, JVMNotRunning)
-        or str(error) in _JVM_NOT_RUNNING_MESSAGES
+        or live_values.scalar_text(error) in _JVM_NOT_RUNNING_MESSAGES
     )
 
 
@@ -47,12 +47,12 @@ def _safe_offset(address_or_value: Any) -> Optional[int]:
     get_offset = _safe_getattr(address_or_value, "getOffset")
     if callable(get_offset):
         try:
-            offset = int(live_values.exact_scalar(get_offset()))
+            offset = live_values.scalar_int(get_offset())
             return offset if offset >= 0 else None
         except Exception:
             return None
     try:
-        offset = int(address_or_value)
+        offset = live_values.scalar_int(address_or_value)
         return offset if offset >= 0 else None
     except Exception:
         return None
@@ -73,7 +73,7 @@ def _safe_program_id(owner: Any) -> Optional[int]:
     get_unique_program_id = _safe_getattr(program, "getUniqueProgramID")
     if callable(get_unique_program_id):
         try:
-            return int(get_unique_program_id())
+            return live_values.scalar_int(get_unique_program_id())
         except Exception:
             return None
     return None

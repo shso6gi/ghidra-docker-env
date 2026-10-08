@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
-from scripts.function_tracer_pcode.core.live_values import as_int, as_str, attribute
+from scripts.function_tracer_pcode.core.live_values import as_int, as_str, attribute, scalar_int, scalar_text
 
 
 _ABI_SLOT_KIND = "abi_argument_slot"
@@ -37,7 +37,7 @@ _FRESH_ARGUMENT_KIND = "fresh_call_argument"
 def _optional_text(value: Any) -> Optional[str]:
     if value is None:
         return None
-    text = str(value).strip()
+    text = scalar_text(value).strip()
     return text or None
 
 
@@ -45,7 +45,7 @@ def _optional_int(value: Any) -> Optional[int]:
     if value is None or isinstance(value, bool):
         return None
     try:
-        return int(value)
+        return scalar_int(value)
     except (TypeError, ValueError):
         return None
 
@@ -67,7 +67,7 @@ class AbiArgumentSlotRef:
     declared_type_name: Optional[str] = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "ordinal", int(self.ordinal))
+        object.__setattr__(self, "ordinal", scalar_int(self.ordinal))
         object.__setattr__(self, "storage_class", _optional_text(self.storage_class))
         object.__setattr__(self, "width_bits", _optional_int(self.width_bits))
         object.__setattr__(self, "declared_type_name", _optional_text(self.declared_type_name))

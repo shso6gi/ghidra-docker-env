@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.live_values import scalar_int, scalar_text
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 
@@ -15,7 +16,7 @@ def _coerce_nonnegative_int(value: Any) -> Optional[int]:
     if value is None or isinstance(value, bool):
         return None
     try:
-        coerced = int(value)
+        coerced = scalar_int(value)
     except (TypeError, ValueError):
         return None
     return coerced if coerced >= 0 else None
@@ -24,7 +25,7 @@ def _coerce_nonnegative_int(value: Any) -> Optional[int]:
 def _coerce_optional_text(value: Any) -> Optional[str]:
     if value is None:
         return None
-    text = str(value)
+    text = scalar_text(value)
     return text if text else None
 
 
@@ -32,9 +33,9 @@ def _coerce_opcode(value: Any) -> Optional[Any]:
     if value is None or isinstance(value, bool):
         return None
     try:
-        return int(value)
+        return scalar_int(value)
     except (TypeError, ValueError):
-        return str(value)
+        return scalar_text(value)
 
 
 def _address_components(address: Any) -> Tuple[Optional[str], Optional[int]]:
@@ -148,14 +149,14 @@ class PcodeOpRef:
         normalized_input_sizes = []
         for size in tuple(self.input_sizes or ()):
             try:
-                int_size = int(size)
+                int_size = scalar_int(size)
             except (TypeError, ValueError):
                 continue
             if int_size > 0:
                 normalized_input_sizes.append(int_size)
         object.__setattr__(self, "input_sizes", tuple(normalized_input_sizes))
         try:
-            output_size = int(self.output_size) if self.output_size is not None else None
+            output_size = scalar_int(self.output_size) if self.output_size is not None else None
         except (TypeError, ValueError):
             output_size = None
         object.__setattr__(self, "output_size", output_size if output_size and output_size > 0 else None)
@@ -232,12 +233,12 @@ class PcodeOpRef:
                 address_offset = None
             try:
                 time = getattr(seq, "getTime", lambda: None)()
-                seq_time = None if time is None else int(time)
+                seq_time = None if time is None else scalar_int(time)
             except Exception:
                 seq_time = None
             try:
                 order = seq.getOrder()
-                seq_order = None if order is None else int(order)
+                seq_order = None if order is None else scalar_int(order)
             except Exception:
                 seq_order = None
 
@@ -247,20 +248,20 @@ class PcodeOpRef:
             parent = None
         if parent is not None:
             try:
-                block_index = int(parent.getIndex())
+                block_index = scalar_int(parent.getIndex())
             except Exception:
                 block_index = None
         if local_op_ordinal is None:
             local_op_ordinal = _local_op_ordinal_from_parent(pcode_op)
 
         try:
-            num_inputs = int(pcode_op.getNumInputs())
+            num_inputs = scalar_int(pcode_op.getNumInputs())
         except Exception:
             num_inputs = 0
         for input_index in range(max(0, num_inputs)):
             try:
                 input_varnode = pcode_op.getInput(input_index)
-                input_size = int(input_varnode.getSize())
+                input_size = scalar_int(input_varnode.getSize())
             except Exception:
                 continue
             if input_size > 0:
@@ -268,7 +269,7 @@ class PcodeOpRef:
 
         try:
             output_varnode = pcode_op.getOutput()
-            output_size = int(output_varnode.getSize()) if output_varnode is not None else None
+            output_size = scalar_int(output_varnode.getSize()) if output_varnode is not None else None
         except Exception:
             output_size = None
 

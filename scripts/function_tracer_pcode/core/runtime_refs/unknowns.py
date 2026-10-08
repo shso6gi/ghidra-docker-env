@@ -13,6 +13,9 @@ from scripts.function_tracer_pcode.core.live_values import (
     as_int,
     attribute,
     elements_of,
+    exact_scalar,
+    scalar_int,
+    scalar_text,
     str_value,
     type_module,
     type_name,
@@ -337,6 +340,8 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
     （組み込みの値だけの値）を読むだけ（bounded path で identity を組み立てない）。
     """
 
+    # scalar の subclass は基底型の値で書く（subclass の code を呼ばず、写しに subclass を残さない。Issue #242）
+    value = exact_scalar(value)
     if value is None or isinstance(value, (bool, int, str)):
         return value
     if depth >= _CANONICAL_BUDGET_MAX_DEPTH:
@@ -354,8 +359,8 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
         )
     if isinstance(value, Mapping):
         return {
-            str(key): _canonical_budget_value(item, depth + 1)
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            scalar_text(key): _canonical_budget_value(item, depth + 1)
+            for key, item in sorted(value.items(), key=lambda pair: scalar_text(pair[0]))
         }
     stable_key = getattr(value, "stable_key", None)
     if callable(stable_key):
@@ -399,20 +404,20 @@ class ExpansionBudgetTruncation:
     referenced_event_ids: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "kind", str(self.kind))
+        object.__setattr__(self, "kind", scalar_text(self.kind))
         if self.surface is not None:
-            object.__setattr__(self, "surface", str(self.surface))
+            object.__setattr__(self, "surface", scalar_text(self.surface))
         if self.label is not None:
-            object.__setattr__(self, "label", str(self.label))
+            object.__setattr__(self, "label", scalar_text(self.label))
         for name in ("dedup", "paths", "conditions"):
             counts = getattr(self, name)
             if counts is None:
                 continue
-            object.__setattr__(self, name, tuple(int(item) for item in counts))
+            object.__setattr__(self, name, tuple(scalar_int(item) for item in counts))
         object.__setattr__(
             self,
             "referenced_event_ids",
-            tuple(sorted({str(item) for item in (self.referenced_event_ids or ())})),
+            tuple(sorted({scalar_text(item) for item in (self.referenced_event_ids or ())})),
         )
         # identity（owner #194 の規則 `_canonical_budget_value`）は構築のときに 1 度だけ作る。
         # 出力（`json_items`）はこの写し（組み込みの値だけの値）を読むだけで、bounded path で

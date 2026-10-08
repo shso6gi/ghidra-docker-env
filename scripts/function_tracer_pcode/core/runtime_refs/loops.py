@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, bounded_repr, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, attribute, is_kind, size, type_module, type_name
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, attribute, is_kind, scalar_int, size, type_module, type_name
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     LocationBaseRef,
 )
@@ -877,8 +877,8 @@ class LoopCaseRef:
 
 
 def _bias_key(value: int, result_size: int) -> Tuple[int, int]:
-    bits = max(1, int(result_size or 0)) * 8
-    return bits, int(value) % (1 << bits)
+    bits = max(1, scalar_int(result_size or 0)) * 8
+    return bits, scalar_int(value) % (1 << bits)
 
 
 def _normalize_storage_identity_key(value: Optional[Tuple[Any, ...]]) -> Optional[Tuple[Any, ...]]:
@@ -944,11 +944,11 @@ class LoopSummaryRef:
     constant_bias: int = 0
 
     def __post_init__(self) -> None:
-        result_size = int(getattr(self.term_descriptor, "result_size", 0) or 0)
-        if result_size <= 0 and int(self.constant_bias) != 0:
+        result_size = scalar_int(getattr(self.term_descriptor, "result_size", 0) or 0)
+        if result_size <= 0 and scalar_int(self.constant_bias) != 0:
             raise ValueError("LoopSummaryRef.constant_bias requires a positive term result_size")
         result_size = max(1, result_size)
-        object.__setattr__(self, "constant_bias", _bias_key(int(self.constant_bias), result_size)[1])
+        object.__setattr__(self, "constant_bias", _bias_key(scalar_int(self.constant_bias), result_size)[1])
 
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         start_key = _loop_object_key(self.start_expr)
@@ -1875,8 +1875,8 @@ class StateTransitionLoopSummaryRef:
     source: str = "state_transition_loop_summary"
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "result_size", max(1, int(self.result_size or 0)))
-        object.__setattr__(self, "state_size", max(1, int(self.state_size or 0)))
+        object.__setattr__(self, "result_size", max(1, scalar_int(self.result_size or 0)))
+        object.__setattr__(self, "state_size", max(1, scalar_int(self.state_size or 0)))
 
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         guard_key = _loop_object_key(self.state_guard)
@@ -2018,8 +2018,8 @@ class CountedStateTransitionLoopSummaryRef:
     source: str = "counted_state_transition_loop_summary"
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "state_size", max(1, int(self.state_size or self.result_size or 0)))
-        object.__setattr__(self, "result_size", max(1, int(self.result_size or self.state_size or 0)))
+        object.__setattr__(self, "state_size", max(1, scalar_int(self.state_size or self.result_size or 0)))
+        object.__setattr__(self, "result_size", max(1, scalar_int(self.result_size or self.state_size or 0)))
 
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         init_key = _loop_object_key(self.initial_state)

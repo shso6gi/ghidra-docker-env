@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, type_name
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, scalar_int, type_name
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     LocationBaseRef,
 )
@@ -129,15 +129,15 @@ class ReductionAccumulatorProof:
     source: str = "recurrence_summary"
 
     def __post_init__(self) -> None:
-        if int(self.stride) <= 0:
+        if scalar_int(self.stride) <= 0:
             raise ValueError("ReductionAccumulatorProof requires a positive stride")
-        if int(self.element_size) <= 0:
+        if scalar_int(self.element_size) <= 0:
             raise ValueError("ReductionAccumulatorProof requires a positive element_size")
-        if int(self.result_size) <= 0:
+        if scalar_int(self.result_size) <= 0:
             raise ValueError("ReductionAccumulatorProof requires a positive result_size")
-        if int(self.index_step) <= 0:
+        if scalar_int(self.index_step) <= 0:
             raise ValueError("ReductionAccumulatorProof requires a positive index_step")
-        if self.seed_term_count is not None and int(self.seed_term_count) < 0:
+        if self.seed_term_count is not None and scalar_int(self.seed_term_count) < 0:
             raise ValueError("ReductionAccumulatorProof requires a non-negative seed_term_count")
         if self.count_parameter_storage_identity_key is not None:
             object.__setattr__(
@@ -145,12 +145,16 @@ class ReductionAccumulatorProof:
                 "count_parameter_storage_identity_key",
                 _normalize_storage_identity_key(self.count_parameter_storage_identity_key),
             )
-        object.__setattr__(self, "constant_bias", _bias_key(int(self.constant_bias), int(self.result_size))[1])
+        object.__setattr__(self, "constant_bias", _bias_key(scalar_int(self.constant_bias), scalar_int(self.result_size))[1])
+        # 項は list で来ることもある（owner は exact な tuple だけを写す）: 要素は基底型の値で読む（Issue #242）
         lane_terms = tuple(
-            sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
+            sorted(
+                (scalar_int(offset), max(1, scalar_int(exact_scalar(size) or 0)))
+                for offset, size in (self.lane_terms or ())
+            )
         )
         if lane_terms:
-            start_offset = int(self.start_offset)
+            start_offset = scalar_int(self.start_offset)
             min_offset = min(offset for offset, _size in lane_terms)
             if start_offset != 0 and min_offset == start_offset:
                 lane_terms = tuple((offset - start_offset, size) for offset, size in lane_terms)
@@ -1028,8 +1032,8 @@ class ReadonlyReductionRef:
     constant_bias: int = 0
 
     def __post_init__(self) -> None:
-        result_size = max(1, int(self.result_size or 0))
-        ref_bias = _bias_key(int(self.constant_bias), result_size)[1]
+        result_size = max(1, scalar_int(self.result_size or 0))
+        ref_bias = _bias_key(scalar_int(self.constant_bias), result_size)[1]
         loop_summary = self.loop_summary
         accumulator_proof = self.accumulator_proof
         if self.count_parameter_storage_identity_key is not None:
@@ -1040,25 +1044,25 @@ class ReadonlyReductionRef:
             )
         source_biases = []
         if loop_summary is not None:
-            summary_result_size_raw = int(
+            summary_result_size_raw = scalar_int(
                 getattr(getattr(loop_summary, "term_descriptor", None), "result_size", 0) or 0
             )
             if summary_result_size_raw > 0 and summary_result_size_raw != result_size:
                 raise ValueError("ReadonlyReductionRef.result_size must match loop_summary term result_size")
-            if summary_result_size_raw <= 0 and int(getattr(loop_summary, "constant_bias", 0) or 0) != 0:
+            if summary_result_size_raw <= 0 and scalar_int(getattr(loop_summary, "constant_bias", 0) or 0) != 0:
                 raise ValueError("ReadonlyReductionRef cannot align biased loop_summary without term result_size")
             summary_result_size = result_size if summary_result_size_raw <= 0 else summary_result_size_raw
             summary_bias = _bias_key(
-                int(getattr(loop_summary, "constant_bias", 0) or 0),
+                scalar_int(getattr(loop_summary, "constant_bias", 0) or 0),
                 summary_result_size,
             )[1]
             source_biases.append(("loop_summary.constant_bias", summary_bias))
         if accumulator_proof is not None:
-            proof_result_size = max(1, int(getattr(accumulator_proof, "result_size", 0) or 0))
+            proof_result_size = max(1, scalar_int(getattr(accumulator_proof, "result_size", 0) or 0))
             if proof_result_size != result_size:
                 raise ValueError("ReadonlyReductionRef.result_size must match accumulator_proof.result_size")
             proof_bias = _bias_key(
-                int(getattr(accumulator_proof, "constant_bias", 0) or 0),
+                scalar_int(getattr(accumulator_proof, "constant_bias", 0) or 0),
                 proof_result_size,
             )[1]
             source_biases.append(("accumulator_proof.constant_bias", proof_bias))

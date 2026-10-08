@@ -6,19 +6,36 @@ field に、外の runtime の scalar の subclass（JPype の `JInt` / `JLong` 
 作る site ごとの正規化は漏れる（`int(...)` も `x or default` も subclass を返し得る）ので、ref の構築の入口
 （`@runtime_ref_record`）で、注釈が scalar / tuple の field を 1 つの規則で写す。
 
-**規則**（値の写し方の owner は `live_values.exact_scalar`。ここは field の注釈ごとの適用だけを持つ）:
+**責務の分け方**:
+
+- scalar の値の読み方（基底型の slot で読む）は `live_values`（`exact_scalar` / `scalar_int` / `scalar_text`）。
+- その規則を field に当てるのはこの module（どの field に、いつ当てるか）。
+- ref ごとの検証（list から tuple を作る・範囲を確かめるなど）は各 ref の `__post_init__`。容器の中や注釈が
+  `Any` の値を数値・文字列として読むときは `live_values.scalar_int` / `scalar_text` を使う（この module は
+  list や任意の object を辿らない）。
+
+**規則**:
 
 - exact な組み込みの値・`None`・Enum の member（`IntEnum` / str の enum を含む）は変えない。
 - scalar の subclass（Enum でない）は基底型の slot で読んだ値にする（subclass の code を呼ばない）。
 - 注釈が `bool` の field だけ、int の subclass を `bool` にする（JBoolean の真偽を保つ）。
 - 注釈が tuple の field は、exact な `tuple` の容器だけを辿り、葉に同じ規則を当てる（注釈は葉の分類に使わない）。
+  共有された tuple は 1 回の正規化の中で 1 度だけ辿り、写した結果も共有する（葉が変わらない tuple は同じ object）。
 - 注釈が scalar / tuple でない field（`Any`・record・式）と、写せない値（scalar でない object）は変えない。
+- 型は identity で見る（型の `__eq__` / `__hash__`、metaclass の hook を呼ばない）。
+
+**注釈の分類**: `X` / `Optional[X]` / `Union[X, None]` / `X | None` / `Annotated[X, ...]`（`X` は `int` / `float` /
+`str` / `bool` / `tuple` / `Tuple[...]`）を分類する。それ以外（`Any`・record・`Dict`・複数の型の `Union`）は写さない。
 
 **順序**: `@dataclass` の **下** に置く（素の class に先に当たる）。class の `__dict__` に `__post_init__` を置く
 （既存のものは包む）ので、生成された `__init__` は field の代入の後にそれを呼ぶ。正規化は class 自身の検証
 （既存の `__post_init__` の本体）より前に走り、検証は exact な値だけを見る。検証が field を書き直したとき
 （list から tuple を作るなど）は、書き直した field だけをもう一度写す。自前の `__init__` を持つ class
 （`init=False`）は、その `__init__` の後に写す。`dataclasses.replace` は `__init__` を通るので同じ規則になる。
+
+**field の値の置き場所**: instance の `__dict__`・`__slots__`（基底の class の slot を含む）・class の既定値
+（`field(init=False, default=...)`）のどれでも、属性として読む（`object.__getattribute__`）。値が無い field
+（自前の `__init__` が置かなかった field）は写さない。
 
 field の分類は class ごとに最初の構築で 1 度だけ決め（前方参照の注釈を解決できるのはその時点）、この
 module の dict に置く。class の namespace には書かない（`live_values.package_type` の判定を変えない）。
@@ -27,13 +44,11 @@ module の dict に置く。class の namespace には書かない（`live_value
 from __future__ import annotations
 
 import dataclasses
+import types
 import typing
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.live_values import NOT_PLAIN, exact_scalar, int_value
-
-#: field の分類（注釈 → 規則の当て方）。`object` の field は写さないので分類の列に入れない。
-_SCALAR_KINDS = {int: "scalar", float: "scalar", str: "scalar", bool: "bool"}
 
 #: class → 写す field の (名前, 分類) の列。最初の構築で決める。
 _FIELD_KINDS: Dict[type, Tuple[Tuple[str, str], ...]] = {}
@@ -42,16 +57,24 @@ _FIELD_KINDS: Dict[type, Tuple[Tuple[str, str], ...]] = {}
 #: ref の class がこの owner を通ることを確かめる読み口（`is_runtime_ref_record`）が使う。
 _WRAPPERS: Dict[Callable[..., Any], Any] = {}
 
+#: field に値が無い印（自前の `__init__` が置かなかった field）
+_ABSENT = object()
+
 
 def _kind_of(annotation: Any) -> str:
+    """注釈の分類（`scalar` / `bool` / `tuple` / `object`）。型は identity で比べる。"""
+
     origin = typing.get_origin(annotation)
-    if origin is typing.Union:
+    if origin is typing.Annotated:
+        return _kind_of(typing.get_args(annotation)[0])
+    if origin is typing.Union or origin is types.UnionType:
         rest = [arg for arg in typing.get_args(annotation) if arg is not type(None)]
         return _kind_of(rest[0]) if len(rest) == 1 else "object"
-    kind = _SCALAR_KINDS.get(annotation) if isinstance(annotation, type) else None
-    if kind is not None:
-        return kind
-    if origin is tuple:
+    if annotation is bool:
+        return "bool"
+    if annotation is int or annotation is float or annotation is str:
+        return "scalar"
+    if annotation is tuple or origin is tuple:
         return "tuple"
     return "object"
 
@@ -73,7 +96,7 @@ def _field_hints(cls: type) -> Dict[str, Any]:
         }
         if own:
             holder = type(klass.__name__, (), {"__annotations__": own, "__module__": klass.__module__})
-            hints.update(typing.get_type_hints(holder))
+            hints.update(typing.get_type_hints(holder, include_extras=True))
     return hints
 
 
@@ -93,52 +116,86 @@ def field_kinds(cls: type) -> Tuple[Tuple[str, str], ...]:
     return known
 
 
+def _exact(value: Any) -> bool:
+    """値が写さなくてよい値か（`None` と exact な組み込みの scalar。型は identity で見る）。"""
+
+    holder = type(value)
+    return value is None or holder is int or holder is str or holder is bool or holder is float
+
+
 def exact_field_value(value: Any, kind: str) -> Any:
     """分類 `kind` の field に置く値（規則は module の docstring）。変えない値は同じ object を返す。"""
 
     holder = type(value)
     if holder is tuple:
         return _exact_tree(value) if kind == "tuple" else value
-    if kind == "tuple":
+    if kind == "tuple" or _exact(value):
         return value
-    if kind == "bool" and holder is not int and holder is not bool:
+    if kind == "bool":
         number = int_value(value)
         if number is not NOT_PLAIN:
             return number != 0
     return exact_scalar(value)
 
 
-def _exact_tree(value: Tuple[Any, ...]) -> Tuple[Any, ...]:
-    """exact な tuple の葉を写した tuple（葉がどれも変わらなければ同じ tuple）。"""
+def _exact_tree(root: Tuple[Any, ...]) -> Tuple[Any, ...]:
+    """exact な tuple の葉を写した tuple（葉がどれも変わらなければ同じ tuple）。
 
-    items = None
-    for index, item in enumerate(value):
-        holder = type(item)
-        if holder is tuple:
-            new = _exact_tree(item)
-        elif item is None or holder is int or holder is str or holder is bool or holder is float:
+    明示 stack の後順走査（入れ子が深くても再帰の上限に当たらない）。memo（元の tuple の `id` → 結果）は
+    この 1 回の走査の中だけで持つ: 元の tuple は `root` から到達できるので走査の間は生きていて、`id` が
+    別の object に再利用されることは無い。共有された tuple は 1 度だけ辿り、結果も共有する。
+    """
+
+    done: Dict[int, Tuple[Any, ...]] = {}
+    stack: List[Tuple[Tuple[Any, ...], bool]] = [(root, False)]
+    while stack:
+        node, leaving = stack.pop()
+        if leaving:
+            items: Optional[List[Any]] = None
+            index = 0
+            for item in node:
+                if type(item) is tuple:
+                    new = done[id(item)]
+                elif _exact(item):
+                    index += 1
+                    continue
+                else:
+                    new = exact_scalar(item)
+                if new is not item:
+                    if items is None:
+                        items = list(node)
+                    items[index] = new
+                index += 1
+            done[id(node)] = node if items is None else tuple(items)
             continue
-        else:
-            new = exact_scalar(item)
-        if new is not item:
-            if items is None:
-                items = list(value)
-            items[index] = new
-    return value if items is None else tuple(items)
+        if id(node) in done:
+            continue
+        # 入った印（tuple は閉路を作れないので、同じ tuple に再び出会うのは別の経路からの共有だけ。
+        # 共有先は親より先に後順の処理を終える）
+        done[id(node)] = node
+        stack.append((node, True))
+        for item in node:
+            if type(item) is tuple:
+                stack.append((item, False))
+    return done[id(root)]
 
 
-#: 写さなくてよい値の型（exact な組み込みの scalar。`None` は値で見る）
-_EXACT_SCALARS = (int, str, bool, float)
+def _read(instance: Any, name: str) -> Any:
+    """field の値（`__dict__`・slot・class の既定値のどこに在っても属性として読む。無ければ `_ABSENT`）。"""
+
+    try:
+        return object.__getattribute__(instance, name)
+    except AttributeError:
+        return _ABSENT
 
 
 def _normalize(instance: Any, kinds: Tuple[Tuple[str, str], ...]) -> List[Any]:
     """`kinds` の field を写し、写した後の値の列を返す（検証の後に、書き直された field を見分けるため）。"""
 
-    state = _instance_state(instance)
     values = []
     for name, kind in kinds:
-        value = state[name] if state is not None else object.__getattribute__(instance, name)
-        if value is not None and type(value) not in _EXACT_SCALARS:
+        value = _read(instance, name)
+        if value is not _ABSENT and not _exact(value):
             new = exact_field_value(value, kind)
             if new is not value:
                 object.__setattr__(instance, name, new)
@@ -150,23 +207,9 @@ def _normalize(instance: Any, kinds: Tuple[Tuple[str, str], ...]) -> List[Any]:
 def _renormalize_rewritten(instance: Any, kinds: Tuple[Tuple[str, str], ...], before: List[Any]) -> None:
     """class 自身の `__post_init__`（検証）が書き直した field だけを、もう一度写す。"""
 
-    state = _instance_state(instance)
-    rewritten = [
-        entry
-        for entry, old in zip(kinds, before)
-        if (state[entry[0]] if state is not None else object.__getattribute__(instance, entry[0])) is not old
-    ]
+    rewritten = tuple(entry for entry, old in zip(kinds, before) if _read(instance, entry[0]) is not old)
     if rewritten:
-        _normalize(instance, tuple(rewritten))
-
-
-def _instance_state(instance: Any) -> Any:
-    """instance の `__dict__`（`slots=True` の class なら `None`。そのときは属性を 1 つずつ読む）。"""
-
-    try:
-        return object.__getattribute__(instance, "__dict__")
-    except AttributeError:
-        return None
+        _normalize(instance, rewritten)
 
 
 def normalize_fields(instance: Any) -> None:

@@ -982,6 +982,27 @@ def exact_scalar(value: Any) -> Any:
     return value if plain is NOT_PLAIN else plain
 
 
+def scalar_int(value: Any) -> int:
+    """`int(value)` と同じ値。scalar の subclass は基底型の値にしてから整数にする（`exact_scalar`）。
+
+    subclass の `__int__` / `__index__` を呼ばない（JPype の `JInt` などが値を変える code を持っていても、
+    整数は基底型の slot の値）。exact な値・enum の member・scalar でない値は `int()` のまま（`as_int` と
+    違い、`int()` が受ける値をすべて受け、例外も `int()` と同じ）。runtime ref の構築（Issue #242）が
+    容器の中や注釈が `Any` の値を整数として読む入口。
+    """
+
+    return int(exact_scalar(value))
+
+
+def scalar_text(value: Any) -> str:
+    """`str(value)` と同じ値。scalar の subclass は基底型の値にしてから文字列にする（`exact_scalar`）。
+
+    subclass の `__str__` / `__repr__` を呼ばない。それ以外は `str()` のまま（Issue #242、`scalar_int` と同じ）。
+    """
+
+    return str(exact_scalar(value))
+
+
 def as_int(value: Any) -> int:
     """`int(value)` と同じ値（bool / int / float / str とその subclass）を基底型の slot で求める。
 
@@ -1854,6 +1875,8 @@ def elements_of(values: Any) -> Iterator[Any]:
 
 __all__ = [
     "exact_scalar",
+    "scalar_int",
+    "scalar_text",
     "StorageBeyondReadBound",
     "metered_storage_reads",
     "register_storage_meter",

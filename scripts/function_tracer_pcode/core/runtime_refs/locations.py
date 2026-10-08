@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw)
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, str_value
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, scalar_int, scalar_text, str_value
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
 )
@@ -158,7 +158,7 @@ class LocationBaseRef:
             normalized_index = None
             if self.parameter_index is not None:
                 try:
-                    candidate = int(self.parameter_index)
+                    candidate = scalar_int(self.parameter_index)
                 except Exception:
                     candidate = None
                 if candidate is not None and candidate >= 0:
@@ -203,8 +203,8 @@ class LocationBaseRef:
             kind="storage",
             storage_space_id=space_id,
             storage_space=space_name or None,
-            storage_offset=int(offset),
-            storage_size=max(1, int(size or 0)),
+            storage_offset=scalar_int(offset),
+            storage_size=max(1, scalar_int(exact_scalar(size) or 0)),
             storage_identity_key=tuple(storage_identity_key) if storage_identity_key is not None else None,
             display_hint=display_hint,
         )
@@ -224,10 +224,10 @@ class LocationBaseRef:
         different binaries canonicalises to the same base (Issue #104).
         """
 
-        name = str(symbol_name or "").strip()
+        name = scalar_text(exact_scalar(symbol_name) or "").strip()
         if not name:
             raise ValueError("global location base requires a symbol name")
-        object_size = max(1, int(size or 0))
+        object_size = max(1, scalar_int(exact_scalar(size) or 0))
         return cls(
             kind="global",
             storage_space=space_name or None,
@@ -450,8 +450,8 @@ class CanonicalLocation:
                 normalized_base = LocationBaseRef.parameter(base_param or "param")
         object.__setattr__(self, "base_ref", normalized_base)
         # scalar の subclass は基底型の値にしてから整数にする（subclass の `__int__` を呼ばない。Issue #242）
-        object.__setattr__(self, "offset", int(exact_scalar(offset)))
-        object.__setattr__(self, "size", int(exact_scalar(size)))
+        object.__setattr__(self, "offset", scalar_int(offset))
+        object.__setattr__(self, "size", scalar_int(size))
         object.__setattr__(self, "steps", tuple(steps))
 
     @property
