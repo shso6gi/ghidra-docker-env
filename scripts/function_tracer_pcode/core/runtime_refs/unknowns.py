@@ -6,6 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core.live_values import (
     NOT_PLAIN,
     as_bool,
@@ -27,6 +28,7 @@ from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class DeferredCallRef:
     """Structured identity for a deferred call site."""
 
@@ -114,6 +116,7 @@ def _runtime_ref_origin_source(value: Any) -> Tuple[Any, ...]:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class UnknownValueRef:
     """Structured identity for UNKNOWN expressions used at runtime."""
 
@@ -375,6 +378,7 @@ def _canonical_budget_json(payload: Any) -> str:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ExpansionBudgetTruncation:
     """1 件の切り捨て事実。
 

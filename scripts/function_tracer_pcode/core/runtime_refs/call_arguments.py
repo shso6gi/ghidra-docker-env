@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 from scripts.function_tracer_pcode.core.live_values import as_int, as_str, attribute
 
@@ -50,6 +51,7 @@ def _optional_int(value: Any) -> Optional[int]:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class AbiArgumentSlotRef:
     """One ABI-determined argument slot of a call site.
 
@@ -128,6 +130,7 @@ class MissingSideDiscriminator(ValueError):
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class FreshCallArgumentRef:
     """A side-specific free symbol standing for one unrecovered call argument.
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 
 
@@ -123,6 +124,7 @@ def _local_op_ordinal_from_parent(pcode_op: Any) -> Optional[int]:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class PcodeOpRef:
     """Stable identity for a concrete Ghidra P-code operation."""
 
@@ -369,6 +371,7 @@ class PcodeOpRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class PcodeBlockRef:
     """Stable identity for a concrete Ghidra decompiler basic block."""
 

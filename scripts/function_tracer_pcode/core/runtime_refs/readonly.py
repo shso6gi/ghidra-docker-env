@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
 from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, type_name
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
@@ -28,6 +29,7 @@ def _location_base_display_name(ref: Any) -> Any:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ReadonlyReductionTermRef:
     """Object-centric description of one scalar term in a memory reduction."""
 
@@ -51,6 +53,7 @@ class ReadonlyReductionTermRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ReadonlyReductionWitness:
     """Concrete count-parameter witness for a readonly reduction."""
 
@@ -77,6 +80,7 @@ class ReadonlyReductionWitness:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ReductionAccumulatorProof:
     """Object-centric proof that a loop accumulator is a readonly reduction.
 
@@ -1003,6 +1007,7 @@ class ReductionAccumulatorProof:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ReadonlyReductionRef:
     """Structured identity for a readonly pointer-reduction summary."""
 
@@ -1283,6 +1288,7 @@ class ReadonlyReductionRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ReadonlyReductionLowering:
     """Materialized readonly lowering produced from a reduction proof."""
 

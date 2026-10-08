@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, bounded_repr, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
 from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, attribute, is_kind, size, type_module, type_name
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
@@ -15,6 +16,7 @@ LoopSummarySolverProver = Callable[["LoopSummaryProofObligation"], "LoopSummaryC
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class LoopVariableIdentityRef:
     """Object-derived identity for a synthetic loop placeholder variable."""
 
@@ -53,6 +55,7 @@ class LoopVariableIdentityRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class _LoopVariableBindingContext:
     """Per-summary alpha-renaming context for loop placeholder variables."""
 
@@ -462,6 +465,7 @@ def _loop_object_to_dict(value: Any) -> Any:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class LoopBodyEffectRef:
     """Object-centric descriptor for one loop-body effect or guard."""
 
@@ -586,6 +590,7 @@ class LoopBodyEffectRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class LoopSideEffectProfileRef:
     """Object-centric side-effect profile for a loop summary."""
 
@@ -697,6 +702,7 @@ class LoopSideEffectProfileRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class LoopTermDescriptorRef:
     """Object-centric descriptor for the per-iteration term of a loop summary."""
 
@@ -810,6 +816,7 @@ class LoopTermDescriptorRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class LoopCaseRef:
     """Path-sensitive loop-body case used by Method-B loop summaries."""
 
@@ -912,6 +919,7 @@ def _count_parameter_semantic_identities(
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class LoopSummaryRef:
     """Unified semantic loop summary shared by all recurrence summaries.
 
@@ -1078,6 +1086,7 @@ class LoopSummaryRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ComposedLoopSummaryRef:
     """Lightweight composition wrapper for sequential loop summaries.
 
@@ -1209,6 +1218,7 @@ class ComposedLoopSummaryRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class LoopSummaryProofObligation:
     """Proof obligation emitted when loop-summary equality needs a solver context."""
 
@@ -1271,6 +1281,7 @@ def _loop_summary_comparison_key(summary: Optional["LoopSummaryRef"]) -> Optiona
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class LoopSummaryComparisonResult:
     """Tri-state result for the future Method-B loop-summary comparator."""
 
@@ -1710,6 +1721,7 @@ def _loop_int_expr(value: int, like_expr: Any) -> Any:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class CountedLoopSummaryRef:
     """Structured identity for a counted scalar loop summary."""
 
@@ -1843,6 +1855,7 @@ class CountedLoopSummaryRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class StateTransitionLoopSummaryRef:
     """Object-centric summary for loops whose trip count is driven by state transitions.
 
@@ -1985,6 +1998,7 @@ class StateTransitionLoopSummaryRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class CountedStateTransitionLoopSummaryRef:
     """Summary for counted loops whose scalar state is updated by a transition."""
 

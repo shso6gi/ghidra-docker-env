@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw)
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, str_value
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, str_value
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
 )
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class AddressValueRef:
     """Structured constant-address identity for runtime analysis."""
 
@@ -130,6 +132,7 @@ def _int_or_zero(value: Any) -> int:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class LocationBaseRef:
     """Structured identity for the root of a canonical memory location."""
 
@@ -403,6 +406,7 @@ class LocationBaseRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class LocationStep:
     kind: str
     value: int
@@ -423,6 +427,7 @@ class LocationStep:
 
 
 @dataclass(frozen=True, init=False)
+@runtime_ref_record
 class CanonicalLocation:
     base_ref: LocationBaseRef
     offset: int
@@ -444,8 +449,9 @@ class CanonicalLocation:
             else:
                 normalized_base = LocationBaseRef.parameter(base_param or "param")
         object.__setattr__(self, "base_ref", normalized_base)
-        object.__setattr__(self, "offset", int(offset))
-        object.__setattr__(self, "size", int(size))
+        # scalar の subclass は基底型の値にしてから整数にする（subclass の `__int__` を呼ばない。Issue #242）
+        object.__setattr__(self, "offset", int(exact_scalar(offset)))
+        object.__setattr__(self, "size", int(exact_scalar(size)))
         object.__setattr__(self, "steps", tuple(steps))
 
     @property
@@ -471,6 +477,7 @@ class CanonicalLocation:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class PostStateValueRef:
     """Structured identity for a fully materialized final object-state value."""
 
@@ -500,6 +507,7 @@ class PostStateValueRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class PostStateSnapshotRef:
     """Structured identity for a shared post-state memory snapshot."""
 
@@ -532,6 +540,7 @@ class PostStateSnapshotRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class PostStateReadRef:
     """Structured identity for a symbolic read from a shared post-state snapshot."""
 
@@ -577,6 +586,7 @@ class PostStateReadRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ObservedMemoryReadRef:
     """Structured provenance for an observed LOAD-derived memory read."""
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Optional, Tuple, Union
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.json_encoding import materialize
 
@@ -39,12 +40,14 @@ def _safe_getattr(owner: Any, name: str) -> Any:
 def _safe_offset(address_or_value: Any) -> Optional[int]:
     if address_or_value is None:
         return None
+    # scalar の subclass（JPype の `JLong` など）は基底型の値で比べる（subclass の code を呼ばない。Issue #242）
+    address_or_value = live_values.exact_scalar(address_or_value)
     if isinstance(address_or_value, int):
         return address_or_value if address_or_value >= 0 else None
     get_offset = _safe_getattr(address_or_value, "getOffset")
     if callable(get_offset):
         try:
-            offset = int(get_offset())
+            offset = int(live_values.exact_scalar(get_offset()))
             return offset if offset >= 0 else None
         except Exception:
             return None
@@ -128,6 +131,7 @@ def _safe_thunked_function(function: Any) -> Any:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class CallTargetRef:
     """Stable call target identity for runtime analysis."""
 

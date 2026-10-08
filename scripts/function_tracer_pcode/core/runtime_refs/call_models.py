@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
 from scripts.function_tracer_pcode.core.live_values import is_kind
 
@@ -55,6 +56,7 @@ def _frozen_key(value: Any, field_name: str) -> Tuple[Any, ...]:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class CallModelCandidateRef:
     """One callsite's decision-neutral call-model candidate classification.
 
