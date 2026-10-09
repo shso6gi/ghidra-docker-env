@@ -544,3 +544,8 @@ def test_pairwise_gate_does_not_complete_analysis_unsafety_even_if_evidence_is_a
     assert made and made[0].reason_id == "counterexample_analysis_safety_unproven"
     assert result.is_equivalent is None
     assert result.counterexample_raw is None
+    # It is the analysis obligation that stops the SAT. Were the gate to accept it, the
+    # pair would only stop later, at the replay obligation the forged proof is not bound to.
+    assert [(r.reason_id, r.evidence_refs) for r in result.unknown_reasons] == [
+        ("counterexample_analysis_safety_unproven", ("function1:incomplete_control_flow",)),
+    ]

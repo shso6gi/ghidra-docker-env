@@ -464,6 +464,21 @@ def test_bound_safe_counterexample_does_not_complete_analysis_unsafety_of_its_wi
             session, _LegacyResult(Outcome.NOT_EQ), case_id="analysis-completion-refused"
         )
 
+    # A deferred (pairwise, not yet terminal) analysis observation is not dropped by
+    # a COMPLETED for it either: the refusal comes before the deferred ledger.
+    session = connector.begin({"phase": "10", "case": "deferred-analysis-kept"})
+    deferred = replace(analysis, defer_until_terminal=True)
+    with production_signal_scope(session):
+        assert emit_sat_safety_signal(deferred) == 0
+        assert len(session.domain_signal_state["sat_safety_deferred_observations"]) == 1
+        assert emit_sat_safety_completion_if_observed(
+            blocker("COMPLETED", "counterexample_analysis_safety_unproven",
+                    "function1:incomplete_control_flow"),
+            producer_site_manifest_id="sat-safety-blocker-completed",
+        ) == 0
+        assert len(session.domain_signal_state["sat_safety_deferred_observations"]) == 1
+        assert session.domain_signal_error_kinds == ["ValueError"]
+
 
 def test_safe_counterexample_rejects_raw_digests_and_tampered_typed_receipt():
     with pytest.raises(TypeError, match="typed safety receipt"):
