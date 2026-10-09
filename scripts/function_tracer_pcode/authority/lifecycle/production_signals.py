@@ -36,6 +36,9 @@ from scripts.function_tracer_pcode.authority.domains.identical_function_identity
 from scripts.function_tracer_pcode.authority.domains.call_effect_sites import (
     CALL_EFFECT_PROOF_BATCH_SITE,
 )
+from scripts.function_tracer_pcode.authority.domains.sat_safety_resolution import (
+    SAT_SAFETY_REASON_RESOLUTION,
+)
 from scripts.function_tracer_pcode.authority.registry import (
     SatisfactionBindingFactory,
     SealedReasonRegistry,
@@ -237,11 +240,8 @@ class OutcomePartitionProductionSignal:
         authority_digest(self._phase7_signal_authority())
 
 
-SAT_SAFETY_TYPED_REASON_IDS = frozenset({
-    "counterexample_analysis_safety_unproven",
-    "counterexample_partition_replay_ambiguous",
-    "counterexample_replay_unproven",
-})
+#: SAT-safety の typed reason id。解消の型の表（``sat_safety_resolution``）の key と同じ集合。
+SAT_SAFETY_TYPED_REASON_IDS = frozenset(SAT_SAFETY_REASON_RESOLUTION)
 
 
 _SAFE_COUNTEREXAMPLE_SIGNAL_TOKEN = object()

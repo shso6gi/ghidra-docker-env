@@ -18,6 +18,11 @@ from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     make_unknown_reason,
     store_comparison_evidence,
 )
+from scripts.function_tracer_pcode.authority.domains.sat_safety_resolution import (
+    COUNTEREXAMPLE_REPLAY_MISSING_REF,
+    replay_may_resolve_sat_safety_reason,
+    sat_safety_reason_id_for_refs,
+)
 from scripts.function_tracer_pcode.authority.domains.sat_safety_sites import (
     SAT_SAFETY_AMBIGUITY_COMPLETED_SITE,
     SAT_SAFETY_AMBIGUITY_OBSERVED_SITE,
@@ -155,7 +160,7 @@ def _impl__counterexample_replay_reasons(
     """
     if analysis1 is None or analysis2 is None:
         return ()
-    return ("counterexample_replay_missing",)
+    return (COUNTEREXAMPLE_REPLAY_MISSING_REF,)
 
 def _impl__collect_equivalence_blocking_unsafety_reasons(
     self,
@@ -401,9 +406,13 @@ def _impl__sat_unsafety_resolution_proof_is_complete(
         return False
     if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value:
         return False
-    if any(_is_input_correspondence_reason(ref) for ref in reason_record.evidence_refs or ()):
-        # counterexample の replay は model の入力 bit が実在する入力か
-        # （上位 bit の対応）を示さない。入力対応の不足は replay で解消しない。
+    if not replay_may_resolve_sat_safety_reason(
+        reason_record.reason_id, reason_record.evidence_refs or ()
+    ):
+        # この gate を完了させる証拠は counterexample の replay の証明だけである。
+        # replay は model の値が実際の実行で同時に起こり得ることも、解析が捨てた
+        # 経路・効果・入力の上位 bit（入力対応）が無いことも示さないので、replay 型
+        # でない理由は、記録済みの証拠があっても解消しない（plan v4 I5・Q6）。
         return False
     proof_obligation_id = self._normalize_nested_tuple(reason_record.proof_obligation_id)
     if proof_obligation_id is None:
@@ -546,7 +555,11 @@ def _impl__record_completed_sat_counterexample_replay_proof(
         return
     if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value:
         return
-    if any(_is_input_correspondence_reason(ref) for ref in reason_record.evidence_refs or ()):
+    if not replay_may_resolve_sat_safety_reason(
+        reason_record.reason_id, reason_record.evidence_refs or ()
+    ):
+        # replay が解消してよいのは replay 型の理由だけ（解析の不安全・入力対応は
+        # pending のまま）。証拠を残すと、後で別の gate が同じ obligation を読む。
         return
     proof_obligation_id = self._normalize_nested_tuple(reason_record.proof_obligation_id)
     object_target_key = self._normalize_nested_tuple(reason_record.object_target_key)
@@ -698,6 +711,19 @@ def _impl__sat_unsafety_resolution_proof_id_from_evidence(cls, evidence: Any) ->
     for section in required_sections:
         if not cls._completed_proof_section_is_clean(proof_content.get(section)):
             return None
+    # この証拠は counterexample の replay の証明である。replay 型でない理由を
+    # 解消したと主張する証拠（以前の版が記録した、または手で組んだもの）は
+    # 証明として数えない（plan v4 I5）。
+    active_unsafety_discharge = proof_content.get("active_unsafety_discharge")
+    if not isinstance(active_unsafety_discharge, Mapping):
+        return None
+    discharged_reason_refs = cls._normalize_nested_tuple(
+        active_unsafety_discharge.get("discharged_reason_refs")
+    )
+    if not isinstance(discharged_reason_refs, tuple) or not replay_may_resolve_sat_safety_reason(
+        evidence_reason_id, discharged_reason_refs
+    ):
+        return None
     counterexample_replay = proof_content.get("counterexample_replay")
     if not isinstance(counterexample_replay, Mapping):
         return None
@@ -755,11 +781,8 @@ def _impl__make_sat_unsafety_unknown_reason(
                 counterexample_binding.pair_key,
             ),
         )
-    compatibility_reason_id = (
-        "counterexample_replay_unproven"
-        if sat_unsafety_reasons
-        and all("counterexample_replay" in str(item) for item in sat_unsafety_reasons)
-        else "counterexample_analysis_safety_unproven"
+    compatibility_reason_id = sat_safety_reason_id_for_refs(
+        str(item) for item in sat_unsafety_reasons
     )
     return _v2_observe_sat_unsafety_reason(make_internal_v2_reason_diagnostic(
         compatibility_reason_id,
@@ -1172,6 +1195,10 @@ def _impl__supersede_rejected_witness_blocker(
             refs, target_key, proof_artifact_digest=proof_digest,
         )
         return
+    if not replay_may_resolve_sat_safety_reason(reason_record.reason_id, refs):
+        # 別の witness の検証が退けてよいのは、その witness に固有の replay 型の
+        # blocker だけ。解析の不安全は witness に固有でないので完了させない。
+        return
     _emit_v2_sat_safety_blockers_completed_if_observed(
         refs,
         self._normalize_nested_tuple(reason_record.object_target_key),
@@ -1234,9 +1261,7 @@ def _impl__observe_v2_sat_counterexample_ambiguity(
 
 
 def _v2_sat_safety_reason_for_ref(reason_ref: str) -> str:
-    if "counterexample_replay" in reason_ref:
-        return "counterexample_replay_unproven"
-    return "counterexample_analysis_safety_unproven"
+    return sat_safety_reason_id_for_refs((str(reason_ref),))
 
 
 def _emit_v2_sat_safety_blockers_observed(

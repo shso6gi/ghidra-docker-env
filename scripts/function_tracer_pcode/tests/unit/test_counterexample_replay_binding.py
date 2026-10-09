@@ -337,14 +337,20 @@ def _open_formula_analysis(name, delta):
     )
 
 
-def _run_monolithic_with_pending_unsafety(prior_evidence=None, *, disable_self_record=False):
+ANALYSIS_UNSAFETY_REF = "function1:incomplete_control_flow"
+REPLAY_REF = "counterexample_replay_missing"
+
+
+def _run_monolithic_with_pending_unsafety(
+    prior_evidence=None, *, disable_self_record=False, pending_refs=(ANALYSIS_UNSAFETY_REF,),
+):
     """Drive MonolithicStrategy.check() through the checker (dispatch frame, typed
-    evidence, safety receipt) with an analysis-level unsafety obligation pending."""
+    evidence, safety receipt) with the given SAT-safety obligation refs pending."""
     from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
 
     checker = EquivalenceChecker(strategy="monolithic", timeout=5, monolithic_timeout=5)
     strategy = checker.monolithic_strategy
-    strategy._collect_decisive_sat_unsafety_reasons = lambda a1, a2: ["function1:incomplete_control_flow"]
+    strategy._collect_decisive_sat_unsafety_reasons = lambda a1, a2: list(pending_refs)
     if disable_self_record:
         strategy._record_completed_sat_counterexample_replay_proof = lambda *a, **k: None
     analysis1, analysis2 = _open_formula_analysis("left", 7), _open_formula_analysis("right", 8)
@@ -355,14 +361,61 @@ def _run_monolithic_with_pending_unsafety(prior_evidence=None, *, disable_self_r
     return result, evidence
 
 
+def test_monolithic_sat_with_pending_analysis_unsafety_is_not_decisive():
+    """plan v4 I5/Q6 (PR-A): the monolithic replay re-solves the same abstract formula
+    with the model values fixed; it does not show that the analysis dropped nothing.
+    With ``incomplete_control_flow`` pending, the SAT stays UNKNOWN and no replay proof
+    claiming to discharge it is recorded (it used to self-discharge into NOT_EQ)."""
+    result, recorded = _run_monolithic_with_pending_unsafety()
+
+    assert result.is_equivalent is None
+    assert result.counterexample_raw is None
+    assert [(r.reason_id, r.evidence_refs) for r in result.unknown_reasons] == [
+        ("counterexample_analysis_safety_unproven", (ANALYSIS_UNSAFETY_REF,)),
+    ]
+    assert recorded == []
+
+
+def test_monolithic_mixed_replay_and_analysis_unsafety_is_not_decisive():
+    """A replay ref next to an analysis-unsafety ref does not make the obligation replay-type."""
+    result, recorded = _run_monolithic_with_pending_unsafety(
+        pending_refs=(REPLAY_REF, ANALYSIS_UNSAFETY_REF),
+    )
+
+    assert result.is_equivalent is None
+    assert [r.reason_id for r in result.unknown_reasons] == ["counterexample_analysis_safety_unproven"]
+    assert recorded == []
+
+
+def test_monolithic_stale_self_discharge_proof_does_not_complete(monkeypatch):
+    """A proof recorded by the pre-PR-A recorder (reproduced by switching the owner's rule
+    off) that claims to discharge an analysis-unsafety obligation does not complete it
+    once the rule is back, even when the self-recorder is disabled."""
+    from scripts.function_tracer_pcode.proof.strategies.proof_gates import sat_safety as gates
+
+    monkeypatch.setattr(gates, "replay_may_resolve_sat_safety_reason", lambda *_a: True)
+    old, stale = _run_monolithic_with_pending_unsafety()
+    assert old.is_equivalent is False  # the self-discharge this PR closes
+    assert len(stale) == 1
+    assert stale[0]["reason_id"] == "counterexample_analysis_safety_unproven"
+    monkeypatch.undo()
+
+    rejected, _ = _run_monolithic_with_pending_unsafety(stale, disable_self_record=True)
+    assert rejected.is_equivalent is None
+    assert rejected.counterexample_raw is None
+    assert [r.reason_id for r in rejected.unknown_reasons] == ["counterexample_analysis_safety_unproven"]
+
+
 def test_monolithic_prior_proof_with_same_binding_but_other_receipt_does_not_complete():
-    """Issue #39 regression: a prior proof whose formula/model/premise/pair match the
-    current witness but whose receipt digest differs must not make the SAT decisive."""
+    """Issue #39 regression, on the replay-type obligation the replay proof may discharge:
+    a prior proof whose formula/model/premise/pair match the current witness but whose
+    receipt digest differs must not make the SAT decisive."""
     import copy
 
-    first, recorded = _run_monolithic_with_pending_unsafety()
+    first, recorded = _run_monolithic_with_pending_unsafety(pending_refs=(REPLAY_REF,))
     assert first.is_equivalent is False
     assert len(recorded) == 1
+    assert recorded[0]["reason_id"] == "counterexample_replay_unproven"
     replay = recorded[0]["proof_content"]["counterexample_replay"]
     assert replay["proof_source" if "proof_source" in replay else "replay_source"].startswith(
         "monolithic-counterexample-safety-receipt:"
@@ -371,28 +424,33 @@ def test_monolithic_prior_proof_with_same_binding_but_other_receipt_does_not_com
     assert replay["pair_key"] == ("monolithic", "0:0") or list(replay["pair_key"]) == ["monolithic", "0:0"]
 
     # Same witness, same receipt: the prior proof completes this execution's obligation.
-    same, _ = _run_monolithic_with_pending_unsafety(recorded, disable_self_record=True)
+    same, _ = _run_monolithic_with_pending_unsafety(
+        recorded, disable_self_record=True, pending_refs=(REPLAY_REF,),
+    )
     assert same.is_equivalent is False
 
     # Same formula/model/premise/pair, different receipt: fail closed.
     other_receipt = copy.deepcopy(recorded)
     other_receipt[0]["proof_content"]["counterexample_replay"]["solver_execution_receipt_digest"] = "f" * 64
-    rejected, _ = _run_monolithic_with_pending_unsafety(other_receipt, disable_self_record=True)
+    rejected, _ = _run_monolithic_with_pending_unsafety(
+        other_receipt, disable_self_record=True, pending_refs=(REPLAY_REF,),
+    )
     assert rejected.is_equivalent is None
     assert rejected.counterexample_raw is None
-    assert [r.reason_id for r in rejected.unknown_reasons] == ["counterexample_analysis_safety_unproven"]
+    assert [r.reason_id for r in rejected.unknown_reasons] == ["counterexample_replay_unproven"]
 
 
 def test_monolithic_without_this_executions_receipt_accepts_no_prior_proof():
-    """Direct strategy use has no dispatch frame and therefore no safety receipt: even a
-    fully matching prior proof cannot complete the obligation (fail-closed)."""
+    """Direct strategy use has no dispatch frame and therefore no safety receipt: a prior
+    replay proof recorded by a checker run cannot complete either obligation (fail-closed)."""
     from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
     from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
     from scripts.function_tracer_pcode.smt import ParallelSolverRunner
 
-    _, recorded = _run_monolithic_with_pending_unsafety()
+    _, recorded = _run_monolithic_with_pending_unsafety(pending_refs=(REPLAY_REF,))
+    assert len(recorded) == 1
     strategy = MonolithicStrategy(FormulaBuilder(), ParallelSolverRunner(timeout=5))
-    strategy._collect_decisive_sat_unsafety_reasons = lambda a1, a2: ["function1:incomplete_control_flow"]
+    strategy._collect_decisive_sat_unsafety_reasons = lambda a1, a2: [ANALYSIS_UNSAFETY_REF]
     analysis1, analysis2 = _open_formula_analysis("left", 7), _open_formula_analysis("right", 8)
     analysis1.completed_recovery_proof_evidence = tuple(recorded)
 

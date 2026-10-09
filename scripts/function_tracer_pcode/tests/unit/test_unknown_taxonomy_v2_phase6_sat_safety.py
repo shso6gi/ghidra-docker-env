@@ -465,11 +465,10 @@ def test_real_sat_safety_producer_observes_completes_and_issues_decisive_authori
     strategy, analysis1, analysis2, case1, case2 = _strategy_and_surface()
     model = {"x_1": 0, "x_2": 1}
     with production_signal_scope(session), comparison_of(analysis1, analysis2):
+        # A replay proof discharges only the replay-type obligation (plan v4 I5); the
+        # analysis-unsafety counterpart is pinned by the test after this one.
         reason = strategy._make_sat_unsafety_unknown_reason(
-            (
-                "function1:incomplete_control_flow",
-                "counterexample_replay_missing",
-            ),
+            ("counterexample_replay_missing",),
             analysis1,
             analysis2,
             case1=case1,
@@ -516,7 +515,7 @@ def test_real_sat_safety_producer_observes_completes_and_issues_decisive_authori
         case_id="phase6-sat-safety-complete",
     )
     evidence.validate()
-    assert reason.reason_id == "counterexample_analysis_safety_unproven"
+    assert reason.reason_id == "counterexample_replay_unproven"
     assert receipt.validates(
         type("Binding", (), {"premise_digest": "phase6-premise"})(),
         (0, 1),
@@ -537,6 +536,59 @@ def test_real_sat_safety_producer_observes_completes_and_issues_decisive_authori
     assert evidence.pilot_result.reduction.projection.q_open_base == ()
     assert evidence.pilot_result.candidate.decision_receipt.outcome == Outcome.NOT_EQ
 
+
+
+def test_replay_proof_does_not_complete_analysis_unsafety_and_authority_stays_unknown():
+    """plan v4 I5/Q6 (PR-A): a replay proof for a SAT whose obligation also carries an
+    analysis-unsafety ref records nothing, completes nothing, and the canonical
+    authority keeps the analysis cause open, so a legacy NOT_EQ is not issued."""
+    connector = _manifest_connector()
+    session = connector.begin({"phase": "6.1", "case": "sat-safety-analysis-unsafety"})
+    strategy, analysis1, analysis2, case1, case2 = _strategy_and_surface()
+    model = {"x_1": 0, "x_2": 1}
+    with production_signal_scope(session), comparison_of(analysis1, analysis2):
+        reason = strategy._make_sat_unsafety_unknown_reason(
+            (
+                "function1:incomplete_control_flow",
+                "counterexample_replay_missing",
+            ),
+            analysis1,
+            analysis2,
+            case1=case1,
+            case2=case2,
+            pair_id="(0,1)",
+            stage="S_PAIRWISE",
+        )
+        strategy._record_completed_sat_counterexample_replay_proof(
+            reason,
+            analysis1,
+            analysis2,
+            counterexample_raw=model,
+            fixed_model_assertion_count=2,
+            replay_source="phase6-production-fixture",
+        )
+        assert not any(
+            isinstance(item, dict) and item.get("proof_source") == "phase6-production-fixture"
+            for item in analysis1.completed_recovery_proof_evidence or ()
+        )
+        assert not strategy._sat_unsafety_resolution_proof_is_complete(
+            reason,
+            analysis1,
+            analysis2,
+            current_counterexample_raw=model,
+        )
+    evidence = connector.finish(
+        session,
+        _LegacyResult(Outcome.NOT_EQ),
+        case_id="phase6-sat-safety-analysis-unsafety",
+    )
+    evidence.validate()
+    assert reason.reason_id == "counterexample_analysis_safety_unproven"
+    open_reason_ids = sorted(
+        cause.reason_id for cause in evidence.pilot_result.reduction.projection.c_active_base
+    )
+    assert "counterexample_analysis_safety_unproven" in open_reason_ids
+    assert evidence.pilot_result.candidate.decision_receipt.outcome == Outcome.UNKNOWN
 
 def test_real_ambiguity_producer_is_distinct_from_analysis_safety_cause():
     connector = _manifest_connector()

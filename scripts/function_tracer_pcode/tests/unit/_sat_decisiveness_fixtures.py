@@ -1318,7 +1318,12 @@ def _sat_unsafety_resolution_evidence(action, counterexample_raw=None, **overrid
     evidence.update(overrides)
     return _fixture_comparison_evidence(evidence)
 
-def _sat_unsafety_resolution_action():
+def _sat_unsafety_resolution_action(evidence_refs=("counterexample_replay_missing",)):
+    """The recovery action of a pending SAT-safety obligation with ``evidence_refs``.
+
+    The default is the replay-type obligation: a replay proof may discharge only that
+    type (plan v4 I5), so the evidence-validator tests exercise their own field there.
+    """
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), Mock(), debug=False)
     analysis1 = _analysis_with_unsupported_call_effect()
     analysis2 = raw_function_analysis(
@@ -1346,7 +1351,7 @@ def _sat_unsafety_resolution_action():
         parameters=analysis2.parameters,
     )
     reason = strategy._make_sat_unsafety_unknown_reason(
-        ("function1:unsupported_call_effect_summary",),
+        tuple(evidence_refs),
         analysis1,
         analysis2,
         case1=case1,
