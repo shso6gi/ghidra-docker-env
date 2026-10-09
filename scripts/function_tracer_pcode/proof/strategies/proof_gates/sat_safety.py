@@ -20,6 +20,7 @@ from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
 )
 from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
     COUNTEREXAMPLE_REPLAY_MISSING_REF,
+    SAT_SAFETY_REASON_RESOLUTION,
     replay_may_resolve_sat_safety_reason,
     sat_safety_reason_id_for_refs,
 )
@@ -398,11 +399,7 @@ def _impl__sat_unsafety_resolution_proof_is_complete(
     expected_binding: Any = None,
     expected_execution_receipt_digest: Optional[str] = None,
 ) -> bool:
-    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
-        SAT_SAFETY_TYPED_REASON_IDS,
-    )
-
-    if reason_record.reason_id not in SAT_SAFETY_TYPED_REASON_IDS:
+    if reason_record.reason_id not in SAT_SAFETY_REASON_RESOLUTION:
         return False
     if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value:
         return False
@@ -547,11 +544,7 @@ def _impl__record_completed_sat_counterexample_replay_proof(
 ) -> None:
     if not self.enable_completed_recovery_proofs:
         return
-    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
-        SAT_SAFETY_TYPED_REASON_IDS,
-    )
-
-    if reason_record.reason_id not in SAT_SAFETY_TYPED_REASON_IDS:
+    if reason_record.reason_id not in SAT_SAFETY_REASON_RESOLUTION:
         return
     if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value:
         return
@@ -663,12 +656,8 @@ def _impl__sat_unsafety_resolution_proof_id_from_evidence(cls, evidence: Any) ->
         return None
     if cls._evidence_text(evidence, "status") not in {"complete", "completed", "proven"}:
         return None
-    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
-        SAT_SAFETY_TYPED_REASON_IDS,
-    )
-
     evidence_reason_id = cls._evidence_text(evidence, "reason_id")
-    if evidence_reason_id not in SAT_SAFETY_TYPED_REASON_IDS:
+    if evidence_reason_id not in SAT_SAFETY_REASON_RESOLUTION:
         return None
     proof_kind = cls._evidence_text(evidence, "recovery_proof_kind")
     if proof_kind != UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value:

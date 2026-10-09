@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "1a74346001baf3d975a8eacea1d0e5e57472b44e338219c3a734b5db27dba5f5",
+  "manifest_digest": "60a30a2e825b4a96c0fd5c88b65a2d84035ac6caf5fc3140b185498a6cc62a8a",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 32,
   "sites": [
@@ -1150,10 +1150,10 @@
       "emitter": "emit_sat_safety_completion_if_observed",
       "enclosing_function": "_emit_v2_sat_safety_ambiguity_if_observed",
       "expected_cause_slots": [],
-      "line": 1364,
+      "line": 1353,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-ambiguity-completed",
-      "source_sha256": "01aa8d0180eca9fe820991aa1dc1a13011a8cd56d81cbb2de3e7790797ace262"
+      "source_sha256": "8829a133139731ab5c45b0978f36783f693e72fb1abb44aae01358685e5ce2f9"
     },
     {
       "allowed_dispositions": [
@@ -1179,10 +1179,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1343,
+      "line": 1332,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-ambiguity-observed",
-      "source_sha256": "01aa8d0180eca9fe820991aa1dc1a13011a8cd56d81cbb2de3e7790797ace262"
+      "source_sha256": "8829a133139731ab5c45b0978f36783f693e72fb1abb44aae01358685e5ce2f9"
     },
     {
       "allowed_dispositions": [
@@ -1197,10 +1197,10 @@
       "emitter": "emit_sat_safety_completion_if_observed",
       "enclosing_function": "_emit_v2_sat_safety_blockers_completed_if_observed",
       "expected_cause_slots": [],
-      "line": 1323,
+      "line": 1312,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-blocker-completed",
-      "source_sha256": "01aa8d0180eca9fe820991aa1dc1a13011a8cd56d81cbb2de3e7790797ace262"
+      "source_sha256": "8829a133139731ab5c45b0978f36783f693e72fb1abb44aae01358685e5ce2f9"
     },
     {
       "allowed_dispositions": [
@@ -1236,10 +1236,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1299,
+      "line": 1288,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-blocker-observed",
-      "source_sha256": "01aa8d0180eca9fe820991aa1dc1a13011a8cd56d81cbb2de3e7790797ace262"
+      "source_sha256": "8829a133139731ab5c45b0978f36783f693e72fb1abb44aae01358685e5ce2f9"
     },
     {
       "allowed_dispositions": [
