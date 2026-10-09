@@ -168,6 +168,9 @@ class SatSafetyPilotEncoder:
             ),)
         if type(signal) is not SatSafetyBlockerProductionSignal:
             return ()
+        # 構築時の分類を前提にしない: 構築を迂回した signal の不整合な対もここで
+        # 拒否し、session が domain signal の失敗として記録する（plan v4 I5）。
+        signal.blocker
         authority, requirement_id = self._authority(session, signal)
         occurrence_key = authority.occurrence.occurrence_id
         observed_occurrences = self._committed_ledger(

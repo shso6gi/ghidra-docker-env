@@ -1540,7 +1540,16 @@ def complete_observed_sat_safety_for_counterexample(
             raise TypeError("SAT safety observed signal has an invalid type")
         if observed_signal.counterexample_binding != expected_binding:
             continue
-        if not observed_signal.blocker.replay_resolvable:
+        try:
+            replay_resolvable = observed_signal.blocker.replay_resolvable
+        except SatSafetyBlockerInconsistent as exc:
+            # 記録された観測が分類と整合しない（構築の迂回）。完了させず、失敗として
+            # 最終判定まで伝える。
+            session.record_domain_signal_failure(
+                type(exc).__name__, f"SatSafetyBlockerProductionSignal: {exc}"
+            )
+            continue
+        if not replay_resolvable:
             # 検証済みの witness が示すのは、その witness の replay だけ。解析の
             # 不安全の blocker は同じ binding でも完了させない（plan v4 I5）。
             continue

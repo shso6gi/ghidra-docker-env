@@ -328,3 +328,83 @@ def test_with_the_audited_manifest_partition_ambiguity_keeps_its_own_completion(
         emit_safe_counterexample_production_signal(safety_receipt=_safe_pairwise_receipt())
     evidence = _finish(session, connector, "manifest-partition")
     assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.NOT_EQ
+
+
+# ---- 構築を迂回した signal（多層の防御） -------------------------------------
+
+
+def _bypassed(action, reason_id, refs, **extra):
+    """``__post_init__`` を通らずに作った signal（in-process の迂回を模す）。"""
+    signal = object.__new__(SatSafetyBlockerProductionSignal)
+    fields = dict(
+        action=action, reason_id=reason_id, canonical_target_key=("bypass",),
+        missing_semantic_fact=("m",), evidence_refs=tuple(refs), producer_id="p",
+        proof_artifact_digest=None, counterexample_binding=None, defer_until_terminal=False,
+    )
+    fields.update(extra)
+    for name, value in fields.items():
+        object.__setattr__(signal, name, value)
+    return signal
+
+
+def test_the_encoder_refuses_an_inconsistent_signal_that_bypassed_construction():
+    session = _connector().begin({"phase": "pr-a", "case": "bypass-observe"})
+    with production_signal_scope(session):
+        before = _state(session)
+        assert emit_sat_safety_signal(_bypassed("OBSERVED", REPLAY, (A,))) == 0
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["SatSafetyBlockerInconsistent"]
+
+
+def test_the_bound_completion_records_an_inconsistent_recorded_observation_instead_of_completing():
+    receipt = _safe_pairwise_receipt()
+    safe = SafeCounterexampleProductionSignal.from_pairwise_receipt(receipt)
+    session = _connector().begin({"phase": "pr-a", "case": "bypass-bound"})
+    session.domain_signal_state["sat_safety_observed_signals"] = {
+        "forged-occurrence": _bypassed(
+            "OBSERVED", REPLAY, (A,), counterexample_binding=safe.counterexample_binding,
+        ),
+    }
+    with production_signal_scope(session):
+        assert complete_observed_sat_safety_for_counterexample(safe) == 0
+        assert session.domain_signal_error_kinds == ["SatSafetyBlockerInconsistent"]
+        assert "sat_safety_completed" not in session.domain_signal_state
+
+
+# ---- 前提: producer は根拠を occurrence の対象に焼き込む ----------------------
+
+
+def test_every_producer_binds_its_evidence_into_the_target_key(monkeypatch):
+    """occurrence の identity は evidence ref を含まない。同じ対象を別の根拠で観測すると
+    後の完了は「言い直していない」として拒否される（fail-closed）。それが起きないのは、
+    producer が根拠を ``canonical_target_key`` に入れているからで、その前提をここで固定する。"""
+    from scripts.function_tracer_pcode.authority.lifecycle import production_signals
+
+    captured = []
+    monkeypatch.setattr(production_signals, "emit_sat_safety_signal",
+                        lambda signal, **_k: captured.append(signal) or 0)
+    from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_of
+    from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_sat_safety import (
+        _strategy_and_surface,
+    )
+
+    strategy, analysis1, analysis2, case1, case2 = _strategy_and_surface()
+    with comparison_of(analysis1, analysis2):
+        # 実際の producer（blocker の観測は ref ごと、曖昧さの観測は pair の段）。
+        strategy._make_sat_unsafety_unknown_reason(
+            (A, R), analysis1, analysis2, case1=case1, case2=case2, pair_id="(0,1)", stage="S_MONOLITHIC_FALLBACK",
+        )
+        strategy._observe_v2_sat_counterexample_ambiguity(
+            ("pairwise", "monolithic"), analysis1, analysis2, case1=case1, case2=case2, pair_id="(0,1)",
+        )
+
+    def flat(value):
+        if isinstance(value, (tuple, list)):
+            for item in value:
+                yield from flat(item)
+        else:
+            yield value
+
+    assert len(captured) == 3
+    for signal in captured:
+        assert set(signal.evidence_refs) <= set(flat(signal.canonical_target_key)), signal
