@@ -18,7 +18,7 @@ from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     make_unknown_reason,
     store_comparison_evidence,
 )
-from scripts.function_tracer_pcode.authority.domains.sat_safety_resolution import (
+from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
     COUNTEREXAMPLE_REPLAY_MISSING_REF,
     replay_may_resolve_sat_safety_reason,
     sat_safety_reason_id_for_refs,
@@ -612,10 +612,12 @@ def _impl__record_completed_sat_counterexample_replay_proof(
                     "status": "discharged",
                     "discharged_reason_refs": tuple(reason_record.evidence_refs),
                 },
+                # replay 型の obligation には解析の不安全の ref が無い（記録の前に
+                # 確かめた）。replay が被覆や効果を証明したとは主張しない。
                 "coverage_effect_safety": {
                     "status": "proven",
-                    "coverage_status": "covered_by_counterexample_replay",
-                    "effect_status": "no_active_effect_unsafety_for_replay_gate",
+                    "coverage_status": "no_active_coverage_unsafety_in_replay_obligation",
+                    "effect_status": "no_active_effect_unsafety_in_replay_obligation",
                 },
             },
         }
@@ -784,6 +786,26 @@ def _impl__make_sat_unsafety_unknown_reason(
     compatibility_reason_id = sat_safety_reason_id_for_refs(
         str(item) for item in sat_unsafety_reasons
     )
+    if replay_may_resolve_sat_safety_reason(
+        compatibility_reason_id, tuple(str(item) for item in sat_unsafety_reasons)
+    ):
+        required_evidence = (
+            "counterexample_replay",
+            "active_unsafety_discharge",
+            "coverage_effect_safety",
+        )
+        description = (
+            "Replay the SAT counterexample under its bound query, model, premise "
+            "and pair before accepting disequivalence."
+        )
+    else:
+        # 解析の不安全は replay では解消しない（plan v4 I5）。要るのは解析の安全性の証明。
+        required_evidence = ("analysis_safety_proof", "coverage_effect_safety")
+        description = (
+            "Prove that the analysis is safe for this counterexample (no dropped "
+            "path, effect or input bits); a counterexample replay does not "
+            "discharge it."
+        )
     return _v2_observe_sat_unsafety_reason(make_internal_v2_reason_diagnostic(
         compatibility_reason_id,
         stage=stage,
@@ -795,15 +817,8 @@ def _impl__make_sat_unsafety_unknown_reason(
             UnknownRecoveryProofObligation.create(
                 UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,
                 "sat_counterexample_safety",
-                required_evidence=(
-                    "counterexample_replay",
-                    "active_unsafety_discharge",
-                    "coverage_effect_safety",
-                ),
-                description=(
-                    "Replay the SAT counterexample and discharge all active "
-                    "coverage/effect unsafety before accepting disequivalence."
-                ),
+                required_evidence=required_evidence,
+                description=description,
             ),
         ),
         proof_stage="sat_counterexample_safety",
@@ -1161,7 +1176,7 @@ def _impl__supersede_rejected_witness_blocker(
     pair_id: str,
     reason_record: UnknownReasonRecord,
     decisive_binding: Any,
-) -> None:
+) -> bool:
     """Retire a witness-scoped blocker once another witness is validated.
 
     A rejected candidate counterexample (ambiguous partition replay, or a SAT
@@ -1170,6 +1185,9 @@ def _impl__supersede_rejected_witness_blocker(
     bound counterexample on another case pair therefore supersedes it.  The
     completion artifact names the superseding witness so the audit trail
     shows why the blocker no longer applies (Issue #28).
+
+    Returns whether the blocker was retired.  An analysis-level unsafety is not
+    witness-scoped and is never retired here (plan v4 I5).
     """
     proof_content = {
         "object_target_key": self._normalize_nested_tuple(reason_record.object_target_key),
@@ -1194,16 +1212,17 @@ def _impl__supersede_rejected_witness_blocker(
         _emit_v2_sat_safety_ambiguity_if_observed(
             refs, target_key, proof_artifact_digest=proof_digest,
         )
-        return
+        return True
     if not replay_may_resolve_sat_safety_reason(reason_record.reason_id, refs):
         # 別の witness の検証が退けてよいのは、その witness に固有の replay 型の
         # blocker だけ。解析の不安全は witness に固有でないので完了させない。
-        return
+        return False
     _emit_v2_sat_safety_blockers_completed_if_observed(
         refs,
         self._normalize_nested_tuple(reason_record.object_target_key),
         proof_artifact_digest=proof_digest,
     )
+    return True
 
 
 def _impl__complete_v2_sat_counterexample_ambiguity_if_observed(

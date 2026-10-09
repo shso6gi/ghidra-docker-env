@@ -22,6 +22,9 @@ from scripts.function_tracer_pcode.authority.lifecycle.production_signals import
     SafeCounterexampleProductionSignal,
     SatSafetyBlockerProductionSignal,
 )
+from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
+    sat_safety_completion_is_admissible,
+)
 from scripts.function_tracer_pcode.authority.registry import (
     SatisfactionBindingFactory,
     SealedReasonRegistry,
@@ -182,6 +185,12 @@ class SatSafetyPilotEncoder:
                 CauseObservedEventAuthority(authority),
             ),)
             action = "OBSERVED"
+        elif not sat_safety_completion_is_admissible(signal.reason_id):
+            # 解析の不安全の cause を完了させる producer は無い。来たら producer の
+            # 契約違反なので、黙って捨てずに止める（plan v4 I5）。
+            raise ValueError(
+                "SAT safety completion is not admissible for an analysis-unsafety cause"
+            )
         elif occurrence_key not in observed_occurrences:
             raise ValueError("SAT safety completion has no observed active occurrence")
         elif occurrence_key in completed_occurrences:

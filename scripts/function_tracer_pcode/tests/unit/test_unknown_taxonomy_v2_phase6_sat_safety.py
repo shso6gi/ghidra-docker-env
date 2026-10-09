@@ -319,15 +319,20 @@ def test_same_function_multiple_sat_pairs_complete_only_the_exact_occurrence():
             unrelated_receipt
         ).counterexample_binding
     )
+    # The bound safe counterexample completes the replay-type blocker of its own
+    # witness; analysis-type blockers are never completed by it (plan v4 I5, pinned by
+    # the test after this one).
     observed = SatSafetyBlockerProductionSignal(
         action="OBSERVED",
-        reason_id="counterexample_analysis_safety_unproven",
+        reason_id="counterexample_replay_unproven",
         canonical_target_key=(
             "legacy-case", ("pair", "region:0"), ("function", "left", 1),
-            ("function", "right", 2), ("safety_gate_ref", "return"),
+            ("function", "right", 2), ("safety_gate_ref", "counterexample_replay_missing"),
         ),
-        missing_semantic_fact=("counterexample_safety_gate_unproven", "return"),
-        evidence_refs=("return",),
+        missing_semantic_fact=(
+            "counterexample_safety_gate_unproven", "counterexample_replay_missing",
+        ),
+        evidence_refs=("counterexample_replay_missing",),
         producer_id="phase10-high-bit-sat-transform",
         counterexample_binding=binding,
     )
@@ -393,6 +398,71 @@ def test_same_function_multiple_sat_pairs_complete_only_the_exact_occurrence():
     assert active[0].occurrence_id == unrelated_occurrence_id
     assert len(evidence.pilot_result.reduction.projection.q_open_base) == 1
     assert evidence.pilot_result.candidate.decision_receipt.outcome is not Outcome.NOT_EQ
+
+
+
+def test_bound_safe_counterexample_does_not_complete_analysis_unsafety_of_its_witness():
+    """plan v4 I5 at the authority layer: a validated witness completes only the
+    replay-type blocker bound to it. An analysis-unsafety blocker with the very same
+    binding stays open, and a direct COMPLETED for it is refused by the encoder."""
+    connector = _connector()
+    session = connector.begin({"phase": "10", "case": "safe-sat-keeps-analysis-open"})
+    receipt = _safe_pairwise_receipt(
+        query="(assert (= x 1))\n(check-sat)", model={"x": 1},
+        premise="region-zero", pair_key=("monolithic", "region:0"),
+    )
+    safe_signal = SafeCounterexampleProductionSignal.from_pairwise_receipt(receipt)
+    binding = safe_signal.counterexample_binding
+
+    def blocker(action, reason_id, ref):
+        return SatSafetyBlockerProductionSignal(
+            action=action,
+            reason_id=reason_id,
+            canonical_target_key=("legacy-case", ("pair", "region:0"), ("safety_gate_ref", ref)),
+            missing_semantic_fact=("counterexample_safety_gate_unproven", ref),
+            evidence_refs=(ref,),
+            producer_id="phase10-high-bit-sat-transform",
+            counterexample_binding=binding,
+            **({"proof_artifact_digest": "d" * 64} if action == "COMPLETED" else {}),
+        )
+
+    analysis = blocker("OBSERVED", "counterexample_analysis_safety_unproven", "function1:incomplete_control_flow")
+    replay = blocker("OBSERVED", "counterexample_replay_unproven", "counterexample_replay_missing")
+    analysis_occurrence_id = session.domain_signal_encoder.authority_for_signal(
+        session, analysis
+    ).occurrence.occurrence_id
+    with production_signal_scope(session):
+        assert emit_sat_safety_signal(analysis) == 1
+        assert emit_sat_safety_signal(replay) == 1
+        assert complete_observed_sat_safety_for_counterexample(safe_signal) == 1
+    evidence = connector.finish(
+        session, _LegacyResult(Outcome.NOT_EQ), case_id="safe-sat-keeps-analysis-open"
+    )
+    active = evidence.pilot_result.reduction.projection.c_active_base
+    assert [row.occurrence_id for row in active] == [analysis_occurrence_id]
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is not Outcome.NOT_EQ
+
+    # A direct COMPLETED for an analysis cause is refused through both completion
+    # entries; the refusal is recorded and surfaces at finish (the pair is ERROR),
+    # never as a completed cause.
+    session = connector.begin({"phase": "10", "case": "analysis-completion-refused"})
+    with production_signal_scope(session):
+        assert emit_sat_safety_signal(analysis) == 1
+        assert emit_sat_safety_completion_if_observed(
+            blocker("COMPLETED", "counterexample_analysis_safety_unproven",
+                    "function1:incomplete_control_flow"),
+            producer_site_manifest_id="sat-safety-blocker-completed",
+        ) == 0
+        assert emit_sat_safety_signal(
+            blocker("COMPLETED", "counterexample_analysis_safety_unproven",
+                    "function1:incomplete_control_flow"),
+        ) == 0
+        assert session.domain_signal_error_kinds == ["ValueError", "ValueError"]
+        assert "sat_safety_completed" not in session.domain_signal_state
+    with pytest.raises(ValueError, match="not admissible for an analysis-unsafety cause"):
+        connector.finish(
+            session, _LegacyResult(Outcome.NOT_EQ), case_id="analysis-completion-refused"
+        )
 
 
 def test_safe_counterexample_rejects_raw_digests_and_tampered_typed_receipt():
@@ -537,7 +607,6 @@ def test_real_sat_safety_producer_observes_completes_and_issues_decisive_authori
     assert evidence.pilot_result.candidate.decision_receipt.outcome == Outcome.NOT_EQ
 
 
-
 def test_replay_proof_does_not_complete_analysis_unsafety_and_authority_stays_unknown():
     """plan v4 I5/Q6 (PR-A): a replay proof for a SAT whose obligation also carries an
     analysis-unsafety ref records nothing, completes nothing, and the canonical
@@ -589,6 +658,7 @@ def test_replay_proof_does_not_complete_analysis_unsafety_and_authority_stays_un
     )
     assert "counterexample_analysis_safety_unproven" in open_reason_ids
     assert evidence.pilot_result.candidate.decision_receipt.outcome == Outcome.UNKNOWN
+
 
 def test_real_ambiguity_producer_is_distinct_from_analysis_safety_cause():
     connector = _manifest_connector()
@@ -799,12 +869,14 @@ def test_sat_safety_dedup_state_is_isolated_between_identical_sessions():
 def test_sat_safety_completion_commits_only_after_stream_append(monkeypatch):
     connector = _connector()
     session = connector.begin({"phase": "6.1", "case": "completion-append-failure"})
+    # Only a replay-type cause may be completed (plan v4 I5); the transaction
+    # mechanics are the same for every admissible completion.
     observed = SatSafetyBlockerProductionSignal(
         action="OBSERVED",
-        reason_id="counterexample_analysis_safety_unproven",
+        reason_id="counterexample_replay_unproven",
         canonical_target_key=("completion-transaction",),
-        missing_semantic_fact=("analysis_safety", False),
-        evidence_refs=("completion-transaction",),
+        missing_semantic_fact=("counterexample_replay", False),
+        evidence_refs=("counterexample_replay_missing",),
         producer_id="completion-transaction-fixture",
     )
     completed = SatSafetyBlockerProductionSignal(

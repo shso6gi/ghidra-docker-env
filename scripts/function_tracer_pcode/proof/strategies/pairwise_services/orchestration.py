@@ -1504,7 +1504,7 @@ def _impl_check(
                 for kind, refs, r_case1, r_case2, r_pair_id, r_reason in rejected_witnesses:
                     if r_pair_id == pair_id:
                         continue
-                    self._supersede_rejected_witness_blocker(
+                    if not self._supersede_rejected_witness_blocker(
                         kind,
                         refs,
                         analysis1,
@@ -1514,7 +1514,9 @@ def _impl_check(
                         pair_id=r_pair_id,
                         reason_record=r_reason,
                         decisive_binding=safety_receipt,
-                    )
+                    ):
+                        # 退けられない blocker（解析の不安全）は UNKNOWN の理由に残す。
+                        continue
                     if r_reason in unknown_reasons:
                         unknown_reasons.remove(r_reason)
                     self._debug_print(

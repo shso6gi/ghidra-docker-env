@@ -43,6 +43,9 @@ from dataclasses import dataclass, field
 from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core.render_smt import expression_contains_call
+from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
+    COUNTEREXAMPLE_REPLAY_MISSING_REF,
+)
 from scripts.function_tracer_pcode.proof.assumptions import (
     AssumptionPremise,
     normalize_assumption_premises,
@@ -79,7 +82,7 @@ COUNTEREXAMPLE_UF_INTERPRETATION_DEPENDENT = (
     "conditional_counterexample_uf_interpretation_dependent"
 )
 #: 既存 production contract が decisive counterexample に要求する replay 証明。
-COUNTEREXAMPLE_REPLAY_MISSING = "counterexample_replay_missing"
+COUNTEREXAMPLE_REPLAY_MISSING = COUNTEREXAMPLE_REPLAY_MISSING_REF
 
 #: 仮定が引き受ける EQ 側 safety reason。ここに無いものは discharge しない。
 ASSUMPTION_DISCHARGED_SAFETY_REASONS = frozenset({"unsupported_call_effect_summary"})

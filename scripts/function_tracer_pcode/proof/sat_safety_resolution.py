@@ -7,12 +7,15 @@ counterexample の replay は、SAT の model が宣言した記号へ与えた�
 **replay 型**の理由（その witness の replay が済んでいないこと）だけで、解析の
 不安全（解析の不完全・被覆の欠け・入力対応の不足）は replay では解消しない。
 
-pairwise と monolithic、stage runner の gate はすべて、この module の
-``replay_may_resolve_sat_safety_reason`` を通して同じ規則を読む。reason の
-evidence ref から reason id を選ぶ規則（``sat_safety_reason_id_for_refs``）も
-ここに置き、ref の部分文字列で型を推測しない。
+pairwise と monolithic、stage runner の gate、authority の完了の経路はすべて、
+この module の ``replay_may_resolve_sat_safety_reason`` を通して同じ規則を読む。
+reason の evidence ref から reason id を選ぶ規則（``sat_safety_reason_id_for_refs``）
+もここに置き、ref の部分文字列で型を推測しない。
 
-この module は他の module を import しない（authority の leaf）。
+この module は他の module を import しない（proof の leaf）。proof の gate と
+conditional lane は同じ層から、authority（``production_signals`` の
+``SAT_SAFETY_TYPED_REASON_IDS``・SAT-safety の encoder と producer site）と
+checker は下向きにこれを読む。
 """
 
 from __future__ import annotations
@@ -70,6 +73,19 @@ def sat_safety_reason_id_for_refs(refs: Iterable[object]) -> str:
     ):
         return COUNTEREXAMPLE_REPLAY_UNPROVEN
     return COUNTEREXAMPLE_ANALYSIS_SAFETY_UNPROVEN
+
+
+def sat_safety_completion_is_admissible(reason_id: object) -> bool:
+    """authority の SAT-safety cause を COMPLETED にしてよい reason か。
+
+    解析の不安全の cause は、replay・別の witness の検証・counterexample の
+    receipt のどれでも完了しない（それを証明する producer は今は無い）。replay 型と
+    partition の曖昧さだけが、それぞれの経路で完了してよい。知らない id は拒否する。
+    """
+    return type(reason_id) is str and SAT_SAFETY_REASON_RESOLUTION.get(reason_id) in {
+        SatSafetyResolution.REPLAY,
+        SatSafetyResolution.PARTITION_AMBIGUITY,
+    }
 
 
 def replay_may_resolve_sat_safety_reason(reason_id: object, evidence_refs: Iterable[object]) -> bool:

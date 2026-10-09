@@ -2,6 +2,8 @@
 from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_of, echo_input_correspondence
 from unittest.mock import Mock
 
+import pytest
+
 from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     SatCounterexampleEvidenceBinding,
 )
@@ -441,8 +443,10 @@ def test_monolithic_prior_proof_with_same_binding_but_other_receipt_does_not_com
 
 
 def test_monolithic_without_this_executions_receipt_accepts_no_prior_proof():
-    """Direct strategy use has no dispatch frame and therefore no safety receipt: a prior
-    replay proof recorded by a checker run cannot complete either obligation (fail-closed)."""
+    """Direct strategy use has no dispatch frame and therefore no safety receipt: with only
+    replay-type obligations pending, a prior replay proof recorded by a checker run does not
+    make the SAT decisive (fail-closed). The obligations are replay-type so the outcome does
+    not come from the PR-A type rule."""
     from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
     from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
     from scripts.function_tracer_pcode.smt import ParallelSolverRunner
@@ -450,7 +454,7 @@ def test_monolithic_without_this_executions_receipt_accepts_no_prior_proof():
     _, recorded = _run_monolithic_with_pending_unsafety(pending_refs=(REPLAY_REF,))
     assert len(recorded) == 1
     strategy = MonolithicStrategy(FormulaBuilder(), ParallelSolverRunner(timeout=5))
-    strategy._collect_decisive_sat_unsafety_reasons = lambda a1, a2: [ANALYSIS_UNSAFETY_REF]
+    strategy._collect_decisive_sat_unsafety_reasons = lambda a1, a2: [REPLAY_REF]
     analysis1, analysis2 = _open_formula_analysis("left", 7), _open_formula_analysis("right", 8)
     analysis1.completed_recovery_proof_evidence = tuple(recorded)
 
@@ -458,8 +462,85 @@ def test_monolithic_without_this_executions_receipt_accepts_no_prior_proof():
 
     assert result.is_equivalent is None
     assert result.counterexample_raw is None
-    # Both obligations (analysis unsafety, bound replay) stay open without a receipt.
-    assert {r.reason_id for r in result.unknown_reasons} == {
-        "counterexample_analysis_safety_unproven",
-        "counterexample_replay_unproven",
-    }
+    # The replay-type obligations stay open without this execution's receipt.
+    assert {r.reason_id for r in result.unknown_reasons} == {"counterexample_replay_unproven"}
+
+
+def _analysis_reporting(name, delta, *, incomplete_control_flow):
+    x = Expression.parameter("x", 0, data_type="int", size=4)
+    return raw_function_analysis(
+        function_name=name, entry_point="0x1000",
+        parameters=[{"name": "x", "index": 0, "size": 4, "data_type": "int"}],
+        returns=[ReturnInfo("0x1010", Expression.binary_op("INT_ADD", x, Expression.constant(delta, size=4)), [])],
+        return_type="int",
+        incomplete_control_flow=incomplete_control_flow,
+    )
+
+
+@pytest.mark.parametrize("strategy", ["monolithic", "pairwise"])
+def test_analysis_reported_unsafety_keeps_the_sat_unknown_in_every_strategy(strategy):
+    """plan v4 §11.2 A(a) in its production shape: the analysis itself reports
+    ``incomplete_control_flow`` (no strategy is patched). Pairwise already kept the SAT
+    UNKNOWN; monolithic self-discharged it into NOT_EQ before PR-A. Both now agree."""
+    from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+
+    checker = EquivalenceChecker(strategy=strategy, timeout=5, monolithic_timeout=5)
+    analysis1 = _analysis_reporting("left", 7, incomplete_control_flow=True)
+    analysis2 = _analysis_reporting("right", 8, incomplete_control_flow=False)
+    assert analysis1.get_decisive_sat_unsafety_reasons() == ["incomplete_control_flow"]
+
+    result = checker.check(analysis1, analysis2)
+
+    assert result.is_equivalent is None
+    assert result.counterexample_raw is None
+    assert [(r.reason_id, r.evidence_refs) for r in result.unknown_reasons] == [
+        ("counterexample_analysis_safety_unproven", ("function1:incomplete_control_flow",)),
+    ]
+
+
+def test_safe_analyses_still_give_a_decisive_monolithic_counterexample():
+    """Control: without an analysis-unsafety reason the same pair stays NOT_EQ."""
+    from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+
+    checker = EquivalenceChecker(strategy="monolithic", timeout=5, monolithic_timeout=5)
+    result = checker.check(
+        _analysis_reporting("left", 7, incomplete_control_flow=False),
+        _analysis_reporting("right", 8, incomplete_control_flow=False),
+    )
+
+    assert result.is_equivalent is False
+    assert result.unknown_reasons == []
+
+
+def test_pairwise_gate_does_not_complete_analysis_unsafety_even_if_evidence_is_accepted():
+    """§7.1 consumer check on the pairwise main loop: even when the evidence validator
+    is bypassed (it accepts a forged proof for the pending obligation), the completion
+    gate refuses an analysis-type obligation, so the SAT stays UNKNOWN."""
+    from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+
+    checker = EquivalenceChecker(strategy="pairwise", timeout=5, monolithic_timeout=5)
+    strategy = checker.pairwise_strategy
+    made = []
+    make_reason = strategy._make_sat_unsafety_unknown_reason
+
+    def remember(*args, **kwargs):
+        reason = make_reason(*args, **kwargs)
+        made.append(reason)
+        return reason
+
+    strategy._make_sat_unsafety_unknown_reason = remember
+    forged = {"proof_content": {"counterexample_replay": {"counterexample_model_sha256": "a" * 64}}}
+    strategy._completed_recovery_proof_evidence = lambda *_a: (forged,)
+    strategy._counterexample_model_fingerprint = lambda raw: "a" * 64 if raw else None
+    strategy._sat_unsafety_resolution_proof_id_from_evidence = (
+        lambda evidence: strategy._normalize_nested_tuple(made[-1].proof_obligation_id) if made else None
+    )
+
+    result = checker.check(
+        _analysis_reporting("left", 7, incomplete_control_flow=True),
+        _analysis_reporting("right", 8, incomplete_control_flow=False),
+    )
+
+    assert made and made[0].reason_id == "counterexample_analysis_safety_unproven"
+    assert result.is_equivalent is None
+    assert result.counterexample_raw is None

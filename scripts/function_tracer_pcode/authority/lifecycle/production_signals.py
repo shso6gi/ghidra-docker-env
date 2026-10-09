@@ -36,8 +36,10 @@ from scripts.function_tracer_pcode.authority.domains.identical_function_identity
 from scripts.function_tracer_pcode.authority.domains.call_effect_sites import (
     CALL_EFFECT_PROOF_BATCH_SITE,
 )
-from scripts.function_tracer_pcode.authority.domains.sat_safety_resolution import (
+from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
     SAT_SAFETY_REASON_RESOLUTION,
+    replay_may_resolve_sat_safety_reason,
+    sat_safety_completion_is_admissible,
 )
 from scripts.function_tracer_pcode.authority.registry import (
     SatisfactionBindingFactory,
@@ -1426,6 +1428,16 @@ def emit_sat_safety_completion_if_observed(
     session = active_production_pilot_session()
     if session is None:
         return 0
+    if not sat_safety_completion_is_admissible(signal.reason_id):
+        # 解析の不安全の cause を完了させる producer は無い（plan v4 I5）。下の
+        # deferred の観測を黙って捨てる経路にも入れず、encoder の拒否と同じく
+        # domain signal の失敗として記録する（最終判定まで伝わる）。
+        session.record_domain_signal_failure(
+            "ValueError",
+            "SatSafetyBlockerProductionSignal: SAT safety completion is not "
+            "admissible for an analysis-unsafety cause",
+        )
+        return 0
     pending = session.domain_signal_state.get(
         "sat_safety_deferred_observations", {}
     )
@@ -1479,6 +1491,12 @@ def complete_observed_sat_safety_for_counterexample(
         if type(observed_signal) is not SatSafetyBlockerProductionSignal:
             raise TypeError("SAT safety observed signal has an invalid type")
         if observed_signal.counterexample_binding != expected_binding:
+            continue
+        if not replay_may_resolve_sat_safety_reason(
+            observed_signal.reason_id, observed_signal.evidence_refs
+        ):
+            # 検証済みの witness が示すのは、その witness の replay だけ。解析の
+            # 不安全の blocker は同じ binding でも完了させない（plan v4 I5）。
             continue
         emitted += emit_sat_safety_completion_if_observed(
             SatSafetyBlockerProductionSignal(

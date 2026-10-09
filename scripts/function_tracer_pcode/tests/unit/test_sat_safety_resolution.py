@@ -1,6 +1,6 @@
 """plan v4 PR-A (I5・Q6): counterexample の replay が解消してよいのは replay 型の理由だけ。
 
-規則の owner は ``authority/domains/sat_safety_resolution.py``。replay の証明を
+規則の owner は ``proof/sat_safety_resolution.py``。replay の証明を
 記録する producer、証拠を証明として数える検証、reason を完了させる gate、別の
 witness による supersede が、すべて同じ owner の述語を読むことをここで固定する。
 production の経路（checker → monolithic）は ``test_counterexample_replay_binding``、
@@ -16,11 +16,12 @@ from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import 
     _sat_unsafety_resolution_action,
     _sat_unsafety_resolution_evidence,
 )
-from scripts.function_tracer_pcode.authority.domains.sat_safety_resolution import (
+from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
     COUNTEREXAMPLE_REPLAY_MISSING_REF,
     SAT_SAFETY_REASON_RESOLUTION,
     SatSafetyResolution,
     replay_may_resolve_sat_safety_reason,
+    sat_safety_completion_is_admissible,
     sat_safety_reason_id_for_refs,
     sat_safety_ref_resolution,
 )
@@ -106,11 +107,46 @@ def test_replay_may_resolve_only_replay_reasons_whose_refs_agree():
     assert not replay_may_resolve_sat_safety_reason(None, replay)
 
 
+def test_only_replay_and_partition_causes_may_be_completed():
+    assert sat_safety_completion_is_admissible("counterexample_replay_unproven")
+    assert sat_safety_completion_is_admissible("counterexample_partition_replay_ambiguous")
+    assert not sat_safety_completion_is_admissible("counterexample_analysis_safety_unproven")
+    assert not sat_safety_completion_is_admissible("unknown_reason")
+    assert not sat_safety_completion_is_admissible(None)
+
+
+def test_every_copy_of_the_sat_reason_vocabulary_is_derived_from_the_table():
+    from scripts.function_tracer_pcode.authority.domains.sat_safety import (
+        SAT_SAFETY_REASON_REGISTRY,
+    )
+    from scripts.function_tracer_pcode.authority.domains.sat_safety_sites import (
+        SAT_SAFETY_AMBIGUITY_OBSERVED_SITE,
+        SAT_SAFETY_BLOCKER_OBSERVED_SITE,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import PILOT_TYPED_CAUSE_KINDS
+    from scripts.function_tracer_pcode.reporting import phase7_producer_manifest as manifest
+
+    assert {item.reason_id for item in SAT_SAFETY_REASON_REGISTRY.snapshot()} == set(
+        SAT_SAFETY_REASON_RESOLUTION
+    )
+    assert SAT_SAFETY_BLOCKER_OBSERVED_SITE.reason_ids == (
+        "counterexample_analysis_safety_unproven",
+        "counterexample_replay_unproven",
+    )
+    assert SAT_SAFETY_AMBIGUITY_OBSERVED_SITE.reason_ids == (
+        "counterexample_partition_replay_ambiguous",
+    )
+    assert set(SAT_SAFETY_REASON_RESOLUTION) <= PILOT_TYPED_CAUSE_KINDS
+    assert {
+        reason_id: manifest._REASON_IDENTITY_SCOPES[reason_id]
+        for reason_id in SAT_SAFETY_REASON_RESOLUTION
+    } == dict.fromkeys(SAT_SAFETY_REASON_RESOLUTION, "RELATIONAL")
+
+
 def test_replay_producers_use_the_owner_vocabulary():
     from scripts.function_tracer_pcode.proof.conditional_lane import COUNTEREXAMPLE_REPLAY_MISSING
 
-    # conditional lane は authority を import できない（層）ので、同じ綴りをここで固定する。
-    assert COUNTEREXAMPLE_REPLAY_MISSING == COUNTEREXAMPLE_REPLAY_MISSING_REF
+    assert COUNTEREXAMPLE_REPLAY_MISSING is COUNTEREXAMPLE_REPLAY_MISSING_REF
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
     analysis = raw_function_analysis(
         function_name="f", entry_point="0x1000", parameters=[], returns=[], return_type="int",
@@ -286,18 +322,18 @@ def test_supersede_completes_only_replay_type_rejected_witness_blockers(monkeypa
         reason = strategy._make_sat_unsafety_unknown_reason(
             refs, analysis1, analysis2, case1=None, case2=None, pair_id="(0,0)", stage="S_PAIRWISE",
         )
-        strategy._supersede_rejected_witness_blocker(
+        assert strategy._supersede_rejected_witness_blocker(
             "replay", refs, analysis1, analysis2, case1=None, case2=None, pair_id="(0,0)",
             reason_record=reason, decisive_binding=decisive,
-        )
+        ) is False
     assert completed == []
 
     replay_refs = (COUNTEREXAMPLE_REPLAY_MISSING_REF,)
     reason = strategy._make_sat_unsafety_unknown_reason(
         replay_refs, analysis1, analysis2, case1=None, case2=None, pair_id="(0,0)", stage="S_PAIRWISE",
     )
-    strategy._supersede_rejected_witness_blocker(
+    assert strategy._supersede_rejected_witness_blocker(
         "replay", replay_refs, analysis1, analysis2, case1=None, case2=None, pair_id="(0,0)",
         reason_record=reason, decisive_binding=decisive,
-    )
+    ) is True
     assert completed == [replay_refs]
