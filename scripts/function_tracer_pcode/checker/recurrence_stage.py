@@ -10,7 +10,7 @@ from scripts.function_tracer_pcode.proof.recursive_abstraction import abstract_r
 from scripts.function_tracer_pcode.authority.lifecycle.production_boundary import (
     run_check_from_binaries_with_v2_pilot as run_check_from_binaries,
 )
-from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
     SAT_SAFETY_TYPED_REASON_IDS,
 )
 from scripts.function_tracer_pcode.checker.unknown_reason import make_internal_v2_reason_diagnostic

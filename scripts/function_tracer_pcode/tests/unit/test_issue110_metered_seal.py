@@ -1589,8 +1589,6 @@ def test_a_completed_promise_releases_its_room(monkeypatch):
     for index in range(6):
         _defer(session, _replay_blocker(index))
     assert session.event_contract.deferred_unpublished == 6
-    # 完了の proof artifact は SAT-safety の test が持つ: ここでは完了が約束した occurrence を名指すことだけ作る
-    _name_the_promised_occurrence(monkeypatch, session)
     with production_signal_scope(session):
         for index in range(6):
             emit_sat_safety_completion_if_observed(
@@ -1607,16 +1605,14 @@ def test_a_completed_promise_releases_its_room(monkeypatch):
     assert session.event_contract.exceeded is None
 
 
-def _name_the_promised_occurrence(monkeypatch, session):
-    encoder = session.domain_signal_encoder
-    real_authority = encoder.authority_for_signal
-    monkeypatch.setattr(encoder, "authority_for_signal", lambda owner, signal: real_authority(
-        owner, signal.observed if isinstance(signal, SimpleNamespace) else signal,
-    ), raising=False)
-
-
 def _completed(observed):
-    return SimpleNamespace(action="COMPLETED", reason_id=observed.reason_id, observed=observed)
+    """観測を言い直した完了の signal（proof artifact は SAT-safety の test が持つ）。"""
+    from dataclasses import replace
+
+    return replace(
+        observed, action="COMPLETED", producer_id="sat_unsafety_resolution_producer",
+        proof_artifact_digest="issue110-completion-proof",
+    )
 
 
 def test_a_promise_of_analysis_unsafety_is_not_completed(monkeypatch):
@@ -1634,7 +1630,6 @@ def test_a_promise_of_analysis_unsafety_is_not_completed(monkeypatch):
     )
     _defer(session, _sat_blocker(0))
     assert session.event_contract.deferred_unpublished == 1
-    _name_the_promised_occurrence(monkeypatch, session)
     with production_signal_scope(session):
         assert emit_sat_safety_completion_if_observed(
             _completed(_sat_blocker(0)),

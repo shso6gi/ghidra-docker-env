@@ -37,9 +37,10 @@ from scripts.function_tracer_pcode.authority.domains.call_effect_sites import (
     CALL_EFFECT_PROOF_BATCH_SITE,
 )
 from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
-    SAT_SAFETY_REASON_RESOLUTION,
-    replay_may_resolve_sat_safety_reason,
-    sat_safety_completion_is_admissible,
+    SAT_SAFETY_TYPED_REASON_IDS,
+    SatSafetyBlocker,
+    SatSafetyBlockerInconsistent,
+    classify_sat_safety_blocker,
 )
 from scripts.function_tracer_pcode.authority.registry import (
     SatisfactionBindingFactory,
@@ -242,8 +243,8 @@ class OutcomePartitionProductionSignal:
         authority_digest(self._phase7_signal_authority())
 
 
-#: SAT-safety の typed reason id。解消の型の表（``sat_safety_resolution``）の key と同じ集合。
-SAT_SAFETY_TYPED_REASON_IDS = frozenset(SAT_SAFETY_REASON_RESOLUTION)
+#: ``SAT_SAFETY_TYPED_REASON_IDS`` は ``proof.sat_safety_resolution`` の object を再輸出する
+#: （既存の import 先を保つ互換のため。語彙の公開元は owner）。
 
 
 _SAFE_COUNTEREXAMPLE_SIGNAL_TOKEN = object()
@@ -307,6 +308,46 @@ class SatSafetyBlockerProductionSignal:
             raise TypeError("SAT safety deferral marker is invalid")
         if self.defer_until_terminal and self.action != "OBSERVED":
             raise ValueError("only SAT safety observations may be deferred")
+        # reason id と evidence ref の対は owner の分類と整合しなければ存在しない
+        # （呼び手が付けた id だけを信じない。plan v4 I5）。
+        classify_sat_safety_blocker(self.reason_id, self.evidence_refs)
+
+    @property
+    def blocker(self) -> SatSafetyBlocker:
+        """この signal の blocker（構築時に整合を確かめた対の分類）。"""
+        return classify_sat_safety_blocker(self.reason_id, self.evidence_refs)
+
+    def same_blocker_as(self, other: "SatSafetyBlockerProductionSignal") -> bool:
+        """同じ blocker を指すか（reason id・対象・欠けた事実・evidence ref が全て同じ）。
+
+        occurrence の identity は evidence ref を含まないので、完了の照合はこれで行う。
+        """
+        return (
+            type(other) is SatSafetyBlockerProductionSignal
+            and self.reason_id == other.reason_id
+            and self.canonical_target_key == other.canonical_target_key
+            and self.missing_semantic_fact == other.missing_semantic_fact
+            and self.evidence_refs == other.evidence_refs
+        )
+
+    def require_completes(self, observed: "SatSafetyBlockerProductionSignal") -> None:
+        """この COMPLETED が、記録済みの観測 ``observed`` を完了させてよいかを確かめる。
+
+        許可は完了の signal 自身の主張ではなく、記録した観測の blocker で決める:
+        観測と同じ blocker を言い直していて、その blocker が完了可能なときだけ通す。
+        """
+        if self.action != "COMPLETED" or type(observed) is not SatSafetyBlockerProductionSignal:
+            raise ValueError("SAT safety completion must name a recorded observation")
+        if observed.action != "OBSERVED":
+            raise ValueError("SAT safety completion must name a recorded observation")
+        if not self.same_blocker_as(observed):
+            raise ValueError(
+                "SAT safety completion does not restate its recorded observation"
+            )
+        if not observed.blocker.completable:
+            raise ValueError(
+                "SAT safety completion is not admissible for an analysis-unsafety cause"
+            )
 
 
 @dataclass(frozen=True, init=False)
@@ -1426,38 +1467,45 @@ def emit_sat_safety_completion_if_observed(
     if signal.action != "COMPLETED":
         raise ValueError("conditional SAT safety emission requires completion")
     session = active_production_pilot_session()
-    if session is None:
+    if session is None or session.domain_signal_encoder is None:
         return 0
-    if not sat_safety_completion_is_admissible(signal.reason_id):
-        # 解析の不安全の cause を完了させる producer は無い（plan v4 I5）。下の
-        # deferred の観測を黙って捨てる経路にも入れず、encoder の拒否と同じく
-        # domain signal の失敗として記録する（最終判定まで伝わる）。
-        session.record_domain_signal_failure(
-            "ValueError",
-            "SatSafetyBlockerProductionSignal: SAT safety completion is not "
-            "admissible for an analysis-unsafety cause",
-        )
-        return 0
+    authority_for_signal = getattr(
+        session.domain_signal_encoder, "authority_for_signal", None
+    )
+    if not callable(authority_for_signal):
+        raise TypeError("SAT safety encoder lacks occurrence authority")
+    occurrence_id = authority_for_signal(session, signal).occurrence.occurrence_id
     pending = session.domain_signal_state.get(
         "sat_safety_deferred_observations", {}
     )
     if type(pending) is not dict:
         raise TypeError("deferred SAT safety ledger is not exact")
-    authority_for_signal = getattr(
-        session.domain_signal_encoder, "authority_for_signal", None
+    observed_signals = session.domain_signal_state.get("sat_safety_observed_signals", {})
+    if type(observed_signals) is not dict:
+        raise TypeError("SAT safety observed signal ledger is not exact")
+    recorded = (
+        pending[occurrence_id][0] if occurrence_id in pending
+        else observed_signals.get(occurrence_id)
     )
-    if callable(authority_for_signal):
-        occurrence_id = authority_for_signal(
-            session, signal
-        ).occurrence.occurrence_id
-        if occurrence_id in pending:
-            pending.pop(occurrence_id)
-            session.event_contract.release(occurrence_id)
-            if not pending:
-                session.domain_signal_state.pop(
-                    "sat_safety_deferred_observations", None
-                )
+    if recorded is not None:
+        # 状態（deferred の約束・予約・Phase 7 の activation・台帳）を変える前に、
+        # 記録した観測に対して許可を確かめる。拒否は domain signal の失敗として
+        # 記録し、最終判定まで伝える（pair は ERROR）。
+        try:
+            signal.require_completes(recorded)
+        except ValueError as exc:
+            session.record_domain_signal_failure(
+                type(exc).__name__, f"SatSafetyBlockerProductionSignal: {exc}"
+            )
             return 0
+    if occurrence_id in pending:
+        pending.pop(occurrence_id)
+        session.event_contract.release(occurrence_id)
+        if not pending:
+            session.domain_signal_state.pop(
+                "sat_safety_deferred_observations", None
+            )
+        return 0
     emit = getattr(session, "emit_domain_signal_if_observed", None)
     if not callable(emit):
         raise TypeError("active production pilot session lacks conditional signal authority")
@@ -1492,9 +1540,7 @@ def complete_observed_sat_safety_for_counterexample(
             raise TypeError("SAT safety observed signal has an invalid type")
         if observed_signal.counterexample_binding != expected_binding:
             continue
-        if not replay_may_resolve_sat_safety_reason(
-            observed_signal.reason_id, observed_signal.evidence_refs
-        ):
+        if not observed_signal.blocker.replay_resolvable:
             # 検証済みの witness が示すのは、その witness の replay だけ。解析の
             # 不安全の blocker は同じ binding でも完了させない（plan v4 I5）。
             continue

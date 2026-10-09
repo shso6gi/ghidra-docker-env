@@ -18,12 +18,11 @@ from scripts.function_tracer_pcode.authority.contracts import (
     requirement_slot,
 )
 from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
-    SAT_SAFETY_TYPED_REASON_IDS,
     SafeCounterexampleProductionSignal,
     SatSafetyBlockerProductionSignal,
 )
 from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
-    sat_safety_completion_is_admissible,
+    SAT_SAFETY_TYPED_REASON_IDS,
 )
 from scripts.function_tracer_pcode.authority.registry import (
     SatisfactionBindingFactory,
@@ -185,17 +184,14 @@ class SatSafetyPilotEncoder:
                 CauseObservedEventAuthority(authority),
             ),)
             action = "OBSERVED"
-        elif not sat_safety_completion_is_admissible(signal.reason_id):
-            # 解析の不安全の cause を完了させる producer は無い。来たら producer の
-            # 契約違反なので、黙って捨てずに止める（plan v4 I5）。
-            raise ValueError(
-                "SAT safety completion is not admissible for an analysis-unsafety cause"
-            )
         elif occurrence_key not in observed_occurrences:
             raise ValueError("SAT safety completion has no observed active occurrence")
         elif occurrence_key in completed_occurrences:
             return ()
         else:
+            # 許可は記録した観測の blocker で決める（完了の signal の主張を信じない）。
+            # 拒否は例外として session が domain signal の失敗に記録する（plan v4 I5）。
+            signal.require_completes(self._recorded_observation(session, occurrence_key))
             receipt = RequirementCompletionReceipt(
                 authority.occurrence.cause_id.value,
                 authority.occurrence.occurrence_id,
@@ -287,6 +283,16 @@ class SatSafetyPilotEncoder:
         pending.pop(id(signal), None)
         if not pending:
             session.domain_signal_state.pop(pending_key, None)
+
+    @staticmethod
+    def _recorded_observation(session: Any, occurrence_key: str) -> SatSafetyBlockerProductionSignal:
+        observed = session.domain_signal_state.get("sat_safety_observed_signals", {})
+        if type(observed) is not dict:
+            raise TypeError("SAT safety observed signal ledger is not exact")
+        try:
+            return observed[occurrence_key]
+        except KeyError as exc:
+            raise ValueError("SAT safety completion has no recorded observation") from exc
 
     def has_observed(self, session: Any, signal: Any) -> bool:
         if type(signal) is not SatSafetyBlockerProductionSignal:

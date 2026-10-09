@@ -20,7 +20,9 @@ from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
 )
 from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
     COUNTEREXAMPLE_REPLAY_MISSING_REF,
-    SAT_SAFETY_REASON_RESOLUTION,
+    SAT_SAFETY_RECOVERY_REQUIREMENTS,
+    SAT_SAFETY_TYPED_REASON_IDS,
+    classify_sat_safety_blocker,
     replay_may_resolve_sat_safety_reason,
     sat_safety_reason_id_for_refs,
 )
@@ -399,7 +401,7 @@ def _impl__sat_unsafety_resolution_proof_is_complete(
     expected_binding: Any = None,
     expected_execution_receipt_digest: Optional[str] = None,
 ) -> bool:
-    if reason_record.reason_id not in SAT_SAFETY_REASON_RESOLUTION:
+    if reason_record.reason_id not in SAT_SAFETY_TYPED_REASON_IDS:
         return False
     if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value:
         return False
@@ -544,7 +546,7 @@ def _impl__record_completed_sat_counterexample_replay_proof(
 ) -> None:
     if not self.enable_completed_recovery_proofs:
         return
-    if reason_record.reason_id not in SAT_SAFETY_REASON_RESOLUTION:
+    if reason_record.reason_id not in SAT_SAFETY_TYPED_REASON_IDS:
         return
     if reason_record.recovery_proof_kind != UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value:
         return
@@ -657,7 +659,7 @@ def _impl__sat_unsafety_resolution_proof_id_from_evidence(cls, evidence: Any) ->
     if cls._evidence_text(evidence, "status") not in {"complete", "completed", "proven"}:
         return None
     evidence_reason_id = cls._evidence_text(evidence, "reason_id")
-    if evidence_reason_id not in SAT_SAFETY_REASON_RESOLUTION:
+    if evidence_reason_id not in SAT_SAFETY_TYPED_REASON_IDS:
         return None
     proof_kind = cls._evidence_text(evidence, "recovery_proof_kind")
     if proof_kind != UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value:
@@ -775,26 +777,12 @@ def _impl__make_sat_unsafety_unknown_reason(
     compatibility_reason_id = sat_safety_reason_id_for_refs(
         str(item) for item in sat_unsafety_reasons
     )
-    if replay_may_resolve_sat_safety_reason(
-        compatibility_reason_id, tuple(str(item) for item in sat_unsafety_reasons)
-    ):
-        required_evidence = (
-            "counterexample_replay",
-            "active_unsafety_discharge",
-            "coverage_effect_safety",
-        )
-        description = (
-            "Replay the SAT counterexample under its bound query, model, premise "
-            "and pair before accepting disequivalence."
-        )
-    else:
-        # 解析の不安全は replay では解消しない（plan v4 I5）。要るのは解析の安全性の証明。
-        required_evidence = ("analysis_safety_proof", "coverage_effect_safety")
-        description = (
-            "Prove that the analysis is safe for this counterexample (no dropped "
-            "path, effect or input bits); a counterexample replay does not "
-            "discharge it."
-        )
+    # 回復の要求は blocker の型で決まる（解析の不安全は replay では解消しない）。
+    required_evidence, description = SAT_SAFETY_RECOVERY_REQUIREMENTS[
+        classify_sat_safety_blocker(
+            compatibility_reason_id, tuple(str(item) for item in sat_unsafety_reasons)
+        ).resolution
+    ]
     return _v2_observe_sat_unsafety_reason(make_internal_v2_reason_diagnostic(
         compatibility_reason_id,
         stage=stage,

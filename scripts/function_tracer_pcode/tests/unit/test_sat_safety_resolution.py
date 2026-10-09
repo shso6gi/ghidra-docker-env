@@ -12,6 +12,7 @@ from copy import deepcopy
 import pytest
 
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import *  # noqa: F401,F403
+from scripts.function_tracer_pcode.proof import sat_safety_resolution as owner
 from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import (
     _sat_unsafety_resolution_action,
     _sat_unsafety_resolution_evidence,
@@ -20,8 +21,9 @@ from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
     COUNTEREXAMPLE_REPLAY_MISSING_REF,
     SAT_SAFETY_REASON_RESOLUTION,
     SatSafetyResolution,
+    SatSafetyBlockerInconsistent,
+    classify_sat_safety_blocker,
     replay_may_resolve_sat_safety_reason,
-    sat_safety_completion_is_admissible,
     sat_safety_reason_id_for_refs,
     sat_safety_ref_resolution,
 )
@@ -107,12 +109,66 @@ def test_replay_may_resolve_only_replay_reasons_whose_refs_agree():
     assert not replay_may_resolve_sat_safety_reason(None, replay)
 
 
-def test_only_replay_and_partition_causes_may_be_completed():
-    assert sat_safety_completion_is_admissible("counterexample_replay_unproven")
-    assert sat_safety_completion_is_admissible("counterexample_partition_replay_ambiguous")
-    assert not sat_safety_completion_is_admissible("counterexample_analysis_safety_unproven")
-    assert not sat_safety_completion_is_admissible("unknown_reason")
-    assert not sat_safety_completion_is_admissible(None)
+REPLAY = (COUNTEREXAMPLE_REPLAY_MISSING_REF,)
+
+
+@pytest.mark.parametrize(("reason_id", "refs", "resolution", "replay_resolvable", "completable"), [
+    ("counterexample_replay_unproven", REPLAY, SatSafetyResolution.REPLAY, True, True),
+    ("counterexample_replay_unproven", REPLAY * 2, SatSafetyResolution.REPLAY, True, True),
+    ("counterexample_analysis_safety_unproven", (ANALYSIS_REF,), SatSafetyResolution.ANALYSIS_UNSAFETY, False, False),
+    ("counterexample_analysis_safety_unproven", (CORRESPONDENCE_REF,), SatSafetyResolution.ANALYSIS_UNSAFETY, False, False),
+    ("counterexample_analysis_safety_unproven", (*REPLAY, ANALYSIS_REF), SatSafetyResolution.ANALYSIS_UNSAFETY, False, False),
+    ("counterexample_analysis_safety_unproven", (), SatSafetyResolution.ANALYSIS_UNSAFETY, False, False),
+    ("counterexample_analysis_safety_unproven", ("unknown-root",), SatSafetyResolution.ANALYSIS_UNSAFETY, False, False),
+    ("counterexample_partition_replay_ambiguous", ("pairwise",), SatSafetyResolution.PARTITION_AMBIGUITY, False, True),
+])
+def test_consistent_blockers_are_classified_from_the_pair(reason_id, refs, resolution, replay_resolvable, completable):
+    blocker = classify_sat_safety_blocker(reason_id, refs)
+    assert (blocker.reason_id, blocker.evidence_refs, blocker.resolution) == (reason_id, refs, resolution)
+    assert blocker.replay_resolvable is replay_resolvable
+    assert blocker.completable is completable
+    assert replay_may_resolve_sat_safety_reason(reason_id, refs) is replay_resolvable
+
+
+@pytest.mark.parametrize(("reason_id", "refs"), [
+    # 呼び手が付けた id と根拠が食い違う（指摘 1 の形を含む）。
+    ("counterexample_replay_unproven", (ANALYSIS_REF,)),
+    ("counterexample_replay_unproven", (CORRESPONDENCE_REF,)),
+    ("counterexample_replay_unproven", (*REPLAY, ANALYSIS_REF)),
+    ("counterexample_replay_unproven", ()),
+    ("counterexample_replay_unproven", ("unknown-root",)),
+    ("counterexample_analysis_safety_unproven", REPLAY),
+    ("counterexample_partition_replay_ambiguous", ()),
+    ("counterexample_partition_replay_ambiguous", REPLAY),
+    ("counterexample_partition_replay_ambiguous", ("pairwise", *REPLAY)),
+    # 形の悪い根拠と未知の id。
+    ("counterexample_replay_unproven", ("",)),
+    ("counterexample_replay_unproven", (None,)),
+    ("counterexample_analysis_safety_unproven", (("tuple",),)),
+    ("unknown_reason", REPLAY),
+    (None, REPLAY),
+])
+def test_inconsistent_or_malformed_pairs_have_no_blocker(reason_id, refs):
+    with pytest.raises(SatSafetyBlockerInconsistent):
+        classify_sat_safety_blocker(reason_id, refs)
+    assert replay_may_resolve_sat_safety_reason(reason_id, refs) is False
+
+
+def test_blockers_are_issued_only_by_the_classifier():
+    with pytest.raises(TypeError):
+        owner.SatSafetyBlocker("counterexample_replay_unproven", REPLAY, SatSafetyResolution.REPLAY)
+
+
+def test_the_owner_offers_no_reason_id_only_admission():
+    """解消・完了の許可は (id, 根拠) の対からしか得られない（id だけの述語を置かない）。"""
+    import inspect
+
+    for name, value in vars(owner).items():
+        if name.startswith("_") or not inspect.isfunction(value):
+            continue
+        params = list(inspect.signature(value).parameters)
+        if "reason_id" in params:
+            assert "evidence_refs" in params, name
 
 
 def test_every_copy_of_the_sat_reason_vocabulary_is_derived_from_the_table():
