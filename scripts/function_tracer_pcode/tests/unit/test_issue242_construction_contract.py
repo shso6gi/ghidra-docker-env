@@ -241,14 +241,15 @@ def test_owner_derived_identity_holds_no_subclass():
 # ---------------------------------------------------------------------------
 
 META_CALLS: "collections.Counter[str]" = collections.Counter()
+_BUILTIN_TYPES = (int, bool, str, float, tuple)
 
 
 class _ClaimsToBeInt(type):
-    """「int と等しい」と答え、自分の hook の呼び出しを数える metaclass。"""
+    """組み込みの scalar 型・tuple のどれとも「等しい」と答え、自分の hook の呼び出しを数える metaclass。"""
 
     def __eq__(cls, other):
         META_CALLS["__eq__"] += 1
-        return other is int or type.__eq__(cls, other)
+        return other in _BUILTIN_TYPES or type.__eq__(cls, other)
 
     def __ne__(cls, other):
         META_CALLS["__ne__"] += 1
