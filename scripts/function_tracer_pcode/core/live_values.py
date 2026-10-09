@@ -996,6 +996,25 @@ def scalar_int(value: Any) -> int:
     return int(exact_scalar(value))
 
 
+def scalar_int_or(value: Any, default: int = 0) -> int:
+    """`int(value or default)` と同じ値。真偽も整数も基底型の値で読む（subclass の `__bool__` / `__int__` を呼ばない）。"""
+
+    base = exact_scalar(value)
+    return scalar_int(base if base else default)
+
+
+def scalar_bool(value: Any) -> bool:
+    """`bool(value)` と同じ値。scalar の subclass は基底型の値にしてから真偽にする（`exact_scalar`）。
+
+    subclass の `__bool__` / `__len__` を呼ばない。JPype の `JBoolean`（int の subclass）は基底型の整数の真偽。
+    それ以外は `bool()` のまま（Issue #242、`scalar_int` と同じ）。
+    """
+
+    if value is True or value is False or value is None:
+        return bool(value)
+    return bool(exact_scalar(value))
+
+
 def scalar_text(value: Any) -> str:
     """`str(value)` と同じ値。scalar の subclass は基底型の値にしてから文字列にする（`exact_scalar`）。
 
@@ -1535,6 +1554,20 @@ def builtin_sequence(item: Any) -> bool:
     return _builtin_behaviour(kind, (tuple, list), ("__iter__", "__len__", "__getitem__", "__bool__"))
 
 
+def builtin_items(item: Any) -> Any:
+    """容器かどうか分からない値の要素の列: `None` なら `()`、組み込みの振る舞いの list / tuple ならそれ自身、
+    それ以外（文字列・他の容器・object）なら `None`（読めない）。
+
+    属性が容器か分からない値（注釈が `Any` の field・式の属性）を、外の型の `__bool__` / `__len__` / `__iter__` を
+    呼ばずに読む入口（Issue #242）。読めない値を空の列にしない: 呼ぶ側は `None` を「判断できない」として扱う
+    （中身を落として別の値と等しくしない）。要素は読まない（値として読むときは `exact_scalar` などで読む）。
+    """
+
+    if item is None:
+        return ()
+    return item if builtin_sequence(item) else None
+
+
 def builtin_set(item: Any) -> bool:
     kind = type(item)
     if kind is frozenset or kind is set:
@@ -1879,7 +1912,10 @@ def elements_of(values: Any) -> Iterator[Any]:
 
 __all__ = [
     "exact_scalar",
+    "scalar_bool",
+    "builtin_items",
     "scalar_int",
+    "scalar_int_or",
     "scalar_text",
     "StorageBeyondReadBound",
     "metered_storage_reads",

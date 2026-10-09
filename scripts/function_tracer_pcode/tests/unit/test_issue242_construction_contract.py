@@ -8,7 +8,8 @@ metaclass の hook）を **1 度も呼ばない**。値は基底型の slot の�
 - 値を偽る subclass（`Liar`: `int()` が 999、`str()` が別の文字列、真偽が逆）を、scalar の field・exact な
   tuple の葉・list・tuple の中の list に入れても、基底型の双子から作った ref と同じ値になり、hook は 0 回。
   owner は exact な tuple だけを写す（list は辿らない）。list を読むのは ref の検証で、読み方は
-  `live_values.scalar_int` / `scalar_text`（静的な guard: `test_construction_paths_read_scalars_through_live_values`）。
+  `live_values` の reader（静的な guard: `test_issue242_construction_guard.py`。factory・入口の引数・API の
+  戻り値の行列: `test_issue242_entry_matrix.py`）。
 - 型は identity で見る（metaclass の `__eq__` / `__hash__` が「int と等しい」と答えても subclass を残さない）。
 - 共有された tuple の DAG は distinct な tuple ごとに 1 度だけ辿り、共有を保つ。入れ子の深さは再帰の上限に依らない。
 - 注釈の表現（`X | None`・`Optional`・`Annotated`・裸の `tuple`）と、field の値の置き場所（`__dict__`・slot・
@@ -17,13 +18,11 @@ metaclass の hook）を **1 度も呼ばない**。値は基底型の slot の�
 
 from __future__ import annotations
 
-import ast
 import collections
 import dataclasses
 import enum
 import json
-import pathlib
-from typing import Annotated, Any, Dict, List, Optional, Tuple
+from typing import Annotated, Any, Dict, Optional, Tuple
 
 import pytest
 
@@ -36,84 +35,7 @@ from scripts.function_tracer_pcode.core.runtime_refs.readonly import ReductionAc
 from scripts.function_tracer_pcode.core.runtime_refs.unknowns import ExpansionBudgetTruncation
 from scripts.function_tracer_pcode.core.semantic_freeze import _capture_runtime_ref
 from scripts.function_tracer_pcode.tests.fixtures.runtime_ref_golden import corpus
-
-PACKAGE = pathlib.Path(__file__).resolve().parents[2]
-
-# ---------------------------------------------------------------------------
-# 値を偽る subclass（hook の呼び出しを数える）
-# ---------------------------------------------------------------------------
-
-HOOK_CALLS: "collections.Counter[str]" = collections.Counter()
-
-_LYING_INT = {
-    "__int__": lambda self: 999,
-    "__index__": lambda self: 999,
-    "__float__": lambda self: 999.0,
-    "__bool__": lambda self: not int.__bool__(self),
-    "__repr__": lambda self: "LIE",
-    "__str__": lambda self: "LIE",
-    "__format__": lambda self, spec: "LIE",
-    "__eq__": lambda self, other: False,
-    "__ne__": lambda self, other: True,
-    "__hash__": lambda self: 7,
-    "__lt__": lambda self, other: True,
-    "__le__": lambda self, other: True,
-    "__gt__": lambda self, other: True,
-    "__ge__": lambda self, other: True,
-    "__neg__": lambda self: 999,
-    "__add__": lambda self, other: 999,
-    "__radd__": lambda self, other: 999,
-    "__sub__": lambda self, other: 999,
-    "__rsub__": lambda self, other: 999,
-    "__mul__": lambda self, other: 999,
-    "__mod__": lambda self, other: 999,
-    "__rmod__": lambda self, other: 999,
-    "__and__": lambda self, other: 999,
-    "__or__": lambda self, other: 999,
-    "__lshift__": lambda self, other: 999,
-    "__rshift__": lambda self, other: 999,
-}
-_LYING_STR = {
-    "__str__": lambda self: "LIE",
-    "__repr__": lambda self: "'LIE'",
-    "__format__": lambda self, spec: "LIE",
-    "__eq__": lambda self, other: False,
-    "__ne__": lambda self, other: True,
-    "__hash__": lambda self: 7,
-    "__lt__": lambda self, other: True,
-    "__len__": lambda self: 3,
-    "__bool__": lambda self: False,
-    "__iter__": lambda self: iter("LIE"),
-    "__getitem__": lambda self, key: "L",
-    "__contains__": lambda self, item: True,
-    "strip": lambda self, *args: "LIE",
-    "__add__": lambda self, other: "LIE",
-}
-
-
-def _lying(base: type, name: str, table: Dict[str, Any]) -> type:
-    namespace = {}
-    for method, implementation in table.items():
-        def hook(self, *args, _method=method, _implementation=implementation):
-            HOOK_CALLS[f"{name}.{_method}"] += 1
-            return _implementation(self, *args)
-
-        namespace[method] = hook
-    return type(name, (base,), namespace)
-
-
-Liar = _lying(int, "Liar", _LYING_INT)
-LiarStr = _lying(str, "LiarStr", _LYING_STR)
-
-
-def _lie(value: Any) -> Any:
-    """exact な int / str を値を偽る subclass へ（bool・None・それ以外はそのまま）。"""
-
-    if type(value) is int:
-        return Liar(value)
-    if type(value) is str:
-        return LiarStr(value)
-    return value
+from scripts.function_tracer_pcode.tests.unit.runtime_ref_adversaries import HOOK_CALLS, Liar, LiarStr, lie
 
 
 def _base(value: Any) -> Any:
@@ -178,7 +100,7 @@ def _observe(ref: Any) -> Any:
 def test_lying_subclasses_in_every_position_build_the_base_typed_ref_without_calling_them(cls, name, label, make):
     kwargs = corpus.BASES[cls]()
     twin_kwargs = dict(kwargs, **{name: make(lambda v: v)})
-    lying_kwargs = dict(kwargs, **{name: make(_lie)})
+    lying_kwargs = dict(kwargs, **{name: make(lie)})
     try:
         twin = cls(**twin_kwargs)
     except Exception as error:  # 双子が受理されない形（検証の対象外）: 偽る値でも同じ型の例外で拒む
@@ -456,87 +378,22 @@ def test_field_storage_does_not_matter():
     assert type(partial.x) is int and not hasattr(partial, "unset")
 
 
-# ---------------------------------------------------------------------------
-# 静的な guard: 構築の経路は scalar を live_values の reader で読む（指摘 C の規則）
-# ---------------------------------------------------------------------------
+def test_supplied_candidate_key_is_compared_on_base_values():
+    # 検証が list の key を tuple に作り直して、渡された key と比べる経路（helper の戻り値は guard が信用する
+    # 位置なので、振る舞いで固定する）: 葉は基底型の値で比べ、偽る型の `__eq__` を呼ばない
+    from scripts.function_tracer_pcode.core.runtime_refs.call_models import CallModelCandidateRef
 
-_RAW_CONVERSIONS = frozenset({"int", "str", "float"})
+    def build(leaf):
+        signature = ["sig", leaf("sin"), [[leaf("float"), leaf(64)]]]
+        provenance = ["prov", leaf("libm")]
+        derived = ("call_model_candidate", "p", "sin", ("sig", "sin", (("float", 64),)), ("prov", "libm"))
+        supplied = [derived[0], derived[1], derived[2], ["sig", leaf("sin"), [[leaf("float"), leaf(64)]]], ["prov", leaf("libm")]]
+        return CallModelCandidateRef(
+            provider="p", canonical_symbol="sin", signature_key=signature, provenance_key=provenance, candidate_key=supplied,
+        )
 
-
-def _construction_paths(path: pathlib.Path):
-    """`@runtime_ref_record` の class の構築の入口（`__post_init__` / `__init__` と、ref を作る classmethod /
-    staticmethod）と、そこから同じ module の中で呼ぶ関数・method（推移的に）。"""
-
-    tree = ast.parse(path.read_text())
-    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
-    methods = {}
-    pending = []
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef) and any(
-            isinstance(d, ast.Name) and d.id == "runtime_ref_record" for d in node.decorator_list
-        ):
-            for item in node.body:
-                if isinstance(item, ast.FunctionDef):
-                    methods[(node.name, item.name)] = item
-                    factory = any(
-                        isinstance(d, ast.Name) and d.id in ("classmethod", "staticmethod") for d in item.decorator_list
-                    )
-                    if item.name in ("__post_init__", "__init__") or factory:
-                        pending.append((node.name, item))
-    seen = set()
-    while pending:
-        owner, function = pending.pop()
-        if (owner, function.name) in seen:
-            continue
-        seen.add((owner, function.name))
-        yield owner, function
-        for node in ast.walk(function):
-            if not isinstance(node, ast.Call):
-                continue
-            callee = node.func
-            if isinstance(callee, ast.Name) and callee.id in functions:
-                pending.append((None, functions[callee.id]))
-            elif (
-                isinstance(callee, ast.Attribute) and isinstance(callee.value, ast.Name)
-                and callee.value.id in ("self", "cls") and (owner, callee.attr) in methods
-            ):
-                pending.append((owner, methods[(owner, callee.attr)]))
-
-
-def _ref_modules():
-    return sorted((PACKAGE / "core" / "runtime_refs").glob("*.py")) + [PACKAGE / "core" / "call_target.py"]
-
-
-def test_construction_paths_read_scalars_through_live_values():
-    violations = []
-    reached = set()
-    for path in _ref_modules():
-        for owner, function in _construction_paths(path):
-            reached.add(f"{owner}.{function.name}")
-            for node in ast.walk(function):
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _RAW_CONVERSIONS:
-                    violations.append(f"{path.name}:{node.lineno} {owner}.{function.name}: {node.func.id}()")
-    # 走査が空回りしていない: 検証・自前の構築と、そこから呼ぶ helper に届く
-    assert {
-        "LocationBaseRef.__post_init__", "CanonicalLocation.__init__", "PcodeOpRef.__post_init__",
-        "ReductionAccumulatorProof.__post_init__", "ExpansionBudgetTruncation.__post_init__",
-        "None._coerce_opcode", "None._optional_int", "None._bias_key", "None._canonical_budget_value",
-        "LocationBaseRef.storage", "PcodeOpRef.from_pcode_op",
-    } <= reached
-    assert violations == []
-
-
-def test_the_static_guard_sees_a_raw_conversion(tmp_path):
-    module = tmp_path / "sample.py"
-    module.write_text(
-        "@dataclass(frozen=True)\n@runtime_ref_record\nclass R:\n"
-        "    def __post_init__(self):\n        helper(self.x)\n\n"
-        "def helper(value):\n    return int(value)\n"
-    )
-    found = [
-        node.func.id
-        for _owner, function in _construction_paths(module)
-        for node in ast.walk(function)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _RAW_CONVERSIONS
-    ]
-    assert found == ["int"]
+    twin = build(lambda value: value)
+    HOOK_CALLS.clear()
+    built = build(lie)
+    assert HOOK_CALLS == {}
+    assert built == twin and built.candidate_key == twin.candidate_key

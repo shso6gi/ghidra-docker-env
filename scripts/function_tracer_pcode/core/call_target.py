@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Optional, Tuple, Union
-from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_record
 from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.json_encoding import materialize
 
@@ -84,7 +84,7 @@ def _safe_bool_method(owner: Any, method_name: str) -> Optional[bool]:
     if not callable(method):
         return None
     try:
-        return bool(method())
+        return live_values.scalar_bool(method())
     except Exception:
         return None
 
@@ -106,7 +106,7 @@ def _safe_external_library_name(function: Any) -> Optional[str]:
         if not callable(method):
             continue
         try:
-            value = method()
+            value = live_values.exact_scalar(method())
         except Exception:
             value = None
         if isinstance(value, str) and value:
@@ -153,6 +153,7 @@ class CallTargetRef:
             raise ValueError(f"Unsupported call target kind: {self.kind}")
 
     @classmethod
+    @runtime_ref_entry
     def from_function(cls, function) -> "CallTargetRef":
         name = None
         entry_offset = None
@@ -192,6 +193,7 @@ class CallTargetRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def from_code_address(
         cls,
         address_value: int,
@@ -208,6 +210,7 @@ class CallTargetRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def from_name(
         cls,
         function_name: str,
@@ -237,6 +240,7 @@ class CallTargetRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def unknown(cls, display_hint: Optional[str] = None) -> "CallTargetRef":
         return cls(kind="unknown", display_hint=display_hint)
 
@@ -331,6 +335,7 @@ class CallTargetRef:
         return materialize(self)
 
 
+@runtime_ref_entry
 def coerce_call_target_ref(target: Union["CallTargetRef", str, None]) -> Optional["CallTargetRef"]:
     if live_values.is_kind(target, CallTargetRef):
         return target

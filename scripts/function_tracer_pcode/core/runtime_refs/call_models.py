@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
-from scripts.function_tracer_pcode.core.live_values import is_kind
+from scripts.function_tracer_pcode.core.live_values import exact_scalar, is_kind
 
 
 CALL_MODEL_CANDIDATE_KIND = "call_model_candidate"
@@ -43,11 +43,11 @@ def _required_text(value: Any, field_name: str) -> str:
 
 
 def _frozen_key(value: Any, field_name: str) -> Tuple[Any, ...]:
-    """list / tuple を再帰的に tuple 化した決定的キーを返す。"""
+    """list / tuple を再帰的に tuple 化した決定的キーを返す（葉の scalar は基底型の値。Issue #242）。"""
     if not isinstance(value, (tuple, list)):
         raise TypeError(f"call model candidate {field_name} must be a tuple")
     frozen = tuple(
-        _frozen_key(item, field_name) if isinstance(item, (tuple, list)) else item
+        _frozen_key(item, field_name) if isinstance(item, (tuple, list)) else exact_scalar(item)
         for item in value
     )
     if not frozen:

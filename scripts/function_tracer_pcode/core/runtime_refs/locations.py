@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
-from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, scalar_int, scalar_text, str_value
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
@@ -152,7 +152,8 @@ class LocationBaseRef:
         if self.kind not in {"parameter", "stack_frame", "storage", "global"}:
             raise ValueError(f"Unsupported location base kind: {self.kind}")
         if self.kind == "global":
-            if not self.storage_identity_key or self.storage_identity_key[0] != "global_object":
+            # 構築中の key は list のこともある（owner は exact な tuple だけを写す）: 要素は基底型の値で比べる
+            if not self.storage_identity_key or exact_scalar(self.storage_identity_key[0]) != "global_object":
                 raise ValueError("global location base requires a global_object identity key")
         if self.kind == "parameter":
             normalized_index = None
@@ -167,6 +168,7 @@ class LocationBaseRef:
                 object.__setattr__(self, "parameter_index", normalized_index)
 
     @classmethod
+    @runtime_ref_entry
     def parameter(
         cls,
         name: str,
@@ -189,6 +191,7 @@ class LocationBaseRef:
         return cls(kind="stack_frame", display_hint="stackframe")
 
     @classmethod
+    @runtime_ref_entry
     def storage(
         cls,
         *,
@@ -210,6 +213,7 @@ class LocationBaseRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def global_object(
         cls,
         symbol_name: str,
@@ -558,6 +562,7 @@ class PostStateReadRef:
             self.state_kind,
         )
 
+    @runtime_ref_entry
     def with_location(self, location: CanonicalLocation) -> "PostStateReadRef":
         return PostStateReadRef(
             location=location,
@@ -566,6 +571,7 @@ class PostStateReadRef:
             state_kind=self.state_kind,
         )
 
+    @runtime_ref_entry
     def with_snapshot(self, snapshot_ref: Optional[PostStateSnapshotRef]) -> "PostStateReadRef":
         return PostStateReadRef(
             location=self.location,
@@ -606,6 +612,7 @@ class ObservedMemoryReadRef:
             self.source,
         )
 
+    @runtime_ref_entry
     def with_location(
         self,
         location: Optional[CanonicalLocation],
@@ -620,6 +627,7 @@ class ObservedMemoryReadRef:
             source=self.source,
         )
 
+    @runtime_ref_entry
     def with_snapshot(
         self,
         snapshot_ref: Optional[PostStateSnapshotRef],

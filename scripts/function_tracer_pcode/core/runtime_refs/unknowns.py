@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
-from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
+from scripts.function_tracer_pcode.core.runtime_ref_record import exact_field_value, runtime_ref_entry, runtime_ref_record
 from scripts.function_tracer_pcode.core.live_values import (
     NOT_PLAIN,
     as_bool,
@@ -136,6 +136,7 @@ class UnknownValueRef:
         object.__setattr__(self, "target_ref", normalized_target)
 
     @classmethod
+    @runtime_ref_entry
     def deferred_call(
         cls,
         *,
@@ -165,6 +166,7 @@ class UnknownValueRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def out_of_scope_call(
         cls,
         *,
@@ -181,6 +183,7 @@ class UnknownValueRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def budget_exceeded(
         cls,
         *,
@@ -198,6 +201,7 @@ class UnknownValueRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def opaque(
         cls,
         *,
@@ -216,6 +220,7 @@ class UnknownValueRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def phi_circular(
         cls,
         *,
@@ -359,8 +364,8 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
         )
     if isinstance(value, Mapping):
         return {
-            scalar_text(key): _canonical_budget_value(item, depth + 1)
-            for key, item in sorted(value.items(), key=lambda pair: scalar_text(pair[0]))
+            _budget_key_text(key): _canonical_budget_value(item, depth + 1)
+            for key, item in sorted(value.items(), key=lambda pair: _budget_key_text(pair[0]))
         }
     stable_key = getattr(value, "stable_key", None)
     if callable(stable_key):
@@ -371,6 +376,13 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
         if key is not None:
             return ["stable", _canonical_budget_value(key, depth + 1)]
     return ["opaque", type(value).__module__, type(value).__qualname__]
+
+
+def _budget_key_text(key: Any) -> str:
+    """mapping の key の文字列（`str(key)` と同じ。tuple の key は葉を基底型の値にしてから文字列にする:
+    subclass の `__repr__` / `__str__` を呼ばない。Issue #242）。"""
+
+    return scalar_text(exact_field_value(key, "tuple"))
 
 
 def _canonical_budget_json(payload: Any) -> str:
@@ -448,6 +460,7 @@ class ExpansionBudgetTruncation:
     def event_id(self) -> str:
         return self._event_id_cache
 
+    @runtime_ref_entry
     def with_binding(
         self,
         *,
@@ -464,7 +477,8 @@ class ExpansionBudgetTruncation:
         bound_owner = (
             self.owner_scope_key if self.owner_scope_key is not None else owner_scope_key
         )
-        if bound_surface == self.surface and bound_owner == self.owner_scope_key:
+        # 束縛済みの欄は自分の値そのもの（同じ object）なので identity で比べる（key の要素を比べない）
+        if bound_surface is self.surface and bound_owner is self.owner_scope_key:
             return self
         return replace(self, surface=bound_surface, owner_scope_key=bound_owner)
 
@@ -510,6 +524,7 @@ class ExpansionBudgetTruncation:
         return materialize(self)
 
 
+@runtime_ref_entry
 def normalize_expansion_budget_truncations(
     items: Optional[Iterable[ExpansionBudgetTruncation]],
 ) -> Tuple[ExpansionBudgetTruncation, ...]:

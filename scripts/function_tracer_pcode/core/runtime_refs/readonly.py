@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
-from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, scalar_int, type_name
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, scalar_int, scalar_int_or, type_name
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     LocationBaseRef,
 )
@@ -245,6 +245,8 @@ class ReductionAccumulatorProof:
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         return self.readonly_term_sequence_contract_key()
+
+    @runtime_ref_entry
 
     def readonly_term_sequence_contract_key(
         self,
@@ -487,6 +489,7 @@ class ReductionAccumulatorProof:
         distance = int(count_value) - start_index
         return (distance + index_step - 1) // index_step
 
+    @runtime_ref_entry
     def loop_body_terms_for_count_value(self, count_value: int) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
         trip_count = self.trip_count_for_count_value(count_value)
         if trip_count is None:
@@ -517,6 +520,7 @@ class ReductionAccumulatorProof:
             for index in range(trip_count)
         )
 
+    @runtime_ref_entry
     def full_terms_for_count_value(self, count_value: int) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
         seed_terms = self.seed_terms_for_count_value(count_value)
         if seed_terms is None:
@@ -588,48 +592,49 @@ class ReductionAccumulatorProof:
                 return candidate
         return None
 
+    @runtime_ref_entry
     def seed_terms_for_count_value(self, count_value: int) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
         seed_terms = tuple(self.seed_terms or ())
         if not seed_terms:
             seed_term_count = self.seed_term_count
             if seed_term_count is not None:
-                count_value = int(count_value)
+                count_value = scalar_int(count_value)
                 if count_value <= 0:
                     return None
-                start_index = int(self.start_index)
+                start_index = scalar_int(self.start_index)
                 if start_index <= 0:
                     return ()
-                seed_term_count_value = int(seed_term_count)
+                seed_term_count_value = scalar_int(seed_term_count)
                 if seed_term_count_value < 0 or seed_term_count_value > start_index:
                     return None
-                index_scale = int(self.index_scale or self.stride)
+                index_scale = scalar_int(self.index_scale or self.stride)
                 if index_scale <= 0:
                     return None
                 if count_value >= start_index:
                     return ()
-                term_start_offset = int(self.start_offset) - int(self.start_index) * index_scale
-                selected_count = min(int(count_value), seed_term_count_value)
+                term_start_offset = scalar_int(self.start_offset) - scalar_int(self.start_index) * index_scale
+                selected_count = min(scalar_int(count_value), seed_term_count_value)
                 return tuple(
                     ReadonlyReductionTermRef(
-                        byte_offset=int(term_start_offset) + index * index_scale,
+                        byte_offset=scalar_int(term_start_offset) + index * index_scale,
                         access_size=self._readonly_term_access_size(),
                     )
                     for index in range(selected_count)
                 )
             return ()
-        count_value = int(count_value)
+        count_value = scalar_int(count_value)
         if count_value <= 0:
             return None
-        start_index = int(self.start_index)
+        start_index = scalar_int(self.start_index)
         if count_value >= start_index:
             return seed_terms
-        index_scale = int(self.index_scale or self.stride)
+        index_scale = scalar_int(self.index_scale or self.stride)
         if index_scale <= 0:
             return None
-        term_start_offset = int(self.start_offset) - int(self.start_index) * index_scale
+        term_start_offset = scalar_int(self.start_offset) - scalar_int(self.start_index) * index_scale
         selected = []
         for term in seed_terms:
-            byte_offset = int(term.byte_offset)
+            byte_offset = scalar_int(term.byte_offset)
             logical_delta = byte_offset - term_start_offset
             if logical_delta < 0 or logical_delta % index_scale != 0:
                 return None
@@ -724,6 +729,7 @@ class ReductionAccumulatorProof:
     def lower_to_loop_summary_ref(self) -> Optional["LoopSummaryRef"]:
         return self._build_loop_summary_ref()
 
+    @runtime_ref_entry
     def with_runtime_evidence(
         self,
         *,
@@ -1044,25 +1050,23 @@ class ReadonlyReductionRef:
             )
         source_biases = []
         if loop_summary is not None:
-            summary_result_size_raw = scalar_int(
-                getattr(getattr(loop_summary, "term_descriptor", None), "result_size", 0) or 0
-            )
+            summary_result_size_raw = scalar_int_or(getattr(getattr(loop_summary, "term_descriptor", None), "result_size", 0))
             if summary_result_size_raw > 0 and summary_result_size_raw != result_size:
                 raise ValueError("ReadonlyReductionRef.result_size must match loop_summary term result_size")
-            if summary_result_size_raw <= 0 and scalar_int(getattr(loop_summary, "constant_bias", 0) or 0) != 0:
+            if summary_result_size_raw <= 0 and scalar_int_or(getattr(loop_summary, "constant_bias", 0)) != 0:
                 raise ValueError("ReadonlyReductionRef cannot align biased loop_summary without term result_size")
             summary_result_size = result_size if summary_result_size_raw <= 0 else summary_result_size_raw
             summary_bias = _bias_key(
-                scalar_int(getattr(loop_summary, "constant_bias", 0) or 0),
+                scalar_int_or(getattr(loop_summary, "constant_bias", 0)),
                 summary_result_size,
             )[1]
             source_biases.append(("loop_summary.constant_bias", summary_bias))
         if accumulator_proof is not None:
-            proof_result_size = max(1, scalar_int(getattr(accumulator_proof, "result_size", 0) or 0))
+            proof_result_size = max(1, scalar_int_or(getattr(accumulator_proof, "result_size", 0)))
             if proof_result_size != result_size:
                 raise ValueError("ReadonlyReductionRef.result_size must match accumulator_proof.result_size")
             proof_bias = _bias_key(
-                scalar_int(getattr(accumulator_proof, "constant_bias", 0) or 0),
+                scalar_int_or(getattr(accumulator_proof, "constant_bias", 0)),
                 proof_result_size,
             )[1]
             source_biases.append(("accumulator_proof.constant_bias", proof_bias))
@@ -1104,6 +1108,8 @@ class ReadonlyReductionRef:
             f"elem={as_int(self.element_size)},"
             f"bias={as_int(self.constant_bias)})"
         )
+
+    @runtime_ref_entry
 
     def readonly_term_sequence_contract_key(
         self,

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
-from scripts.function_tracer_pcode.core.live_values import scalar_int, scalar_text
-from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
+from scripts.function_tracer_pcode.core.live_values import exact_scalar, scalar_int, scalar_text
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 
 
@@ -108,9 +108,8 @@ def _local_op_ordinal_from_parent(pcode_op: Any) -> Optional[int]:
             has_next = iterator.hasNext()
         except Exception:
             return None
-        if not isinstance(has_next, bool):
-            return None
-        if not has_next:
+        # 組み込みの bool だけを受ける（`bool` は subclass を作れないので、真偽は identity で読める）
+        if has_next is not True:
             return None
         try:
             candidate = iterator.next()
@@ -146,6 +145,9 @@ class PcodeOpRef:
     program_uid: Optional[int] = None
 
     def __post_init__(self) -> None:
+        # `binary_id` は注釈が Any だが stable key の scalar（側の識別子）: 基底型の値で持つ（Issue #242。
+        # stable key を並べる・比べる読み手が subclass の code を呼ばない）
+        object.__setattr__(self, "binary_id", exact_scalar(self.binary_id))
         normalized_input_sizes = []
         for size in tuple(self.input_sizes or ()):
             try:
@@ -187,6 +189,7 @@ class PcodeOpRef:
             return None
 
     @classmethod
+    @runtime_ref_entry
     def from_pcode_op(
         cls,
         pcode_op: Any,
@@ -381,6 +384,10 @@ class PcodeBlockRef:
     binary_id: Optional[Any] = None
     function_entry_space: Optional[str] = None
     function_entry_offset: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        # `binary_id` は stable key の scalar（`PcodeOpRef` と同じ読み方。Issue #242）
+        object.__setattr__(self, "binary_id", exact_scalar(self.binary_id))
 
     def stable_key(self) -> Tuple[Any, ...]:
         if (

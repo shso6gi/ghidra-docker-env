@@ -44,6 +44,7 @@ module の dict に置く。class の namespace には書かない（`live_value
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import types
 import typing
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -59,6 +60,12 @@ _WRAPPERS: Dict[Callable[..., Any], Any] = {}
 
 #: field に値が無い印（自前の `__init__` が置かなかった field）
 _ABSENT = object()
+
+#: `runtime_ref_entry` が作った包み → 包んだ入口の関数。
+_ENTRY_WRAPPERS: Dict[Callable[..., Any], Callable[..., Any]] = {}
+
+#: 入口の関数 → 引数の写し方（位置の引数の分類の列、名前 → 分類）。最初の呼び出しで決める。
+_ENTRY_PLANS: Dict[Callable[..., Any], Tuple[Tuple[str, ...], Dict[str, str]]] = {}
 
 
 def _kind_of(annotation: Any) -> str:
@@ -129,8 +136,11 @@ def exact_field_value(value: Any, kind: str) -> Any:
     holder = type(value)
     if holder is tuple:
         return _exact_tree(value) if kind == "tuple" else value
-    if kind == "tuple" or _exact(value):
+    if _exact(value):
         return value
+    if kind == "tuple":
+        # tuple の注釈に tuple でない値: list や object は辿らない。scalar の subclass は値の基底型へ
+        return exact_scalar(value)
     if kind == "bool":
         number = int_value(value)
         if number is not NOT_PLAIN:
@@ -228,6 +238,90 @@ def normalize_fields(instance: Any) -> None:
     _normalize(instance, field_kinds(type(instance)))
 
 
+def _entry_plan(function: Callable[..., Any]) -> Tuple[Tuple[str, ...], Dict[str, str]]:
+    """入口の関数の引数の分類（注釈を最初の呼び出しで 1 度だけ解決する。`self` / `cls` は写さない）。"""
+
+    plan = _ENTRY_PLANS.get(function)
+    if plan is None:
+        hints = typing.get_type_hints(function, include_extras=True)
+        positional: List[str] = []
+        by_name: Dict[str, str] = {}
+        for index, parameter in enumerate(inspect.signature(function).parameters.values()):
+            if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+                break
+            receiver = index == 0 and parameter.name in ("self", "cls")
+            kind = "object" if receiver else _kind_of(hints.get(parameter.name, Any))
+            if parameter.kind is not parameter.KEYWORD_ONLY:
+                positional.append(kind)
+            if parameter.kind is not parameter.POSITIONAL_ONLY:
+                by_name[parameter.name] = kind
+        plan = (tuple(positional), by_name)
+        _ENTRY_PLANS[function] = plan
+    return plan
+
+
+def _entry_value(value: Any, kind: str) -> Any:
+    holder = type(value)
+    if kind == "object" or value is None or holder is int or holder is str or holder is bool or holder is float:
+        return value
+    return exact_field_value(value, kind)
+
+
+def entry_arguments(
+    function: Callable[..., Any], args: Tuple[Any, ...], kwargs: Dict[str, Any],
+) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+    """入口 `function` へ渡す引数を、注釈の分類で写した引数（field と同じ規則。`Any` の引数は変えない）。"""
+
+    plan = _ENTRY_PLANS.get(function)
+    positional, by_name = plan if plan is not None else _entry_plan(function)
+    rewritten: Optional[List[Any]] = None
+    for index, value in enumerate(args):
+        if index >= len(positional):
+            break
+        new = _entry_value(value, positional[index])
+        if new is not value:
+            if rewritten is None:
+                rewritten = list(args)
+            rewritten[index] = new
+    if rewritten is not None:
+        args = tuple(rewritten)
+    for name, value in kwargs.items():
+        kind = by_name.get(name)
+        if kind is not None:
+            new = _entry_value(value, kind)
+            if new is not value:
+                kwargs[name] = new
+    return args, kwargs
+
+
+def runtime_ref_entry(function: Callable[..., Any]) -> Callable[..., Any]:
+    """ref を作る入口（factory・ref から ref を作る method・自前の `__init__`）の引数を、本体が値を消費する
+    **前に** 注釈の型規則で写す（`classmethod` / `staticmethod` の **下** に置く）。
+
+    本体が引数を `or` / 比較 / format / 文字列の method で読む前に subclass を基底型の値にするので、
+    本体は subclass の code を呼ばない。注釈が `bool` の引数は bool の規則（JBoolean は `bool`）、`Any`・
+    record・式の引数は変えない（本体が値として読むなら `live_values` の reader で読む）。
+    """
+
+    def entry(*args: Any, **kwargs: Any) -> Any:
+        args, kwargs = entry_arguments(function, args, kwargs)
+        return function(*args, **kwargs)
+
+    entry.__module__ = function.__module__
+    entry.__name__ = function.__name__
+    entry.__qualname__ = function.__qualname__
+    entry.__doc__ = function.__doc__
+    _ENTRY_WRAPPERS[entry] = function
+    return entry
+
+
+def is_runtime_ref_entry(function: Any) -> bool:
+    """`function`（`classmethod` / `staticmethod` なら中身）が `runtime_ref_entry` の包みか。"""
+
+    inner = getattr(function, "__func__", function)
+    return type(inner) is types.FunctionType and inner in _ENTRY_WRAPPERS
+
+
 def runtime_ref_record(cls: type) -> type:
     """runtime ref の class に scalar の正規化を付ける（`@dataclass(...)` の **下** に置く）。"""
 
@@ -235,8 +329,10 @@ def runtime_ref_record(cls: type) -> type:
         raise TypeError(f"@runtime_ref_record must be applied below @dataclass ({cls.__qualname__})")
     custom_init = cls.__dict__.get("__init__")
     if custom_init is not None:
-        # `init=False` で自前の `__init__` を持つ class（`CanonicalLocation`）: その後で写す
+        # `init=False` で自前の `__init__` を持つ class（`CanonicalLocation`）: 引数は入口として本体の前に写し、
+        # 本体が置いた field をその後で写す
         def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
+            args, kwargs = entry_arguments(custom_init, args, kwargs)
             custom_init(self, *args, **kwargs)
             normalize_fields(self)
 
@@ -275,9 +371,12 @@ def is_runtime_ref_record(cls: type) -> bool:
 
 
 __all__ = [
+    "entry_arguments",
     "exact_field_value",
     "field_kinds",
+    "is_runtime_ref_entry",
     "is_runtime_ref_record",
+    "runtime_ref_entry",
     "normalize_fields",
     "runtime_ref_record",
 ]
