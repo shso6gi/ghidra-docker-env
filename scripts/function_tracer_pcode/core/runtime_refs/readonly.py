@@ -6,9 +6,14 @@ from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, scalar_int, scalar_int_or, type_name
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, exact_tree, scalar_bool, scalar_int, scalar_int_or, type_name
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     LocationBaseRef,
+)
+from scripts.function_tracer_pcode.core.runtime_refs._reading import (
+    items as _items,
+    optional_rows as _optional_rows,
+    rows as _scalar_rows,
 )
 from scripts.function_tracer_pcode.core.runtime_refs.loops import (
     LoopSideEffectProfileRef,
@@ -18,6 +23,24 @@ from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeBlockRef,
     PcodeOpRef,
 )
+
+
+def _term_keys(terms: Any) -> Tuple[Any, ...]:
+    """項の stable key の列。項は代わりの型かもしれないので、比べる前に基底型の値で読む（Issue #242）。"""
+
+    return tuple(exact_tree(term.stable_key()) for term in terms)
+
+
+def _witness_terms(witness: Any) -> Tuple[Any, ...]:
+    """`tuple(witness.terms)` と同じ要素（subclass の code を呼ばない reader で読む）。"""
+
+    return _items(witness.terms)
+
+
+def _witness_count(witness: Any) -> int:
+    """`int(getattr(witness, "exact_count", 0) or 0)`（基底型の値で読む）。"""
+
+    return scalar_int_or(getattr(witness, "exact_count", 0))
 
 
 def _location_base_display_name(ref: Any) -> Any:
@@ -150,7 +173,7 @@ class ReductionAccumulatorProof:
         lane_terms = tuple(
             sorted(
                 (scalar_int(offset), max(1, scalar_int(exact_scalar(size) or 0)))
-                for offset, size in (self.lane_terms or ())
+                for offset, size in _optional_rows(self.lane_terms, 2)
             )
         )
         if lane_terms:
@@ -162,14 +185,14 @@ class ReductionAccumulatorProof:
         return_op_refs = tuple(
             sorted(
                 (ref for ref in (self.return_op_refs or ()) if isinstance(ref, PcodeOpRef)),
-                key=lambda ref: repr(ref.stable_key()),
+                key=lambda ref: repr(exact_tree(ref.stable_key())),
             )
         )
         object.__setattr__(self, "return_op_refs", return_op_refs)
         return_value_op_refs = tuple(
             sorted(
                 (ref for ref in (self.return_value_op_refs or ()) if isinstance(ref, PcodeOpRef)),
-                key=lambda ref: repr(ref.stable_key()),
+                key=lambda ref: repr(exact_tree(ref.stable_key())),
             )
         )
         object.__setattr__(self, "return_value_op_refs", return_value_op_refs)
@@ -203,7 +226,7 @@ class ReductionAccumulatorProof:
                 if self.seed_term_count is not None
                 else ()
             ),
-            tuple((int(offset), max(1, int(size or 0))) for offset, size in self.lane_terms),
+            tuple((int(offset), max(1, int(size or 0))) for offset, size in _scalar_rows(self.lane_terms, 2)),
             tuple(witness.stable_key() for witness in self.loop_body_witnesses),
             tuple(witness.stable_key() for witness in self.exact_return_witnesses),
             guard_keys,
@@ -267,9 +290,9 @@ class ReductionAccumulatorProof:
         target_result_size = self._readonly_contract_result_size(result_size)
         if target_result_size is None:
             return None
-        if self.side_effect_profile.requires_effect_proof():
+        if scalar_bool(self.side_effect_profile.requires_effect_proof()):
             return None
-        pointer_key = self.pointer_base_ref.semantic_key()
+        pointer_key = exact_tree(self.pointer_base_ref.semantic_key())
         count_identity = self.count_parameter_semantic_identity()
         if count_identity is None:
             return None
@@ -281,7 +304,7 @@ class ReductionAccumulatorProof:
             if count_storage_key is None:
                 return None
             limit_key = ("loop_limit_count_storage_identity", count_storage_key)
-        side_effect_key = self.side_effect_profile.semantic_key()
+        side_effect_key = exact_tree(self.side_effect_profile.semantic_key())
         if pointer_key is None or limit_key is None or side_effect_key is None:
             return None
         geometry = self._readonly_contract_scalar_geometry(target_result_size)
@@ -301,7 +324,7 @@ class ReductionAccumulatorProof:
             term_start_offset=term_start_offset,
             scalar_stride=scalar_stride,
         )
-        seed_keys = tuple(term.stable_key() for term in remaining_seed_terms)
+        seed_keys = _term_keys(remaining_seed_terms)
         return (
             "readonly_reduction_term_sequence_contract",
             self.reduction_kind,
@@ -387,7 +410,7 @@ class ReductionAccumulatorProof:
     ) -> Tuple[Tuple[int, int], ...]:
         target_result_size = max(1, int(target_result_size))
         normalized_lanes = tuple(
-            sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
+            sorted((int(offset), max(1, int(size or 0))) for offset, size in _optional_rows(self.lane_terms, 2))
         )
         if not normalized_lanes:
             return ()
@@ -416,11 +439,11 @@ class ReductionAccumulatorProof:
         if explicit_seed_terms:
             normalized_terms = []
             for term in explicit_seed_terms:
-                if max(1, int(getattr(term, "access_size", 0) or 0)) != term_access_size:
+                if max(1, scalar_int_or(getattr(term, "access_size", 0))) != term_access_size:
                     return None
                 normalized_terms.append(
                     ReadonlyReductionTermRef(
-                        byte_offset=int(getattr(term, "byte_offset")),
+                        byte_offset=scalar_int(getattr(term, "byte_offset")),
                         access_size=term_access_size,
                     )
                 )
@@ -478,6 +501,7 @@ class ReductionAccumulatorProof:
         return canonical_start, tuple(remaining_seed_terms)
 
     def trip_count_for_count_value(self, count_value: int) -> Optional[int]:
+        count_value = scalar_int(count_value)  # 呼び出し元の値（公開の method）: 基底型の値で読む
         if int(count_value) <= 0:
             return None
         start_index = int(self.start_index)
@@ -567,13 +591,14 @@ class ReductionAccumulatorProof:
             )
             for index in range(count_value)
         )
-        expected_prefix_key = tuple(term.stable_key() for term in expected_prefix)
+        expected_prefix_key = _term_keys(expected_prefix)
         for witness in sorted(
             tuple(self.exact_return_witnesses or ()),
-            key=lambda item: int(getattr(item, "exact_count", 0) or 0),
+            key=_witness_count,
         ):
-            exact_count = int(getattr(witness, "exact_count", 0) or 0)
-            terms = tuple(getattr(witness, "terms", ()) or ())
+            exact_count = _witness_count(witness)
+            raw_terms = getattr(witness, "terms", ())
+            terms = _items(raw_terms) if scalar_bool(raw_terms) else ()
             if exact_count < count_value or len(terms) < exact_count:
                 continue
             expected_witness = tuple(
@@ -583,12 +608,12 @@ class ReductionAccumulatorProof:
                 )
                 for index in range(exact_count)
             )
-            if tuple(term.stable_key() for term in terms[:exact_count]) != tuple(
+            if _term_keys(terms[:exact_count]) != tuple(
                 term.stable_key() for term in expected_witness
             ):
                 continue
             candidate = tuple(terms[:count_value])
-            if tuple(term.stable_key() for term in candidate) == expected_prefix_key:
+            if _term_keys(candidate) == expected_prefix_key:
                 return candidate
         return None
 
@@ -669,7 +694,7 @@ class ReductionAccumulatorProof:
         )
 
     def _readonly_lowering_failure_reason(self) -> Optional[str]:
-        if self.side_effect_profile.requires_effect_proof():
+        if scalar_bool(self.side_effect_profile.requires_effect_proof()):
             return "side_effects_not_representable"
         return None
 
@@ -774,9 +799,9 @@ class ReductionAccumulatorProof:
         ):
             return self
         exact_witnesses = {
-            int(witness.exact_count): tuple(witness.terms)
+            scalar_int(witness.exact_count): _witness_terms(witness)
             for witness in self.exact_return_witnesses or ()
-            if int(getattr(witness, "exact_count", 0) or 0) > 0
+            if _witness_count(witness) > 0
         }
         if not exact_witnesses:
             return self
@@ -789,7 +814,7 @@ class ReductionAccumulatorProof:
                 )
                 for index in range(count_value)
             )
-            if tuple(term.stable_key() for term in terms) == tuple(
+            if _term_keys(terms) == tuple(
                 term.stable_key() for term in expected_terms
             ):
                 matching_counts.append(int(count_value))
@@ -836,7 +861,7 @@ class ReductionAccumulatorProof:
         lane_count = stride // access_size
         if lane_count <= 1:
             return ()
-        witnesses_by_count = {int(witness.exact_count): tuple(witness.terms) for witness in witnesses or ()}
+        witnesses_by_count = {scalar_int(witness.exact_count): _witness_terms(witness) for witness in witnesses or ()}
         for count in range(1, lane_count + 1):
             terms = witnesses_by_count.get(count)
             expected = tuple(
@@ -846,7 +871,7 @@ class ReductionAccumulatorProof:
                 )
                 for index in range(count)
             )
-            if terms is None or tuple(term.stable_key() for term in terms) != tuple(
+            if terms is None or _term_keys(terms) != tuple(
                 term.stable_key() for term in expected
             ):
                 return ()
@@ -892,7 +917,7 @@ class ReductionAccumulatorProof:
         require_witness_prefix: bool,
     ) -> Tuple[Tuple[int, int], ...]:
         normalized_lanes = tuple(
-            sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
+            sorted((int(offset), max(1, int(size or 0))) for offset, size in _optional_rows(self.lane_terms, 2))
         )
         if not normalized_lanes:
             return ()
@@ -911,7 +936,7 @@ class ReductionAccumulatorProof:
             if int(self.start_index) != 0:
                 return ()
             witnesses_by_count = {
-                int(witness.exact_count): tuple(witness.terms)
+                scalar_int(witness.exact_count): _witness_terms(witness)
                 for witness in self.loop_body_witnesses or ()
             }
             for count in range(1, len(offsets)):
@@ -923,7 +948,7 @@ class ReductionAccumulatorProof:
                     )
                     for index in range(count)
                 )
-                if terms is None or tuple(term.stable_key() for term in terms) != tuple(
+                if terms is None or _term_keys(terms) != tuple(
                     term.stable_key() for term in expected
                 ):
                     return ()
@@ -945,7 +970,7 @@ class ReductionAccumulatorProof:
         if candidate_start_index <= 0:
             return self
         exact_witnesses = {
-            int(witness.exact_count): tuple(witness.terms)
+            scalar_int(witness.exact_count): _witness_terms(witness)
             for witness in self.exact_return_witnesses or ()
         }
         for count_value in range(1, candidate_start_index + 1):
@@ -959,7 +984,7 @@ class ReductionAccumulatorProof:
                 )
                 for index in range(count_value)
             )
-            if tuple(term.stable_key() for term in witness_terms) != tuple(
+            if _term_keys(witness_terms) != tuple(
                 term.stable_key() for term in expected_terms
             ):
                 return self
@@ -1229,11 +1254,11 @@ class ReadonlyReductionRef:
             )
             if callable(score_fn):
                 try:
-                    return max(0, int(score_fn()))
+                    return max(0, scalar_int(score_fn()))
                 except (TypeError, ValueError):
                     return 0
         witness_counts = {
-            int(witness.exact_count)
+            scalar_int(witness.exact_count)
             for witness in (self.semantic_witnesses or ())
             if getattr(witness, "exact_count", None) is not None
         }
@@ -1248,9 +1273,9 @@ class ReadonlyReductionRef:
         if not self.semantic_witnesses:
             return None
         witnesses_by_count = {
-            int(witness.exact_count): witness
+            scalar_int(witness.exact_count): witness
             for witness in self.semantic_witnesses
-            if int(getattr(witness, "exact_count", 0) or 0) > 0
+            if _witness_count(witness) > 0
         }
         prefix = []
         next_count = 1

@@ -355,6 +355,11 @@ LIVE_VALUES_WORK_OWNERS = {
     "_StorageRead.admit": _A,
     "_registered_meter": _A,
     "register_storage_meter": _A,
+    # Issue #242: 構築の中で受理した値を読む reader（反復の確かめ。辿る数を値の storage の読みの上限と比べる）
+    "exact_tree": _B,
+    "_tree_kind": _A,
+    "_tree_children": _B_CALLER,
+    "_tree_rebuild": _B_CALLER,
 }
 
 #: `core/read_limits`（作業量を受け取らない読みの固定の上限の owner）の入力に比例する関数

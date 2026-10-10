@@ -14,6 +14,8 @@ from scripts.function_tracer_pcode.core.live_values import (
     attribute,
     elements_of,
     exact_scalar,
+    exact_tree,
+    scalar_bool,
     scalar_int,
     scalar_text,
     str_value,
@@ -25,6 +27,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     as_list, builtin_str, inline, is_json_record, materialize, raw,
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
+from scripts.function_tracer_pcode.core.runtime_refs._reading import items as _items, optional_items as _optional_items
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
 )
@@ -95,6 +98,7 @@ def _deferred_call_display_name(ref: Any) -> Any:
 
 
 def _runtime_ref_stable_key_or_repr(value: Any) -> Optional[Tuple[Any, ...]]:
+    value = exact_tree(value)  # 注釈が Any の値: 型の名前・repr を基底型の値で（Issue #242）
     if value is None:
         return None
     stable_key = getattr(value, "stable_key", None)
@@ -104,8 +108,8 @@ def _runtime_ref_stable_key_or_repr(value: Any) -> Optional[Tuple[Any, ...]]:
         except (AttributeError, TypeError, ValueError, RecursionError):
             key = None
         if key is not None:
-            return ("stable", key)
-    return ("repr", type(value).__module__, type(value).__qualname__, repr(value))
+            return ("stable", exact_tree(key))
+    return ("repr", type(value).__module__, type(value).__qualname__, repr(exact_tree(value)))
 
 
 def _runtime_ref_origin_source(value: Any) -> Tuple[Any, ...]:
@@ -244,7 +248,7 @@ class UnknownValueRef:
             except (AttributeError, TypeError, ValueError, RecursionError):
                 candidate_key = None
             if candidate_key is not None:
-                origin_key = ("stable", candidate_key)
+                origin_key = ("stable", exact_tree(candidate_key))
         return (
             self.kind,
             self.reason,
@@ -347,6 +351,7 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
 
     # scalar の subclass は基底型の値で書く（subclass の code を呼ばず、写しに subclass を残さない。Issue #242）
     value = exact_scalar(value)
+    depth = scalar_int(depth)
     if value is None or isinstance(value, (bool, int, str)):
         return value
     if depth >= _CANONICAL_BUDGET_MAX_DEPTH:
@@ -421,8 +426,7 @@ class ExpansionBudgetTruncation:
             object.__setattr__(self, "surface", scalar_text(self.surface))
         if self.label is not None:
             object.__setattr__(self, "label", scalar_text(self.label))
-        for name in ("dedup", "paths", "conditions"):
-            counts = getattr(self, name)
+        for name, counts in (("dedup", self.dedup), ("paths", self.paths), ("conditions", self.conditions)):
             if counts is None:
                 continue
             object.__setattr__(self, name, tuple(scalar_int(item) for item in counts))
@@ -570,6 +574,7 @@ def _plain_event_id(value: Any) -> str:
     return text
 
 
+@runtime_ref_entry
 def merge_expansion_budget_truncations(
     *groups: Optional[Iterable[ExpansionBudgetTruncation]],
 ) -> Tuple[ExpansionBudgetTruncation, ...]:
@@ -587,7 +592,8 @@ def merge_expansion_budget_truncations(
 def expansion_budget_event_ids(
     items: Optional[Iterable[ExpansionBudgetTruncation]],
 ) -> Tuple[str, ...]:
-    return tuple(sorted({item.event_id for item in (items or ()) if item is not None}))
+    # 記録は代わりの型かもしれない: 容器と id は基底型の値で読む（Issue #242）
+    return tuple(sorted({scalar_text(item.event_id) for item in _optional_items(items) if item is not None}))
 
 
 class ExpansionBudgetCollector:
@@ -603,22 +609,25 @@ class ExpansionBudgetCollector:
         self._records: List[ExpansionBudgetTruncation] = []
         self._seen: set = set()
 
+    @runtime_ref_entry
     def record(self, truncation: Optional[ExpansionBudgetTruncation]) -> None:
         if truncation is None:
             return
-        event_id = truncation.event_id
+        # 記録は代わりの型かもしれない: id は基底型の値で読む（Issue #242）
+        event_id = scalar_text(truncation.event_id)
         if event_id in self._seen:
             existing_index = next(
                 index
                 for index, item in enumerate(self._records)
-                if item.event_id == event_id
+                if scalar_text(item.event_id) == event_id
             )
             existing = self._records[existing_index]
+            existing_ids = tuple(scalar_text(item) for item in _items(existing.referenced_event_ids))
             union = tuple(sorted(
-                set(existing.referenced_event_ids)
-                | set(truncation.referenced_event_ids)
+                set(existing_ids)
+                | {scalar_text(item) for item in _items(truncation.referenced_event_ids)}
             ))
-            if union != existing.referenced_event_ids:
+            if union != existing_ids:
                 self._records[existing_index] = replace(
                     existing, referenced_event_ids=union
                 )
@@ -626,8 +635,9 @@ class ExpansionBudgetCollector:
         self._seen.add(event_id)
         self._records.append(truncation)
 
+    @runtime_ref_entry
     def extend(self, items: Optional[Iterable[ExpansionBudgetTruncation]]) -> None:
-        for item in items or ():
+        for item in _optional_items(items):
             self.record(item)
 
     @property

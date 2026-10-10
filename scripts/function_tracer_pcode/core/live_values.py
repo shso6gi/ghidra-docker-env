@@ -35,8 +35,9 @@ import threading
 import types
 import contextvars
 from collections import OrderedDict
+import collections
 from enum import Enum
-from typing import Any, Iterator, NoReturn, Optional, Tuple
+from typing import Any, Dict, Iterator, List, NoReturn, Optional, Tuple
 
 #: 基底型でない値に `plain_scalar` / `*_value` が返す印
 NOT_PLAIN = object()
@@ -1016,14 +1017,152 @@ def scalar_bool(value: Any) -> bool:
 
 
 def scalar_text(value: Any) -> str:
-    """`str(value)` と同じ値。scalar の subclass は基底型の値にしてから文字列にする（`exact_scalar`）。
+    """`str(value)` と同じ値。scalar の subclass は基底型の値にしてから文字列にする（容器の中の葉も: `exact_tree`）。
 
-    subclass の `__str__` / `__repr__` を呼ばない。それ以外は `str()` のまま（Issue #242、`scalar_int` と同じ）。
+    subclass の `__str__` / `__repr__` を呼ばない（容器の `str()` は要素の `__repr__` を呼ぶので、葉を写してから
+    文字列にする）。それ以外の object は `str()` のまま（外の code。Issue #242、`scalar_int` と同じ）。
     """
 
     if type(value) is str:
         return value
-    return str(exact_scalar(value))
+    return str(exact_tree(value))
+
+
+#: `exact_tree` が 1 回の写しで読む容器の要素の量の名前
+_TREE_NODES = "a value tree's container items"
+
+
+def _tree_kind(value: Any) -> Optional[type]:
+    """`exact_tree` が辿る容器の基底の型（組み込みの tuple / list / dict / set / frozenset と `deque`。subclass を含む）。"""
+
+    kind = type(value)
+    if kind is tuple or kind is list or kind is dict or kind is set or kind is frozenset:
+        return kind
+    for base in (tuple, list, dict, set, frozenset, collections.deque):
+        if isinstance(value, base):
+            return base
+    return None
+
+
+def _tree_length(node: Any, kind: type) -> int:
+    """容器の要素の数（基底型の slot で O(1)。dict は key と値の 2 つずつ）。"""
+
+    if kind is dict:
+        return 2 * dict.__len__(node)
+    return kind.__len__(node)
+
+
+def _tree_children(node: Any, kind: type) -> List[Any]:
+    """容器の要素（dict は key と値を交互に）を基底型の slot で読む（呼ぶ側が先に数を上限と比べる）。"""
+
+    if kind is dict:
+        children: List[Any] = []
+        for key, item in dict.items(node):
+            children.append(key)
+            children.append(item)
+        return children
+    return list(kind.__iter__(node))
+
+
+def _tree_rebuild(node: Any, kind: type, items: List[Any]) -> Any:
+    """写した要素から元と同じ型の容器を作る（呼ぶ側が先に数を上限と比べる）。
+
+    組み込みの型そのもの・named tuple・`OrderedDict` / `defaultdict` / `Counter` / `deque` は同じ型で作る。
+    それ以外の subclass は、その型の構築子で作れなければ基底の型で作る（値は同じ。型は基底の型になる）。
+    """
+
+    holder = type(node)
+    pairs = list(zip(items[0::2], items[1::2])) if kind is dict else None
+    if holder is kind:
+        return dict(pairs) if kind is dict else kind(items)
+    if isinstance(node, tuple) and hasattr(holder, "_make"):
+        return holder._make(items)
+    if isinstance(node, collections.defaultdict):
+        return holder(node.default_factory, dict(pairs))
+    if isinstance(node, collections.deque):
+        return holder(items, node.maxlen)
+    try:
+        return holder(dict(pairs)) if kind is dict else holder(items)
+    except (TypeError, ValueError):  # 構築子の形が違う subclass: 値は同じ基底の型で
+        return dict(pairs) if kind is dict else kind(items)
+
+
+def exact_tree(value: Any) -> Any:
+    """比べる・hash する・文字列にする前の値の写し: 組み込みの容器を辿り、scalar の subclass の葉を基底型の値にする。
+
+    外の object（代わりの型・API の object）の method の戻り値（key など）や、受理したまま持つ容器を、比べる・
+    並べる・dict の key にする・`str()` にする前に読む reader（Issue #242）。辿る容器は組み込みの tuple / list /
+    dict（key と値）/ set / frozenset とその subclass（named tuple・`OrderedDict` / `defaultdict` / `Counter`）と
+    `deque` で、要素は基底型の slot で読み、型と並びを保って作り直す（構築子の形が違う subclass は基底の型で
+    作る: 値は同じ）。それ以外の object は辿らない（外の code）。葉の規則は `exact_scalar`（exact な値・enum の
+    member・scalar でない object は変えない）。葉がどれも変わらない容器は同じ object を返し、共有された容器は
+    1 度だけ辿って結果も共有する。明示 stack の後順走査（入れ子が深くても再帰の上限に当たらない）。閉路を
+    持つ容器は、写しが要らなければ同じ object、要るなら `TypeError`（元の容器を指す写しを作らない: fail-closed）。
+    容器の反復は基底型の slot で行い（容器の subclass の上書きを呼ばない）、辿る要素の数の和は値の storage の
+    読みの 1 つの量（反復の確かめ: 呼ぶ側が辿ると頼んだ読み）として上限と比べる。
+    """
+
+    kind = type(value)
+    if value is None or kind is int or kind is str or kind is bool or kind is float:
+        return value  # exact な scalar（最も多い形）
+    if kind is tuple or kind is list:
+        # よくある形（葉が exact な scalar だけの平らな列）: 何も作らずに同じ object を返す
+        length = len(value)
+        if length <= SCAN_LIMIT:
+            for item in value:
+                holder = type(item)
+                if not (item is None or holder is int or holder is str or holder is bool or holder is float):
+                    break
+            else:
+                return value
+    elif _tree_kind(value) is None:
+        return exact_scalar(value)
+    read = _StorageRead(_TREE_NODES, traversal=True)
+    done: Dict[int, Any] = {}
+    children_of: Dict[int, List[Any]] = {}
+    active: set = set()  # 入って、まだ出ていない容器（ここへ戻る要素は閉路）
+    cyclic = False
+    changed = False
+    stack: List[Tuple[Any, bool]] = [(value, False)]
+    while stack:
+        node, leaving = stack.pop()
+        kind = _tree_kind(node)
+        if not leaving:
+            if id(node) in done:
+                continue
+            done[id(node)] = node  # 入った印（同じ容器に再び出会うのは共有か閉路: 閉路は辿り直さない）
+            active.add(id(node))
+            read.admit(_tree_length(node, kind))
+            children = _tree_children(node, kind)
+            children_of[id(node)] = children
+            stack.append((node, True))
+            for item in children:
+                if _tree_kind(item) is not None and id(item) not in done:
+                    stack.append((item, False))
+            continue
+        children = children_of.pop(id(node))
+        items: Optional[List[Any]] = None
+        for index, item in enumerate(children):
+            holder = type(item)
+            if item is None or holder is int or holder is str or holder is bool or holder is float:
+                continue
+            if _tree_kind(item) is not None:
+                cyclic = cyclic or id(item) in active
+                new = done[id(item)]
+            else:
+                new = exact_scalar(item)
+            if new is not item:
+                if items is None:
+                    items = list(children)
+                items[index] = new
+        active.discard(id(node))
+        if items is not None:
+            changed = True
+            done[id(node)] = _tree_rebuild(node, kind, items)
+    if cyclic and changed:
+        # 閉路を持つ容器の写しは元の容器を指してしまう: 読めない値として扱う（空や元の値にしない）
+        raise TypeError("a cyclic container holding scalar subclasses is not copied")
+    return done[id(value)]
 
 
 def as_int(value: Any) -> int:
@@ -1912,6 +2051,7 @@ def elements_of(values: Any) -> Iterator[Any]:
 
 __all__ = [
     "exact_scalar",
+    "exact_tree",
     "scalar_bool",
     "builtin_items",
     "scalar_int",

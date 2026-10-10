@@ -6,7 +6,13 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, bounded_repr, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, attribute, builtin_items, exact_scalar, is_kind, scalar_bool, scalar_int, scalar_int_or, scalar_text, size, type_module, type_name
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, attribute, builtin_items, exact_scalar, exact_tree, is_kind, scalar_bool, scalar_int, scalar_int_or, scalar_text, size, type_module, type_name
+from scripts.function_tracer_pcode.core.runtime_refs._reading import (
+    items as _items,
+    optional_items as _optional_items,
+    optional_rows as _optional_rows,
+    rows as _scalar_rows,
+)
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     LocationBaseRef,
 )
@@ -41,7 +47,7 @@ class LoopVariableIdentityRef:
             "loop_variable_identity",
             self.role,
             int(self.binder_ordinal),
-            self.varnode_key,
+            exact_tree(self.varnode_key),  # list のまま受理した key の葉も基底型の値で（Issue #242）
         )
 
     def json_items(self):
@@ -62,7 +68,7 @@ class _LoopVariableBindingContext:
     stable_to_binder: Dict[Tuple[Any, ...], Tuple[Any, ...]]
 
     def semantic_key_for(self, ref: LoopVariableIdentityRef) -> Optional[Tuple[Any, ...]]:
-        stable_key = ref.stable_key()
+        stable_key = exact_tree(ref.stable_key())  # 代わりの型・subclass の key も基底型の値で引く
         if stable_key is None:
             return None
         binder_key = self.stable_to_binder.get(stable_key)
@@ -79,7 +85,7 @@ def _loop_object_key(value: Any) -> Optional[Tuple[Any, ...]]:
     if isinstance(value, int):
         return ("int", scalar_int(value))
     if isinstance(value, str):
-        return ("str", exact_scalar(value))
+        return ("str", exact_tree(value))
     if isinstance(value, bytes):
         return ("bytes", bytes.hex(value))
     if isinstance(value, tuple):
@@ -105,7 +111,7 @@ def _loop_object_key(value: Any) -> Optional[Tuple[Any, ...]]:
     structural_key = getattr(value, "structural_key", None)
     if callable(structural_key):
         try:
-            return ("structural", structural_key())
+            return ("structural", exact_tree(structural_key()))
         except (AttributeError, TypeError, ValueError, RecursionError):
             return None
     stable_key = getattr(value, "stable_key", None)
@@ -116,10 +122,11 @@ def _loop_object_key(value: Any) -> Optional[Tuple[Any, ...]]:
             return None
         if key is None:
             return None
-        return ("stable", key)
+        return ("stable", exact_tree(key))
     return None
 
 
+@runtime_ref_entry
 def _loop_variable_binding_context_from_values(
     *values: Any,
 ) -> Optional[_LoopVariableBindingContext]:
@@ -137,8 +144,8 @@ def _loop_variable_binding_context_from_values(
 
         ref = item if isinstance(item, LoopVariableIdentityRef) else getattr(item, "runtime_ref", None)
         if isinstance(ref, LoopVariableIdentityRef):
-            stable_key = ref.stable_key()
-            binder_key = ref.binder_key()
+            stable_key = exact_tree(ref.stable_key())
+            binder_key = exact_tree(ref.binder_key())
             if stable_key is None:
                 return False
             existing_stable = binder_to_stable.get(binder_key)
@@ -150,12 +157,12 @@ def _loop_variable_binding_context_from_values(
             binder_to_stable[binder_key] = stable_key
             stable_to_binder[stable_key] = binder_key
 
-        expr_type = exact_scalar(getattr(getattr(item, "expr_type", None), "name", None))
+        expr_type = exact_tree(getattr(getattr(item, "expr_type", None), "name", None))
         if expr_type == "PHI":
             branches = builtin_items(getattr(item, "value", None))
             if branches is None:
                 return False  # 読めない容器: 中身を落とさず、束縛の文脈を作らない
-            for cond, branch_value in branches:
+            for cond, branch_value in _scalar_rows(branches, 2):
                 if cond is not None and not visit(cond):
                     return False
                 if not visit(branch_value):
@@ -208,7 +215,7 @@ def _loop_object_semantic_key(
     if isinstance(value, int):
         return ("int", scalar_int(value))
     if isinstance(value, str):
-        return ("str", exact_scalar(value))
+        return ("str", exact_tree(value))
     if isinstance(value, bytes):
         return ("bytes", bytes.hex(value))
     if isinstance(value, tuple):
@@ -235,7 +242,7 @@ def _loop_object_semantic_key(
     if isinstance(value, LoopVariableIdentityRef):
         if loop_variable_context is None:
             return None
-        return loop_variable_context.semantic_key_for(value)
+        return exact_tree(loop_variable_context.semantic_key_for(value))
 
     expr_key = _loop_expression_semantic_key(value, loop_variable_context)
     if expr_key is not None:
@@ -248,7 +255,7 @@ def _loop_object_semantic_key(
         except (AttributeError, TypeError, ValueError, RecursionError):
             return None
         if key is not None:
-            return ("semantic", key)
+            return ("semantic", exact_tree(key))
         if isinstance(value, LocationBaseRef):
             return None
 
@@ -260,7 +267,7 @@ def _loop_object_semantic_key(
             return None
         if key is None:
             return None
-        return ("storage_identity", key)
+        return ("storage_identity", exact_tree(key))
 
     stable_key = getattr(value, "stable_key", None)
     if callable(stable_key):
@@ -270,7 +277,7 @@ def _loop_object_semantic_key(
             return None
         if key is None:
             return None
-        return ("stable", key)
+        return ("stable", exact_tree(key))
     return None
 
 
@@ -279,11 +286,11 @@ def _loop_expression_semantic_key(
     loop_variable_context: Optional[_LoopVariableBindingContext] = None,
 ) -> Optional[Tuple[Any, ...]]:
     expr_type = getattr(value, "expr_type", None)
-    expr_type_name = exact_scalar(getattr(expr_type, "name", None))
+    expr_type_name = exact_tree(getattr(expr_type, "name", None))
     if expr_type_name is None:
         return None
 
-    size = scalar_int(exact_scalar(getattr(value, "size", 0)) or 0)
+    size = scalar_int(exact_tree(getattr(value, "size", 0)) or 0)
     if expr_type_name == "CONSTANT":
         try:
             return ("const", scalar_int(getattr(value, "value")), size)
@@ -317,7 +324,7 @@ def _loop_expression_semantic_key(
                 return None
             return ("variable_runtime", size, runtime_key)
         return None
-    if expr_type_name in {"UNARY_OP", "BINARY_OP", "INTRINSIC", "CALL"}:
+    if expr_type_name in ("UNARY_OP", "BINARY_OP", "INTRINSIC", "CALL"):
         operands = builtin_items(getattr(value, "operands", None))
         if operands is None:
             return None  # 読めない容器: operand を落とした key で別の式と等しくしない
@@ -326,7 +333,7 @@ def _loop_expression_semantic_key(
             return None
         return (
             expr_type_name.lower(),
-            exact_scalar(getattr(value, "operator", None)) or exact_scalar(getattr(value, "name", None)) or "",
+            exact_tree(getattr(value, "operator", None)) or exact_tree(getattr(value, "name", None)) or "",
             None if getattr(value, "opcode", None) is None else scalar_int(getattr(value, "opcode")),
             size,
             operand_keys,
@@ -345,7 +352,7 @@ def _loop_expression_semantic_key(
         phi_branches = builtin_items(getattr(value, "value", None))
         if phi_branches is None:
             return None
-        for condition, branch_value in phi_branches:
+        for condition, branch_value in _scalar_rows(phi_branches, 2):
             if condition is None:
                 condition_key = ("none",)
             else:
@@ -451,13 +458,13 @@ def _lane_term_source(lane: Any) -> Any:
 
 def _loop_object_to_dict(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
-        return value
+        return exact_scalar(value)
     if isinstance(value, tuple):
         return [_loop_object_to_dict(item) for item in value]
     if isinstance(value, list):
         return [_loop_object_to_dict(item) for item in value]
     if isinstance(value, dict):
-        return {str(key): _loop_object_to_dict(item) for key, item in value.items()}
+        return {scalar_text(key): _loop_object_to_dict(item) for key, item in value.items()}
     to_dict = getattr(value, "to_dict", None)
     if callable(to_dict):
         try:
@@ -509,7 +516,7 @@ class LoopBodyEffectRef:
         value_key = _loop_object_key(self.value_expr)
         guard_keys = tuple(_loop_object_key(guard) for guard in self.guard_constraints)
         path_keys = tuple(
-            tuple(_loop_object_key(condition) for condition in path_conditions)
+            tuple(_loop_object_key(condition) for condition in _items(path_conditions))
             for path_conditions in self.path_condition_sets
         )
         target_key = _loop_object_key(self.target_ref)
@@ -546,7 +553,7 @@ class LoopBodyEffectRef:
         value_key = _loop_object_semantic_key(self.value_expr)
         guard_keys = tuple(_loop_object_semantic_key(guard) for guard in self.guard_constraints)
         path_keys = tuple(
-            tuple(_loop_object_semantic_key(condition) for condition in path_conditions)
+            tuple(_loop_object_semantic_key(condition) for condition in _items(path_conditions))
             for path_conditions in self.path_condition_sets
         )
         target_key = _loop_object_semantic_key(self.target_ref)
@@ -674,7 +681,7 @@ class LoopSideEffectProfileRef:
         context_descriptors = tuple(self.context_descriptors or ())
 
         def _descriptor_requires_effect_proof(effect: LoopBodyEffectRef) -> bool:
-            return getattr(effect, "kind", None) != "conditional_guard"
+            return exact_tree(getattr(effect, "kind", None)) != "conditional_guard"
 
         if profile not in {"pure", "pure_memory_read", "pure_conditional"}:
             return True
@@ -733,7 +740,7 @@ class LoopTermDescriptorRef:
                 int(residue),
                 _loop_object_key(bias_expr),
             )
-            for modulus, residue, bias_expr in self.residue_bias_terms
+            for modulus, residue, bias_expr in _scalar_rows(self.residue_bias_terms, 3)
         )
         if any(key[2] is None for key in residue_bias_keys):
             return None
@@ -753,10 +760,10 @@ class LoopTermDescriptorRef:
                     int(coeff),
                     int(bias),
                 )
-                for modulus, residue, coeff, bias in self.residue_cases
+                for modulus, residue, coeff, bias in _scalar_rows(self.residue_cases, 4)
             ),
             residue_bias_keys,
-            tuple((int(offset), max(1, int(size or 0))) for offset, size in self.lane_terms),
+            tuple((int(offset), max(1, int(size or 0))) for offset, size in _scalar_rows(self.lane_terms, 2)),
         )
 
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
@@ -769,7 +776,7 @@ class LoopTermDescriptorRef:
                 int(residue),
                 _loop_object_semantic_key(bias_expr),
             )
-            for modulus, residue, bias_expr in self.residue_bias_terms
+            for modulus, residue, bias_expr in _scalar_rows(self.residue_bias_terms, 3)
         )
         if any(key[2] is None for key in residue_bias_keys):
             return None
@@ -789,10 +796,10 @@ class LoopTermDescriptorRef:
                     int(coeff),
                     int(bias),
                 )
-                for modulus, residue, coeff, bias in self.residue_cases
+                for modulus, residue, coeff, bias in _scalar_rows(self.residue_cases, 4)
             ),
             residue_bias_keys,
-            tuple((int(offset), max(1, int(size or 0))) for offset, size in self.lane_terms),
+            tuple((int(offset), max(1, int(size or 0))) for offset, size in _scalar_rows(self.lane_terms, 2)),
         )
 
     def json_items(self):
@@ -893,7 +900,7 @@ def _bias_key(value: int, result_size: int) -> Tuple[int, int]:
 def _normalize_storage_identity_key(value: Optional[Tuple[Any, ...]]) -> Optional[Tuple[Any, ...]]:
     if value is None:
         return None
-    return tuple(value)
+    return exact_tree(_items(value))
 
 
 def _count_parameter_semantic_identity(
@@ -919,7 +926,7 @@ def _count_parameter_semantic_identities(
         identities.append(("parameter_storage", storage_key))
     if count_parameter_index is not None:
         try:
-            index = int(count_parameter_index)
+            index = scalar_int(count_parameter_index)
         except (TypeError, ValueError):
             index = -1
         if index >= 0:
@@ -1007,12 +1014,12 @@ class LoopSummaryRef:
         )
 
     def requires_effect_proof(self) -> bool:
-        return self.side_effect_profile.requires_effect_proof()
+        return scalar_bool(self.side_effect_profile.requires_effect_proof())
 
     def requires_path_proof(self) -> bool:
         counted_update_cases = []
         for case in tuple(self.cases or ()):
-            if getattr(case, "source", None) == "counted_loop_update_case":
+            if exact_tree(getattr(case, "source", None)) == "counted_loop_update_case":
                 counted_update_cases.append(case)
                 continue
             if getattr(case, "body_effect", None) is not None:
@@ -1026,26 +1033,28 @@ class LoopSummaryRef:
     def _counted_loop_update_cases_are_descriptor_covered(self, cases: Sequence[Any]) -> bool:
         if not cases:
             return True
-        if getattr(self.term_descriptor, "kind", None) != "affine_residue":
+        if exact_tree(getattr(self.term_descriptor, "kind", None)) != "affine_residue":
             return False
-        residue_cases = tuple(getattr(self.term_descriptor, "residue_cases", ()) or ())
+        raw_residue_cases = getattr(self.term_descriptor, "residue_cases", ())
+        residue_cases = _items(raw_residue_cases) if scalar_bool(raw_residue_cases) else ()
         if not residue_cases:
             return False
         for case in cases:
-            if getattr(case, "case_kind", None) != "accumulator_delta":
+            if exact_tree(getattr(case, "case_kind", None)) != "accumulator_delta":
                 return False
             body_effect = getattr(case, "body_effect", None)
-            if getattr(body_effect, "kind", None) != "accumulator_update":
+            if exact_tree(getattr(body_effect, "kind", None)) != "accumulator_update":
                 return False
             if getattr(case, "term_expr", None) is None:
                 return False
         residue_keys = []
         for residue_case in residue_cases:
-            if len(residue_case) < 4:
+            row = _items(residue_case)
+            if len(row) < 4:
                 return False
             try:
-                modulus = int(residue_case[0])
-                residue = int(residue_case[1])
+                modulus = scalar_int(row[0])
+                residue = scalar_int(row[1])
             except (TypeError, ValueError):
                 return False
             if modulus <= 0 or residue < 0 or residue >= modulus:
@@ -1127,16 +1136,16 @@ class ComposedLoopSummaryRef:
 
     @property
     def seed_terms(self) -> Tuple[Any, ...]:
-        return tuple(getattr(self.current, "seed_terms", ()) or ())
+        return _optional_items(getattr(self.current, "seed_terms", ()))
 
     @property
     def seed_term_count(self) -> Optional[int]:
         # `current` は Any: scalar は基底型の値で返す（読み手が subclass の code を呼ばない。Issue #242）
-        return exact_scalar(getattr(self.current, "seed_term_count", None))
+        return exact_tree(getattr(self.current, "seed_term_count", None))
 
     @property
     def witnesses(self) -> Tuple[Any, ...]:
-        return tuple(getattr(self.current, "witnesses", ()) or ())
+        return _optional_items(getattr(self.current, "witnesses", ()))
 
     @property
     def side_effect_profile(self) -> LoopSideEffectProfileRef:
@@ -1146,15 +1155,15 @@ class ComposedLoopSummaryRef:
 
     @property
     def guard_constraints(self) -> Tuple[Any, ...]:
-        return tuple(getattr(self.current, "guard_constraints", ()) or ())
+        return _optional_items(getattr(self.current, "guard_constraints", ()))
 
     @property
     def cases(self) -> Tuple[Any, ...]:
-        return tuple(getattr(self.current, "cases", ()) or ())
+        return _optional_items(getattr(self.current, "cases", ()))
 
     @property
     def loop_var_unit(self) -> str:
-        return scalar_text(exact_scalar(getattr(self.current, "loop_var_unit", "element_index")) or "element_index")
+        return scalar_text(exact_tree(getattr(self.current, "loop_var_unit", "element_index")) or "element_index")
 
     @property
     def constant_bias(self) -> int:
@@ -1204,14 +1213,14 @@ class ComposedLoopSummaryRef:
     def requires_effect_proof(self) -> bool:
         for summary in (self.prior, self.current):
             requires_effect_proof = getattr(summary, "requires_effect_proof", None)
-            if callable(requires_effect_proof) and requires_effect_proof():
+            if callable(requires_effect_proof) and scalar_bool(requires_effect_proof()):
                 return True
         return False
 
     def requires_path_proof(self) -> bool:
         for summary in (self.prior, self.current):
             requires_path_proof = getattr(summary, "requires_path_proof", None)
-            if callable(requires_path_proof) and requires_path_proof():
+            if callable(requires_path_proof) and scalar_bool(requires_path_proof()):
                 return True
         return False
 
@@ -1349,7 +1358,7 @@ def compare_loop_summaries(
     right_profile = getattr(right, "side_effect_profile", None)
     if left_profile is not None and right_profile is not None:
         left_shape = (
-            exact_scalar(left_profile.profile),
+            exact_tree(left_profile.profile),
             scalar_bool(left_profile.memory_reads),
             scalar_bool(left_profile.memory_writes),
             scalar_bool(left_profile.calls),
@@ -1359,7 +1368,7 @@ def compare_loop_summaries(
             scalar_int(left_profile.guard_count),
         )
         right_shape = (
-            exact_scalar(right_profile.profile),
+            exact_tree(right_profile.profile),
             scalar_bool(right_profile.memory_reads),
             scalar_bool(right_profile.memory_writes),
             scalar_bool(right_profile.calls),
@@ -1370,23 +1379,23 @@ def compare_loop_summaries(
         )
         if left_shape != right_shape:
             return LoopSummaryComparisonResult("incompatible", "loop side-effect profiles differ")
-        left_effect_key = left_profile.stable_key()
-        right_effect_key = right_profile.stable_key()
+        left_effect_key = exact_tree(left_profile.stable_key())
+        right_effect_key = exact_tree(right_profile.stable_key())
         if left_effect_key is not None and right_effect_key is not None and left_effect_key != right_effect_key:
             return LoopSummaryComparisonResult("incompatible", "loop body effects differ")
-    left_cases = tuple(getattr(left, "cases", ()) or ())
-    right_cases = tuple(getattr(right, "cases", ()) or ())
+    left_cases = _optional_items(getattr(left, "cases", ()))
+    right_cases = _optional_items(getattr(right, "cases", ()))
     if len(left_cases) != len(right_cases):
         return LoopSummaryComparisonResult("incompatible", "loop case counts differ")
     if left_cases or right_cases:
-        left_case_keys = tuple(case.stable_key() for case in left_cases)
-        right_case_keys = tuple(case.stable_key() for case in right_cases)
+        left_case_keys = tuple(exact_tree(case.stable_key()) for case in left_cases)
+        right_case_keys = tuple(exact_tree(case.stable_key()) for case in right_cases)
         if any(case_key is None for case_key in left_case_keys + right_case_keys):
             return LoopSummaryComparisonResult("incompatible", "loop cases are unkeyable")
         if left_case_keys != right_case_keys:
             return LoopSummaryComparisonResult("incompatible", "loop cases differ")
-    left_semantic_key = left.pairwise_semantic_key()
-    right_semantic_key = right.pairwise_semantic_key()
+    left_semantic_key = exact_tree(left.pairwise_semantic_key())
+    right_semantic_key = exact_tree(right.pairwise_semantic_key())
     if left_semantic_key is not None and right_semantic_key is not None:
         if left_semantic_key == right_semantic_key:
             return LoopSummaryComparisonResult("equivalent", "loop summaries match by semantic key")
@@ -1401,7 +1410,7 @@ def compare_loop_summaries(
         except (AttributeError, TypeError, ValueError, RecursionError):
             proven = None
         if isinstance(proven, LoopSummaryComparisonResult):
-            if exact_scalar(proven.status) in {"equivalent", "different", "incompatible"}:
+            if exact_tree(proven.status) in {"equivalent", "different", "incompatible"}:
                 return proven
     return LoopSummaryComparisonResult(
         "unknown",
@@ -1426,22 +1435,22 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
         return None
     if isinstance(summary, ComposedLoopSummaryRef):
         return None
-    seed_terms_for_binding = tuple(getattr(summary, "seed_terms", ()) or ())
+    seed_terms_for_binding = _optional_items(getattr(summary, "seed_terms", ()))
     binding_context = _loop_variable_binding_context_from_values(
         getattr(summary, "start_expr", None),
         getattr(summary, "limit_expr", None),
         getattr(summary, "step_expr", None),
         seed_terms_for_binding,
-        tuple(getattr(summary, "witnesses", ()) or ()),
-        tuple(getattr(summary, "guard_constraints", ()) or ()),
+        _optional_items(getattr(summary, "witnesses", ())),
+        _optional_items(getattr(summary, "guard_constraints", ())),
     )
     if binding_context is None:
         return None
     requires_effect_proof = getattr(summary, "requires_effect_proof", None)
-    if callable(requires_effect_proof) and requires_effect_proof():
+    if callable(requires_effect_proof) and scalar_bool(requires_effect_proof()):
         return None
     requires_path_proof = getattr(summary, "requires_path_proof", None)
-    if callable(requires_path_proof) and requires_path_proof():
+    if callable(requires_path_proof) and scalar_bool(requires_path_proof()):
         return None
     start_value = _loop_summary_int_constant(getattr(summary, "start_expr", None))
     step_value = _loop_summary_int_constant(getattr(summary, "step_expr", None))
@@ -1452,24 +1461,24 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
     if term_descriptor is None:
         return None
     if (
-        exact_scalar(getattr(term_descriptor, "kind", None)) == "memory_load"
+        exact_tree(getattr(term_descriptor, "kind", None)) == "memory_load"
         and getattr(term_descriptor, "location_base_ref", None) is None
     ):
         return None
     term_key = _loop_summary_term_descriptor_semantic_key(
         term_descriptor,
-        loop_var_unit=exact_scalar(getattr(summary, "loop_var_unit", None)),
+        loop_var_unit=exact_tree(getattr(summary, "loop_var_unit", None)),
     )
-    if exact_scalar(getattr(term_descriptor, "kind", None)) == "memory_load" and term_key is None:
+    if exact_tree(getattr(term_descriptor, "kind", None)) == "memory_load" and term_key is None:
         return None
-    loop_var_unit_key = exact_scalar(getattr(summary, "loop_var_unit", None))
+    loop_var_unit_key = exact_tree(getattr(summary, "loop_var_unit", None))
     if term_key is not None and len(term_key) > 0 and term_key[0] == "scalar_memory_term_sequence":
         loop_var_unit_key = "scalar_element_index"
     limit_key = _loop_summary_limit_semantic_key(
         getattr(summary, "limit_expr", None),
         binding_context,
     )
-    side_effect_key = summary.side_effect_profile.semantic_key()
+    side_effect_key = exact_tree(summary.side_effect_profile.semantic_key())
     if limit_key is None or side_effect_key is None:
         return None
 
@@ -1545,12 +1554,15 @@ def loop_summary_method_b_key_at_result_size(
         return None
     if target_result_size == original_result_size:
         return loop_summary_method_b_key(summary)
-    if exact_scalar(getattr(term_descriptor, "kind", None)) != "memory_load":
+    if exact_tree(getattr(term_descriptor, "kind", None)) != "memory_load":
         return None
-    if exact_scalar(getattr(term_descriptor, "reduction_kind", "sum")) not in {"sum", "memory_sum"}:
+    if exact_tree(getattr(term_descriptor, "reduction_kind", "sum")) not in ("sum", "memory_sum"):
         return None
 
-    lane_terms = tuple(getattr(term_descriptor, "lane_terms", ()) or ())
+    try:
+        lane_terms = _optional_rows(getattr(term_descriptor, "lane_terms", ()), 2)
+    except (TypeError, ValueError):
+        return None
     if lane_terms:
         try:
             if any(max(1, scalar_int_or(size)) != target_result_size for _offset, size in lane_terms):
@@ -1580,7 +1592,7 @@ def _loop_summary_int_constant(value: Any) -> Optional[int]:
     if isinstance(value, int):
         return scalar_int(value)
     expr_type = getattr(value, "expr_type", None)
-    if exact_scalar(getattr(expr_type, "name", None)) == "CONSTANT":
+    if exact_tree(getattr(expr_type, "name", None)) == "CONSTANT":
         try:
             return scalar_int(getattr(value, "value"))
         except (TypeError, ValueError):
@@ -1593,7 +1605,7 @@ def _loop_summary_limit_semantic_key(
     loop_variable_context: Optional[_LoopVariableBindingContext] = None,
 ) -> Optional[Tuple[Any, ...]]:
     expr_type = getattr(value, "expr_type", None)
-    if exact_scalar(getattr(expr_type, "name", None)) == "PARAMETER":
+    if exact_tree(getattr(expr_type, "name", None)) == "PARAMETER":
         storage = getattr(value, "storage_info", None)
         storage_key = _loop_object_semantic_key(storage, loop_variable_context) if storage is not None else None
         if storage is not None:
@@ -1621,7 +1633,7 @@ def _loop_summary_term_descriptor_semantic_key(
     )
     if scalar_key is not None:
         return scalar_key
-    return term_descriptor.semantic_key()
+    return exact_tree(term_descriptor.semantic_key())
 
 
 def _loop_summary_scalar_memory_term_key(
@@ -1629,21 +1641,22 @@ def _loop_summary_scalar_memory_term_key(
     *,
     loop_var_unit: Optional[str] = None,
 ) -> Optional[Tuple[Any, ...]]:
-    if exact_scalar(getattr(term_descriptor, "kind", None)) != "memory_load":
+    loop_var_unit = exact_tree(loop_var_unit)
+    if exact_tree(getattr(term_descriptor, "kind", None)) != "memory_load":
         return None
     location_base_ref = getattr(term_descriptor, "location_base_ref", None)
     if location_base_ref is None:
         return None
-    reduction_kind = exact_scalar(getattr(term_descriptor, "reduction_kind", "sum"))
+    reduction_kind = exact_tree(getattr(term_descriptor, "reduction_kind", "sum"))
     result_size = max(1, scalar_int_or(getattr(term_descriptor, "result_size", 0)))
     start_offset = scalar_int_or(getattr(term_descriptor, "start_offset", 0))
-    lane_terms = tuple(getattr(term_descriptor, "lane_terms", ()) or ())
+    lane_terms = _optional_rows(getattr(term_descriptor, "lane_terms", ()), 2)
     if not lane_terms:
         element_size = scalar_int_or(getattr(term_descriptor, "element_size", 0))
         stride = scalar_int_or(getattr(term_descriptor, "stride", 0))
         if element_size <= 0 or stride <= 0 or element_size != result_size:
             return None
-        location_key = location_base_ref.semantic_key()
+        location_key = exact_tree(location_base_ref.semantic_key())
         if location_key is None:
             return None
         return (
@@ -1688,7 +1701,7 @@ def _loop_summary_scalar_memory_term_key(
     expected_offsets = [offsets[0] + index * scalar_stride for index in range(len(offsets))]
     if offsets != expected_offsets:
         return None
-    location_key = location_base_ref.semantic_key()
+    location_key = exact_tree(location_base_ref.semantic_key())
     if location_key is None:
         return None
     return (
@@ -1702,16 +1715,17 @@ def _loop_summary_scalar_memory_term_key(
     )
 
 
+@runtime_ref_entry
 def _loop_summary_term_at_index(summary: LoopSummaryRef, index: int) -> Optional[Any]:
     from scripts.function_tracer_pcode.core.runtime_refs.readonly import (ReadonlyReductionTermRef)
     term_descriptor = getattr(summary, "term_descriptor", None)
     if term_descriptor is None:
         return None
-    if exact_scalar(getattr(term_descriptor, "kind", None)) != "memory_load":
+    if exact_tree(getattr(term_descriptor, "kind", None)) != "memory_load":
         return None
     scalar_key = _loop_summary_scalar_memory_term_key(
         term_descriptor,
-        loop_var_unit=exact_scalar(getattr(summary, "loop_var_unit", None)),
+        loop_var_unit=exact_tree(getattr(summary, "loop_var_unit", None)),
     )
     if scalar_key is not None:
         start_offset = scalar_int(scalar_key[3])
@@ -1736,9 +1750,9 @@ def _loop_int_expr(value: int, like_expr: Any) -> Any:
     expression_cls = getattr(like_expr, "__class__", None)
     constant = getattr(expression_cls, "constant", None)
     if callable(constant):
-        size = max(1, int(getattr(like_expr, "size", 0) or 4))
-        return constant(int(value), size=size)
-    return int(value)
+        size = max(1, scalar_int_or(getattr(like_expr, "size", 0), 4))
+        return constant(scalar_int(value), size=size)
+    return scalar_int(value)
 
 
 @dataclass(frozen=True)
@@ -1762,7 +1776,7 @@ class CountedLoopSummaryRef:
                 int(residue),
                 _loop_object_key(bias_expr),
             )
-            for modulus, residue, bias_expr in self.residue_bias_terms
+            for modulus, residue, bias_expr in _scalar_rows(self.residue_bias_terms, 3)
         )
         if any(key[2] is None for key in residue_bias_keys):
             return None
@@ -1778,7 +1792,7 @@ class CountedLoopSummaryRef:
                     int(coeff),
                     int(bias),
                 )
-                for modulus, residue, coeff, bias in self.residue_cases
+                for modulus, residue, coeff, bias in _scalar_rows(self.residue_cases, 4)
             ),
             residue_bias_keys,
             self.source,
@@ -1792,7 +1806,7 @@ class CountedLoopSummaryRef:
                 int(residue),
                 _loop_object_semantic_key(bias_expr),
             )
-            for modulus, residue, bias_expr in self.residue_bias_terms
+            for modulus, residue, bias_expr in _scalar_rows(self.residue_bias_terms, 3)
         )
         if any(key[2] is None for key in residue_bias_keys):
             return None
@@ -1812,7 +1826,7 @@ class CountedLoopSummaryRef:
                         int(coeff),
                         int(bias),
                     )
-                    for modulus, residue, coeff, bias in self.residue_cases
+                    for modulus, residue, coeff, bias in _scalar_rows(self.residue_cases, 4)
                 ),
                 residue_bias_keys,
                 loop_key,
@@ -1829,7 +1843,7 @@ class CountedLoopSummaryRef:
                     int(coeff),
                     int(bias),
                 )
-                for modulus, residue, coeff, bias in self.residue_cases
+                for modulus, residue, coeff, bias in _scalar_rows(self.residue_cases, 4)
             ),
             residue_bias_keys,
         )
@@ -1977,23 +1991,23 @@ class StateTransitionLoopSummaryRef:
 
         effect_keys = tuple(
             _loop_object_semantic_key(effect, binding_context)
-            for effect in getattr(self.side_effect_profile, "effect_descriptors", ()) or ()
+            for effect in _optional_items(getattr(self.side_effect_profile, "effect_descriptors", ()))
         )
         context_keys = tuple(
             _loop_object_semantic_key(effect, binding_context)
-            for effect in getattr(self.side_effect_profile, "context_descriptors", ()) or ()
+            for effect in _optional_items(getattr(self.side_effect_profile, "context_descriptors", ()))
         )
         if any(effect_key is None for effect_key in effect_keys + context_keys):
             return None
         return (
             "state_transition_scalar_effect_profile",
-            bool(getattr(self.side_effect_profile, "memory_reads", False)),
-            bool(getattr(self.side_effect_profile, "memory_writes", False)),
-            bool(getattr(self.side_effect_profile, "calls", False)),
-            bool(getattr(self.side_effect_profile, "escapes", False)),
-            bool(getattr(self.side_effect_profile, "context_memory_writes", False)),
-            bool(getattr(self.side_effect_profile, "context_calls", False)),
-            bool(getattr(self.side_effect_profile, "context_escapes", False)),
+            scalar_bool(getattr(self.side_effect_profile, "memory_reads", False)),
+            scalar_bool(getattr(self.side_effect_profile, "memory_writes", False)),
+            scalar_bool(getattr(self.side_effect_profile, "calls", False)),
+            scalar_bool(getattr(self.side_effect_profile, "escapes", False)),
+            scalar_bool(getattr(self.side_effect_profile, "context_memory_writes", False)),
+            scalar_bool(getattr(self.side_effect_profile, "context_calls", False)),
+            scalar_bool(getattr(self.side_effect_profile, "context_escapes", False)),
             effect_keys,
             context_keys,
         )

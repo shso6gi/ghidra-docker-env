@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
-from scripts.function_tracer_pcode.core.live_values import as_int, as_str, attribute, scalar_int, scalar_text
+from scripts.function_tracer_pcode.core.live_values import as_int, as_str, attribute, exact_tree, scalar_int, scalar_text
 
 
 _ABI_SLOT_KIND = "abi_argument_slot"
@@ -211,4 +211,4 @@ def fresh_call_argument_refs_are_side_distinct(
 
     if left is None or right is None:
         return False
-    return left.stable_key() != right.stable_key()
+    return exact_tree(left.stable_key()) != exact_tree(right.stable_key())

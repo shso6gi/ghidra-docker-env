@@ -1,25 +1,29 @@
 # -*- coding: utf-8 -*-
-"""Issue #242: runtime ref の構築の入口 × 値の消費 × 入力の形の行列（構築の契約の振る舞いの検査）。
+"""Issue #242: runtime ref の構築の入口 × 呼び出しの形 × 受け手 × 入力の形の行列（構築の契約の振る舞いの検査）。
 
 入口: 自前の `__init__`・factory（classmethod / staticmethod）・ref から ref を作る method / 関数
 （`@runtime_ref_entry`）。直接構築（35 class の生成された `__init__`）は `test_issue242_construction_contract.py`
-と golden が持つ。各入口について、基底の引数（`ENTRY_CASES`）の scalar の位置と、入口が読む API の戻り値の
-位置に、次の値を 1 つずつ入れる:
+と golden が持つ。次の次元を組み合わせる:
 
-- 値を偽る subclass（`int()` は 999、真偽は逆、比較は偽、format は別の文字列）
-- 0 / 空文字 / 0.0（偽る subclass と exact の両方: `x or default` の真偽が値に効く）
-- `None`（注釈が Optional のとき）
-- bool の注釈の位置には JBoolean の代わり（`Liar(1)` / `Liar(0)`）と exact な `True` / `False`
+- 呼び出しの形: キーワード・位置・混在（signature から作る。`*args` の入口は位置だけ）。引数の束縛と写し方の
+  対応のずれ（自前の `__init__` の receiver など）を落とす
+- 受け手と分岐: method の入口は受け手の構成を変える（readonly の seed の項・seed の数・exact な witness・lane、
+  loop summary の lane・seed）。基底の 1 構成では通らない分岐の読みを通す
+- 入力の形（1 つずつ）: 基底の引数（`ENTRY_CASES`）の scalar の位置と入口が読む API の戻り値の位置に、値を偽る
+  subclass・0 / 空文字・`None`・bool の位置の JBoolean の代わり
+- 入力の形（全体）: すべての scalar を同時に偽る（`lie_all`）、引数と受け手の中の ref を代わりの型（`Duck`）に
+  する（`duck`: 偽る代わりの型と、正直な代わりの型の双子）、その両方（`duck_lie_all`）。受理された値の属性・
+  method の戻り値を読む経路（guard が「外の値」と扱う位置）を実行する
 
-期待: 入口の引数の注釈の型規則（owner の規則。この test は corpus の仕様の写しで独立に計算する）で写した双子から
-作った結果と、型の札つきの view で同じになり、偽る型の code の呼び出しが 0 回。双子が例外になる入力は同じ型の
-例外になる。結果が偽る値をそのまま持つ（注釈が `Any` の field など owner が写さない位置）ときは、出力（LEGACY の
-JSON）は比べない（契約の外）。
+期待: 双子（入口の引数の注釈の型規則で写した値・正直な代わりの型）から作った結果と、型の札つきの view で
+同じになり、偽る型の code の呼び出しが 0 回。双子が例外になる入力は同じ型の例外になる。結果が偽る値をそのまま
+持つ（注釈が `Any` の field など owner が写さない位置）ときは、出力（LEGACY の JSON）は比べない（契約の外）。
 """
 
 from __future__ import annotations
 
 import ast
+import importlib
 import dataclasses
 import inspect
 import json
@@ -44,6 +48,8 @@ from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     PostStateSnapshotRef,
 )
 from scripts.function_tracer_pcode.core.runtime_refs.loops import (
+    LoopBodyEffectRef,
+    LoopCaseRef,
     LoopSideEffectProfileRef,
     LoopSummaryProofObligation,
     LoopSummaryRef,
@@ -62,7 +68,9 @@ from scripts.function_tracer_pcode.tests.unit.runtime_ref_adversaries import (
     HOOK_CALLS,
     Liar,
     LiarStr,
+    disguise,
     lie,
+    lie_deep,
     view,
 )
 
@@ -188,35 +196,127 @@ def make_pcode_op(values: Dict[str, Any]) -> FakePcodeOp:
 
 @dataclasses.dataclass(frozen=True)
 class EntryCase:
-    """1 つの入口: `call(kwargs)` が入口を呼ぶ。`base()` は exact な引数。`api` は入口が読む API の戻り値。"""
+    """1 つの入口の 1 構成。
 
-    entry: Any  # 入口の関数（classmethod / method / 関数。annotation を読むため）
-    call: Callable[[Dict[str, Any], Dict[str, Any]], Any]
+    `call(receiver, args, kwargs, api)` が入口を呼ぶ（`args` / `kwargs` は呼び出しの形で `base()` から作る）。
+    `receiver` は method の入口の受け手を作る（`None` なら関数・classmethod）。`fixed` は `call` が自分で渡す
+    先頭の位置の引数の数（偽の Ghidra object など。receiver を除く）。`api` は入口が読む API の戻り値。
+    """
+
+    entry: Any
+    call: Callable[[Any, Tuple[Any, ...], Dict[str, Any], Dict[str, Any]], Any]
     base: Callable[[], Dict[str, Any]]
     api: Optional[Dict[str, Any]] = None
+    receiver: Optional[Callable[[], Any]] = None
+    fixed: int = 0
 
 
 def _expr(value: int = 1) -> Expression:
     return Expression.constant(value, size=4)
 
 
-def _loop_summary() -> LoopSummaryRef:
-    return LoopSummaryRef(
-        start_expr=_expr(0), limit_expr=_expr(8), step_expr=_expr(1),
-        term_descriptor=LoopTermDescriptorRef(kind="memory_load", reduction_kind="sum", location_base_ref=LocationBaseRef.parameter("p", index=0), stride=4, element_size=4, result_size=4),
+def _descriptor(**changes: Any) -> LoopTermDescriptorRef:
+    fields = dict(
+        kind="memory_load", reduction_kind="sum", location_base_ref=LocationBaseRef.parameter("p", index=0),
+        stride=4, element_size=4, result_size=4,
+    )
+    fields.update(changes)
+    return LoopTermDescriptorRef(**fields)
+
+
+def _loop_summary(**changes: Any) -> LoopSummaryRef:
+    fields = dict(
+        start_expr=_expr(0), limit_expr=_expr(8), step_expr=_expr(1), term_descriptor=_descriptor(),
         side_effect_profile=LoopSideEffectProfileRef(profile="pure_memory_read", memory_reads=True),
+    )
+    fields.update(changes)
+    return LoopSummaryRef(**fields)
+
+
+def _lane_summary() -> LoopSummaryRef:
+    return _loop_summary(
+        term_descriptor=_descriptor(stride=8, element_size=8, lane_terms=((0, 4), (4, 4))),
+        loop_var_unit="scalar_element_index",
     )
 
 
-def _proof() -> ReductionAccumulatorProof:
-    return ReductionAccumulatorProof(
+def _seeded_summary() -> LoopSummaryRef:
+    return _loop_summary(start_expr=_expr(2), seed_terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),))
+
+
+def _term(offset: int, size: int = 4) -> ReadonlyReductionTermRef:
+    return ReadonlyReductionTermRef(byte_offset=offset, access_size=size)
+
+
+def _proof(**changes: Any) -> ReductionAccumulatorProof:
+    fields = dict(
         reduction_kind="memory_sum", pointer_base_ref=LocationBaseRef.parameter("base", index=0),
         count_parameter_name="count", count_parameter_index=1,
         limit_expr=Expression.parameter("count", 1, size=4), result_size=4, stride=4, element_size=4, index_scale=4,
-        loop_body_witnesses=(
-            ReadonlyReductionWitness(exact_count=1, terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),)),
-        ),
+        loop_body_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
     )
+    fields.update(changes)
+    return ReductionAccumulatorProof(**fields)
+
+
+#: readonly の入口が分岐で読む受け手の構成（seed の項・seed の数・exact な戻り値の witness・lane）
+PROOF_RECEIVERS: Dict[str, Callable[[], ReductionAccumulatorProof]] = {
+    "": _proof,
+    "#seed_terms": lambda: _proof(seed_terms=(_term(0), _term(4)), start_index=2, start_offset=8),
+    "#seed_count": lambda: _proof(seed_term_count=1, start_index=1, start_offset=4),
+    "#exact_witnesses": lambda: _proof(
+        element_size=8, stride=8, index_scale=8,
+        exact_return_witnesses=(
+            ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),
+            ReadonlyReductionWitness(exact_count=2, terms=(_term(0), _term(4))),
+        ),
+    ),
+    "#lanes": lambda: _proof(
+        stride=8, element_size=8, index_scale=8, lane_terms=((0, 4), (4, 4)),
+        loop_body_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
+    ),
+}
+
+def _conditional_summary() -> LoopSummaryRef:
+    condition = Expression.parameter("c", 2, size=4)
+    effect = LoopBodyEffectRef(kind="conditional_guard", path_condition_sets=((condition,),), guard_constraints=(condition,))
+    return _loop_summary(side_effect_profile=LoopSideEffectProfileRef(
+        profile="pure_conditional", memory_reads=True, conditional_guards=True, effect_descriptors=(effect,), guard_count=1,
+    ))
+
+
+def _loop_variable_summary() -> LoopSummaryRef:
+    from scripts.function_tracer_pcode.core.runtime_refs.loops import LoopVariableIdentityRef
+
+    induction = Expression.variable("i", size=4, runtime_ref=LoopVariableIdentityRef(role="induction", varnode_key=("unique", 0x10, 4)))
+    return _loop_summary(limit_expr=Expression.binary_op("+", induction, _expr(1)))
+
+
+def _counted_case_summary() -> LoopSummaryRef:
+    def case() -> LoopCaseRef:
+        return LoopCaseRef(
+            path_conditions=(), body_effect=LoopBodyEffectRef(kind="accumulator_update"), term_expr=_expr(1),
+            case_kind="accumulator_delta", source="counted_loop_update_case",
+        )
+
+    return _loop_summary(
+        term_descriptor=_descriptor(kind="affine_residue", residue_cases=((2, 0, 1, 0), (2, 1, 1, 0))), cases=(case(), case()),
+    )
+
+
+#: loop summary の入口が分岐で読む構成（lane・seed・式の limit・条件つきの効果・counted loop の場合分け）
+SUMMARY_PAIRS: Dict[str, Callable[[], Tuple[LoopSummaryRef, LoopSummaryRef]]] = {
+    "": lambda: (_loop_summary(), _loop_summary()),
+    "#lanes": lambda: (_lane_summary(), _lane_summary()),
+    "#seeded": lambda: (_seeded_summary(), _seeded_summary()),
+    "#limit_parameter": lambda: (_loop_summary(limit_expr=Expression.parameter("n", 1, size=4)),) * 2,
+    "#limit_binary": lambda: (
+        _loop_summary(limit_expr=Expression.binary_op("+", Expression.parameter("n", 1, size=4), _expr(2))),
+    ) * 2,
+    "#effects": lambda: (_conditional_summary(), _conditional_summary()),
+    "#counted_cases": lambda: (_counted_case_summary(), _counted_case_summary()),
+    "#loop_variable": lambda: (_loop_variable_summary(), _loop_variable_summary()),
+}
 
 
 def _location() -> CanonicalLocation:
@@ -225,156 +325,282 @@ def _location() -> CanonicalLocation:
 
 ENTRY_CASES: Dict[str, EntryCase] = {
     "LocationBaseRef.parameter": EntryCase(
-        LocationBaseRef.parameter, lambda kw, api: LocationBaseRef.parameter(**kw),
+        LocationBaseRef.parameter, lambda r, a, kw, api: LocationBaseRef.parameter(*a, **kw),
         lambda: dict(name="a", index=1, owner_program_id=7, owner_entry_offset=0x100),
     ),
     "LocationBaseRef.storage": EntryCase(
-        LocationBaseRef.storage, lambda kw, api: LocationBaseRef.storage(**kw),
+        LocationBaseRef.storage, lambda r, a, kw, api: LocationBaseRef.storage(*a, **kw),
         lambda: dict(space_id=1, space_name="register", offset=8, size=8, storage_identity_key=("register", 8, 8), display_hint="r"),
     ),
     "LocationBaseRef.global_object": EntryCase(
-        LocationBaseRef.global_object, lambda kw, api: LocationBaseRef.global_object(**kw),
+        LocationBaseRef.global_object, lambda r, a, kw, api: LocationBaseRef.global_object(*a, **kw),
         lambda: dict(symbol_name="g", size=8, space_name="ram"),
     ),
     "LocationBaseRef.stack_frame": EntryCase(
-        LocationBaseRef.stack_frame, lambda kw, api: LocationBaseRef.stack_frame(), lambda: {},
+        LocationBaseRef.stack_frame, lambda r, a, kw, api: LocationBaseRef.stack_frame(*a, **kw), lambda: {},
     ),
     "PostStateSnapshotRef.function_return": EntryCase(
-        PostStateSnapshotRef.function_return, lambda kw, api: PostStateSnapshotRef.function_return(), lambda: {},
+        PostStateSnapshotRef.function_return, lambda r, a, kw, api: PostStateSnapshotRef.function_return(*a, **kw), lambda: {},
     ),
     "CanonicalLocation.__init__": EntryCase(
-        CanonicalLocation.__init__, lambda kw, api: CanonicalLocation(**kw),
+        CanonicalLocation.__init__, lambda r, a, kw, api: CanonicalLocation(*a, **kw),
         lambda: dict(base_param="p", offset=4, size=4, steps=(LocationStep("offset", 4),)),
     ),
     "CanonicalLocation.__init__#stackframe": EntryCase(
-        CanonicalLocation.__init__, lambda kw, api: CanonicalLocation(**kw),
+        CanonicalLocation.__init__, lambda r, a, kw, api: CanonicalLocation(*a, **kw),
         lambda: dict(base_param="stackframe", offset=4, size=4),
     ),
+    "CanonicalLocation.__init__#base_ref": EntryCase(
+        CanonicalLocation.__init__, lambda r, a, kw, api: CanonicalLocation(*a, **kw),
+        lambda: dict(offset=4, size=4, base_ref=LocationBaseRef.parameter("p", index=0)),
+    ),
     "PostStateReadRef.with_location": EntryCase(
-        PostStateReadRef.with_location, lambda kw, api: PostStateReadRef(location=_location()).with_location(**kw),
-        lambda: dict(location=_location()),
+        PostStateReadRef.with_location, lambda r, a, kw, api: r.with_location(*a, **kw),
+        lambda: dict(location=_location()), receiver=lambda: PostStateReadRef(location=_location()),
     ),
     "PostStateReadRef.with_snapshot": EntryCase(
-        PostStateReadRef.with_snapshot, lambda kw, api: PostStateReadRef(location=_location()).with_snapshot(**kw),
-        lambda: dict(snapshot_ref=PostStateSnapshotRef.function_return()),
+        PostStateReadRef.with_snapshot, lambda r, a, kw, api: r.with_snapshot(*a, **kw),
+        lambda: dict(snapshot_ref=PostStateSnapshotRef.function_return()), receiver=lambda: PostStateReadRef(location=_location()),
     ),
     "ObservedMemoryReadRef.with_location": EntryCase(
-        ObservedMemoryReadRef.with_location, lambda kw, api: ObservedMemoryReadRef(order_key=3).with_location(**kw),
-        lambda: dict(location=_location(), snapshot_ref=None),
+        ObservedMemoryReadRef.with_location, lambda r, a, kw, api: r.with_location(*a, **kw),
+        lambda: dict(location=_location(), snapshot_ref=None), receiver=lambda: ObservedMemoryReadRef(order_key=3),
     ),
     "ObservedMemoryReadRef.with_snapshot": EntryCase(
-        ObservedMemoryReadRef.with_snapshot, lambda kw, api: ObservedMemoryReadRef(order_key=3).with_snapshot(**kw),
-        lambda: dict(snapshot_ref=PostStateSnapshotRef.function_return()),
-    ),
-    "compare_loop_summaries": EntryCase(
-        loops_module.compare_loop_summaries, lambda kw, api: loops_module.compare_loop_summaries(**kw),
-        lambda: dict(left=_loop_summary(), right=_loop_summary()),
-    ),
-    "LoopSummaryProofObligation.case_aware_solver_equality": EntryCase(
-        LoopSummaryProofObligation.case_aware_solver_equality,
-        lambda kw, api: LoopSummaryProofObligation.case_aware_solver_equality(**kw),
-        lambda: dict(left=_loop_summary(), right=_loop_summary(), reason="needs_solver"),
+        ObservedMemoryReadRef.with_snapshot, lambda r, a, kw, api: r.with_snapshot(*a, **kw),
+        lambda: dict(snapshot_ref=PostStateSnapshotRef.function_return()), receiver=lambda: ObservedMemoryReadRef(order_key=3),
     ),
     "PcodeOpRef.from_pcode_op": EntryCase(
-        PcodeOpRef.from_pcode_op, lambda kw, api: PcodeOpRef.from_pcode_op(make_pcode_op(api), **kw),
+        PcodeOpRef.from_pcode_op, lambda r, a, kw, api: PcodeOpRef.from_pcode_op(make_pcode_op(api), *a, **kw),
         lambda: dict(binary_id="B1", program_uid=7, function_entry_space="ram", function_entry_offset=0x100),
-        api=PCODE_API,
-    ),
-    "ReductionAccumulatorProof.loop_body_terms_for_count_value": EntryCase(
-        ReductionAccumulatorProof.loop_body_terms_for_count_value,
-        lambda kw, api: _proof().loop_body_terms_for_count_value(**kw), lambda: dict(count_value=3),
-    ),
-    "ReductionAccumulatorProof.full_terms_for_count_value": EntryCase(
-        ReductionAccumulatorProof.full_terms_for_count_value,
-        lambda kw, api: _proof().full_terms_for_count_value(**kw), lambda: dict(count_value=3),
-    ),
-    "ReductionAccumulatorProof.seed_terms_for_count_value": EntryCase(
-        ReductionAccumulatorProof.seed_terms_for_count_value,
-        lambda kw, api: _proof().seed_terms_for_count_value(**kw), lambda: dict(count_value=3),
+        api=PCODE_API, fixed=1,
     ),
     "ReductionAccumulatorProof.with_runtime_evidence": EntryCase(
-        ReductionAccumulatorProof.with_runtime_evidence,
-        lambda kw, api: _proof().with_runtime_evidence(**kw),
+        ReductionAccumulatorProof.with_runtime_evidence, lambda r, a, kw, api: r.with_runtime_evidence(*a, **kw),
         lambda: dict(
             limit_expr=Expression.parameter("count", 1, size=4), result_size=4,
-            loop_body_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(ReadonlyReductionTermRef(byte_offset=0, access_size=4),)),),
+            loop_body_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),),
             exact_return_witnesses=(), guard_constraints=(), signed_counter=True,
         ),
+        receiver=_proof,
+    ),
+    # exact な戻り値の witness から scalar の prefix を正規化する分岐
+    "ReductionAccumulatorProof.with_runtime_evidence#normalize_prefix": EntryCase(
+        ReductionAccumulatorProof.with_runtime_evidence, lambda r, a, kw, api: r.with_runtime_evidence(*a, **kw),
+        lambda: dict(
+            limit_expr=Expression.parameter("count", 1, size=4), result_size=4, loop_body_witnesses=(),
+            exact_return_witnesses=tuple(
+                ReadonlyReductionWitness(exact_count=n, terms=tuple(_term(4 * i) for i in range(n))) for n in (1, 2, 3)
+            ),
+            guard_constraints=(), signed_counter=True,
+        ),
+        receiver=lambda: _proof(start_index=2, start_offset=8, loop_body_witnesses=()),
+    ),
+    # lane の受け手で seed の prefix を witness から補う分岐
+    "ReductionAccumulatorProof.with_runtime_evidence#complete_seed": EntryCase(
+        ReductionAccumulatorProof.with_runtime_evidence, lambda r, a, kw, api: r.with_runtime_evidence(*a, **kw),
+        lambda: dict(
+            limit_expr=Expression.parameter("count", 1, size=4), result_size=4,
+            loop_body_witnesses=(ReadonlyReductionWitness(exact_count=1, terms=(_term(8),)),),
+            exact_return_witnesses=(
+                ReadonlyReductionWitness(exact_count=1, terms=(_term(0),)),
+                ReadonlyReductionWitness(exact_count=2, terms=(_term(0), _term(4))),
+            ),
+            guard_constraints=(), signed_counter=True,
+        ),
+        receiver=lambda: _proof(stride=8, element_size=8, index_scale=8, lane_terms=((0, 4), (4, 4)), start_offset=8),
     ),
     "normalize_expansion_budget_truncations": EntryCase(
         unknowns_module.normalize_expansion_budget_truncations,
-        lambda kw, api: unknowns_module.normalize_expansion_budget_truncations(**kw),
+        lambda r, a, kw, api: unknowns_module.normalize_expansion_budget_truncations(*a, **kw),
         lambda: dict(items=[ExpansionBudgetTruncation(kind="k", dedup=(3, 2, 2)), ExpansionBudgetTruncation(kind="k", dedup=(3, 2, 2))]),
     ),
+    "merge_expansion_budget_truncations": EntryCase(
+        unknowns_module.merge_expansion_budget_truncations,
+        lambda r, a, kw, api: unknowns_module.merge_expansion_budget_truncations(*a, **kw),
+        lambda: dict(groups=[
+            [ExpansionBudgetTruncation(kind="k", dedup=(3, 2, 2))],
+            None,
+            (ExpansionBudgetTruncation(kind="k", dedup=(3, 2, 2), referenced_event_ids=("e",)),),
+        ]),
+    ),
     "UnknownValueRef.deferred_call": EntryCase(
-        UnknownValueRef.deferred_call, lambda kw, api: UnknownValueRef.deferred_call(**kw),
+        UnknownValueRef.deferred_call, lambda r, a, kw, api: UnknownValueRef.deferred_call(*a, **kw),
         lambda: dict(placeholder_name="p", sequence=2),
     ),
     "UnknownValueRef.out_of_scope_call": EntryCase(
-        UnknownValueRef.out_of_scope_call, lambda kw, api: UnknownValueRef.out_of_scope_call(**kw),
+        UnknownValueRef.out_of_scope_call, lambda r, a, kw, api: UnknownValueRef.out_of_scope_call(*a, **kw),
         lambda: dict(reason="r", display_hint="d"),
     ),
     "UnknownValueRef.budget_exceeded": EntryCase(
-        UnknownValueRef.budget_exceeded, lambda kw, api: UnknownValueRef.budget_exceeded(**kw),
+        UnknownValueRef.budget_exceeded, lambda r, a, kw, api: UnknownValueRef.budget_exceeded(*a, **kw),
         lambda: dict(operation="expand", origin_kind="k"),
     ),
     "UnknownValueRef.opaque": EntryCase(
-        UnknownValueRef.opaque, lambda kw, api: UnknownValueRef.opaque(**kw),
+        UnknownValueRef.opaque, lambda r, a, kw, api: UnknownValueRef.opaque(*a, **kw),
         lambda: dict(reason="r", display_hint="d", origin_kind="k"),
     ),
     "UnknownValueRef.phi_circular": EntryCase(
-        UnknownValueRef.phi_circular, lambda kw, api: UnknownValueRef.phi_circular(**kw),
+        UnknownValueRef.phi_circular, lambda r, a, kw, api: UnknownValueRef.phi_circular(*a, **kw),
         lambda: dict(display_hint="phi"),
     ),
     "ExpansionBudgetTruncation.with_binding": EntryCase(
-        ExpansionBudgetTruncation.with_binding,
-        lambda kw, api: ExpansionBudgetTruncation(kind="k").with_binding(**kw),
+        ExpansionBudgetTruncation.with_binding, lambda r, a, kw, api: r.with_binding(*a, **kw),
+        lambda: dict(surface="return", owner_scope_key=("scope", 1)), receiver=lambda: ExpansionBudgetTruncation(kind="k"),
+    ),
+    "ExpansionBudgetTruncation.with_binding#bound": EntryCase(
+        ExpansionBudgetTruncation.with_binding, lambda r, a, kw, api: r.with_binding(*a, **kw),
         lambda: dict(surface="return", owner_scope_key=("scope", 1)),
+        receiver=lambda: ExpansionBudgetTruncation(kind="k", surface="return", owner_scope_key=("scope", 1)),
     ),
     "CallTargetRef.from_function": EntryCase(
-        CallTargetRef.from_function, lambda kw, api: CallTargetRef.from_function(make_function(api)),
-        lambda: {}, api=FUNCTION_API,
+        CallTargetRef.from_function, lambda r, a, kw, api: CallTargetRef.from_function(make_function(api), *a, **kw),
+        lambda: {}, api=FUNCTION_API, fixed=1,
     ),
     "CallTargetRef.from_code_address": EntryCase(
-        CallTargetRef.from_code_address, lambda kw, api: CallTargetRef.from_code_address(**kw),
+        CallTargetRef.from_code_address, lambda r, a, kw, api: CallTargetRef.from_code_address(*a, **kw),
         lambda: dict(address_value=0x1000, display_hint="d", program_id=7),
     ),
     "CallTargetRef.from_code_address#address": EntryCase(
         CallTargetRef.from_code_address,
-        lambda kw, api: CallTargetRef.from_code_address(FakeAddress(api), **kw),
-        lambda: dict(display_hint="d", program_id=7), api={"FakeAddress.getOffset": 0x1000},
+        lambda r, a, kw, api: CallTargetRef.from_code_address(FakeAddress(api), *a, **kw),
+        lambda: dict(display_hint="d", program_id=7), api={"FakeAddress.getOffset": 0x1000}, fixed=1,
     ),
     "CallTargetRef.from_name": EntryCase(
-        CallTargetRef.from_name, lambda kw, api: CallTargetRef.from_name(**kw),
+        CallTargetRef.from_name, lambda r, a, kw, api: CallTargetRef.from_name(*a, **kw),
         lambda: dict(function_name="f", program_id=7, entry_offset=0x100, is_external=True, library_name="libc",
                      is_thunk=False, thunked_is_external=False, thunked_library_name="libm"),
     ),
     "CallTargetRef.unknown": EntryCase(
-        CallTargetRef.unknown, lambda kw, api: CallTargetRef.unknown(**kw), lambda: dict(display_hint="u"),
-    ),
-    "loop_summary_method_b_key": EntryCase(
-        loops_module.loop_summary_method_b_key, lambda kw, api: loops_module.loop_summary_method_b_key(**kw),
-        lambda: dict(summary=_loop_summary()),
-    ),
-    "loop_summary_method_b_key_at_result_size": EntryCase(
-        loops_module.loop_summary_method_b_key_at_result_size,
-        lambda kw, api: loops_module.loop_summary_method_b_key_at_result_size(**kw),
-        lambda: dict(summary=_loop_summary(), result_size=2),
-    ),
-    "ReductionAccumulatorProof.readonly_term_sequence_contract_key": EntryCase(
-        ReductionAccumulatorProof.readonly_term_sequence_contract_key,
-        lambda kw, api: _proof().readonly_term_sequence_contract_key(**kw), lambda: dict(result_size=4),
-    ),
-    "ReadonlyReductionRef.readonly_term_sequence_contract_key": EntryCase(
-        ReadonlyReductionRef.readonly_term_sequence_contract_key,
-        lambda kw, api: _proof().lower_to_readonly_reduction_ref().readonly_term_sequence_contract_key(**kw),
-        lambda: dict(result_size=4),
+        CallTargetRef.unknown, lambda r, a, kw, api: CallTargetRef.unknown(*a, **kw), lambda: dict(display_hint="u"),
     ),
     "coerce_call_target_ref": EntryCase(
-        coerce_call_target_ref, lambda kw, api: coerce_call_target_ref(**kw),
+        coerce_call_target_ref, lambda r, a, kw, api: coerce_call_target_ref(*a, **kw),
         lambda: dict(target=CallTargetRef.from_name("f")),
     ),
 }
+
+for _suffix, _pair in SUMMARY_PAIRS.items():
+    ENTRY_CASES.update({
+        f"compare_loop_summaries{_suffix}": EntryCase(
+            loops_module.compare_loop_summaries, lambda r, a, kw, api: loops_module.compare_loop_summaries(*a, **kw),
+            lambda _pair=_pair: dict(zip(("left", "right"), _pair())),
+        ),
+        f"LoopSummaryProofObligation.case_aware_solver_equality{_suffix}": EntryCase(
+            LoopSummaryProofObligation.case_aware_solver_equality,
+            lambda r, a, kw, api: LoopSummaryProofObligation.case_aware_solver_equality(*a, **kw),
+            lambda _pair=_pair: dict(zip(("left", "right"), _pair()), reason="needs_solver"),
+        ),
+        f"loop_summary_method_b_key{_suffix}": EntryCase(
+            loops_module.loop_summary_method_b_key, lambda r, a, kw, api: loops_module.loop_summary_method_b_key(*a, **kw),
+            lambda _pair=_pair: dict(summary=_pair()[0]),
+        ),
+        f"loop_summary_method_b_key_at_result_size{_suffix}": EntryCase(
+            loops_module.loop_summary_method_b_key_at_result_size,
+            lambda r, a, kw, api: loops_module.loop_summary_method_b_key_at_result_size(*a, **kw),
+            lambda _pair=_pair: dict(summary=_pair()[0], result_size=2),
+        ),
+    })
+
+for _suffix, _receiver in PROOF_RECEIVERS.items():
+    ENTRY_CASES.update({
+        f"ReductionAccumulatorProof.loop_body_terms_for_count_value{_suffix}": EntryCase(
+            ReductionAccumulatorProof.loop_body_terms_for_count_value,
+            lambda r, a, kw, api: r.loop_body_terms_for_count_value(*a, **kw), lambda: dict(count_value=3),
+            receiver=_receiver,
+        ),
+        f"ReductionAccumulatorProof.full_terms_for_count_value{_suffix}": EntryCase(
+            ReductionAccumulatorProof.full_terms_for_count_value,
+            lambda r, a, kw, api: r.full_terms_for_count_value(*a, **kw), lambda: dict(count_value=1),
+            receiver=_receiver,
+        ),
+        f"ReductionAccumulatorProof.seed_terms_for_count_value{_suffix}": EntryCase(
+            ReductionAccumulatorProof.seed_terms_for_count_value,
+            lambda r, a, kw, api: r.seed_terms_for_count_value(*a, **kw), lambda: dict(count_value=1),
+            receiver=_receiver,
+        ),
+        f"ReductionAccumulatorProof.readonly_term_sequence_contract_key{_suffix}": EntryCase(
+            ReductionAccumulatorProof.readonly_term_sequence_contract_key,
+            lambda r, a, kw, api: r.readonly_term_sequence_contract_key(*a, **kw), lambda: dict(result_size=4),
+            receiver=_receiver,
+        ),
+        f"ReadonlyReductionRef.readonly_term_sequence_contract_key{_suffix}": EntryCase(
+            ReadonlyReductionRef.readonly_term_sequence_contract_key,
+            lambda r, a, kw, api: r.readonly_term_sequence_contract_key(*a, **kw), lambda: dict(result_size=4),
+            receiver=lambda _receiver=_receiver: _receiver().lower_to_readonly_reduction_ref(),
+        ),
+    })
+
+
+def _collector() -> Any:
+    collector = unknowns_module.ExpansionBudgetCollector()
+    collector.record(ExpansionBudgetTruncation(kind="k", dedup=(3, 2, 2), referenced_event_ids=("a",)))
+    return collector
+
+
+def _zero_argument(owner: type, name: str, receiver: Callable[[], Any], call: Optional[Callable[[Any], Any]] = None) -> EntryCase:
+    """引数の無い method / property（ref を作る読み手）の行: 受け手の構成と代わりの型の variant で走る。"""
+
+    member = owner.__dict__[name]
+    function = member.fget if isinstance(member, property) else member
+    invoke = call or (lambda r: getattr(r, name) if isinstance(member, property) else getattr(r, name)())
+    return EntryCase(function, lambda r, a, kw, api, _invoke=invoke: _invoke(r), lambda: {}, receiver=receiver)
+
+
+def _composed() -> Any:
+    from scripts.function_tracer_pcode.core.runtime_refs.loops import ComposedLoopSummaryRef
+
+    return ComposedLoopSummaryRef(prior=_loop_summary(), current=_lane_summary(), handoff_proof_key=("handoff", 1), source="composed")
+
+
+def _corpus_instance(cls: type) -> Any:
+    return corpus.build(cls, corpus.BASES[cls]())
+
+
+ENTRY_CASES.update({
+    "_loop_summary_term_at_index": EntryCase(
+        loops_module._loop_summary_term_at_index, lambda r, a, kw, api: loops_module._loop_summary_term_at_index(*a, **kw),
+        lambda: dict(summary=_loop_summary(), index=1),
+    ),
+    "_loop_summary_term_at_index#lanes": EntryCase(
+        loops_module._loop_summary_term_at_index, lambda r, a, kw, api: loops_module._loop_summary_term_at_index(*a, **kw),
+        lambda: dict(summary=_lane_summary(), index=3),
+    ),
+    "_loop_variable_binding_context_from_values": EntryCase(
+        loops_module._loop_variable_binding_context_from_values,
+        lambda r, a, kw, api: loops_module._loop_variable_binding_context_from_values(*a, **kw),
+        lambda: dict(values=[_loop_variable_summary().limit_expr, _expr(2), (_expr(3), [_expr(4)])]),
+    ),
+    "ExpansionBudgetCollector.record": EntryCase(
+        unknowns_module.ExpansionBudgetCollector.record, lambda r, a, kw, api: (r.record(*a, **kw), r.as_tuple())[1],
+        lambda: dict(truncation=ExpansionBudgetTruncation(kind="k", dedup=(3, 2, 2), referenced_event_ids=("b",))),
+        receiver=_collector,
+    ),
+    "ExpansionBudgetCollector.extend": EntryCase(
+        unknowns_module.ExpansionBudgetCollector.extend, lambda r, a, kw, api: (r.extend(*a, **kw), r.as_tuple())[1],
+        lambda: dict(items=[ExpansionBudgetTruncation(kind="k", dedup=(3, 2, 2), referenced_event_ids=("c",)), None]),
+        receiver=_collector,
+    ),
+    "ExpansionBudgetCollector.as_tuple": _zero_argument(unknowns_module.ExpansionBudgetCollector, "as_tuple", _collector),
+    "ComposedLoopSummaryRef.side_effect_profile": _zero_argument(loops_module.ComposedLoopSummaryRef, "side_effect_profile", _composed),
+    "StateTransitionLoopSummaryRef.semantic_key": _zero_argument(
+        loops_module.StateTransitionLoopSummaryRef, "semantic_key", lambda: _corpus_instance(loops_module.StateTransitionLoopSummaryRef),
+    ),
+    "CountedStateTransitionLoopSummaryRef.semantic_key": _zero_argument(
+        loops_module.CountedStateTransitionLoopSummaryRef, "semantic_key",
+        lambda: _corpus_instance(loops_module.CountedStateTransitionLoopSummaryRef),
+    ),
+})
+for _suffix, _pair in SUMMARY_PAIRS.items():
+    for _name in ("semantic_key", "pairwise_semantic_key"):
+        ENTRY_CASES[f"LoopSummaryRef.{_name}{_suffix}"] = _zero_argument(LoopSummaryRef, _name, lambda _pair=_pair: _pair()[0])
+for _suffix, _receiver in PROOF_RECEIVERS.items():
+    for _name in ("loop_var_unit", "lower_to_loop_summary_ref", "lower_to_readonly_reduction", "lower_to_readonly_reduction_ref", "semantic_key"):
+        ENTRY_CASES[f"ReductionAccumulatorProof.{_name}{_suffix}"] = _zero_argument(ReductionAccumulatorProof, _name, _receiver)
+    for _name in ("semantic_key", "pairwise_semantic_key"):
+        ENTRY_CASES[f"ReadonlyReductionRef.{_name}{_suffix}"] = _zero_argument(
+            ReadonlyReductionRef, _name, lambda _receiver=_receiver: _receiver().lower_to_readonly_reduction_ref(),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -382,9 +608,7 @@ ENTRY_CASES: Dict[str, EntryCase] = {
 # ---------------------------------------------------------------------------
 
 
-def _discovered_entries() -> set:
-    """ref module の入口（`runtime_ref_entry` の関数・method、ref の class の classmethod / staticmethod と自前の `__init__`）。"""
-
+def _ref_modules() -> list:
     import importlib
     import pkgutil
 
@@ -392,23 +616,75 @@ def _discovered_entries() -> set:
 
     modules = [importlib.import_module(f"{runtime_refs.__name__}.{info.name}") for info in pkgutil.iter_modules(runtime_refs.__path__)]
     modules.append(call_target_module)
-    found = set()
-    for module in modules:
+    return modules
+
+
+def _discovered() -> Dict[str, Any]:
+    """ref module の入口（`runtime_ref_entry` の関数・method、ref の class の classmethod / staticmethod と自前の `__init__`）。"""
+
+    found: Dict[str, Any] = {}
+    for module in _ref_modules():
         for name, value in vars(module).items():
             if inspect.isfunction(value) and value.__module__ == module.__name__ and runtime_ref_record.is_runtime_ref_entry(value):
-                found.add(name)
+                found[name] = value
             if isinstance(value, type) and value.__module__ == module.__name__ and runtime_ref_record.is_runtime_ref_record(value):
                 for attribute, member in value.__dict__.items():
                     if isinstance(member, (classmethod, staticmethod)) or runtime_ref_record.is_runtime_ref_entry(member):
-                        found.add(f"{value.__name__}.{attribute}")
+                        found[f"{value.__name__}.{attribute}"] = getattr(member, "__func__", member)
                     elif attribute == "__init__" and not getattr(value, "__dataclass_params__").init:
-                        found.add(f"{value.__name__}.__init__")
+                        found[f"{value.__name__}.__init__"] = member
+            elif isinstance(value, type) and value.__module__ == module.__name__:
+                # ref でない class（`ExpansionBudgetCollector` など）の入口
+                for attribute, member in value.__dict__.items():
+                    if runtime_ref_record.is_runtime_ref_entry(member):
+                        found[f"{value.__name__}.{attribute}"] = member
     return found
 
 
+def _discovered_entry_functions() -> list:
+    """入口の元の関数（包みの中身）。"""
+
+    return [_original(function) for function in _discovered().values() if runtime_ref_record.is_runtime_ref_entry(function)]
+
+
+def _ref_producing_callables() -> set:
+    from scripts.function_tracer_pcode.tests.unit.runtime_ref_construction_guard import ConstructionGuard
+
+    required = set()
+    for label in ConstructionGuard.for_package().ref_producing_functions(with_arguments=False):
+        owner, name = label.split(":")[1].split(".")
+        required.add(name if owner == "None" else f"{owner}.{name}")
+    return required
+
+
 def test_every_entry_is_in_the_matrix():
+    """入口はすべて行列にある。行列の行は入口か、ref を作る呼べる関数（古い名前の行を残さない）。"""
+
     table = {name.split("#", 1)[0] for name in ENTRY_CASES}
-    assert _discovered_entries() == table
+    discovered = set(_discovered())
+    assert sorted(discovered - table) == []
+    assert sorted(table - discovered - _ref_producing_callables()) == []
+
+
+def test_every_ref_producing_callable_is_in_the_matrix():
+    """ref を作る、外から呼べるすべての関数・method・property（引数の無いもの・ref でない class のものを含む）は
+    行列の行を持つ（受け手の構成と代わりの型の variant で実行される）。"""
+
+    table = {name.split("#", 1)[0] for name in ENTRY_CASES}
+    assert sorted(_ref_producing_callables() - table) == []
+
+
+def test_every_entry_wraps_its_arguments():
+    """引数を持つ全入口（factory・自前の `__init__` を含む）が、引数を写す包み（`runtime_ref_entry` と同じ束縛）。"""
+
+    def takes_arguments(function: Any) -> bool:
+        parameters = list(inspect.signature(_original(function)).parameters)
+        return bool(parameters[1:] if parameters[:1] in (["self"], ["cls"]) else parameters)
+
+    assert sorted(
+        name for name, function in _discovered().items()
+        if takes_arguments(function) and not runtime_ref_record.is_runtime_ref_entry(function)
+    ) == []
 
 
 def test_public_ref_producing_functions_are_entries():
@@ -425,6 +701,10 @@ def test_public_ref_producing_functions_are_entries():
         function = module.functions[name] if owner == "None" else module.methods[(owner, name)]
         if any(ast.unparse(d) == "runtime_ref_entry" for d in function.decorator_list):
             decorated.add(unit_name)
+        elif name == "__init__" and runtime_ref_record.is_runtime_ref_entry(
+            vars(importlib.import_module(module.name))[owner].__init__
+        ):
+            decorated.add(unit_name)  # 自前の `__init__` は `runtime_ref_record` が入口と同じ包みにする
     assert sorted(set(guard.ref_producing_functions()) - decorated) == []
 
 
@@ -438,17 +718,63 @@ def _original(entry: Any) -> Any:
     return runtime_ref_record._ENTRY_WRAPPERS.get(function, function)
 
 
-def _parameter_kinds(entry: Any) -> Dict[str, Tuple[str, bool]]:
+def _parameters(case: EntryCase) -> List[inspect.Parameter]:
+    """呼び出しで渡す引数（receiver と `fixed` を除く）。"""
+
+    function = _original(case.entry)
+    parameters = list(inspect.signature(function).parameters.values())
+    receiver = parameters and parameters[0].name in ("self", "cls") and "." in function.__qualname__
+    return parameters[int(bool(receiver)) + case.fixed:]
+
+
+def _parameter_kinds(case: EntryCase) -> Dict[str, Tuple[str, bool]]:
     """引数 → (corpus の仕様の分類, Optional か)。"""
 
-    function = _original(entry)
+    function = _original(case.entry)
     hints = typing.get_type_hints(function, include_extras=True)
     kinds = {}
-    for name in inspect.signature(function).parameters:
-        hint = hints.get(name, Any)
+    for parameter in _parameters(case):
+        hint = hints.get(parameter.name, Any)
         optional = typing.get_origin(hint) is typing.Union and type(None) in typing.get_args(hint)
-        kinds[name] = (corpus.field_kind(hint), optional)
+        kinds[parameter.name] = (corpus.field_kind(hint), optional)
     return kinds
+
+
+def _shapes(case: EntryCase) -> List[str]:
+    """呼び出しの形: キーワード・位置（渡せる先頭の引数をすべて位置で）・混在（最初の 1 つだけ位置で）。"""
+
+    parameters = _parameters(case)
+    base = case.base()
+    positional = [p for p in parameters if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD, p.VAR_POSITIONAL)]
+    if any(p.kind is p.VAR_POSITIONAL and p.name in base for p in parameters):
+        return ["positional"]
+    if not positional or positional[0].name not in base:
+        return ["keyword"]
+    count = 0
+    for parameter in positional:
+        if parameter.name not in base or parameter.kind is parameter.VAR_POSITIONAL:
+            break
+        count += 1
+    return ["keyword", "positional", "mixed"] if count > 1 else ["keyword", "positional"]
+
+
+def _arguments(case: EntryCase, shape: str, kwargs: Dict[str, Any]) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+    """`kwargs`（名前 → 値）を呼び出しの形の `args` / `kwargs` にする。"""
+
+    kwargs = dict(kwargs)
+    if shape == "keyword":
+        return (), kwargs
+    args: List[Any] = []
+    for parameter in _parameters(case):
+        if parameter.kind is parameter.VAR_POSITIONAL:
+            args.extend(kwargs.pop(parameter.name, ()))
+            break
+        if parameter.kind not in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD) or parameter.name not in kwargs:
+            break
+        args.append(kwargs.pop(parameter.name))
+        if shape == "mixed":
+            break
+    return tuple(args), kwargs
 
 
 def _zero(value: Any) -> Any:
@@ -456,7 +782,7 @@ def _zero(value: Any) -> Any:
 
 
 def _argument_variants(case: EntryCase):
-    kinds = _parameter_kinds(case.entry)
+    kinds = _parameter_kinds(case)
     for name, value in case.base().items():
         kind, optional = kinds.get(name, ("object", False))
         if type(value) is bool or kind == "bool":
@@ -485,13 +811,20 @@ def _api_variants(case: EntryCase):
                 yield f"api:{key}:{label}", key, item, corpus.twin_value(item, "element")
 
 
+#: 入力全体を変える variant: すべての scalar を偽る / ref を代わりの型（偽る・正直な双子）にする / その両方
+DEEP_VARIANTS = ("lie_all", "duck", "duck_lie_all", "duck_objects")
+
+
 def _matrix():
     for case_id, case in ENTRY_CASES.items():
-        yield pytest.param(case_id, "exact", None, None, None, id=f"{case_id}:exact")
-        for label, name, item, twin in _argument_variants(case):
-            yield pytest.param(case_id, "arg", name, item, twin, id=f"{case_id}:{label}")
-        for label, key, item, twin in _api_variants(case):
-            yield pytest.param(case_id, "api", key, item, twin, id=f"{case_id}:{label}")
+        for shape in _shapes(case):
+            yield pytest.param(case_id, shape, "exact", None, None, None, id=f"{case_id}:{shape}:exact")
+            for label, name, item, twin in _argument_variants(case):
+                yield pytest.param(case_id, shape, "arg", name, item, twin, id=f"{case_id}:{shape}:{label}")
+            for label, key, item, twin in _api_variants(case):
+                yield pytest.param(case_id, shape, "api", key, item, twin, id=f"{case_id}:{shape}:{label}")
+            for variant in DEEP_VARIANTS:
+                yield pytest.param(case_id, shape, variant, None, None, None, id=f"{case_id}:{shape}:{variant}")
 
 
 def _holds_subclass(value: Any, depth: int = 0) -> bool:
@@ -513,40 +846,97 @@ def _outputs(result: Any) -> Any:
     for item in items:
         if dataclasses.is_dataclass(item) and not isinstance(item, type):
             stable_key = getattr(type(item), "stable_key", None)
-            out.append((
-                json.dumps(materialize(item), sort_keys=True),
-                view(stable_key(item)) if stable_key else None,
-            ))
+            try:
+                legacy = json.dumps(materialize(item), sort_keys=True)
+            except Exception as error:  # LEGACY の JSON に写せない ref（tuple の key の dict を持つなど）
+                legacy = ("unencodable", type(error).__name__)
+            out.append((legacy, view(stable_key(item)) if stable_key else None))
     return out
 
 
-def _invoke(case: EntryCase, where: str, name: Optional[str], value: Any):
+def _disguised_receiver(receiver: Any, lying: bool, objects: bool = False) -> Any:
+    """受け手の ref の field と容器の field（中の ref と scalar）を代わりの型にした受け手（構築の検証も通る）。
+
+    受け手の scalar の field は owner が写すので変えない。
+    """
+
+    def eligible(value: Any) -> bool:
+        if dataclasses.is_dataclass(value) or type(value) in (tuple, list):
+            return True
+        return objects and type(value).__module__.startswith("scripts.function_tracer_pcode.") and not callable(value)
+
+    changes = {
+        item.name: disguise(getattr(receiver, item.name), lying, objects=objects)
+        for item in dataclasses.fields(receiver)
+        if item.init and eligible(getattr(receiver, item.name))
+    }
+    return dataclasses.replace(receiver, **changes) if changes else receiver
+
+
+def _inputs(case: EntryCase, where: str, name: Optional[str], value: Any, shape: str, *, twin: bool):
+    """1 回の呼び出しの (受け手, args, kwargs, api)。`twin` なら deep variant の正直な双子。"""
+
     kwargs = case.base()
     api = dict(case.api or {})
+    receiver = case.receiver() if case.receiver is not None else None
     if where == "arg":
         kwargs[name] = value
     elif where == "api":
         api[name] = value
-    return case.call(kwargs, api)
+    elif where in ("lie_all", "duck_lie_all") and not twin:
+        kwargs = {key: lie_deep(item) for key, item in kwargs.items()}
+        api = {key: (Liar(int(item)) if key in BOOLEAN_API else lie(item)) for key, item in api.items()}
+    elif where in ("lie_all", "duck_lie_all") and twin:
+        api = {key: (bool(item) if key in BOOLEAN_API else item) for key, item in api.items()}
+    if where in ("duck", "duck_lie_all", "duck_objects"):
+        # `duck_objects`: 式・storage など ref 以外の package の object も代わりの型にする（注釈が Any の位置）
+        lying = not twin
+        objects = where == "duck_objects"
+        kwargs = {
+            key: disguise(item, lying, objects=objects)
+            if dataclasses.is_dataclass(item) or type(item) in (tuple, list) or (objects and type(item).__module__.startswith("scripts.function_tracer_pcode."))
+            else item
+            for key, item in kwargs.items()
+        }
+        if receiver is not None and dataclasses.is_dataclass(receiver):
+            receiver = _disguised_receiver(receiver, lying, objects)
+    args, kwargs = _arguments(case, shape, kwargs)
+    return receiver, args, kwargs, api
 
 
-@pytest.mark.parametrize("case_id, where, name, item, twin", list(_matrix()))
-def test_entry_builds_the_twin_without_calling_subclass_code(case_id, where, name, item, twin):
+def _run(case: EntryCase, where: str, name: Optional[str], value: Any, shape: str, *, twin: bool):
+    receiver, args, kwargs, api = _inputs(case, where, name, value, shape, twin=twin)
+    return case.call(receiver, args, kwargs, api)
+
+
+@pytest.mark.parametrize("case_id, shape, where, name, item, twin", list(_matrix()))
+def test_entry_builds_the_twin_without_calling_subclass_code(case_id, shape, where, name, item, twin):
     case = ENTRY_CASES[case_id]
+    deep = where in DEEP_VARIANTS
     try:
-        expected = _invoke(case, where, name, twin)
+        expected = _run(case, where, name, twin if not deep else None, shape, twin=True)
     except Exception as error:
         HOOK_CALLS.clear()
         with pytest.raises(type(error)):
-            _invoke(case, where, name, item)
+            _run(case, where, name, item, shape, twin=False)
         assert HOOK_CALLS == {}
         return
     HOOK_CALLS.clear()
-    built = _invoke(case, where, name, item)
+    built = _run(case, where, name, item, shape, twin=False)
     assert HOOK_CALLS == {}, dict(HOOK_CALLS)
     assert view(built) == view(expected)
-    if not _holds_subclass(built):
+    if not deep and not _holds_subclass(built):
         assert _outputs(built) == _outputs(expected)
+
+
+def test_call_shapes_are_exercised():
+    """位置・混在の呼び出しを持つ入口が十分にある（`_shapes` が黙って全部をキーワードにしない）。"""
+
+    shapes = {case_id: _shapes(case) for case_id, case in ENTRY_CASES.items()}
+    assert sum("positional" in s for s in shapes.values()) >= 25
+    assert sum("mixed" in s for s in shapes.values()) >= 10
+    assert "positional" in shapes["CanonicalLocation.__init__"] and "mixed" in shapes["CanonicalLocation.__init__"]
+    assert shapes["merge_expansion_budget_truncations"] == ["positional"]
 
 
 def test_reviewed_examples_keep_their_meaning():
@@ -668,3 +1058,148 @@ def test_scalar_subclass_in_a_tuple_annotated_field_takes_the_base_type():
     assert HOOK_CALLS == {}
     assert type(built.owner_scope_key) is str and built.referenced_event_ids == ("a", "b")
     assert type(location.storage_identity_key) is str
+
+
+# ---------------------------------------------------------------------------
+# loop の key の組み立て（入口が到達する読み手）: 値の種類ごとに、代わりの型（偽る / 正直な双子）で読む
+# ---------------------------------------------------------------------------
+
+
+def _key_values() -> Dict[str, Any]:
+    from scripts.function_tracer_pcode.core.runtime_refs.loops import LoopVariableIdentityRef
+    from scripts.function_tracer_pcode.core.storage import StorageInfo
+
+    parameter = Expression.parameter("n", 1, size=4)
+    storage = StorageInfo(is_register=True, space_name="register", register_name="x0", offset=8, size=8)
+    variable = Expression.variable("v", size=4, storage_info=storage)
+    loop_variable = Expression.variable("i", size=4, runtime_ref=LoopVariableIdentityRef(role="induction", varnode_key=("unique", 0x10, 4)))
+    return {
+        "constant": _expr(3),
+        "parameter": parameter,
+        "parameter_storage": Expression.parameter("s", size=8, storage_info=storage),
+        "variable_storage": variable,
+        "variable_runtime": loop_variable,
+        "binary": Expression.binary_op("+", parameter, _expr(2)),
+        "memory": Expression.memory(Expression.binary_op("+", parameter, _expr(4)), size=4, read_order_key=2),
+        "phi": Expression.phi([(Expression.binary_op("<", parameter, _expr(1)), _expr(1)), (None, parameter)]),
+        "unknown": Expression.unknown("u"),
+        "containers": (1, "a", [2, ("b", 3.5)], {"k": 4, "j": (5,)}, b"\x01", True, None),
+        "ref": LocationBaseRef.parameter("p", index=0),
+        "summary": _loop_summary(limit_expr=parameter),
+    }
+
+
+@pytest.mark.parametrize("builder", ["_loop_object_key", "_loop_object_semantic_key", "_loop_expression_semantic_key"])
+@pytest.mark.parametrize("kind", list(_key_values()))
+def test_loop_key_builders_read_every_value_kind_on_base_values(builder, kind):
+    """式・storage・ref・容器を代わりの型（偽る / 正直な双子）にしても、key は双子と同じで hook は 0 回。"""
+
+    function = getattr(loops_module, builder)
+    value = _key_values()[kind]
+    context = loops_module._loop_variable_binding_context_from_values(value) if builder != "_loop_object_key" else None
+    arguments = () if builder == "_loop_object_key" else (context,)
+    twin = function(disguise(value, False, objects=True), *arguments)
+    lying = disguise(value, True, objects=True)
+    HOOK_CALLS.clear()
+    lied = function(lying, *arguments)
+    assert HOOK_CALLS == {}, dict(HOOK_CALLS)
+    assert _without_unidentified(view(lied)) == _without_unidentified(view(twin))
+
+
+def _without_unidentified(value: Any) -> Any:
+    """識別できない値（PHI など）の構造 key の process 内の serial と nonce を外した view（呼ぶたびに変わる）。"""
+
+    if type(value) is tuple:
+        items = tuple(_without_unidentified(item) for item in value)
+        if len(items) == 2 and items[0] == "tuple" and items[1] and items[1][0] == ("str", "exact_tail_unidentified"):
+            return ("tuple", items[1][:2])
+        return items
+    return value
+
+
+@pytest.mark.parametrize("kind", list(_key_values()))
+def test_loop_binding_context_reads_every_value_kind_on_base_values(kind):
+    value = _key_values()[kind]
+    twin = loops_module._loop_variable_binding_context_from_values(disguise(value, False, objects=True))
+    lying = disguise(value, True, objects=True)
+    HOOK_CALLS.clear()
+    lied = loops_module._loop_variable_binding_context_from_values(lying)
+    assert HOOK_CALLS == {}, dict(HOOK_CALLS)
+    assert view(lied) == view(twin)
+
+
+# ---------------------------------------------------------------------------
+# 引数の無い読み手（method / property）を全部: 偽る値・代わりの型で作った ref と、双子で作った ref で比べる
+# ---------------------------------------------------------------------------
+
+
+def _zero_argument_members(cls: type) -> List[str]:
+    names = []
+    for name, member in vars(cls).items():
+        if name.startswith("_") and not (name.startswith("__") and name.endswith("__")):
+            continue
+        if name in ("__init__", "__post_init__", "__setattr__", "__delattr__", "__repr__", "__eq__", "__hash__", "__init_subclass__"):
+            continue
+        if isinstance(member, property):
+            names.append(name)
+        elif inspect.isfunction(member):
+            parameters = [p for p in inspect.signature(member).parameters.values() if p.default is p.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+            if len(parameters) == 1:
+                names.append(name)
+    return sorted(names)
+
+
+def _read(instance: Any, name: str) -> Any:
+    try:
+        value = getattr(instance, name)
+        if callable(value) and not isinstance(getattr(type(instance), name, None), property):
+            value = value()
+        if inspect.isgenerator(value):
+            value = list(value)
+        return ("value", value)
+    except Exception as error:
+        return ("raised", type(error).__name__)
+
+
+@pytest.mark.parametrize("shape", ["leaves", "listed"])
+@pytest.mark.parametrize("cls", corpus.REF_CLASSES, ids=lambda cls: cls.__name__)
+def test_every_zero_argument_reader_of_a_ref_reads_on_base_values(cls, shape):
+    """corpus の基底の入力の、写されない位置（Any・record・list）を偽る値と代わりの型にして作った ref の、引数の無い
+    すべての method / property の結果が、双子（正直な代わりの型）から作った ref と同じで、hook は 0 回。
+
+    `listed` は注釈が Any の位置の scalar を 1 要素の list に入れる（受理したまま持つ容器の中の葉を読む経路）。
+    """
+
+    kinds = corpus.field_kinds(cls)
+
+    def inputs(lying: bool) -> Dict[str, Any]:
+        kwargs = corpus.BASES[cls]()
+        out = {}
+        for name, value in kwargs.items():
+            if kinds.get(name) == "object" or type(value) is list:
+                if shape == "listed" and type(value) in (int, str, float):
+                    value = [value]
+                value = disguise(value, lying, objects=True)
+                if lying:
+                    value = lie_deep(value)
+            out[name] = value
+        return out
+
+    twin_inputs, lying_inputs = inputs(False), inputs(True)
+    try:
+        twin = corpus.build(cls, twin_inputs)
+    except Exception as error:
+        HOOK_CALLS.clear()
+        with pytest.raises(type(error)):
+            corpus.build(cls, lying_inputs)
+        assert HOOK_CALLS == {}
+        return
+    HOOK_CALLS.clear()
+    built = corpus.build(cls, lying_inputs)
+    assert HOOK_CALLS == {}, dict(HOOK_CALLS)
+    for name in _zero_argument_members(cls):
+        expected = _read(twin, name)
+        HOOK_CALLS.clear()
+        got = _read(built, name)
+        assert HOOK_CALLS == {}, (name, dict(HOOK_CALLS))
+        assert view(got) == view(expected), name

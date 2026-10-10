@@ -23,8 +23,32 @@ def _is_jvm_not_running_error(error: Exception) -> bool:
         JVMNotRunning = ()  # type: ignore[assignment]
     return (
         isinstance(error, JVMNotRunning)
-        or live_values.scalar_text(error) in _JVM_NOT_RUNNING_MESSAGES
+        or _error_text(error) in _JVM_NOT_RUNNING_MESSAGES
     )
+
+
+def _error_text(error: BaseException) -> str:
+    """`str(error)` と同じ文字列（例外の引数の scalar の subclass の `__str__` を呼ばない。Issue #242）。
+
+    引数に scalar の subclass が無い例外は `str(error)` のまま。既定の `BaseException.__str__` の例外は、引数を
+    基底型の値で読んでから同じ規則（引数が 1 つならその `str()`、無ければ空、2 つ以上なら tuple の `str()`）で、
+    `KeyError` は引数が 1 つならその `repr()`（`KeyError.__str__` と同じ）で文字列にする。それ以外の `__str__` を
+    自分で持つ例外の型（`OSError` など）は `str(error)` のまま（外の code）。
+    """
+
+    args = getattr(error, "args", None)
+    if type(args) is not tuple:
+        return live_values.scalar_text(error)
+    exact = live_values.exact_tree(args)
+    if exact is args:
+        return live_values.scalar_text(error)
+    if type(error).__str__ is KeyError.__str__ and len(exact) == 1:
+        return repr(exact[0])
+    if type(error).__str__ is not BaseException.__str__:
+        return live_values.scalar_text(error)
+    if not exact:
+        return ""
+    return live_values.scalar_text(exact[0] if len(exact) == 1 else exact)
 
 
 def _safe_getattr(owner: Any, name: str) -> Any:
@@ -367,7 +391,7 @@ def _declared_return_data_type(function_obj: Any) -> Any:
     )
 
     try:
-        if is_void_data_type(return_type) or is_undefined_data_type(return_type):
+        if live_values.scalar_bool(is_void_data_type(return_type)) or live_values.scalar_bool(is_undefined_data_type(return_type)):
             return None
     except Exception:
         return None
@@ -413,7 +437,7 @@ def call_target_returns_floating_value(target_ref: Any) -> bool:
     verdicts = set()
     for declared in declarations:
         try:
-            verdicts.add(bool(is_floating_data_type(declared)))
+            verdicts.add(live_values.scalar_bool(is_floating_data_type(declared)))
         except Exception:
             return False
     if len(verdicts) != 1:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
-from scripts.function_tracer_pcode.core.live_values import exact_scalar, scalar_int, scalar_text
+from scripts.function_tracer_pcode.core.live_values import exact_scalar, exact_tree, scalar_int, scalar_text
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 
@@ -147,7 +147,7 @@ class PcodeOpRef:
     def __post_init__(self) -> None:
         # `binary_id` は注釈が Any だが stable key の scalar（側の識別子）: 基底型の値で持つ（Issue #242。
         # stable key を並べる・比べる読み手が subclass の code を呼ばない）
-        object.__setattr__(self, "binary_id", exact_scalar(self.binary_id))
+        object.__setattr__(self, "binary_id", exact_tree(self.binary_id))
         normalized_input_sizes = []
         for size in tuple(self.input_sizes or ()):
             try:
@@ -184,7 +184,7 @@ class PcodeOpRef:
 
     def input_size(self, index: int = 0) -> Optional[int]:
         try:
-            return self.input_sizes[int(index)]
+            return self.input_sizes[scalar_int(index)]
         except (IndexError, TypeError, ValueError):
             return None
 
@@ -387,7 +387,7 @@ class PcodeBlockRef:
 
     def __post_init__(self) -> None:
         # `binary_id` は stable key の scalar（`PcodeOpRef` と同じ読み方。Issue #242）
-        object.__setattr__(self, "binary_id", exact_scalar(self.binary_id))
+        object.__setattr__(self, "binary_id", exact_tree(self.binary_id))
 
     def stable_key(self) -> Tuple[Any, ...]:
         if (

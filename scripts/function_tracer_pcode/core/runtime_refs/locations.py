@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw)
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, scalar_int, scalar_text, str_value
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, exact_tree, scalar_int, scalar_text, str_value
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
 )
@@ -151,6 +151,9 @@ class LocationBaseRef:
     def __post_init__(self) -> None:
         if self.kind not in {"parameter", "stack_frame", "storage", "global"}:
             raise ValueError(f"Unsupported location base kind: {self.kind}")
+        if self.storage_identity_key is not None:
+            # key は `==`・hash・文字列化で読む: list のまま受理した値の葉も基底型の値にする（Issue #242）
+            object.__setattr__(self, "storage_identity_key", exact_tree(self.storage_identity_key))
         if self.kind == "global":
             # 構築中の key は list のこともある（owner は exact な tuple だけを写す）: 要素は基底型の値で比べる
             if not self.storage_identity_key or exact_scalar(self.storage_identity_key[0]) != "global_object":
@@ -370,15 +373,16 @@ class LocationBaseRef:
         if not self.is_parameter():
             return False
         try:
-            param_index = param.get("index")
+            # `param` は呼び出し元の dict: 値は基底型の値で読む（Issue #242）
+            param_index = exact_scalar(param.get("index"))
             if self.parameter_index is not None and param_index is not None:
                 if self.owner_program_id is not None or self.owner_entry_offset is not None:
                     return (
-                        int(param_index) == int(self.parameter_index)
-                        and param.get("owner_program_id") == self.owner_program_id
-                        and param.get("owner_entry_offset") == self.owner_entry_offset
+                        scalar_int(param_index) == int(self.parameter_index)
+                        and exact_tree(param.get("owner_program_id")) == self.owner_program_id
+                        and exact_tree(param.get("owner_entry_offset")) == self.owner_entry_offset
                     )
-                return int(param_index) == int(self.parameter_index)
+                return scalar_int(param_index) == int(self.parameter_index)
         except Exception:
             pass
         return False
