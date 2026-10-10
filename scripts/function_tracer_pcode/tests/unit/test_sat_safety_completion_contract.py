@@ -688,3 +688,61 @@ def test_no_encoder_means_no_emission():
     with production_signal_scope(session):
         assert _observe(_observed(REPLAY, (R,))) == 0
         assert _complete_conditionally(_completion(_observed(REPLAY, (R,)))) == 0
+
+
+def test_a_loop_handoff_colliding_with_a_deferred_promise_is_a_recorded_collision():
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        _consume_loop_sat_safety_handoffs,
+    )
+
+    session = _manifest_connector().begin({"phase": "pr-a", "case": "loop-promise-collision"})
+    with production_signal_scope(session):
+        _observe(_observed(ANALYSIS, (A,), defer=True))
+        before = _state(session)
+        session.domain_signal_state["loop_sat_safety_handoffs"] = [
+            _observed(ANALYSIS, ("function2:other",)),
+        ]
+        assert _consume_loop_sat_safety_handoffs(session) == 0
+        assert "loop_sat_safety_handoffs" not in session.domain_signal_state
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["ValueError"]
+
+
+def test_a_refused_publication_of_a_promise_keeps_the_promise():
+    """約束の公開が encoder に拒否されたら（別の blocker が同じ identity で公開済み）、約束を
+    台帳から外さない（拒否の後に台帳を変えない）。"""
+    session = _connector().begin({"phase": "pr-a", "case": "promise-refused"})
+    promise = _observed(PARTITION, ("pairwise",), defer=True)
+    with production_signal_scope(session):
+        _observe(promise)
+        assert session.emit_domain_signal(_observed(PARTITION, ("monolithic",))) == 1
+        before = _state(session)
+        assert _observe(replace(promise, defer_until_terminal=False)) == 0
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["ValueError"]
+
+
+def test_a_non_restating_completion_of_a_completed_cause_is_refused_on_the_generic_route():
+    session = _connector().begin({"phase": "pr-a", "case": "generic-completed-swap"})
+    observed = _observed(PARTITION, ("pairwise",))
+    with production_signal_scope(session):
+        _observe(observed)
+        assert _complete_conditionally(_completion(observed)) == 1
+        before = _state(session)
+        assert session.emit_domain_signal(_completion(observed, evidence_refs=("monolithic",))) == 0
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["ValueError"]
+
+
+@pytest.mark.parametrize("route", ["entry", "generic"])
+def test_a_reobservation_under_another_counterexample_binding_is_a_collision(route):
+    receipt = _safe_pairwise_receipt()
+    binding = SafeCounterexampleProductionSignal.from_pairwise_receipt(receipt).counterexample_binding
+    session = _connector().begin({"phase": "pr-a", "case": f"binding-{route}"})
+    with production_signal_scope(session):
+        _observe(_observed(REPLAY, (R,), binding=binding))
+        before = _state(session)
+        other = _observed(REPLAY, (R,))
+        assert (_observe(other) if route == "entry" else session.emit_domain_signal(other)) == 0
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["ValueError"]

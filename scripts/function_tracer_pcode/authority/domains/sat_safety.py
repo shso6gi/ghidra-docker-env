@@ -193,12 +193,13 @@ class SatSafetyPilotEncoder:
             action = "OBSERVED"
         elif occurrence_key not in observed_occurrences:
             raise ValueError("SAT safety completion has no observed active occurrence")
-        elif occurrence_key in completed_occurrences:
-            return ()
         else:
             # 許可は記録した観測の blocker で決める（完了の signal の主張を信じない）。
+            # 完了済みの重複判定より前に確かめる（言い直さない完了を黙って捨てない）。
             # 拒否は例外として session が domain signal の失敗に記録する（plan v4 I5）。
             signal.require_completes(self._recorded_observation(session, occurrence_key))
+            if occurrence_key in completed_occurrences:
+                return ()
             receipt = RequirementCompletionReceipt(
                 authority.occurrence.cause_id.value,
                 authority.occurrence.occurrence_id,

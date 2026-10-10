@@ -336,7 +336,11 @@ class SatSafetyBlockerProductionSignal:
         言い直しなら重複、別の根拠なら衝突（``ValueError``）。重複判定をする全ての
         場所（入口の検査と encoder）がこれを使う。
         """
-        if self.action != "OBSERVED" or not self.same_blocker_as(recorded):
+        if (
+            self.action != "OBSERVED"
+            or not self.same_blocker_as(recorded)
+            or self.counterexample_binding != recorded.counterexample_binding
+        ):
             raise ValueError("SAT safety observation collides with its recorded observation")
 
     def require_completes(self, observed: "SatSafetyBlockerProductionSignal") -> None:
@@ -1476,8 +1480,9 @@ def _emit_sat_safety_blocker(
     if (
         signal.action == "OBSERVED"
         and admission.deferred
-        and admission.occurrence_id
-        in session.domain_signal_state.get("sat_safety_observed", set())
+        and session.domain_signal_state.get("sat_safety_observed_signals", {}).get(
+            admission.occurrence_id
+        ) is signal
     ):
         # 約束を公開した: 約束は果たされたので deferred の台帳から外す（記録の正本は
         # 公開済みの観測になる。予約は event contract が公開で数え済みで、release は
@@ -1524,6 +1529,20 @@ class _SatSafetyAdmission:
     recorded: Optional[SatSafetyBlockerProductionSignal]
     deferred: bool
     pending: dict
+
+
+def _deferred_sat_safety_record(
+    session: Any, signal: SatSafetyBlockerProductionSignal,
+) -> Optional[SatSafetyBlockerProductionSignal]:
+    """``signal`` の identity に deferred の約束があれば、その記録した観測。"""
+    pending = session.domain_signal_state.get("sat_safety_deferred_observations")
+    authority_for_signal = getattr(
+        session.domain_signal_encoder, "authority_for_signal", None
+    )
+    if not pending or not callable(authority_for_signal):
+        return None
+    record = pending.get(authority_for_signal(session, signal).occurrence.occurrence_id)
+    return None if record is None else record[0]
 
 
 def _refuse_sat_safety_signal(session: Any, exc: Exception) -> None:
@@ -2017,6 +2036,10 @@ def _consume_loop_sat_safety_handoffs(session: Any) -> int:
         # それを失敗として記録して消費する（黙って捨てない・再 emit しない）。
         try:
             duplicate = has_observed(session, handoff)
+            if not duplicate:
+                promise = _deferred_sat_safety_record(session, handoff)
+                if promise is not None:
+                    handoff.require_restates(promise)
         except ValueError as exc:
             _refuse_sat_safety_signal(session, exc)
             del pending[0]
