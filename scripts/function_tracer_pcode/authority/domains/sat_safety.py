@@ -83,6 +83,10 @@ class SatSafetyPilotEncoder:
         return ledger
 
     def _authority(self, session: Any, signal: SatSafetyBlockerProductionSignal):
+        # identity は検証済みの blocker からしか作らない。重複判定・deferred の登録・
+        # 完了の照合はすべてこの identity を使うので、不整合な対（構築の迂回を含む）は
+        # どの経路でも identity より前に止まる（plan v4 I5）。
+        signal.blocker
         cause = self._cause_factory.create(
             reason_id=signal.reason_id,
             identity_scope=IdentityScope.RELATIONAL,
@@ -168,9 +172,6 @@ class SatSafetyPilotEncoder:
             ),)
         if type(signal) is not SatSafetyBlockerProductionSignal:
             return ()
-        # 構築時の分類を前提にしない: 構築を迂回した signal の不整合な対もここで
-        # 拒否し、session が domain signal の失敗として記録する（plan v4 I5）。
-        signal.blocker
         authority, requirement_id = self._authority(session, signal)
         occurrence_key = authority.occurrence.occurrence_id
         observed_occurrences = self._committed_ledger(

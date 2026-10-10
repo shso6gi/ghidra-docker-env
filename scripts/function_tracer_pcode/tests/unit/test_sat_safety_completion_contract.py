@@ -408,3 +408,137 @@ def test_every_producer_binds_its_evidence_into_the_target_key(monkeypatch):
     assert len(captured) == 3
     for signal in captured:
         assert set(signal.evidence_refs) <= set(flat(signal.canonical_target_key)), signal
+
+
+# ---- 入口の検査: 状態変更・重複判定・deferred 登録より前に owner の規則 -----------
+#
+# 契約: SAT-safety の blocker を受け取る全ての入口は、identity の計算・重複判定・
+# deferred の登録・Phase 7 の取引・完了の照合より前に (id, 根拠) を分類する。
+# 不整合なら何も変えずに失敗を記録し（pair は ERROR）、決して黙って捨てない。
+
+BAD_PAIRS = [
+    pytest.param((A,), id="analysis-evidence"),
+    pytest.param((R, A), id="mixed-evidence"),
+    pytest.param((), id="empty-evidence"),
+]
+
+
+def _bad_replay(refs, *, action="OBSERVED", defer=False, key=("contract",)):
+    """正常な replay 観測と同じ identity（id・対象・欠けた事実）で、根拠だけが不整合な signal。"""
+    return _bypassed(
+        action, REPLAY, refs,
+        canonical_target_key=key,
+        missing_semantic_fact=("counterexample_safety_gate_unproven", "contract"),
+        producer_id=_SITES[REPLAY][0 if action == "OBSERVED" else 1].producer_id,
+        proof_artifact_digest="contract-proof" if action == "COMPLETED" else None,
+        defer_until_terminal=defer,
+    )
+
+
+def _entries():
+    return {
+        "observe": lambda s: _observe(s),
+        "complete-conditionally": lambda s: _complete_conditionally(s),
+        "complete-directly": lambda s: _complete_directly(s),
+    }
+
+
+@pytest.mark.parametrize("refs", BAD_PAIRS)
+@pytest.mark.parametrize("situation", [
+    "fresh", "deferred", "duplicate-of-published", "duplicate-of-deferred", "publication-of-deferred",
+])
+def test_an_inconsistent_observation_is_refused_before_dedupe_or_deferral(situation, refs):
+    session = _connector().begin({"phase": "pr-a", "case": f"entry-{situation}"})
+    good = _observed(REPLAY, (R,), defer=situation in {"duplicate-of-deferred", "publication-of-deferred"})
+    with production_signal_scope(session):
+        if situation.startswith(("duplicate", "publication")):
+            _observe(good)
+        before = _state(session)
+        bad = _bad_replay(refs, defer=situation in {"deferred", "duplicate-of-deferred"})
+        assert _observe(bad) == 0
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["SatSafetyBlockerInconsistent"]
+
+
+@pytest.mark.parametrize("refs", BAD_PAIRS)
+@pytest.mark.parametrize("entry", ["complete-conditionally", "complete-directly"])
+@pytest.mark.parametrize("recorded", ["published", "deferred"])
+def test_an_inconsistent_completion_is_refused_before_any_lookup(recorded, entry, refs):
+    session = _connector().begin({"phase": "pr-a", "case": f"entry-complete-{recorded}"})
+    good = _observed(REPLAY, (R,), defer=recorded == "deferred")
+    with production_signal_scope(session):
+        _observe(good)
+        before = _state(session)
+        assert _entries()[entry](_bad_replay(refs, action="COMPLETED")) == 0
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["SatSafetyBlockerInconsistent"]
+
+
+def test_the_loop_handoff_consumer_refuses_an_inconsistent_handoff_before_dedupe():
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        _consume_loop_sat_safety_handoffs,
+    )
+
+    # handoff の消費は route を持つ composite encoder を要る（監査済みの manifest の session）。
+    session = _manifest_connector().begin({"phase": "pr-a", "case": "entry-loop-handoff"})
+    with production_signal_scope(session):
+        _observe(_observed(REPLAY, (R,)))
+        before = _state(session)
+        session.domain_signal_state["loop_sat_safety_handoffs"] = [_bad_replay((A,))]
+        assert _consume_loop_sat_safety_handoffs(session) == 0
+        session.domain_signal_state.pop("loop_sat_safety_handoffs", None)
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["SatSafetyBlockerInconsistent"]
+
+
+@pytest.mark.parametrize("manifest", [False, True])
+@pytest.mark.parametrize("defer", [False, True])
+def test_an_inconsistent_duplicate_of_a_replay_observation_never_lets_the_pair_reach_not_eq(defer, manifest):
+    """指摘の形: 正常な replay の観測と同じ identity で解析の根拠を持つ signal を再送し、
+    replay を完了して safe counterexample を出す。以前は重複として捨てられ NOT_EQ だった。"""
+    connector = _manifest_connector() if manifest else _connector()
+    session = connector.begin({"phase": "pr-a", "case": f"dup-{defer}-{manifest}"})
+    good = _observed(REPLAY, (R,), defer=defer)
+    with production_signal_scope(session):
+        _observe(good)
+        _observe(_bad_replay((A,), defer=defer))
+        _complete_conditionally(_completion(good))
+        emit_safe_counterexample_production_signal(safety_receipt=_safe_pairwise_receipt())
+    with pytest.raises(ValueError, match="does not match its evidence refs"):
+        _finish(session, connector, "dup")
+
+
+@pytest.mark.parametrize(("recorded_deferred", "defer"), [(False, False), (True, True), (True, False)])
+def test_a_consistent_reobservation_with_other_evidence_is_a_recorded_collision(recorded_deferred, defer):
+    """同じ identity を別の（整合した）根拠で観測し直すのは、重複として捨てずに衝突として記録する
+    （公開済みの再観測・deferred の再登録・deferred の約束の公開の全て）。"""
+    session = _connector().begin({"phase": "pr-a", "case": f"collision-{recorded_deferred}-{defer}"})
+    with production_signal_scope(session):
+        _observe(_observed(PARTITION, ("pairwise",), defer=recorded_deferred))
+        before = _state(session)
+        assert _observe(_observed(PARTITION, ("monolithic",), defer=defer)) == 0
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["ValueError"]
+
+
+@pytest.mark.parametrize("defer", [False, True])
+def test_an_exact_reobservation_is_still_a_silent_duplicate(defer):
+    """対照: 同じ blocker の再観測（公開済み・deferred の再登録）は従来どおり重複。"""
+    session = _connector().begin({"phase": "pr-a", "case": f"dup-ok-{defer}"})
+    observed = _observed(REPLAY, (R,), defer=defer)
+    with production_signal_scope(session):
+        _observe(observed)
+        before = _state(session)
+        assert _observe(observed) == 0
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == []
+
+
+def test_publishing_a_deferred_promise_is_not_a_duplicate():
+    """対照（Issue #110）: deferred の約束を defer せずに観測すると公開される（重複ではない）。"""
+    session = _connector().begin({"phase": "pr-a", "case": "publish-promise"})
+    with production_signal_scope(session):
+        _observe(_observed(REPLAY, (R,), defer=True))
+        assert _observe(_observed(REPLAY, (R,))) == 1
+        assert len(session.domain_signal_state["sat_safety_observed"]) == 1
+        assert session.domain_signal_error_kinds == []
