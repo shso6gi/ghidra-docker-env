@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "438ed875baa531ace3c8ebf07dd384fb98161a43f7a8647a47019d6aa0d32249",
+  "manifest_digest": "2efb739715630dac5eff1924930226f56cb55868817c5e3d63542546b5b55418",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 32,
   "sites": [
@@ -566,10 +566,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 2017,
+      "line": 2027,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "pairwise-loop-sat-safety-observed",
-      "source_sha256": "0c304c033a414daa2855aeb6d90715b15e15029986f2f822636c200f37b4ea97"
+      "source_sha256": "9a4c913551e6c32eb0ad91bd202c43bdfc32b2c2a1315677b7651bfb09e7746e"
     },
     {
       "allowed_dispositions": [
@@ -1257,7 +1257,7 @@
       "line": 1638,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "sat-safety-counterexample-bound-completed",
-      "source_sha256": "0c304c033a414daa2855aeb6d90715b15e15029986f2f822636c200f37b4ea97"
+      "source_sha256": "9a4c913551e6c32eb0ad91bd202c43bdfc32b2c2a1315677b7651bfb09e7746e"
     }
   ]
 }

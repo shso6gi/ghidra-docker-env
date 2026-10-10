@@ -2012,21 +2012,26 @@ def _consume_loop_sat_safety_handoffs(session: Any) -> int:
         handoff = pending[0]
         if type(handoff) is not SatSafetyBlockerProductionSignal:
             raise TypeError("loop SAT handoff signal is not exact")
-        # 重複判定・衝突・不整合の拒否は入口の検査と同じ経路で行う（has_observed で
-        # 先に捨てない）。入口が拒否したもの（失敗は記録済み）は消費する。
+        # 重複の判定は identity の owner（encoder の has_observed）に聞く。owner は
+        # 不整合な対と、記録と別の根拠の再観測（衝突）を ValueError で拒否するので、
+        # それを失敗として記録して消費する（黙って捨てない・再 emit しない）。
+        try:
+            duplicate = has_observed(session, handoff)
+        except ValueError as exc:
+            _refuse_sat_safety_signal(session, exc)
+            del pending[0]
+            continue
+        if duplicate:
+            del pending[0]
+            continue
         count = emit_sat_safety_signal(
             handoff,
             producer_site_manifest_id="pairwise-loop-sat-safety-observed",
         )
-        if count <= 0:
-            try:
-                handled = has_observed(session, handoff)
-            except SatSafetyBlockerInconsistent:
-                handled = True  # 入口が不整合として拒否し、記録した
-            if not handled:
-                raise ValueError(
-                    "loop SAT safety handoff was neither emitted nor deduplicated"
-                )
+        if count <= 0 and not has_observed(session, handoff):
+            raise ValueError(
+                "loop SAT safety handoff was neither emitted nor deduplicated"
+            )
         del pending[0]
         emitted += count
     state.pop(key, None)

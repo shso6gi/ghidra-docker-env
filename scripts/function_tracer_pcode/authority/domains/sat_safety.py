@@ -308,4 +308,11 @@ class SatSafetyPilotEncoder:
         observed_occurrences = self._committed_ledger(
             session, "sat_safety_observed"
         )
-        return authority.occurrence.occurrence_id in observed_occurrences
+        occurrence_key = authority.occurrence.occurrence_id
+        if occurrence_key not in observed_occurrences:
+            return False
+        if signal.action == "OBSERVED":
+            # 重複と答えてよいのは、記録した観測の言い直しだけ。別の根拠は衝突
+            # （``ValueError``）で、呼び手は黙って捨てずに失敗として記録する。
+            signal.require_restates(self._recorded_observation(session, occurrence_key))
+        return True
