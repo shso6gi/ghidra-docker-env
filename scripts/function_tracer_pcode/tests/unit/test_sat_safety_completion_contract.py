@@ -542,3 +542,46 @@ def test_publishing_a_deferred_promise_is_not_a_duplicate():
         assert _observe(_observed(REPLAY, (R,))) == 1
         assert len(session.domain_signal_state["sat_safety_observed"]) == 1
         assert session.domain_signal_error_kinds == []
+
+
+# ---- authority 側の経路（production の入口を通らない generic な route） ----------
+
+
+def test_the_identity_owner_refuses_an_inconsistent_pair_on_every_identity_api():
+    """重複判定・deferred の登録・ABI の変換が使う identity は、検証済みの blocker からしか
+    作れない（production の入口の検査を通らない route でも）。"""
+    connector = _manifest_connector()
+    session = connector.begin({"phase": "pr-a", "case": "identity-owner"})
+    bad = _bad_replay((A,))
+    encoder = session.domain_signal_encoder
+    before = _state(session)
+    for api in (encoder.has_observed, encoder.authority_for_signal, encoder.prepare_sat_safety_transformation):
+        with pytest.raises(SatSafetyBlockerInconsistent):
+            api(session, bad)
+    assert _state(session) == before
+
+
+def test_the_generic_route_refuses_to_complete_an_analysis_cause():
+    """``session.emit_domain_signal`` へ直接渡した完了（production の入口を通らない）も、
+    encoder が記録した観測に対して拒否する。"""
+    session = _connector().begin({"phase": "pr-a", "case": "generic-complete"})
+    observed = _observed(ANALYSIS, (A,))
+    with production_signal_scope(session):
+        assert _observe(observed) == 1
+        before = _state(session)
+        assert session.emit_domain_signal(_completion(observed)) == 0
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["ValueError"]
+
+
+def test_a_deferred_reregistration_from_another_site_is_a_recorded_collision():
+    """deferred の約束は (signal, site) ごと記録する。同じ blocker を別の site から約束し直すと
+    衝突として記録する（約束の持ち主を黙って差し替えない）。"""
+    session = _connector().begin({"phase": "pr-a", "case": "deferred-site"})
+    observed = _observed(REPLAY, (R,), defer=True)
+    with production_signal_scope(session):
+        _observe(observed)
+        before = _state(session)
+        assert emit_sat_safety_signal(observed, producer_site_manifest_id="pairwise-loop-sat-safety-observed") == 0
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["ValueError"]
