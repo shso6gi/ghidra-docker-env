@@ -447,8 +447,11 @@ def _entries():
 @pytest.mark.parametrize("situation", [
     "fresh", "deferred", "duplicate-of-published", "duplicate-of-deferred", "publication-of-deferred",
 ])
-def test_an_inconsistent_observation_is_refused_before_dedupe_or_deferral(situation, refs):
-    session = _connector().begin({"phase": "pr-a", "case": f"entry-{situation}"})
+@pytest.mark.parametrize("manifest", [False, True], ids=["plain", "manifest"])
+def test_an_inconsistent_observation_is_refused_before_dedupe_or_deferral(manifest, situation, refs):
+    session = (_manifest_connector() if manifest else _connector()).begin(
+        {"phase": "pr-a", "case": f"entry-{situation}"}
+    )
     good = _observed(REPLAY, (R,), defer=situation in {"duplicate-of-deferred", "publication-of-deferred"})
     with production_signal_scope(session):
         if situation.startswith(("duplicate", "publication")):
@@ -463,8 +466,11 @@ def test_an_inconsistent_observation_is_refused_before_dedupe_or_deferral(situat
 @pytest.mark.parametrize("refs", BAD_PAIRS)
 @pytest.mark.parametrize("entry", ["complete-conditionally", "complete-directly"])
 @pytest.mark.parametrize("recorded", ["published", "deferred"])
-def test_an_inconsistent_completion_is_refused_before_any_lookup(recorded, entry, refs):
-    session = _connector().begin({"phase": "pr-a", "case": f"entry-complete-{recorded}"})
+@pytest.mark.parametrize("manifest", [False, True], ids=["plain", "manifest"])
+def test_an_inconsistent_completion_is_refused_before_any_lookup(manifest, recorded, entry, refs):
+    session = (_manifest_connector() if manifest else _connector()).begin(
+        {"phase": "pr-a", "case": f"entry-complete-{recorded}"}
+    )
     good = _observed(REPLAY, (R,), defer=recorded == "deferred")
     with production_signal_scope(session):
         _observe(good)
@@ -585,3 +591,100 @@ def test_a_deferred_reregistration_from_another_site_is_a_recorded_collision():
         assert emit_sat_safety_signal(observed, producer_site_manifest_id="pairwise-loop-sat-safety-observed") == 0
         assert _state(session) == before
         assert session.domain_signal_error_kinds == ["ValueError"]
+
+
+# ---- 同じ identity の衝突: 全ての重複判定の route で同じ規則 ----------------------
+
+
+def test_a_colliding_loop_handoff_is_a_recorded_collision():
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        _consume_loop_sat_safety_handoffs,
+    )
+
+    session = _manifest_connector().begin({"phase": "pr-a", "case": "loop-collision"})
+    with production_signal_scope(session):
+        _observe(_observed(ANALYSIS, (A,)))
+        before = _state(session)
+        session.domain_signal_state["loop_sat_safety_handoffs"] = [
+            _observed(ANALYSIS, ("function2:other",)),
+        ]
+        assert _consume_loop_sat_safety_handoffs(session) == 0
+        assert "loop_sat_safety_handoffs" not in session.domain_signal_state
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["ValueError"]
+
+
+def test_a_colliding_observation_on_the_generic_route_is_a_recorded_collision():
+    """``session.emit_domain_signal`` へ直接渡した観測（ABI の handoff・finalize の route）も、
+    encoder の重複判定が同じ規則で衝突を記録する。"""
+    session = _connector().begin({"phase": "pr-a", "case": "generic-collision"})
+    with production_signal_scope(session):
+        _observe(_observed(PARTITION, ("pairwise",)))
+        before = _state(session)
+        assert session.emit_domain_signal(_observed(PARTITION, ("monolithic",))) == 0
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["ValueError"]
+
+
+def test_an_exact_observation_on_the_generic_route_is_still_a_duplicate():
+    session = _connector().begin({"phase": "pr-a", "case": "generic-dup"})
+    observed = _observed(PARTITION, ("pairwise",))
+    with production_signal_scope(session):
+        _observe(observed)
+        assert session.emit_domain_signal(observed) == 0
+        assert session.domain_signal_error_kinds == []
+
+
+# ---- deferred の約束を公開した後の lifecycle ------------------------------------
+
+
+def test_a_published_promise_leaves_the_deferred_ledger_and_its_reservation():
+    session = _connector().begin({"phase": "pr-a", "case": "promise-published"})
+    observed = _observed(REPLAY, (R,), defer=True)
+    with production_signal_scope(session):
+        _observe(observed)
+        assert session.event_contract.deferred_unpublished == 1
+        assert _observe(replace(observed, defer_until_terminal=False)) == 1
+        assert "sat_safety_deferred_observations" not in session.domain_signal_state
+        assert session.event_contract.deferred_unpublished == 0
+        # 記録の正本は公開済みの観測: 再観測は重複、再 defer も重複。
+        assert _observe(observed) == 0
+        assert _observe(replace(observed, defer_until_terminal=False)) == 0
+        assert session.domain_signal_error_kinds == []
+
+
+@pytest.mark.parametrize(("reason_id", "refs", "outcome"), [
+    (REPLAY, (R,), Outcome.NOT_EQ),
+    (ANALYSIS, (A,), None),
+])
+def test_a_published_promise_is_completed_or_refused_as_a_published_cause(reason_id, refs, outcome):
+    connector = _manifest_connector()
+    session = connector.begin({"phase": "pr-a", "case": f"promise-lifecycle-{reason_id}"})
+    observed = _observed(reason_id, refs, defer=True)
+    with production_signal_scope(session):
+        _observe(observed)
+        _observe(replace(observed, defer_until_terminal=False))
+        _complete_conditionally(_completion(observed))
+        emit_safe_counterexample_production_signal(safety_receipt=_safe_pairwise_receipt())
+    if outcome is None:
+        with pytest.raises(ValueError, match="not admissible for an analysis-unsafety cause"):
+            _finish(session, connector, "promise-lifecycle")
+    else:
+        evidence = _finish(session, connector, "promise-lifecycle")
+        assert evidence.pilot_result.candidate.decision_receipt.outcome is outcome
+
+
+def test_no_encoder_means_no_emission():
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import ProductionDualWritePilotConnector
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.domains.sat_safety import (
+        SAT_SAFETY_RECOVERY_REGISTRY,
+        SAT_SAFETY_REASON_REGISTRY,
+    )
+
+    session = ProductionDualWritePilotConnector(ShadowLifecycleReducer(
+        reason_registry=SAT_SAFETY_REASON_REGISTRY, recovery_registry=SAT_SAFETY_RECOVERY_REGISTRY,
+    )).begin({"phase": "pr-a", "case": "no-encoder"})
+    with production_signal_scope(session):
+        assert _observe(_observed(REPLAY, (R,))) == 0
+        assert _complete_conditionally(_completion(_observed(REPLAY, (R,)))) == 0

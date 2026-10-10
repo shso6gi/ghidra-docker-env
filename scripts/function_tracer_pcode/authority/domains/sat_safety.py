@@ -182,6 +182,9 @@ class SatSafetyPilotEncoder:
         )
         if signal.action == "OBSERVED":
             if occurrence_key in observed_occurrences:
+                # 同じ identity の再観測は、記録した観測の言い直しのときだけ重複。
+                # 別の根拠は衝突として拒否する（generic な route でも黙って捨てない）。
+                signal.require_restates(self._recorded_observation(session, occurrence_key))
                 return ()
             intents = (EventIntent(
                 EventType.CAUSE_OBSERVED,
