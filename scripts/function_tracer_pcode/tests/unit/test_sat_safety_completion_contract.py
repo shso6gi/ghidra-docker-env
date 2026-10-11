@@ -927,7 +927,7 @@ _FAILURE_MESSAGES = {
     "complete-swapped": "does not restate its recorded observation",
     "complete-nothing": "no observed active occurrence",
     "complete-generic-promise": "goes through the lifecycle entry",
-    "phase7-noop": "",
+    "phase7-noop": "discovered activation disposition is not site-sealed",
 }
 
 
@@ -1153,3 +1153,113 @@ def test_a_truncated_stream_refuses_every_sat_signal_before_identity(defer, monk
     assert built == []
     assert _state(session) == before
     assert session.truncation_consequences == consequences
+
+
+# ---- ABI の取引の境界: commit の後の失敗は ABI と SAT-safety の全ての台帳を戻す ---------
+
+
+def _abi_transaction_with_one_sat_handoff():
+    """ABI の solver の取引（SAT-safety の観測への変換を 1 つ持つ）を、ABI の commit が読む
+    形だけで作る。取引の識別は固定する（この test が見るのは commit と rollback の契約）。"""
+    from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
+        AbiWidthReadonlyBlockerSignal,
+        AbiWidthReadonlyPilotEncoder,
+        AbiWidthReadonlySolverExecutionBatchSignal,
+    )
+    from scripts.function_tracer_pcode.authority.domains.sat_safety import SatSafetyPilotEncoder
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        CompositeProductionSignalEncoder,
+    )
+
+    # commit と rollback は solver の実行の設定に依らない（実行の権限の配備は要らない）。
+    abi = AbiWidthReadonlyPilotEncoder(enable_solver_execution=False)
+    abi._solver_batch_transaction_key = lambda _session, _batch: ("abi-transaction",)
+    abi._solver_batch_transaction_digest = lambda _session, _batch: "abi-transaction-digest"
+    safety = SatSafetyPilotEncoder()
+    composite = CompositeProductionSignalEncoder({
+        AbiWidthReadonlyBlockerSignal: abi,
+        AbiWidthReadonlySolverExecutionBatchSignal: abi,
+        SatSafetyBlockerProductionSignal: safety,
+        SafeCounterexampleProductionSignal: safety,
+    })
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import ProductionDualWritePilotConnector
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.domains.sat_safety import (
+        SAT_SAFETY_REASON_REGISTRY,
+        SAT_SAFETY_RECOVERY_REGISTRY,
+    )
+
+    session = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=SAT_SAFETY_REASON_REGISTRY, recovery_registry=SAT_SAFETY_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=composite,
+    ).begin({"phase": "pr-a", "case": "abi-transaction"})
+    batch = object.__new__(AbiWidthReadonlySolverExecutionBatchSignal)
+    handoff = replace(
+        _observed(ANALYSIS, ("abi-model-bound-refutation",), key=("abi-handoff",)),
+        producer_id="abi-width-model-bound-refutation-handoff-v1",
+    )
+    session.domain_signal_state["abi_width_pending_emission_transactions"] = {
+        ("abi-transaction",): ("abi-transaction-digest", (), {
+            "fresh_receipt_digests": {"receipt"},
+            "decisive_conflict": None,
+            "model_artifacts": ["model-artifact"],
+            "sat_transformations": [("transformation", "proof", "artifact", handoff)],
+        }),
+    }
+    return session, abi, batch, handoff
+
+
+_ABI_TRANSACTION_KEYS = (
+    "abi_width_solver_execution_receipts",
+    "abi_width_model_bound_refutation_artifacts",
+    "abi_width_high_bit_sat_transformations",
+    "abi_width_committed_emission_transactions",
+)
+
+
+def test_an_abi_transaction_failing_after_its_commit_restores_the_sat_safety_ledger():
+    session, abi, batch, handoff = _abi_transaction_with_one_sat_handoff()
+    with production_signal_scope(session):
+        before = _state(session)
+        abi_before = {key: session.domain_signal_state.get(key) for key in _ABI_TRANSACTION_KEYS}
+        abi.commit_emitted_signal(session, batch, ())
+        # commit は SAT-safety の観測を公開済みとして台帳に記録した。
+        assert _ledger_state(session, handoff) is BlockerState.PUBLISHED
+        # 同じ取引の後の commit（Phase 7 など）が失敗したときの、本番の呼び手の巻き戻し。
+        abi.rollback_emitted_signal(session, batch)
+        assert _ledger_state(session, handoff) is BlockerState.ABSENT
+        assert _state(session) == before
+        assert {key: session.domain_signal_state.get(key) for key in _ABI_TRANSACTION_KEYS} == abi_before
+
+
+def test_a_completed_abi_transaction_keeps_its_sat_safety_publication():
+    """対照: 取引が成功したら（呼び手が巻き戻さない）、公開は残り、次の取引の開始で写しは消える。"""
+    session, abi, batch, handoff = _abi_transaction_with_one_sat_handoff()
+    with production_signal_scope(session):
+        abi.commit_emitted_signal(session, batch, ())
+        assert _ledger_state(session, handoff) is BlockerState.PUBLISHED
+        assert "abi_width_committed_rollback_snapshots" in session.domain_signal_state
+
+
+def test_a_completion_that_fails_after_the_encoder_commit_restores_the_ledger(monkeypatch):
+    """完了の event の commit の後で取引が失敗したら、cause は公開済み（未完了）のまま。再試行で完了できる。"""
+    session = _manifest_connector().begin({"phase": "pr-a", "case": "post-commit-completion"})
+    observed = _observed(REPLAY, (R,))
+    with production_signal_scope(session):
+        _observe(observed)
+        before = _state(session)
+        real_commit = session._commit_phase7_signal_transaction
+
+        def fail_phase7_commit(_signal):
+            raise RuntimeError("forced Phase 7 commit failure")
+
+        monkeypatch.setattr(session, "_commit_phase7_signal_transaction", fail_phase7_commit)
+        assert _complete_conditionally(_completion(observed)) == 0
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["RuntimeError"]
+        assert _ledger_state(session, observed) is BlockerState.PUBLISHED
+        monkeypatch.setattr(session, "_commit_phase7_signal_transaction", real_commit)
+        _complete_conditionally(_completion(observed))
+        assert _ledger_state(session, observed) is BlockerState.COMPLETED

@@ -54,6 +54,18 @@ ABI_WIDTH_READONLY_DOMAIN_ID = "abi-return-width-readonly-v2"
 ABI_WIDTH_READONLY_REGISTRY_VERSION = 1
 
 
+
+#: commit を終えた取引の、取引の前の台帳の写し（取引の終わりまで残す）。
+_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY = "abi_width_committed_rollback_snapshots"
+
+
+def _restore_abi_transaction_snapshots(state: dict, snapshots: dict) -> None:
+    for key, (existed, snapshot) in snapshots.items():
+        if existed:
+            state[key] = snapshot
+        else:
+            state.pop(key, None)
+
 class AbiWidthReadonlyCapability(str, Enum):
     STRUCTURAL_ONLY = "STRUCTURAL_ONLY"
     STRUCTURAL_OR_SOLVER_UNSAT = "STRUCTURAL_OR_SOLVER_UNSAT"
@@ -3442,6 +3454,8 @@ class AbiWidthReadonlyPilotEncoder:
         if tuple(intents) != expected_intents:
             raise ValueError("ABI/width emission transaction intents changed")
         state = session.domain_signal_state
+        # 前の取引は成功したか巻き戻されたかで終わっている（emission は直列）。
+        state.pop(_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY, None)
         mutated_keys = (
             "abi_width_solver_execution_receipts",
             "abi_width_solver_decisive_conflicts",
@@ -3503,12 +3517,12 @@ class AbiWidthReadonlyPilotEncoder:
                 tuple(intents),
             )
         except Exception:
-            for key, (existed, snapshot) in snapshots.items():
-                if existed:
-                    state[key] = snapshot
-                else:
-                    state.pop(key, None)
+            _restore_abi_transaction_snapshots(state, snapshots)
             raise
+        # この commit の後で同じ取引の別の commit（Phase 7 など）が失敗すると、呼び手は
+        # ``rollback_emitted_signal`` を呼ぶ。そのとき ABI と SAT-safety の全ての台帳を
+        # 取引の前へ戻せるよう、写しを取引の終わりまで残す（成功の確認 → 状態の確定）。
+        state[_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY] = {transaction_key: snapshots}
         pending.pop(transaction_key)
 
     def rollback_emitted_signal(self, session: Any, signal: Any) -> None:
@@ -3518,6 +3532,14 @@ class AbiWidthReadonlyPilotEncoder:
             )
             transaction_key = self._solver_batch_transaction_key(session, signal)
             pending.pop(transaction_key, None)
+            snapshots = session.domain_signal_state.get(
+                _ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY, {}
+            ).get(transaction_key)
+            if snapshots is not None:
+                # commit の後で取引が失敗した: ABI と SAT-safety の台帳を取引の前へ戻す。
+                session.domain_signal_state.pop(_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY, None)
+                _restore_abi_transaction_snapshots(session.domain_signal_state, snapshots)
+                return
             committed = session.domain_signal_state.get(
                 "abi_width_committed_emission_transactions", {}
             )
@@ -3948,6 +3970,8 @@ class AbiWidthReadonlyPilotEncoder:
             except Exception:
                 self.rollback_emitted_signal(session, batch)
                 raise
+            # 取引は成功した: 巻き戻し用の写しはもう要らない。
+            session.domain_signal_state.pop(_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY, None)
             handoffs = tuple(session.domain_signal_state.pop(
                 "abi_width_sat_safety_handoffs", ()
             ))
