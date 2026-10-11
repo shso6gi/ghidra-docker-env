@@ -12,6 +12,7 @@ import threading
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Optional
 
+from scripts.function_tracer_pcode.authority.domains.sat_safety_ledger import SAT_SAFETY_LEDGER_KEYS
 from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrence,
     CauseOccurrenceAuthority,
@@ -3445,7 +3446,8 @@ class AbiWidthReadonlyPilotEncoder:
             "abi_width_solver_execution_receipts",
             "abi_width_solver_decisive_conflicts",
             "abi_width_model_bound_refutation_artifacts",
-            "sat_safety_observed",
+            # 変換した SAT-safety の観測の公開は、SAT-safety の台帳の全ての key を変え得る。
+            *SAT_SAFETY_LEDGER_KEYS,
             "sat_safety_pending_emission_transactions",
             "abi_width_high_bit_sat_transformations",
             "abi_width_committed_emission_transactions",

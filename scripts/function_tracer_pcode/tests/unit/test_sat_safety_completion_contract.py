@@ -360,6 +360,7 @@ def test_the_bound_completion_records_an_inconsistent_recorded_observation_inste
     receipt = _safe_pairwise_receipt()
     safe = SafeCounterexampleProductionSignal.from_pairwise_receipt(receipt)
     session = _connector().begin({"phase": "pr-a", "case": "bypass-bound"})
+    session.domain_signal_state["sat_safety_observed"] = {"forged-occurrence"}
     session.domain_signal_state["sat_safety_observed_signals"] = {
         "forged-occurrence": _bypassed(
             "OBSERVED", REPLAY, (A,), counterexample_binding=safe.counterexample_binding,
@@ -708,19 +709,22 @@ def test_a_loop_handoff_colliding_with_a_deferred_promise_is_a_recorded_collisio
         assert session.domain_signal_error_kinds == ["ValueError"]
 
 
-def test_a_refused_publication_of_a_promise_keeps_the_promise():
-    """約束の公開が encoder に拒否されたら（別の blocker が同じ identity で公開済み）、約束を
-    台帳から外さない（拒否の後に台帳を変えない）。"""
+def test_a_refused_publication_of_a_promise_keeps_the_promise(monkeypatch):
+    """約束の公開が失敗したら（ここでは stream への追加の失敗）、約束も予約も残す。
+    台帳を変えるのは event の commit が成功した後だけ（成功の確認 → 状態の変更の順）。"""
     session = _connector().begin({"phase": "pr-a", "case": "promise-refused"})
-    promise = _observed(PARTITION, ("pairwise",), defer=True)
+    promise = _observed(REPLAY, (R,), defer=True)
     with production_signal_scope(session):
         _observe(promise)
-        assert session.emit_domain_signal(_observed(PARTITION, ("monolithic",))) == 1
         before = _state(session)
+
+        def fail_append(_intents, _commit_callback=None, **_k):
+            raise RuntimeError("forced stream append failure")
+
+        monkeypatch.setattr(session, "emit_many", fail_append)
         assert _observe(replace(promise, defer_until_terminal=False)) == 0
         assert _state(session) == before
-        assert session.domain_signal_error_kinds == ["ValueError"]
-
+        assert session.domain_signal_error_kinds == ["RuntimeError"]
 
 def test_a_non_restating_completion_of_a_completed_cause_is_refused_on_the_generic_route():
     session = _connector().begin({"phase": "pr-a", "case": "generic-completed-swap"})
@@ -746,3 +750,291 @@ def test_a_reobservation_under_another_counterexample_binding_is_a_collision(rou
         assert (_observe(other) if route == "entry" else session.emit_domain_signal(other)) == 0
         assert _state(session) == before
         assert session.domain_signal_error_kinds == ["ValueError"]
+
+
+# ---- review 5 の 3 件: 記録の正本は 1 つ（deferred の約束か公開済みの観測） ---------
+
+
+@pytest.mark.parametrize("manifest", [False, True], ids=["plain", "manifest"])
+@pytest.mark.parametrize("differs", ["evidence", "binding"])
+def test_case1_the_generic_route_refuses_a_collision_with_a_deferred_promise(differs, manifest):
+    receipt = _safe_pairwise_receipt()
+    binding = SafeCounterexampleProductionSignal.from_pairwise_receipt(receipt).counterexample_binding
+    session = (_manifest_connector() if manifest else _connector()).begin({"phase": "pr-a", "case": "case1"})
+    promise = _observed(PARTITION, ("pairwise",), defer=True)
+    other = (
+        _observed(PARTITION, ("monolithic",)) if differs == "evidence"
+        else _observed(PARTITION, ("pairwise",), binding=binding)
+    )
+    with production_signal_scope(session):
+        _observe(promise)
+        before = _state(session)
+        assert session.emit_domain_signal(other) == 0
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["ValueError"]
+
+
+@pytest.mark.parametrize("manifest", [False, True], ids=["plain", "manifest"])
+def test_case2_a_promise_published_on_the_generic_route_is_completed_as_a_published_cause(manifest):
+    connector = _manifest_connector() if manifest else _connector()
+    session = connector.begin({"phase": "pr-a", "case": "case2"})
+    promise = _observed(REPLAY, (R,), defer=True)
+    with production_signal_scope(session):
+        _observe(promise)
+        if manifest:
+            session.record_phase7_pre_emission_activation(
+                _SITES[REPLAY][0].site_id, published := replace(promise, defer_until_terminal=False),
+            )
+        else:
+            published = replace(promise, defer_until_terminal=False)
+        session.emit_domain_signal(published)
+        assert "sat_safety_deferred_observations" not in session.domain_signal_state
+        assert session.event_contract.deferred_unpublished == 0
+        _complete_conditionally(_completion(promise))
+        assert len(session.domain_signal_state["sat_safety_completed"]) == 1
+        emit_safe_counterexample_production_signal(safety_receipt=_safe_pairwise_receipt())
+    evidence = _finish(session, connector, "case2")
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.NOT_EQ
+
+
+@pytest.mark.parametrize("manifest", [False, True], ids=["plain", "manifest"])
+def test_case3_finalize_keeps_a_promise_whose_publication_is_refused(manifest, monkeypatch):
+    """finalize は約束を公開の遷移で処理する。検証が公開を拒んだら約束も予約も消さない
+    （拒否は記録済み）。予算による打切りとは区別する。"""
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        finalize_deferred_sat_safety_observations,
+    )
+
+    session = (_manifest_connector() if manifest else _connector()).begin({"phase": "pr-a", "case": "case3"})
+    promise = _observed(REPLAY, (R,), defer=True)
+    with production_signal_scope(session):
+        _observe(promise)
+        # 公開を検証が拒む状況を、記録済みの約束の根拠を壊して作る（構築を迂回した記録）。
+        pending = session.domain_signal_state["sat_safety_deferred_observations"]
+        (occurrence_id, (recorded, site)), = pending.items()
+        broken = _bad_replay((A,), defer=True)
+        pending[occurrence_id] = (broken, site)
+        before = _state(session)
+        finalize_deferred_sat_safety_observations(session)
+        assert _state(session) == before
+        assert "SatSafetyBlockerInconsistent" in session.domain_signal_error_kinds
+
+
+# ---- 状態 × 遷移 × 入口の行列（本番の API だけで作る。期待は台帳の契約の oracle から） ----
+
+from scripts.function_tracer_pcode.authority.domains.sat_safety_ledger import (  # noqa: E402
+    BlockerState,
+    SatSafetyBlockerLedger,
+)
+
+_STATES = ["absent", "promised", "published", "published_from_promise", "completed"]
+# safe receipt は scope の中で作ると event を出すので、束縛は scope の外で 1 回だけ作る。
+_OTHER_BINDING = SafeCounterexampleProductionSignal.from_pairwise_receipt(
+    _safe_pairwise_receipt(query="(assert (= y 1))\n(check-sat)")
+).counterexample_binding
+_LOOP_HANDOFF_PRODUCER = "loop-model-bound-refutation-handoff-v1"
+
+
+def _generic(session, signal):
+    """generic な route（ABI の handoff・finalize と同じく Phase 7 の activation を開いて emit）。"""
+    if getattr(session, "phase7_runtime", None) is not None:
+        site = _SITES[signal.reason_id][0 if signal.action == "OBSERVED" else 1].site_id
+        session.record_phase7_pre_emission_activation(site, signal)
+    return session.emit_domain_signal(signal)
+
+
+def _handoff(session, signal):
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        _consume_loop_sat_safety_handoffs,
+    )
+
+    session.domain_signal_state["loop_sat_safety_handoffs"] = [
+        replace(signal, producer_id=_LOOP_HANDOFF_PRODUCER)
+    ]
+    try:
+        return _consume_loop_sat_safety_handoffs(session)
+    except ValueError:
+        session.domain_signal_state.pop("loop_sat_safety_handoffs", None)
+        raise
+
+
+def _finalize(session, _signal):
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        finalize_deferred_sat_safety_observations,
+    )
+
+    finalize_deferred_sat_safety_observations(session)
+
+
+def _setup(session, state):
+    promise = _observed(REPLAY, (R,), defer=True)
+    published = replace(promise, defer_until_terminal=False)
+    if state == "promised":
+        _observe(promise)
+    elif state == "published":
+        _observe(published)
+    elif state == "published_from_promise":
+        _observe(promise)
+        _observe(published)
+    elif state == "completed":
+        _observe(published)
+        _complete_conditionally(_completion(published))
+    return promise, published
+
+
+def _ledger_state(session, signal):
+    occurrence_id = session.domain_signal_encoder.authority_for_signal(session, signal).occurrence.occurrence_id
+    return SatSafetyBlockerLedger(session).state_of(occurrence_id)[0]
+
+
+def _entry_observe(_session, signal):
+    return _observe(signal)
+
+
+def _entry_complete_conditionally(_session, signal):
+    return _complete_conditionally(signal)
+
+
+def _entry_complete_directly(_session, signal):
+    return _complete_directly(signal)
+
+
+_OPS = {
+    # name: (route, signal builder, expectation(state) -> (next_state, failure))
+    "observe-defer-same/entry": (_entry_observe, lambda p, q: p),
+    "observe-publish-same/entry": (_entry_observe, lambda p, q: q),
+    "observe-publish-same/generic": (_generic, lambda p, q: q),
+    "observe-publish-same/handoff": (_handoff, lambda p, q: q),
+    "observe-collide-evidence/entry": (_entry_observe, lambda p, q: replace(q, evidence_refs=(R, R))),
+    "observe-collide-evidence/generic": (_generic, lambda p, q: replace(q, evidence_refs=(R, R))),
+    "observe-collide-evidence/handoff": (_handoff, lambda p, q: replace(q, evidence_refs=(R, R))),
+    "observe-collide-binding/entry": (_entry_observe, lambda p, q: replace(q, counterexample_binding=_OTHER_BINDING)),
+    "observe-collide-binding/generic": (_generic, lambda p, q: replace(q, counterexample_binding=_OTHER_BINDING)),
+    "complete-same/conditional": (_entry_complete_conditionally, lambda p, q: _completion(q)),
+    "complete-same/direct": (_entry_complete_directly, lambda p, q: _completion(q)),
+    "complete-same/generic": (_generic, lambda p, q: _completion(q)),
+    "complete-swapped/conditional": (_entry_complete_conditionally, lambda p, q: _completion(q, evidence_refs=(R, R))),
+    "complete-swapped/direct": (_entry_complete_directly, lambda p, q: _completion(q, evidence_refs=(R, R))),
+    "complete-swapped/generic": (_generic, lambda p, q: _completion(q, evidence_refs=(R, R))),
+    "finalize": (_finalize, lambda p, q: None),
+}
+
+
+def _oracle(state, op, manifest=False):
+    """台帳の契約から導いた (次の状態, 失敗を記録するか)。"""
+    next_state, failure = _ledger_oracle(state, op)
+    now = "published" if state == "published_from_promise" else state
+    route = op.split("/")[1] if "/" in op else ""
+    if manifest and route == "generic" and op.startswith("observe") and not failure and next_state == now:
+        # Phase 7 の既存の契約: ELIGIBLE だけの観測の site で、event の無い no-op に
+        # activation を開くと拒否される（本番の入口は重複に activation を開かない。generic な
+        # route の本番の呼び手は約束の公開だけ）。完了の site は DECISIVE なので対象外。
+        return now, True
+    return next_state, failure
+
+
+def _ledger_oracle(state, op):
+    now = {"absent": "absent", "promised": "promised", "published": "published",
+           "published_from_promise": "published", "completed": "completed"}[state]
+    kind, route = (op.split("/") + [""])[:2]
+    if kind == "observe-defer-same":
+        return ("promised" if now == "absent" else now), False
+    if kind == "observe-publish-same":
+        return ("published" if now in {"absent", "promised"} else now), False
+    if kind.startswith("observe-collide"):
+        if now == "absent":
+            return "published", False  # 記録が無ければ新しい観測（衝突ではない）
+        return now, True
+    if kind == "complete-same":
+        if now == "absent":
+            return "absent", route != "conditional"
+        if now == "promised":
+            # 未公開の約束の完了は event の無い遷移: lifecycle の入口だけが行う
+            return ("absent", False) if route != "generic" else ("promised", True)
+        return "completed", False
+    if kind == "complete-swapped":
+        if now == "absent":
+            return "absent", route != "conditional"
+        return now, True
+    if kind == "finalize":
+        return ("published" if now == "promised" else now), False
+    raise AssertionError(op)
+
+
+@pytest.mark.parametrize("op", list(_OPS))
+@pytest.mark.parametrize("state", _STATES)
+@pytest.mark.parametrize("manifest", [False, True], ids=["plain", "manifest"])
+def test_every_transition_follows_the_ledger_contract(manifest, state, op):
+    route, build = _OPS[op]
+    if route is _handoff and not manifest:
+        pytest.skip("the loop handoff consumer needs the routed (composite) encoder")
+    session = (_manifest_connector() if manifest else _connector()).begin(
+        {"phase": "pr-a", "case": f"matrix-{state}-{op}"}
+    )
+    with production_signal_scope(session):
+        promise, published = _setup(session, state)
+        assert session.domain_signal_error_kinds == []
+        before = _state(session)
+        expected_state, expected_failure = _oracle(state, op, manifest)
+        route(session, build(promise, published))
+        failures = session.domain_signal_error_kinds
+        assert bool(failures) is expected_failure, failures
+        if expected_failure:
+            assert _state(session) == before, "a refusal must not change the ledger"
+        assert _ledger_state(session, published).value == {
+            "absent": BlockerState.ABSENT, "promised": BlockerState.PROMISED,
+            "published": BlockerState.PUBLISHED, "completed": BlockerState.COMPLETED,
+        }[expected_state].value
+        # 不変量: 約束と公開は共存しない（state_of が検査する）、予約の数 == 約束の数
+        ledger = SatSafetyBlockerLedger(session)
+        assert session.event_contract.deferred_unpublished == len(ledger.promises())
+
+
+# ---- 入口をまたぐ連続操作の最終判定（監査済みの manifest） ------------------------
+
+
+def _publish_via(session, route, promise):
+    published = replace(promise, defer_until_terminal=False)
+    if route == "entry":
+        _observe(published)
+    elif route == "generic":
+        _generic(session, published)
+    else:
+        _finalize(session, None)
+
+
+@pytest.mark.parametrize("complete_route", ["conditional", "direct"])
+@pytest.mark.parametrize("publish_route", ["entry", "generic", "finalize"])
+def test_a_promised_replay_cause_published_and_completed_across_entries_is_not_eq(publish_route, complete_route):
+    connector = _manifest_connector()
+    session = connector.begin({"phase": "pr-a", "case": f"xentry-{publish_route}-{complete_route}"})
+    promise = _observed(REPLAY, (R,), defer=True)
+    with production_signal_scope(session):
+        _observe(promise)
+        _publish_via(session, publish_route, promise)
+        assert SatSafetyBlockerLedger(session).promises() == []
+        completion = _completion(promise)
+        (_complete_conditionally if complete_route == "conditional" else _complete_directly)(completion)
+        emit_safe_counterexample_production_signal(safety_receipt=_safe_pairwise_receipt())
+        assert session.domain_signal_error_kinds == []
+    evidence = _finish(session, connector, "xentry")
+    assert evidence.pilot_result.candidate.decision_receipt.outcome is Outcome.NOT_EQ
+
+
+@pytest.mark.parametrize("complete_route", ["conditional", "direct"])
+@pytest.mark.parametrize("publish_route", ["entry", "generic", "finalize"])
+def test_a_promised_analysis_cause_never_completes_across_entries(publish_route, complete_route):
+    connector = _manifest_connector()
+    session = connector.begin({"phase": "pr-a", "case": f"xentry-analysis-{publish_route}-{complete_route}"})
+    promise = _observed(ANALYSIS, (A,), defer=True)
+    with production_signal_scope(session):
+        _observe(promise)
+        _publish_via(session, publish_route, promise)
+        completion = _completion(promise)
+        (_complete_conditionally if complete_route == "conditional" else _complete_directly)(completion)
+        emit_safe_counterexample_production_signal(safety_receipt=_safe_pairwise_receipt())
+        assert SatSafetyBlockerLedger(session).state_of(
+            session.domain_signal_encoder.authority_for_signal(session, promise).occurrence.occurrence_id
+        )[0] is BlockerState.PUBLISHED
+    with pytest.raises(ValueError, match="not admissible for an analysis-unsafety cause"):
+        _finish(session, connector, "xentry-analysis")
