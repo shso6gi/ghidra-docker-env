@@ -1127,3 +1127,29 @@ def test_finalize_keeps_a_promise_whose_terminal_publication_is_refused(monkeypa
         assert not session.stream_truncated
         assert _state(session) == before
         assert session.domain_signal_error_kinds == ["RuntimeError"]
+
+
+@pytest.mark.parametrize("defer", [False, True])
+def test_a_truncated_stream_refuses_every_sat_signal_before_identity(defer, monkeypatch):
+    """Issue #110: 切られた stream は（限界以外の）signal を identity を作る前に O(1) で拒む。
+    観測・約束のどちらでも、台帳の判定（衝突の記録を含む）をしない。"""
+    from scripts.function_tracer_pcode.tests.unit.test_issue110_metered_seal import (
+        _sat_blocker,
+        _truncated_session,
+    )
+
+    _connector_, session, _pending = _truncated_session(monkeypatch, f"pr-a-truncated-{defer}")
+    encoder = session.domain_signal_encoder
+    built = []
+    real_authority = encoder.authority_for_signal
+    monkeypatch.setattr(encoder, "authority_for_signal",
+                        lambda owner, signal: built.append(signal) or real_authority(owner, signal),
+                        raising=False)
+    colliding = replace(_sat_blocker(0), evidence_refs=("issue110-other",), defer_until_terminal=defer)
+    consequences = {k: dict(v) for k, v in session.truncation_consequences.items()}
+    before = _state(session)
+    with production_signal_scope(session):
+        assert emit_sat_safety_signal(colliding, producer_site_manifest_id="sat-safety-blocker-observed") == 0
+    assert built == []
+    assert _state(session) == before
+    assert session.truncation_consequences == consequences

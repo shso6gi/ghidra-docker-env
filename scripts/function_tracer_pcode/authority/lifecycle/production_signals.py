@@ -1454,11 +1454,6 @@ def _emit_sat_safety_blocker(
     """
     if session.domain_signal_encoder is None:
         return 0
-    try:
-        signal.blocker  # owner の分類（identity・台帳より前）
-    except SatSafetyBlockerInconsistent as exc:
-        _refuse_sat_safety_signal(session, exc)
-        return None
     if session.stream_truncated:
         # Issue #110: a truncated stream takes no new (non-limitation) signal; it is
         # refused in O(1) before the occurrence authority is built, as the session
@@ -1472,6 +1467,8 @@ def _emit_sat_safety_blocker(
         raise TypeError("SAT safety encoder lacks occurrence authority")
     ledger = SatSafetyBlockerLedger(session)
     try:
+        # identity の owner は検証済みの blocker からしか identity を作らない（owner の分類は
+        # ここで 1 回、identity・台帳より前）。
         occurrence_id = authority_for_signal(session, signal).occurrence.occurrence_id
         disposition = ledger.decide(signal, occurrence_id, producer_site_manifest_id)
     except ValueError as exc:
