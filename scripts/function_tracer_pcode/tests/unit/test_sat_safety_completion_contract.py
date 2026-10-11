@@ -1235,12 +1235,12 @@ def test_an_abi_transaction_failing_after_its_commit_restores_the_sat_safety_led
 
 
 def test_a_completed_abi_transaction_keeps_its_sat_safety_publication():
-    """対照: 取引が成功したら（呼び手が巻き戻さない）、公開は残り、次の取引の開始で写しは消える。"""
+    """対照: 取引が成功したら（呼び手が巻き戻さない）、変換した観測の公開は残る。"""
     session, abi, batch, handoff = _abi_transaction_with_one_sat_handoff()
     with production_signal_scope(session):
         abi.commit_emitted_signal(session, batch, ())
         assert _ledger_state(session, handoff) is BlockerState.PUBLISHED
-        assert "abi_width_committed_rollback_snapshots" in session.domain_signal_state
+        assert session.domain_signal_error_kinds == []
 
 
 def test_a_completion_that_fails_after_the_encoder_commit_restores_the_ledger(monkeypatch):
