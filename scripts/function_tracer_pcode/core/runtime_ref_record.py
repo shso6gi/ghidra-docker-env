@@ -22,13 +22,19 @@ field に、外の runtime の scalar の subclass（JPype の `JInt` / `JLong` 
 - exact な組み込みの値・`None`・Enum の member（`IntEnum` / str の enum を含む）は変えない。
 - scalar の subclass（Enum でない）は基底型の slot で読んだ値にする（subclass の code を呼ばない）。
 - 注釈が `bool` の field だけ、int の subclass を `bool` にする（JBoolean の真偽を保つ）。
-- 注釈が tuple の field は、exact な `tuple` の容器だけを辿り、葉に同じ規則を当てる（注釈は葉の分類に使わない）。
-  共有された tuple は 1 回の正規化の中で 1 度だけ辿り、写した結果も共有する（葉が変わらない tuple は同じ object）。
-- 注釈が scalar / tuple でない field（`Any`・record・式）と、写せない値（scalar でない object）は変えない。
+- 注釈が tuple の field は、`tuple` とその subclass（named tuple など）の容器を基底型の slot（`tuple.__iter__`）で
+  辿り、組み込みの `tuple` で作り直して葉に同じ規則を当てる（注釈は葉の分類に使わない。subclass の constructor /
+  `_make` は呼ばない: 作り直すときに葉を scalar の subclass へ包み直し得る。named tuple は基底型の tuple になる）。
+  共有された tuple は 1 回の正規化の中で 1 度だけ辿り、写した結果も共有する（葉が変わらない exact な tuple は同じ
+  object）。list とそれ以外の容器は辿らない（そのまま: 中身は検証・読み手が reader で読む）。
+- 注釈が record（dataclass の型: ref の class など）の field は、scalar の subclass（型の誤り）だけを基底型の値に
+  する（その値の属性の読みが subclass の `__getattribute__` を呼ばないように。record の instance はそのまま）。
+- 注釈が `Any`・式などの field と、写せない値（scalar でない object）は変えない。
 - 型は identity で見る（型の `__eq__` / `__hash__`、metaclass の hook を呼ばない）。
 
 **注釈の分類**: `X` / `Optional[X]` / `Union[X, None]` / `X | None` / `Annotated[X, ...]`（`X` は `int` / `float` /
-`str` / `bool` / `tuple` / `Tuple[...]`）を分類する。それ以外（`Any`・record・`Dict`・複数の型の `Union`）は写さない。
+`str` / `bool` / `tuple` / `Tuple[...]` / dataclass の型）を分類する。それ以外（`Any`・`Dict`・複数の型の `Union`）は
+写さない。
 
 **順序**: `@dataclass` の **下** に置く（素の class に先に当たる）。class の `__dict__` に `__post_init__` を置く
 （既存のものは包む）ので、生成された `__init__` は field の代入の後にそれを呼ぶ。正規化は class 自身の検証
@@ -40,6 +46,10 @@ field に、外の runtime の scalar の subclass（JPype の `JInt` / `JLong` 
 **field の値の置き場所**: instance の `__dict__`・`__slots__`（基底の class の slot を含む）・class の既定値
 （`field(init=False, default=...)`）のどれでも、属性として読む（`object.__getattribute__`）。値が無い field
 （自前の `__init__` が置かなかった field）は写さない。
+
+**key の出口**（`runtime_ref_key`）: key を返す公開の method / 関数は、戻り値を `live_values.exact_tree`（組み込みの
+木）にして返す。ただし `self.m()` の上書き（ref の class を継承した型の method）と、他の object の key の method の
+結果は包みを通らないので、ref の層の中で受け取った側が `exact_tree` で読む（construction guard が確かめる）。
 
 field の分類は class ごとに最初の構築で 1 度だけ決め（前方参照の注釈を解決できるのはその時点）、この
 module の dict に置く。class の namespace には書かない（`live_values.package_type` の判定を変えない）。
@@ -54,7 +64,7 @@ import types
 import typing
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from scripts.function_tracer_pcode.core.live_values import NOT_PLAIN, exact_scalar, int_value
+from scripts.function_tracer_pcode.core.live_values import NOT_PLAIN, exact_scalar, exact_tree, int_value
 
 #: class → 写す field の (名前, 分類) の列。最初の構築で決める。
 _FIELD_KINDS: Dict[type, Tuple[Tuple[str, str], ...]] = {}
@@ -74,7 +84,11 @@ _ENTRY_PLANS: Dict[Callable[..., Any], "_CallPlan"] = {}
 
 
 def _kind_of(annotation: Any) -> str:
-    """注釈の分類（`scalar` / `bool` / `tuple` / `object`）。型は identity で比べる。"""
+    """注釈の分類（`scalar` / `bool` / `tuple` / `record` / `object`）。型は identity で比べる。
+
+    `record` は注釈が dataclass の型（ref の class など）: 値は object として持つが、scalar の subclass（型の誤り）
+    だけは基底型の値にする（その値の属性の読みが subclass の code を呼ばないように）。
+    """
 
     origin = typing.get_origin(annotation)
     if origin is typing.Annotated:
@@ -88,6 +102,8 @@ def _kind_of(annotation: Any) -> str:
         return "scalar"
     if annotation is tuple or origin is tuple:
         return "tuple"
+    if isinstance(annotation, type) and dataclasses.is_dataclass(annotation):
+        return "record"
     return "object"
 
 
@@ -139,7 +155,8 @@ def exact_field_value(value: Any, kind: str) -> Any:
     """分類 `kind` の field に置く値（規則は module の docstring）。変えない値は同じ object を返す。"""
 
     holder = type(value)
-    if holder is tuple:
+    if holder is tuple or (kind == "tuple" and issubclass(holder, tuple)):
+        # tuple の注釈の field の tuple（subclass・named tuple を含む）は組み込みの tuple の木にする
         return _exact_tree(value) if kind == "tuple" else value
     if _exact(value):
         return value
@@ -150,15 +167,19 @@ def exact_field_value(value: Any, kind: str) -> Any:
         number = int_value(value)
         if number is not NOT_PLAIN:
             return number != 0
+    # scalar / record: scalar の subclass は基底型の値（record の位置の object・enum の member はそのまま）
     return exact_scalar(value)
 
 
 def _exact_tree(root: Tuple[Any, ...]) -> Tuple[Any, ...]:
-    """exact な tuple の葉を写した tuple（葉がどれも変わらなければ同じ tuple）。
+    """tuple の木の葉を写した、組み込みの tuple だけの木（葉と容器がどれも変わらなければ同じ tuple）。
 
-    明示 stack の後順走査（入れ子が深くても再帰の上限に当たらない）。memo（元の tuple の `id` → 結果）は
-    この 1 回の走査の中だけで持つ: 元の tuple は `root` から到達できるので走査の間は生きていて、`id` が
-    別の object に再利用されることは無い。共有された tuple は 1 度だけ辿り、結果も共有する。
+    tuple の subclass（named tuple など）は基底型の slot（`tuple.__iter__`）で辿り、組み込みの tuple で作り直す
+    （その型の constructor / `_make` は呼ばない: 作り直すときに葉を scalar の subclass へ包み直し得る）。list と
+    それ以外の object は辿らない（そのまま）。明示 stack の後順走査（入れ子が深くても再帰の上限に当たらない）。
+    memo（元の tuple の `id` → 結果）はこの 1 回の走査の中だけで持つ: 元の tuple は `root` から到達できるので
+    走査の間は生きていて、`id` が別の object に再利用されることは無い。共有された tuple は 1 度だけ辿り、
+    結果も共有する。
     """
 
     done: Dict[int, Tuple[Any, ...]] = {}
@@ -166,10 +187,11 @@ def _exact_tree(root: Tuple[Any, ...]) -> Tuple[Any, ...]:
     while stack:
         node, leaving = stack.pop()
         if leaving:
-            items: Optional[List[Any]] = None
+            children = tuple.__iter__(node)
+            items: Optional[List[Any]] = None if type(node) is tuple else list(tuple.__iter__(node))
             index = 0
-            for item in node:
-                if type(item) is tuple:
+            for item in children:
+                if issubclass(type(item), tuple):
                     new = done[id(item)]
                 elif _exact(item):
                     index += 1
@@ -178,7 +200,7 @@ def _exact_tree(root: Tuple[Any, ...]) -> Tuple[Any, ...]:
                     new = exact_scalar(item)
                 if new is not item:
                     if items is None:
-                        items = list(node)
+                        items = list(tuple.__iter__(node))
                     items[index] = new
                 index += 1
             done[id(node)] = node if items is None else tuple(items)
@@ -189,8 +211,8 @@ def _exact_tree(root: Tuple[Any, ...]) -> Tuple[Any, ...]:
         # 共有先は親より先に後順の処理を終える）
         done[id(node)] = node
         stack.append((node, True))
-        for item in node:
-            if type(item) is tuple:
+        for item in tuple.__iter__(node):
+            if issubclass(type(item), tuple):
                 stack.append((item, False))
     return done[id(root)]
 
@@ -371,6 +393,38 @@ def runtime_ref_entry(function: Callable[..., Any]) -> Callable[..., Any]:
     return _entry_wrapper(function)
 
 
+#: `runtime_ref_key` が作った包み → 包んだ key の関数。
+_KEY_WRAPPERS: Dict[Callable[..., Any], Callable[..., Any]] = {}
+
+
+def runtime_ref_key(function: Callable[..., Any]) -> Callable[..., Any]:
+    """key を返す method / 関数の出口: 戻り値を **組み込みの木**（`live_values.exact_tree`）にして返す。
+
+    ref の key は field の値（注釈が Any の値を含む）と、他の object（注釈だけの値・代わりの型）の key から
+    作る。それらは外の code が作った値で、scalar の subclass の葉や、作り直すと葉を包み直す容器を含み得る。
+    key を作る側ではなく出口の 1 か所で読むので、新しい key の method も decorator 1 行で同じ保証になる
+    （受け取った側の比較・hash・文字列化は組み込みの木だけを読む）。本体の中で比べる・hash する値は、
+    本体が reader で読む（出口の写しは本体の消費を守らない）。
+    """
+
+    if type(function) is not types.FunctionType:
+        raise TypeError(f"runtime ref keys must wrap a plain function: {function!r}")
+
+    def key(*args: Any, **kwargs: Any) -> Any:
+        return exact_tree(function(*args, **kwargs))
+
+    functools.update_wrapper(key, function)
+    _KEY_WRAPPERS[key] = function
+    return key
+
+
+def is_runtime_ref_key(function: Any) -> bool:
+    """`function` が `runtime_ref_key` の包みか。"""
+
+    inner = getattr(function, "__func__", function)
+    return type(inner) is types.FunctionType and inner in _KEY_WRAPPERS
+
+
 def is_runtime_ref_entry(function: Any) -> bool:
     """`function`（`classmethod` / `staticmethod` なら中身）が `runtime_ref_entry` の包みか。"""
 
@@ -424,6 +478,8 @@ def is_runtime_ref_record(cls: type) -> bool:
 
 __all__ = [
     "entry_arguments",
+    "is_runtime_ref_key",
+    "runtime_ref_key",
     "exact_field_value",
     "field_kinds",
     "is_runtime_ref_entry",

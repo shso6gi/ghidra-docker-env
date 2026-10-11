@@ -356,10 +356,18 @@ LIVE_VALUES_WORK_OWNERS = {
     "_registered_meter": _A,
     "register_storage_meter": _A,
     # Issue #242: 構築の中で受理した値を読む reader（反復の確かめ。辿る数を値の storage の読みの上限と比べる）
-    "exact_tree": _B,
-    "_tree_kind": _A,
+    "_exact_tree_read": _B,
+    # 型の tuple（呼ぶ側が書いた固定の組）だけ
+    "is_kind": _A,
+    # 固定の組（`_TREE_BASES`）だけ。結果は型ごとに memo（`id(型)` の数の上限まで）
+    "_kind_entry": _A,
+    # 既に組み込みの木かを確かめる（辿った数を `SCAN_LIMIT` と比べ、超えれば遅い経路の読みへ）
+    "_already_plain": _B,
     "_tree_children": _B_CALLER,
     "_tree_rebuild": _B_CALLER,
+    "defined_attribute": _B,
+    # 写した木と元の値のどちらかの `repr`（読みは `_exact_tree_read`）
+    "scalar_repr": _A,
 }
 
 #: `core/read_limits`（作業量を受け取らない読みの固定の上限の owner）の入力に比例する関数

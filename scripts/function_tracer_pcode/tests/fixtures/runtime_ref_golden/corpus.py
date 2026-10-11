@@ -195,7 +195,11 @@ class SE(str, enum.Enum):
 
 
 def field_kind(annotation: Any) -> str:
-    """field の注釈の分類: ``int`` / ``bool`` / ``str`` / ``float`` / ``tuple`` / ``object``。"""
+    """field の注釈の分類: ``int`` / ``bool`` / ``str`` / ``float`` / ``tuple`` / ``record`` / ``object``。
+
+    ``record`` は注釈が dataclass の型（ref の class）: 値は object として持つが、scalar の subclass だけは
+    基底型の値になる（review 4: その値の属性の読みが subclass の code を呼ばないように）。
+    """
 
     origin = typing.get_origin(annotation)
     args = typing.get_args(annotation)
@@ -206,6 +210,8 @@ def field_kind(annotation: Any) -> str:
         return annotation.__name__
     if origin is tuple:
         return "tuple"
+    if isinstance(annotation, type) and dataclasses.is_dataclass(annotation):
+        return "record"
     return "object"
 
 
@@ -215,11 +221,13 @@ def twin_value(value: Any, kind: str) -> Any:
     holder = type(value)
     if kind == "object":
         return value
-    if kind == "tuple":
-        # exact な tuple の容器だけを辿る（入れ子も）。葉は注釈によらず値の基底型へ
-        if holder is tuple:
-            return tuple(twin_value(item, "tuple" if type(item) is tuple else "element") for item in value)
-        return value
+    if kind == "tuple" and issubclass(holder, tuple):
+        # tuple の容器（subclass・named tuple を含む: 組み込みの tuple になる）を辿る。葉は注釈によらず値の基底型へ
+        return tuple(
+            twin_value(item, "tuple" if issubclass(type(item), tuple) else "element") for item in tuple.__iter__(value)
+        )
+    if kind == "tuple" and type(value) is list:
+        return value  # list は辿らない
     if value is None or holder in (int, bool, str, float) or isinstance(value, enum.Enum):
         return value
     if isinstance(value, int):

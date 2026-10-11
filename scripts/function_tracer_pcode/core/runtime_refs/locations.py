@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
-from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_record
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw)
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, exact_tree, scalar_int, scalar_text, str_value
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, exact_tree, scalar_int, scalar_text, str_value, is_kind, method_of
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
 )
@@ -37,6 +37,7 @@ class AddressValueRef:
     object_base_offset: Optional[int] = None
     object_size: Optional[int] = None
 
+    @runtime_ref_key
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         return (
             "address",
@@ -266,7 +267,7 @@ class LocationBaseRef:
         return hash(self.stable_key())
 
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, LocationBaseRef):
+        if not is_kind(other, LocationBaseRef):
             return False
         if self.kind != other.kind:
             return False
@@ -299,6 +300,7 @@ class LocationBaseRef:
             and int(self.storage_size or 0) == int(other.storage_size or 0)
         )
 
+    @runtime_ref_key
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         if self.is_parameter():
             if self.parameter_index is not None:
@@ -329,6 +331,7 @@ class LocationBaseRef:
             int(self.storage_size or 0),
         )
 
+    @runtime_ref_key
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         """Program-independent identity for comparing function-local locations.
 
@@ -374,13 +377,13 @@ class LocationBaseRef:
             return False
         try:
             # `param` は呼び出し元の dict: 値は基底型の値で読む（Issue #242）
-            param_index = exact_scalar(param.get("index"))
+            param_index = exact_scalar(method_of(param, "get")("index"))
             if self.parameter_index is not None and param_index is not None:
                 if self.owner_program_id is not None or self.owner_entry_offset is not None:
                     return (
                         scalar_int(param_index) == int(self.parameter_index)
-                        and exact_tree(param.get("owner_program_id")) == self.owner_program_id
-                        and exact_tree(param.get("owner_entry_offset")) == self.owner_entry_offset
+                        and exact_tree(method_of(param, "get")("owner_program_id")) == self.owner_program_id
+                        and exact_tree(method_of(param, "get")("owner_entry_offset")) == self.owner_entry_offset
                     )
                 return scalar_int(param_index) == int(self.parameter_index)
         except Exception:
@@ -423,6 +426,7 @@ class LocationStep:
         if self.kind not in {"offset", "deref"}:
             raise ValueError(f"Unsupported location step kind: {self.kind}")
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[str, int]:
         return (self.kind, int(self.value))
 
@@ -464,12 +468,13 @@ class CanonicalLocation:
 
     @property
     def base_param(self) -> str:
-        return self.base_ref.display_name()
+        return exact_scalar(self.base_ref.display_name())  # 代わりの型の method の結果の葉を写す
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             self.base_ref.stable_key(),
-            tuple(step.stable_key() for step in self.steps),
+            tuple(method_of(step, "stable_key")() for step in self.steps),
             int(self.offset),
             int(self.size),
         )
@@ -494,6 +499,7 @@ class PostStateValueRef:
     source: str = "effect_summary"
     state_kind: str = "materialized_final_value"
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "post_state_value",
@@ -528,6 +534,7 @@ class PostStateSnapshotRef:
     def function_return(cls) -> "PostStateSnapshotRef":
         return cls()
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "post_state_snapshot",
@@ -557,6 +564,7 @@ class PostStateReadRef:
     source: str = "effect_summary"
     state_kind: str = "symbolic_post_state_read"
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "post_state_read",
@@ -606,6 +614,7 @@ class ObservedMemoryReadRef:
     pcode_op_ref: Optional[PcodeOpRef] = None
     source: str = "ghidra_load"
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "observed_memory_read",

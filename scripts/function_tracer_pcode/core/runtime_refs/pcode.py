@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
-from scripts.function_tracer_pcode.core.live_values import exact_scalar, exact_tree, scalar_int, scalar_text
-from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_record
+from scripts.function_tracer_pcode.core.live_values import exact_scalar, exact_tree, scalar_int, scalar_text, is_kind, attribute_of, method_of
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 
 
@@ -13,7 +13,7 @@ _MAX_PARENT_PCODE_OP_SCAN = 10000
 
 
 def _coerce_nonnegative_int(value: Any) -> Optional[int]:
-    if value is None or isinstance(value, bool):
+    if value is None or is_kind(value, bool):
         return None
     try:
         coerced = scalar_int(value)
@@ -30,7 +30,7 @@ def _coerce_optional_text(value: Any) -> Optional[str]:
 
 
 def _coerce_opcode(value: Any) -> Optional[Any]:
-    if value is None or isinstance(value, bool):
+    if value is None or is_kind(value, bool):
         return None
     try:
         return scalar_int(value)
@@ -43,16 +43,16 @@ def _address_components(address: Any) -> Tuple[Optional[str], Optional[int]]:
         return None, None
     space_name = None
     try:
-        space = address.getAddressSpace()
+        space = method_of(address, "getAddressSpace")()
     except Exception:
         space = None
     if space is not None:
         try:
-            space_name = space.getName()
+            space_name = method_of(space, "getName")()
         except Exception:
             space_name = None
     try:
-        offset = address.getOffset()
+        offset = method_of(address, "getOffset")()
     except Exception:
         offset = None
     return _coerce_optional_text(space_name), _coerce_nonnegative_int(offset)
@@ -64,28 +64,28 @@ def _pcode_op_ordinal_signature(pcode_op: Any) -> Tuple[Any, ...]:
     seq_time = None
     seq_order = None
     try:
-        seq = pcode_op.getSeqnum()
+        seq = method_of(pcode_op, "getSeqnum")()
     except Exception:
         seq = None
     if seq is not None:
         try:
-            target_space, target_offset = _address_components(seq.getTarget())
+            target_space, target_offset = _address_components(method_of(seq, "getTarget")())
         except Exception:
             target_space, target_offset = None, None
         try:
-            seq_time = _coerce_nonnegative_int(seq.getTime())
+            seq_time = _coerce_nonnegative_int(method_of(seq, "getTime")())
         except Exception:
             seq_time = None
         try:
-            seq_order = _coerce_nonnegative_int(seq.getOrder())
+            seq_order = _coerce_nonnegative_int(method_of(seq, "getOrder")())
         except Exception:
             seq_order = None
     try:
-        opcode = _coerce_opcode(pcode_op.getOpcode())
+        opcode = _coerce_opcode(method_of(pcode_op, "getOpcode")())
     except Exception:
         opcode = None
     try:
-        mnemonic = _coerce_optional_text(pcode_op.getMnemonic())
+        mnemonic = _coerce_optional_text(method_of(pcode_op, "getMnemonic")())
     except Exception:
         mnemonic = None
     return (target_space, target_offset, seq_time, seq_order, opcode, mnemonic)
@@ -93,26 +93,26 @@ def _pcode_op_ordinal_signature(pcode_op: Any) -> Tuple[Any, ...]:
 
 def _local_op_ordinal_from_parent(pcode_op: Any) -> Optional[int]:
     try:
-        parent = pcode_op.getParent()
+        parent = method_of(pcode_op, "getParent")()
     except Exception:
         parent = None
     if parent is None:
         return None
-    iterator = getattr(parent, "getIterator", lambda: None)()
+    iterator = attribute_of(parent, "getIterator", lambda: None)()
     if iterator is None:
         return None
     target_signature = _pcode_op_ordinal_signature(pcode_op)
     ordinal = 0
     while ordinal < _MAX_PARENT_PCODE_OP_SCAN:
         try:
-            has_next = iterator.hasNext()
+            has_next = method_of(iterator, "hasNext")()
         except Exception:
             return None
         # 組み込みの bool だけを受ける（`bool` は subclass を作れないので、真偽は identity で読める）
         if has_next is not True:
             return None
         try:
-            candidate = iterator.next()
+            candidate = method_of(iterator, "next")()
         except Exception:
             return None
         if candidate is pcode_op or candidate == pcode_op:
@@ -216,63 +216,63 @@ class PcodeOpRef:
         opcode = None
 
         try:
-            mnemonic = pcode_op.getMnemonic()
+            mnemonic = method_of(pcode_op, "getMnemonic")()
         except Exception:
             mnemonic = None
         try:
-            opcode = pcode_op.getOpcode()
+            opcode = method_of(pcode_op, "getOpcode")()
         except Exception:
             opcode = None
 
         try:
-            seq = pcode_op.getSeqnum()
+            seq = method_of(pcode_op, "getSeqnum")()
         except Exception:
             seq = None
         if seq is not None:
             try:
-                target = seq.getTarget()
+                target = method_of(seq, "getTarget")()
                 target_space, address_offset = _address_components(target)
             except Exception:
                 address_offset = None
             try:
-                time = getattr(seq, "getTime", lambda: None)()
+                time = attribute_of(seq, "getTime", lambda: None)()
                 seq_time = None if time is None else scalar_int(time)
             except Exception:
                 seq_time = None
             try:
-                order = seq.getOrder()
+                order = method_of(seq, "getOrder")()
                 seq_order = None if order is None else scalar_int(order)
             except Exception:
                 seq_order = None
 
         try:
-            parent = pcode_op.getParent()
+            parent = method_of(pcode_op, "getParent")()
         except Exception:
             parent = None
         if parent is not None:
             try:
-                block_index = scalar_int(parent.getIndex())
+                block_index = scalar_int(method_of(parent, "getIndex")())
             except Exception:
                 block_index = None
         if local_op_ordinal is None:
             local_op_ordinal = _local_op_ordinal_from_parent(pcode_op)
 
         try:
-            num_inputs = scalar_int(pcode_op.getNumInputs())
+            num_inputs = scalar_int(method_of(pcode_op, "getNumInputs")())
         except Exception:
             num_inputs = 0
         for input_index in range(max(0, num_inputs)):
             try:
-                input_varnode = pcode_op.getInput(input_index)
-                input_size = scalar_int(input_varnode.getSize())
+                input_varnode = method_of(pcode_op, "getInput")(input_index)
+                input_size = scalar_int(method_of(input_varnode, "getSize")())
             except Exception:
                 continue
             if input_size > 0:
                 input_sizes.append(input_size)
 
         try:
-            output_varnode = pcode_op.getOutput()
-            output_size = scalar_int(output_varnode.getSize()) if output_varnode is not None else None
+            output_varnode = method_of(pcode_op, "getOutput")()
+            output_size = scalar_int(method_of(output_varnode, "getSize")()) if output_varnode is not None else None
         except Exception:
             output_size = None
 
@@ -302,6 +302,7 @@ class PcodeOpRef:
             local_op_ordinal=local_op_ordinal,
         )
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         if self._has_full_identity_context():
             return (
@@ -389,6 +390,7 @@ class PcodeBlockRef:
         # `binary_id` は stable key の scalar（`PcodeOpRef` と同じ読み方。Issue #242）
         object.__setattr__(self, "binary_id", exact_tree(self.binary_id))
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         if (
             self.binary_id is not None

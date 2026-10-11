@@ -437,8 +437,9 @@ def test_jvm_shutdown_errors_are_recognised_from_the_base_text_of_their_message(
     assert view(built) == view(twin)
 
 
-def test_named_tuples_are_read_by_the_tree_reader_but_kept_by_the_owner():
-    """owner は exact な tuple だけを写す（named tuple は object と同じに扱う）。読み手は `exact_tree` で読む。"""
+def test_named_tuples_become_builtin_tuples_in_readers_and_tuple_fields():
+    """named tuple は reader も owner の tuple の field も組み込みの tuple にする（その型の `_make` / constructor を
+    呼ばない: 作り直すときに葉を偽る型へ包み直し得る。review 4 の P1）。意図した差: 型は基底型の tuple になる。"""
 
     import collections
 
@@ -449,9 +450,9 @@ def test_named_tuples_are_read_by_the_tree_reader_but_kept_by_the_owner():
     HOOK_CALLS.clear()
     read = exact_tree(Pair(LiarStr("x"), (Liar(1),)))
     assert HOOK_CALLS == {}
-    assert type(read) is Pair and type(read.left) is str and type(read.right[0]) is int
+    assert type(read) is tuple and read == ("x", (1,)) and type(read[0]) is str and type(read[1][0]) is int
     built = _same_without_hooks(lambda v: ExpansionBudgetTruncation(kind="k", owner_scope_key=Pair(v("x"), 1)))
-    assert type(built.owner_scope_key) is Pair
+    assert type(built.owner_scope_key) is tuple and built.owner_scope_key == ("x", 1)
 
 
 
@@ -563,12 +564,23 @@ def test_diagnostic_keys_read_accepted_origin_values_on_base_values(kind):
         "Counter": lambda s, i: collections.Counter({s("a"): i(1)}),
         "scalar": lambda s, i: s("x"),
     }
-    twin = UnknownValueRef.opaque(reason="r", origin_kind="k", origin_ref=makers[kind](str, int)).diagnostic_key()
+    twin_origin = makers[kind](str, int)
+    twin = UnknownValueRef.opaque(reason="r", origin_kind="k", origin_ref=twin_origin).diagnostic_key()
     origin = makers[kind](LiarStr, Liar)
     HOOK_CALLS.clear()
     built = UnknownValueRef.opaque(reason="r", origin_kind="k", origin_ref=origin).diagnostic_key()
     assert HOOK_CALLS == {}, dict(HOOK_CALLS)
-    assert view(built) == view(twin)
+    if kind == "scalar":
+        assert view(built) == view(twin)
+        return
+    # 型の名前は元の型（双子と同じ）。scalar の subclass を持つ容器の `repr` は、写した組み込みの容器の `repr`
+    # （元の型で作り直すと外の constructor を呼ぶ: 意図した差 D5）。subclass が無い入力は双子と同じ文字列
+    from scripts.function_tracer_pcode.core.live_values import exact_tree
+
+    *head, (label, (tag, module, name, text)) = built
+    *twin_head, (twin_label, (twin_tag, twin_module, twin_name, twin_text)) = twin
+    assert (head, label, tag, module, name) == (twin_head, twin_label, twin_tag, twin_module, twin_name)
+    assert type(text) is str and text == repr(exact_tree(twin_origin)) and twin_text == repr(twin_origin)
 
 
 @pytest.mark.parametrize(

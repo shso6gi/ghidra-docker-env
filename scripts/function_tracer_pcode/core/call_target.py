@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Optional, Tuple, Union
-from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_record
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.json_encoding import materialize
 
@@ -22,39 +22,70 @@ def _is_jvm_not_running_error(error: Exception) -> bool:
     except ImportError:
         JVMNotRunning = ()  # type: ignore[assignment]
     return (
-        isinstance(error, JVMNotRunning)
+        live_values.is_kind(error, JVMNotRunning)
         or _error_text(error) in _JVM_NOT_RUNNING_MESSAGES
     )
+
+
+#: 既定の `__str__`（型の名前空間の値: 例外の型の metaclass の `__getattribute__` を呼ばずに比べる）
+_KEY_ERROR_STR = live_values.defined_attribute(KeyError, "__str__")
+_BASE_EXCEPTION_STR = live_values.defined_attribute(BaseException, "__str__")
 
 
 def _error_text(error: BaseException) -> str:
     """`str(error)` と同じ文字列（例外の引数の scalar の subclass の `__str__` を呼ばない。Issue #242）。
 
-    引数に scalar の subclass が無い例外は `str(error)` のまま。既定の `BaseException.__str__` の例外は、引数を
-    基底型の値で読んでから同じ規則（引数が 1 つならその `str()`、無ければ空、2 つ以上なら tuple の `str()`）で、
+    引数（の木の葉）に scalar の subclass が無い例外は `str(error)` のまま。既定の `BaseException.__str__` の例外は、
+    引数を基底型の値で読んでから同じ規則（引数が 1 つならその `str()`、無ければ空、2 つ以上なら tuple の `str()`）で、
     `KeyError` は引数が 1 つならその `repr()`（`KeyError.__str__` と同じ）で文字列にする。それ以外の `__str__` を
     自分で持つ例外の型（`OSError` など）は `str(error)` のまま（外の code）。
     """
 
-    args = getattr(error, "args", None)
-    if type(args) is not tuple:
+    args = live_values.attribute_of(error, "args", None)
+    if type(args) is not tuple or not live_values.holds_scalar_subclass(args):
+        return live_values.scalar_text(error)
+    try:
+        defined_str = live_values.defined_attribute(type(error), "__str__")
+    except TypeError:
+        return live_values.scalar_text(error)  # 型を判定できない: `str(error)` のまま（外の code）
+    if defined_str is _KEY_ERROR_STR and len(args) == 1:
+        return live_values.scalar_repr(args[0])
+    if defined_str is not _BASE_EXCEPTION_STR:
+        return _builtin_error_text(error, args)
+    if not args:
+        return ""
+    return live_values.scalar_text(args[0] if len(args) == 1 else args)
+
+
+def _builtin_error_text(error: BaseException, args: Tuple[Any, ...]) -> str:
+    """自分の `__str__` を持つ組み込みの例外（`OSError` など）の文字列を、引数を基底型の値にした同じ型の例外から作る。
+
+    組み込みの型の constructor と `__str__` は組み込みの code（引数の scalar の subclass の code を呼ばない）。
+    `OSError` の file 名（`args` の外に持つ）も写して渡す。組み込みでない型の `__str__` は外の code（`str(error)`）。
+    作れないときは、写した引数の組の文字列（判定できない値を成功にしないが、例外の流れも変えない）。
+    """
+
+    kind = type(error)
+    if type(kind) is not type or live_values.type_module(kind) != "builtins":
         return live_values.scalar_text(error)
     exact = live_values.exact_tree(args)
-    if exact is args:
-        return live_values.scalar_text(error)
-    if type(error).__str__ is KeyError.__str__ and len(exact) == 1:
-        return repr(exact[0])
-    if type(error).__str__ is not BaseException.__str__:
-        return live_values.scalar_text(error)
-    if not exact:
-        return ""
-    return live_values.scalar_text(exact[0] if len(exact) == 1 else exact)
+    extra: Tuple[Any, ...] = ()
+    if live_values.is_kind(error, OSError) and len(exact) == 2:
+        first = live_values.attribute_of(error, "filename", None)
+        second = live_values.attribute_of(error, "filename2", None)
+        if first is not None or second is not None:
+            extra = (live_values.exact_tree(first), None, live_values.exact_tree(second))
+    try:
+        rebuilt = kind(*exact, *extra)
+    except (TypeError, ValueError):
+        return live_values.scalar_text(exact)
+    return live_values.scalar_text(rebuilt)
 
 
 def _safe_getattr(owner: Any, name: str) -> Any:
     """Read a proxy attribute without leaking JVM-shutdown races."""
     try:
-        return getattr(owner, name, None)
+        return live_values.attribute_of(owner, name, None)
     except Exception as error:
         if _is_jvm_not_running_error(error):
             return None
@@ -66,7 +97,7 @@ def _safe_offset(address_or_value: Any) -> Optional[int]:
         return None
     # scalar の subclass（JPype の `JLong` など）は基底型の値で比べる（subclass の code を呼ばない。Issue #242）
     address_or_value = live_values.exact_scalar(address_or_value)
-    if isinstance(address_or_value, int):
+    if live_values.is_kind(address_or_value, int):
         return address_or_value if address_or_value >= 0 else None
     get_offset = _safe_getattr(address_or_value, "getOffset")
     if callable(get_offset):
@@ -133,7 +164,7 @@ def _safe_external_library_name(function: Any) -> Optional[str]:
             value = live_values.exact_scalar(method())
         except Exception:
             value = None
-        if isinstance(value, str) and value:
+        if live_values.is_kind(value, str) and value:
             return value
     return None
 
@@ -278,6 +309,7 @@ class CallTargetRef:
     def is_unknown(self) -> bool:
         return live_values.str_value(self.kind) == "unknown"
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         if self.is_function():
             if self.entry_offset is not None:
@@ -298,6 +330,7 @@ class CallTargetRef:
             return ("code_address", self.program_id, self.address_offset)
         return ("unknown", self.program_id)
 
+    @runtime_ref_key
     def analysis_key(self) -> Optional[Tuple[Any, ...]]:
         if self.is_unknown():
             return None
@@ -383,6 +416,8 @@ def _declared_return_data_type(function_obj: Any) -> Any:
         return_type = getter()
     except Exception:
         return None
+    # 外の API の値: scalar の subclass は基底型の値にしてから、この解析が辿らない package の code（`signature`）へ渡す
+    return_type = live_values.exact_tree(return_type)
     if return_type is None:
         return None
     from scripts.function_tracer_pcode.core.signature import (
@@ -411,12 +446,12 @@ def call_target_declared_return_data_types(target_ref: Any) -> Tuple[Any, ...]:
     function_obj = _safe_getattr(target_ref, "function_obj")
     if function_obj is None:
         return ()
-    declarations: list = []
+    declarations = []
     for candidate in (_safe_thunked_function(function_obj), function_obj):
         declared = _declared_return_data_type(candidate)
         if declared is not None:
             declarations.append(declared)
-    return tuple(declarations)
+    return live_values.exact_tree(tuple(declarations))  # 外の API の値: scalar の subclass の葉は基底型の値
 
 
 def call_target_returns_floating_value(target_ref: Any) -> bool:

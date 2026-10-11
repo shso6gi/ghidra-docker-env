@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import json
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
-from scripts.function_tracer_pcode.core.runtime_ref_record import exact_field_value, runtime_ref_entry, runtime_ref_record
+from scripts.function_tracer_pcode.core.runtime_ref_record import exact_field_value, runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.live_values import (
+    defined_attribute,
+    method_of,
+    scalar_repr,
+    attribute_of,
+    is_kind,
     NOT_PLAIN,
     as_bool,
     as_int,
@@ -27,7 +33,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     as_list, builtin_str, inline, is_json_record, materialize, raw,
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
-from scripts.function_tracer_pcode.core.runtime_refs._reading import items as _items, optional_items as _optional_items
+from scripts.function_tracer_pcode.core.runtime_refs._reading import items as _items, optional_items as _optional_items, pairs as _pairs
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
 )
@@ -47,6 +53,7 @@ class DeferredCallRef:
     def __post_init__(self) -> None:
         object.__setattr__(self, "target_ref", coerce_call_target_ref(self.target_ref))
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "deferred_call_site",
@@ -98,10 +105,16 @@ def _deferred_call_display_name(ref: Any) -> Any:
 
 
 def _runtime_ref_stable_key_or_repr(value: Any) -> Optional[Tuple[Any, ...]]:
-    value = exact_tree(value)  # 注釈が Any の値: 型の名前・repr を基底型の値で（Issue #242）
+    """main の `stable_key` / `repr` の規則を双子の値で（Issue #242）。
+
+    注釈が Any の値: scalar の subclass は基底型の値にしてから（葉だけ。容器は元の型のまま `stable_key` と型の名前を
+    読む）。`stable_key()` の結果は組み込みの木、`repr` は葉に scalar の subclass が在るときだけ写した木の `repr`。
+    """
+
+    value = exact_scalar(value)
     if value is None:
         return None
-    stable_key = getattr(value, "stable_key", None)
+    stable_key = attribute_of(value, "stable_key", None)
     if callable(stable_key):
         try:
             key = stable_key()
@@ -109,7 +122,7 @@ def _runtime_ref_stable_key_or_repr(value: Any) -> Optional[Tuple[Any, ...]]:
             key = None
         if key is not None:
             return ("stable", exact_tree(key))
-    return ("repr", type(value).__module__, type(value).__qualname__, repr(exact_tree(value)))
+    return ("repr", type_module(type(value)), type_name(type(value)), scalar_repr(value))
 
 
 def _runtime_ref_origin_source(value: Any) -> Tuple[Any, ...]:
@@ -238,10 +251,11 @@ class UnknownValueRef:
             origin_ref=pcode_op_ref,
         )
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         target_key = self.target_ref.stable_key() if self.target_ref is not None else None
         origin_key = None
-        stable_key = getattr(self.origin_ref, "stable_key", None)
+        stable_key = attribute_of(self.origin_ref, "stable_key", None)
         if callable(stable_key):
             try:
                 candidate_key = stable_key()
@@ -258,6 +272,7 @@ class UnknownValueRef:
             origin_key,
         )
 
+    @runtime_ref_key
     def diagnostic_key(self) -> Tuple[Any, ...]:
         key = self.stable_key()
         if self.origin_kind is None and self.origin_ref is None:
@@ -336,6 +351,11 @@ EXPANSION_BUDGET_TRUNCATION_SURFACES = frozenset({
 _CANONICAL_BUDGET_MAX_DEPTH = 12
 
 
+#: `items` の組み込みの実装（dict と `OrderedDict`）
+_DICT_ITEMS = dict.__dict__["items"]
+_ODICT_ITEMS = collections.OrderedDict.__dict__["items"]
+
+
 def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
     """決定的な JSON 化（producer 時点の identity: `stable_key` / `event_id`）。
 
@@ -352,27 +372,33 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
     # scalar の subclass は基底型の値で書く（subclass の code を呼ばず、写しに subclass を残さない。Issue #242）
     value = exact_scalar(value)
     depth = scalar_int(depth)
-    if value is None or isinstance(value, (bool, int, str)):
+    if value is None or is_kind(value, (bool, int, str)):
         return value
     if depth >= _CANONICAL_BUDGET_MAX_DEPTH:
-        return ["depth_limited", type(value).__module__, type(value).__qualname__]
-    if isinstance(value, float):
+        return ["depth_limited", type_module(type(value)), type_name(type(value))]
+    if is_kind(value, float):
         return repr(value)
-    if isinstance(value, bytes):
+    if is_kind(value, bytes):
         return ["bytes", value.hex()]
-    if isinstance(value, (list, tuple)):
+    if is_kind(value, (list, tuple)):
         return [_canonical_budget_value(item, depth + 1) for item in value]
-    if isinstance(value, (set, frozenset)):
+    if is_kind(value, (set, frozenset)):
         return sorted(
             (_canonical_budget_value(item, depth + 1) for item in value),
             key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True),
         )
-    if isinstance(value, Mapping):
+    if is_kind(value, Mapping):
+        # `items` を上書きしない dict（`OrderedDict` の C の `items` を含む: 組の集合は同じで、下で並べ替える）は基底型の
+        # slot で読む（`OrderedDict.items()` の反復は key を hash で引き直す）。上書きした `items` と dict でない mapping
+        # は、その型の `items()`（双子と同じ外の code）
+        slot = defined_attribute(type(value), "items", None) if is_kind(value, dict) else None
+        plain_items = slot is not None and (slot is _DICT_ITEMS or slot is _ODICT_ITEMS)
+        entries = _pairs(dict.items(value) if plain_items else method_of(value, "items")())
         return {
             _budget_key_text(key): _canonical_budget_value(item, depth + 1)
-            for key, item in sorted(value.items(), key=lambda pair: _budget_key_text(pair[0]))
+            for key, item in sorted(entries, key=lambda pair: _budget_key_text(pair[0]))
         }
-    stable_key = getattr(value, "stable_key", None)
+    stable_key = attribute_of(value, "stable_key", None)
     if callable(stable_key):
         try:
             key = stable_key()
@@ -380,7 +406,7 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
             key = None
         if key is not None:
             return ["stable", _canonical_budget_value(key, depth + 1)]
-    return ["opaque", type(value).__module__, type(value).__qualname__]
+    return ["opaque", type_module(type(value)), type_name(type(value))]
 
 
 def _budget_key_text(key: Any) -> str:
@@ -444,6 +470,7 @@ class ExpansionBudgetTruncation:
             _canonical_budget_json(self.stable_key()).encode("utf-8")
         ).hexdigest())
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         """発生事実キー。``event_id`` と参照先 event の内容は含めない。"""
 
@@ -593,7 +620,7 @@ def expansion_budget_event_ids(
     items: Optional[Iterable[ExpansionBudgetTruncation]],
 ) -> Tuple[str, ...]:
     # 記録は代わりの型かもしれない: 容器と id は基底型の値で読む（Issue #242）
-    return tuple(sorted({scalar_text(item.event_id) for item in _optional_items(items) if item is not None}))
+    return tuple(sorted({scalar_text(attribute_of(item, "event_id")) for item in _optional_items(items) if item is not None}))
 
 
 class ExpansionBudgetCollector:

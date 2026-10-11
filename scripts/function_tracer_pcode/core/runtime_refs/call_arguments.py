@@ -25,9 +25,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
-from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record, runtime_ref_key
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
-from scripts.function_tracer_pcode.core.live_values import as_int, as_str, attribute, exact_tree, scalar_int, scalar_text
+from scripts.function_tracer_pcode.core.live_values import as_int, as_str, attribute, exact_tree, scalar_int, scalar_text, is_kind, method_of
 
 
 _ABI_SLOT_KIND = "abi_argument_slot"
@@ -42,7 +42,7 @@ def _optional_text(value: Any) -> Optional[str]:
 
 
 def _optional_int(value: Any) -> Optional[int]:
-    if value is None or isinstance(value, bool):
+    if value is None or is_kind(value, bool):
         return None
     try:
         return scalar_int(value)
@@ -75,9 +75,10 @@ class AbiArgumentSlotRef:
         object.__setattr__(
             self,
             "storage_identity_key",
-            tuple(key) if isinstance(key, (tuple, list)) else None,
+            tuple(key) if is_kind(key, (tuple, list)) else None,
         )
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         """Cross-binary comparable identity.
 
@@ -93,6 +94,7 @@ class AbiArgumentSlotRef:
             self.width_bits,
         )
 
+    @runtime_ref_key
     def provenance_key(self) -> Tuple[Any, ...]:
         """Full per-side detail, including the concrete storage identity.
 
@@ -158,11 +160,12 @@ class FreshCallArgumentRef:
         object.__setattr__(
             self,
             "call_site_key",
-            tuple(key) if isinstance(key, (tuple, list)) else None,
+            tuple(key) if is_kind(key, (tuple, list)) else None,
         )
-        if not isinstance(self.slot, AbiArgumentSlotRef):
+        if not is_kind(self.slot, AbiArgumentSlotRef):
             raise TypeError("fresh call argument requires an AbiArgumentSlotRef slot")
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             _FRESH_ARGUMENT_KIND,
@@ -172,6 +175,7 @@ class FreshCallArgumentRef:
             self.reason,
         )
 
+    @runtime_ref_key
     def identity_correspondence_key(self) -> Tuple[Any, ...]:
         """The slot identity this fresh value occupies.
 
@@ -211,4 +215,4 @@ def fresh_call_argument_refs_are_side_distinct(
 
     if left is None or right is None:
         return False
-    return exact_tree(left.stable_key()) != exact_tree(right.stable_key())
+    return exact_tree(method_of(left, "stable_key")()) != exact_tree(method_of(right, "stable_key")())

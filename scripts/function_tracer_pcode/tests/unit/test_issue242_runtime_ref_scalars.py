@@ -239,7 +239,7 @@ def test_ref_classes_stay_package_types_and_classify_their_fields(cls):
     # 注釈（前方参照を含む）が解決でき、分類は dataclass の field の部分集合
     kinds = dict(field_kinds(cls))
     assert set(kinds) <= {item.name for item in dataclasses.fields(cls)}
-    assert set(kinds.values()) <= {"scalar", "bool", "tuple"}
+    assert set(kinds.values()) <= {"scalar", "bool", "tuple", "record"}
 
 
 def test_decorator_must_be_below_dataclass():

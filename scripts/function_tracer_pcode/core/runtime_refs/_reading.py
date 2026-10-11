@@ -12,7 +12,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Tuple
 
-from scripts.function_tracer_pcode.core.live_values import exact_tree, scalar_bool, scalar_int
+from scripts.function_tracer_pcode.core.live_values import exact_scalar, exact_tree, scalar_bool, scalar_int, is_kind, type_name
 
 
 def items(value: Any) -> Tuple[Any, ...]:
@@ -20,14 +20,15 @@ def items(value: Any) -> Tuple[Any, ...]:
 
     if type(value) is tuple:
         return value
-    if isinstance(value, tuple):
+    if is_kind(value, tuple):
         return tuple(tuple.__iter__(value))
-    if isinstance(value, list):
+    if is_kind(value, list):
         return tuple(list.__iter__(value))
-    if isinstance(value, str) and not isinstance(value, Enum):
+    if is_kind(value, str) and not is_kind(value, Enum):
         return tuple(str.__str__(value))
-    if isinstance(value, (int, float)) and not isinstance(value, Enum):
-        raise TypeError(f"'{type(value).__name__}' object is not iterable")
+    if is_kind(value, (int, float)) and not is_kind(value, Enum):
+        # 双子（基底型の値）の `tuple()` と同じ文: 型の名前は葉を写した値の型から、metaclass を通らない slot で
+        raise TypeError(f"'{type_name(type(exact_scalar(value)))}' object is not iterable")
     return tuple(value)  # 組み込みの列・scalar でない iterable: その object の反復（外の code）
 
 
@@ -50,10 +51,23 @@ def rows(value: Any, width: int) -> Tuple[Tuple[Any, ...], ...]:
     return tuple(out)
 
 
+def pairs(value: Any) -> Tuple[Tuple[Any, Any], ...]:
+    """`for a, b in value` と同じ 2 つ組（行でない値・幅の違う行は unpack と同じ例外）。組の中身は読まない
+    （呼ぶ側が reader で読む: `rows` と違い、葉の値も容器の型も保つ）。"""
+
+    out = []
+    for row in items(value):
+        cells = items(row)
+        if len(cells) != 2:
+            raise ValueError(f"expected 2 values to unpack, got {len(cells)}")
+        out.append(cells)
+    return tuple(out)
+
+
 def optional_rows(value: Any, width: int) -> Tuple[Tuple[Any, ...], ...]:
     """`rows(value or (), width)`（真偽も基底型の値で読む）。"""
 
     return rows(value, width) if scalar_bool(value) else ()
 
 
-__all__ = ["items", "optional_items", "optional_rows", "rows"]
+__all__ = ["items", "optional_items", "optional_rows", "pairs", "rows"]

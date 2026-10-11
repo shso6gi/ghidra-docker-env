@@ -71,8 +71,11 @@ class _World(RefWorld):
 
 
 HEADER = """
-from scripts.function_tracer_pcode.core.live_values import builtin_items, exact_scalar, exact_tree, scalar_bool, scalar_int, scalar_text
-from scripts.function_tracer_pcode.core.runtime_ref_record import exact_field_value
+from __future__ import annotations
+import hashlib
+from scripts.function_tracer_pcode.core import live_values
+from scripts.function_tracer_pcode.core.live_values import attribute_of, builtin_items, method_of, exact_scalar, exact_tree, is_kind, scalar_bool, scalar_int, scalar_text
+from scripts.function_tracer_pcode.core.runtime_ref_record import exact_field_value, runtime_ref_key
 @dataclass(frozen=True)
 @runtime_ref_record
 class Ref:
@@ -92,16 +95,16 @@ def _violations(body: str) -> list:
         ("@classmethod\ndef make(cls, name):\n    return cls(name=name or None)\n", ["truthiness of unknown"]),
         ("@classmethod\ndef make(cls, kind):\n    return cls(name='a' if kind in {'x', 'y'} else 'b')\n", ["comparison of unknown"]),
         ("@classmethod\ndef make(cls, operation):\n    return cls(name=f'{operation}_x')\n", ["format"]),
-        ("@classmethod\ndef make(cls, name):\n    return cls(name=name.strip())\n", ["method strip() on unknown"]),
+        ("@classmethod\ndef make(cls, name):\n    return cls(name=name.strip())\n", ["method of unknown", "method strip() on unknown"]),
         ("@classmethod\ndef make(cls, size):\n    return cls(name=str(size + 1))\n", ["arithmetic on unknown", "str() of unknown"]),
         # API の戻り値
-        ("@classmethod\ndef make(cls, function):\n    return cls(flag=bool(function.isExternal()))\n", ["bool() of unknown"]),
-        ("@classmethod\ndef make(cls, function):\n    names = {function.getName()}\n    return cls(name='a')\n", ["hash"]),
+        ("@classmethod\ndef make(cls, function):\n    return cls(flag=bool(method_of(function, 'isExternal')()))\n", ["bool() of foreign"]),
+        ("@classmethod\ndef make(cls, function):\n    names = {method_of(function, 'getName')()}\n    return cls(name='a')\n", ["hash"]),
         # 例外の流れ: except の後の代入が try の中の値を隠さない
         (
             "@classmethod\ndef make(cls, method):\n    try:\n        value = method()\n    except Exception:\n        value = None\n"
             "    if value:\n        return cls(name='a')\n    return cls(name='b')\n",
-            ["truthiness of unknown"],
+            ["truthiness of foreign"],
         ),
         # 構築中の tuple の要素（list で来るかもしれない）
         ("def __post_init__(self):\n    if self.key and self.key[0] != 'x':\n        raise ValueError()\n", ["comparison of unknown"]),
@@ -132,9 +135,9 @@ def _violations(body: str) -> list:
             ["comparison of unknown"],
         ),
         # 注釈だけの値（tuple の要素・record の field）の scalar の属性と、method の戻り値
-        ("def __post_init__(self):\n    for term in self.terms:\n        if term.offset > 0:\n            raise ValueError()\n", ["comparison of unknown"]),
-        ("def __post_init__(self):\n    if self.child.key() == ('a',):\n        raise ValueError()\n", ["comparison of unknown"]),
-        ("def __post_init__(self):\n    if self.child.ready():\n        raise ValueError()\n", ["truthiness of unknown"]),
+        ("def __post_init__(self):\n    for term in self.terms:\n        if term.offset > 0:\n            raise ValueError()\n", ["attribute of rtyped:Term", "comparison of unknown"]),
+        ("def __post_init__(self):\n    if self.child.key() == ('a',):\n        raise ValueError()\n", ["comparison of foreign"]),
+        ("def __post_init__(self):\n    if self.child.ready():\n        raise ValueError()\n", ["truthiness of foreign"]),
     ],
 )
 def test_the_guard_flags_unsafe_consumption(body, expected):
@@ -164,7 +167,7 @@ def test_the_guard_follows_self_methods_from_entries():
             return tuple(int(getattr(term, "offset", 0) or 0) for term in self.terms)
     """)
     assert "sample:Ref._seed" in guard.reached()
-    assert _found(guard) == ["int() of unknown", "truthiness of unknown"]
+    assert _found(guard) == ["attribute of rtyped:Term", "int() of unknown", "truthiness of unknown"]
 
 
 def test_the_guard_does_not_trust_method_results_it_did_not_prove():
@@ -217,7 +220,7 @@ def test_the_guard_does_not_trust_results_of_methods_on_annotated_values():
         """,
     )
     assert "sample:Term.key" in guard.reached()
-    assert _found(guard) == ["comparison of unknown"]
+    assert _found(guard) == ["comparison of foreign"]
 
 
 def test_the_guard_reads_tuple_fields_of_annotated_values_as_uncertain():
@@ -331,7 +334,8 @@ def test_the_guard_does_not_trust_methods_of_values_narrowed_by_isinstance():
             return ("a",)
         """,
     )
-    assert _found(narrowed) == ["comparison of unknown"]
+    # `isinstance` の判定そのものが値の `__class__` を読む（`is_kind` で絞る）
+    assert _found(narrowed) == ["comparison of foreign", "isinstance reads the class of unknown"]
     exact = _module(
         """
         @classmethod
@@ -365,7 +369,45 @@ def test_the_guard_trusts_readers_only_by_import():
         def make(cls, value, scalar_int):
             return cls(flag=scalar_int(value) > 0)
     """)
-    assert _found(local) == ["comparison of unknown"]
+    assert _found(local) == ["comparison of foreign", "passes unknown to foreign code"]
+
+
+@pytest.mark.parametrize(
+    "body, extra, expected",
+    [
+        # module の形の reader: import した module の名前だけを信用する
+        ("@classmethod\ndef make(cls, value):\n    return cls(flag=live_values.exact_tree(value) == (1,))\n", "", []),
+        # 引数・局所変数・module の代入がその名前を隠すと reader ではない（review 4 の非 blocker）
+        (
+            "@classmethod\ndef make(cls, value, live_values):\n    return cls(flag=live_values.exact_tree(value) == (1,))\n",
+            "", ["comparison of foreign", "method of unknown"],
+        ),
+        (
+            "@classmethod\ndef make(cls, value):\n    live_values = value\n    return cls(flag=live_values.exact_tree(value) == (1,))\n",
+            "", ["comparison of foreign", "method of unknown"],
+        ),
+        (
+            "@classmethod\ndef make(cls, value):\n    return cls(flag=live_values.exact_tree(value) == (1,))\n",
+            "class live_values:\n    @staticmethod\n    def exact_tree(value):\n        return value\n",
+            ["comparison of foreign", "method of unknown"],
+        ),
+        (
+            "@classmethod\ndef make(cls, value):\n    return cls(flag=live_values.exact_tree(value) == (1,))\n",
+            "from scripts.function_tracer_pcode.tests.unit import fakes as live_values\n", ["comparison of foreign", "method of unknown"],
+        ),
+        (
+            "@classmethod\ndef make(cls, value):\n    return cls(flag=exact_tree(value) == (1,))\n",
+            "def _rebind():\n    global exact_tree\n    exact_tree = len\n", ["comparison of foreign"],
+        ),
+    ],
+)
+def test_the_guard_trusts_reader_modules_only_where_the_name_is_the_import(body, extra, expected):
+    source = (
+        HEADER
+        + textwrap.indent(textwrap.dedent(body), "    ") + "\n" + extra
+    )
+    guard = ConstructionGuard({"scripts.function_tracer_pcode.core.runtime_refs.sample": source}, _World())
+    assert [v.split(": ", 2)[1] for v in guard.violations()] == expected
 
 
 def test_the_guard_starts_from_everything_callable_from_outside():
@@ -392,7 +434,10 @@ def test_the_guard_starts_from_everything_callable_from_outside():
         """,
     )
     assert {"sample:Ref.lower", "sample:Collector.record", "sample:None.public_helper"} <= set(guard.reached())
-    assert _found(guard) == ["comparison of unknown", "comparison of unknown", "hash", "int() of unknown", "truthiness of unknown"]
+    assert _found(guard) == [
+        "attribute of unknown", "attribute of unknown", "attribute of unknown",
+        "comparison of unknown", "comparison of unknown", "hash", "int() of unknown", "truthiness of unknown",
+    ]
 
 
 def _module_with(world: RefWorld, body: str) -> ConstructionGuard:
@@ -444,7 +489,7 @@ def test_the_guard_follows_values_into_module_helpers():
     [
         # reader で読んだ値
         "@classmethod\ndef make(cls, name):\n    return cls(name=exact_scalar(name) or None)\n",
-        "@classmethod\ndef make(cls, function):\n    return cls(flag=scalar_bool(function.isExternal()))\n",
+        "@classmethod\ndef make(cls, function):\n    return cls(flag=scalar_bool(method_of(function, 'isExternal')()))\n",
         "@classmethod\ndef make(cls, size):\n    return cls(name=str(scalar_int(size) + 1))\n",
         # decorator が写した引数（注釈が scalar）
         "@classmethod\n@runtime_ref_entry\ndef make(cls, name: str, size: int):\n    return cls(name=f'{name or size}')\n",
@@ -452,14 +497,126 @@ def test_the_guard_follows_values_into_module_helpers():
         "def __post_init__(self):\n    if self.name not in {'a', 'b'} or self.flag:\n        raise ValueError()\n",
         "def __post_init__(self):\n    if self.key and exact_scalar(self.key[0]) != 'x':\n        raise ValueError()\n",
         # bool への絞り込み（bool は subclass を作れない）・identity の比較
-        "@classmethod\ndef make(cls, value):\n    if isinstance(value, bool) and value:\n        return cls(flag=value)\n    return cls(flag=value is True)\n",
+        "@classmethod\ndef make(cls, value):\n    if is_kind(value, bool) and value:\n        return cls(flag=value)\n    return cls(flag=value is True)\n",
         # 本物の instance への絞り込み（scalar の field は owner が写した値）・否定の早期 return
-        "@classmethod\ndef make(cls, value):\n    if not isinstance(value, Term):\n        return None\n    return cls(flag=value.offset > 0)\n",
+        "@classmethod\ndef make(cls, value):\n    if not is_kind(value, Term):\n        return None\n    return cls(flag=value.offset > 0)\n",
         # reader で読んだ外の値・外の method の戻り値
-        "def __post_init__(self):\n    for term in self.terms:\n        if scalar_int(term.offset) > 0:\n            raise ValueError()\n",
+        "def __post_init__(self):\n    for term in self.terms:\n        if scalar_int(attribute_of(term, 'offset')) > 0:\n            raise ValueError()\n",
         "def __post_init__(self):\n    if exact_tree(self.child.key()) == ('a',):\n        raise ValueError()\n",
         "@classmethod\ndef make(cls, items):\n    return cls(key=builtin_items(items), name=str(len(builtin_items(items))))\n",
     ],
 )
 def test_the_guard_accepts_safe_consumption(body):
     assert _violations(body) == []
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        # 型の属性は metaclass の `__getattribute__` を呼ぶ（`type_name` / `type_module` / `defined_attribute` で読む）
+        ("@classmethod\ndef make(cls, value):\n    return cls(name=type(value).__name__)\n", ["type attribute of unknown"]),
+        # 未確認の値の属性の読み（`attribute_of` で読む）
+        ("@classmethod\ndef make(cls, value):\n    return cls(name=scalar_text(getattr(value, 'name', '')))\n", ["attribute of unknown"]),
+        ("@classmethod\ndef make(cls, value):\n    return cls(name=scalar_text(value.name))\n", ["attribute of unknown"]),
+        # `isinstance` は値の `__class__` を読む（`is_kind` で絞る）
+        ("@classmethod\ndef make(cls, value):\n    return cls(flag=isinstance(value, tuple))\n", ["isinstance reads the class of unknown"]),
+        # 外の code の結果を読まずに外へ返す・owner が読まない field に置く
+        ("@classmethod\ndef make(cls, value):\n    cls(name='a')\n    return method_of(value, 'build')()\n", ["returns an unread result of foreign code"]),
+        ("@classmethod\ndef make(cls, value):\n    return cls(payload=method_of(value, 'build')())\n", ["stores an unread result of foreign code"]),
+        # 値の型の code を呼ぶ文（review 5）: `with` の `__enter__`、`yield from` の反復、`del` の key の hash、追わない束縛
+        ("@classmethod\ndef make(cls, value):\n    with value:\n        return cls(name='a')\n", ["with of unknown"]),
+        ("def lines(self, value):\n    yield from value\n", ["yield from iterates unknown"]),
+        ("@classmethod\ndef make(cls, value):\n    d = {}\n    del d[value]\n    return cls(name='a')\n", ["del hashes unknown"]),
+        (
+            "@classmethod\ndef make(cls, value):\n    y = 0\n    def inner():\n        nonlocal y\n        y = value\n    inner()\n"
+            "    return cls(flag=y == 1)\n",
+            ["nonlocal is not tracked"],
+        ),
+        ("@classmethod\ndef make(cls, value):\n    globals()['scalar_int'] = len\n    return cls(name='a')\n", ["globals() is not tracked"]),
+        # 標準の hash は引数の buffer を読む（結果の `hexdigest()` は組み込みの `str`）
+        ("@classmethod\ndef make(cls, value):\n    return cls(name=hashlib.sha256(value).hexdigest())\n", ["hashlib reads unknown"]),
+    ],
+)
+def test_the_guard_flags_reads_that_run_the_code_of_the_value(body, expected):
+    assert _violations(body) == expected
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "@classmethod\ndef make(cls, value):\n    return cls(name=scalar_text(attribute_of(value, 'name', '')))\n",
+        "@classmethod\ndef make(cls, value):\n    return cls(flag=is_kind(value, tuple))\n",
+        # 読んでから返す・owner が読む field（scalar）に置く
+        "@classmethod\ndef make(cls, value):\n    cls(name='a')\n    return exact_tree(method_of(value, 'build')())\n",
+        "@classmethod\ndef make(cls, value):\n    return cls(name=method_of(value, 'build')())\n",
+        # key の出口（`runtime_ref_key` が組み込みの木にして返す）
+        "@runtime_ref_key\ndef semantic_key(self, value):\n    return method_of(value, 'build')()\n",
+        # 組み込みの値と組み込みの容器の連結は要素を読まない
+        "@runtime_ref_key\ndef stable_key(self):\n    return self.semantic_key() + (self.name, self.payload)\n"
+        "@runtime_ref_key\ndef semantic_key(self):\n    return ('a',)\n",
+    ],
+)
+def test_the_guard_accepts_read_results_of_foreign_code(body):
+    assert _violations(body) == []
+
+
+def test_the_guard_trusts_validation_rewrites_only_when_every_path_rewrites():
+    """owner が読まない field（object）へ外の code の結果を置くのは、検証がどの経路でも reader で書き直すときだけよい。"""
+
+    always = (
+        "def __post_init__(self):\n    object.__setattr__(self, 'payload', scalar_int(self.payload))\n"
+        "@classmethod\ndef make(cls, f):\n    return cls(payload=method_of(f, 'x')())\n"
+    )
+    sometimes = (
+        "def __post_init__(self):\n    if self.flag:\n        object.__setattr__(self, 'payload', scalar_int(self.payload))\n"
+        "@classmethod\ndef make(cls, f):\n    return cls(payload=method_of(f, 'x')())\n"
+    )
+    assert _violations(always) == []
+    assert _violations(sometimes) == ["stores an unread result of foreign code"]
+
+
+def test_the_guard_does_not_trust_attributes_read_by_a_dynamic_name():
+    body = "@classmethod\ndef make(cls, value, name):\n    return cls(flag=attribute_of(value, name) == 1)\n"
+    assert _violations(body) == ["comparison of foreign"]
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        # 値の型の code を呼ぶ組み込み・属性の書き込み・型の constructor（独立 review 2 巡目）
+        ("@classmethod\ndef make(cls, value):\n    if hasattr(value, 'a'):\n        return cls(name='a')\n    return None\n", ["attribute of unknown"]),
+        ("@classmethod\ndef make(cls, value):\n    from collections.abc import Mapping\n    return cls(flag=issubclass(type(value), Mapping))\n",
+         ["issubclass reads the class of a value (use is_kind)"]),
+        ("@classmethod\ndef make(cls, value):\n    names = dir(value)\n    return cls(name='a')\n", ["dir() of unknown"]),
+        ("@classmethod\ndef make(cls, value):\n    other = type(value)(1)\n    return cls(name='a')\n", ["constructs the type of unknown"]),
+        ("@classmethod\ndef make(cls, value):\n    value.seen = True\n    return cls(name='a')\n", ["attribute store on unknown"]),
+        ("@classmethod\ndef make(cls, value):\n    return cls(name=f'{1:{value}}')\n", ["format"]),
+        # 解析しない構文は使うと違反
+        ("@classmethod\ndef make(cls, value):\n    class Inner:\n        seen = value > 1\n    return cls(name='a')\n", ["ClassDef is not tracked"]),
+        ("@classmethod\ndef make(cls, value):\n    def inner(a=value.foo):\n        return a\n    return cls(name='a')\n",
+         ["defaults or decorators of a nested function are not tracked"]),
+        # 標準の library の関数・正体の分からない callable へ読まずに渡す
+        ("@classmethod\ndef make(cls, value):\n    from math import floor\n    return cls(name=scalar_text(floor(value)))\n", ["passes unknown to floor"]),
+        ("@classmethod\ndef make(cls, value, choose):\n    reader = exact_tree if choose else len\n    return cls(name=scalar_text(reader(value)))\n",
+         ["passes unknown to foreign code", "truthiness of unknown"]),
+        # 別名・呼び先・入れ子の関数を通した容器の変異
+        ("@classmethod\ndef make(cls, value):\n    items = []\n    alias = items\n    alias.append(value)\n    return cls(flag=items[0] > 1)\n", ["comparison of unknown"]),
+        ("@classmethod\ndef make(cls, value):\n    items = []\n    def add(x):\n        items.append(x)\n    add(value)\n    return cls(flag=items[0] > 1)\n",
+         ["comparison of unknown"]),
+        # package の中でこの解析が辿らない module の関数へ読まずに渡す
+        ("@classmethod\ndef make(cls, value):\n    from scripts.function_tracer_pcode.core.signature import is_void_data_type\n"
+         "    return cls(flag=scalar_bool(is_void_data_type(value)))\n", ["passes unknown to package code outside the guard"]),
+        ("@classmethod\ndef make(cls, value):\n    from scripts.function_tracer_pcode.core.signature import is_void_data_type\n"
+         "    return cls(flag=scalar_bool(is_void_data_type(exact_tree(value))))\n", []),
+        # 例外の照合は型の `__subclasscheck__`
+        ("@classmethod\ndef make(cls, value):\n    try:\n        return cls(name='a')\n    except value:\n        return None\n", ["except matches an unread value"]),
+    ],
+)
+def test_the_guard_closes_the_second_independent_review_holes(body, expected):
+    assert _violations(body) == expected
+
+
+def test_the_guard_requires_unevaluated_annotations():
+    source = HEADER.replace("from __future__ import annotations\n", "") + "    name: str = ''\n"
+    guard = ConstructionGuard({"scripts.function_tracer_pcode.core.runtime_refs.sample": source}, _World())
+    assert [v.split(": ", 2)[1] for v in guard.violations()] == ["annotations are evaluated (line 1)"]

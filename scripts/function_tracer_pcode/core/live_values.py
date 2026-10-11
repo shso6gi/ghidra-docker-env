@@ -875,17 +875,32 @@ _TYPE_NAME = type.__dict__["__name__"]
 def type_name(kind: type) -> str:
     """型の `__qualname__`（metaclass の property を通らない組み込みの slot で読む）。"""
 
-    return _TYPE_QUALNAME.__get__(kind)
+    return exact_scalar(_TYPE_QUALNAME.__get__(kind))
 
 
 def type_module(kind: type) -> str:
-    return _TYPE_MODULE.__get__(kind)
+    """型の `__module__`（metaclass の hook を通らない slot で読み、組み込みの `str` そのもので返す）。"""
+
+    return exact_scalar(_TYPE_MODULE.__get__(kind))
 
 
-def is_kind(value: Any, base: type) -> bool:
-    """`value` の型が `base` の subclass か（`isinstance` の代わり。`__class__` を読まない）。"""
+def is_kind(value: Any, base: Any) -> bool:
+    """`value` の型が `base`（型か型の tuple）の subclass か（`isinstance` の代わり）。
 
-    return issubclass(type(value), base)
+    読み方: 値の `__class__` を読まない（`type(value)` の MRO）。`base` の metatype が `type` そのもの（組み込みの型・
+    素の class）なら C の MRO の比較だけで、値の型の metaclass の hook を呼ばない。それ以外（ABC の `Mapping`・
+    `Enum` など、metatype の `__subclasscheck__` が値の型の属性を読む）は、値の葉を写してから判定する（scalar の
+    subclass の metaclass の hook を呼ばない。scalar でない値の型の hook は外の code）。返す値は `bool`。
+    """
+
+    if type(base) is tuple:
+        for item in base:
+            if is_kind(value, item):
+                return True
+        return False
+    if type(base) is type:
+        return issubclass(type(value), base)
+    return issubclass(type(exact_scalar(value)), base)
 
 
 def is_enum(value: Any) -> bool:
@@ -979,6 +994,11 @@ def exact_scalar(value: Any) -> Any:
     （Issue #235: 意味の値の scalar を組み込みの型そのものにする入口が使う）。
     """
 
+    kind = type(value)
+    if value is None or kind is int or kind is str or kind is bool or kind is float:
+        return value  # exact な scalar
+    if not issubclass(kind, (int, float, str)):
+        return value  # scalar でない値（MRO は C の slot で見る: hook を呼ばない）
     plain = plain_scalar(value)
     return value if plain is NOT_PLAIN else plain
 
@@ -1017,31 +1037,124 @@ def scalar_bool(value: Any) -> bool:
 
 
 def scalar_text(value: Any) -> str:
-    """`str(value)` と同じ値。scalar の subclass は基底型の値にしてから文字列にする（容器の中の葉も: `exact_tree`）。
+    """`str(value)` と同じ値。scalar の subclass は基底型の値にしてから文字列にする（容器の中の葉も）。
 
-    subclass の `__str__` / `__repr__` を呼ばない（容器の `str()` は要素の `__repr__` を呼ぶので、葉を写してから
-    文字列にする）。それ以外の object は `str()` のまま（外の code。Issue #242、`scalar_int` と同じ）。
+    読み方: `exact_tree` と同じに辿り、葉に scalar の subclass が無ければ元の値の `str()`（双子と同じ文字列。容器の
+    型の `repr` を保つ）、在れば写した組み込みの木の `str()`（subclass の `__str__` / `__repr__` を呼ばない。元の
+    容器の型では作り直さないので、`deque` などの `repr` は基底の容器のもの: 意図した差 D5）。
+    返す値の保証: 組み込みの `str` そのもの（外の object の `__str__` が返した `str` の subclass も写す）。
     """
 
     if type(value) is str:
         return value
-    return str(exact_tree(value))
+    tree, leaves = _exact_tree_read(value)
+    # 葉に scalar の subclass が無ければ元の値の `str()`（双子と同じ文字列: 容器の型の `repr` を保つ）。在れば写した木の
+    # `str()`（組み込みの容器の `repr`）。外の object の `__str__` は str の subclass を返し得る: 返した値も基底型の slot で読む
+    return exact_scalar(str(tree if leaves else value))
+
+
+def scalar_repr(value: Any) -> str:
+    """`repr(value)` と同じ値（規則は `scalar_text` と同じ。組み込みの `str` そのもので返す）。"""
+
+    tree, leaves = _exact_tree_read(value)
+    return exact_scalar(repr(tree if leaves else value))
 
 
 #: `exact_tree` が 1 回の写しで読む容器の要素の量の名前
 _TREE_NODES = "a value tree's container items"
 
 
+#: `exact_tree` が辿る容器の基底の型（値の型の MRO で見る。subclass は基底の型の容器へ写す）
+_TREE_BASES = (tuple, list, dict, set, frozenset, collections.deque)
+#: dict の view（subclass を作れない組み込みの型）。要素を組み込みの slot で辿り、list に写す
+_DICT_VIEWS = (type({}.keys()), type({}.values()), type({}.items()))
+#: `OrderedDict` の view: 反復が key ごとに連結 list の node を hash で引き直す（key の型の `__hash__` / `__eq__`）。
+#: 辿れないので判定しない（`TypeError`。成功にも「葉」にもしない）
+_ODICT_VIEWS = (
+    type(collections.OrderedDict().keys()), type(collections.OrderedDict().values()), type(collections.OrderedDict().items()),
+)
+
+
 def _tree_kind(value: Any) -> Optional[type]:
-    """`exact_tree` が辿る容器の基底の型（組み込みの tuple / list / dict / set / frozenset と `deque`。subclass を含む）。"""
+    """`exact_tree` が辿る容器の基底の型（組み込みの tuple / list / dict / set / frozenset と `deque`。subclass を含む）。
+
+    型は `type(value)` の MRO で見る（`isinstance` と違い、値の `__class__` / `__getattribute__` を読まない）。
+    """
 
     kind = type(value)
     if kind is tuple or kind is list or kind is dict or kind is set or kind is frozenset:
         return kind
-    for base in (tuple, list, dict, set, frozenset, collections.deque):
-        if isinstance(value, base):
-            return base
-    return None
+    if kind is _DICT_VIEWS[0] or kind is _DICT_VIEWS[1] or kind is _DICT_VIEWS[2]:
+        return kind
+    if kind is _ODICT_VIEWS[0] or kind is _ODICT_VIEWS[1] or kind is _ODICT_VIEWS[2]:
+        raise TypeError("an OrderedDict view is not read without hashing its keys")
+    return _subclass_tree_kind(kind)
+
+
+#: 型ごとの `_subclass_tree_kind` の結果（`id(型)` → (型, 結果)。型の `__hash__` / `__eq__` を呼ばない。型は生かしておく）
+_KIND_CACHE: Dict[int, Tuple[type, Optional[type], bool]] = {}
+_KIND_CACHE_LIMIT = 4096
+
+
+def _kind_entry(kind: type) -> Tuple[type, Optional[type], bool]:
+    """(型, 辿る容器の基底の型, scalar でも容器でもない葉か)。MRO は C の slot で見る（hook を呼ばない）。"""
+
+    entry = _KIND_CACHE.get(id(kind))
+    if entry is not None and entry[0] is kind:
+        return entry
+    base_kind: Optional[type] = None
+    for base in _TREE_BASES:
+        if issubclass(kind, base):
+            base_kind = base
+            break
+    opaque = base_kind is None and not issubclass(kind, (int, float, str))
+    entry = (kind, base_kind, opaque)
+    if len(_KIND_CACHE) >= _KIND_CACHE_LIMIT:
+        _KIND_CACHE.clear()
+    _KIND_CACHE[id(kind)] = entry
+    return entry
+
+
+def _subclass_tree_kind(kind: type) -> Optional[type]:
+    return _kind_entry(kind)[1]
+
+
+def _already_plain(value: Any) -> bool:
+    """`value` が既に組み込みの木か（容器は組み込みの型そのもの・共有と閉路が無い・葉は exact な scalar か scalar でも
+    容器でもない object・要素の数は `SCAN_LIMIT` まで）。確かめるだけで何も作らない（`exact_tree` の速い経路。
+    当てはまらなければ遅い経路が同じ規則で読む）。"""
+
+    stack: List[Any] = [value]
+    seen: set = set()
+    count = 0
+    while stack:
+        node = stack.pop()
+        kind = type(node)
+        if node is None or kind is int or kind is str or kind is bool or kind is float:
+            continue
+        if kind is tuple or kind is list or kind is set or kind is frozenset or kind is dict:
+            if id(node) in seen:
+                if kind is tuple or kind is frozenset:
+                    continue  # 共有された変わらない容器は確かめ済み（閉路は変わる容器を通るので、そこで見つかる）
+                return False  # 変わる容器の共有・閉路は遅い経路（memo と閉路の規則）
+            seen.add(id(node))
+            count += kind.__len__(node) * (2 if kind is dict else 1)
+            if count > SCAN_LIMIT:
+                return False  # 上限の外の意味は遅い経路の読み（文脈の owner）
+            if kind is dict:
+                for key, item in dict.items(node):
+                    stack.append(key)
+                    stack.append(item)
+            else:
+                stack.extend(kind.__iter__(node))
+            continue
+        if (
+            kind is _DICT_VIEWS[0] or kind is _DICT_VIEWS[1] or kind is _DICT_VIEWS[2]
+            or kind is _ODICT_VIEWS[0] or kind is _ODICT_VIEWS[1] or kind is _ODICT_VIEWS[2]
+            or not _kind_entry(kind)[2]
+        ):
+            return False
+    return True
 
 
 def _tree_length(node: Any, kind: type) -> int:
@@ -1065,64 +1178,93 @@ def _tree_children(node: Any, kind: type) -> List[Any]:
 
 
 def _tree_rebuild(node: Any, kind: type, items: List[Any]) -> Any:
-    """写した要素から元と同じ型の容器を作る（呼ぶ側が先に数を上限と比べる）。
+    """写した要素から **組み込みの型そのもの** の容器を作る（呼ぶ側が先に数を上限と比べる）。
 
-    組み込みの型そのもの・named tuple・`OrderedDict` / `defaultdict` / `Counter` / `deque` は同じ型で作る。
-    それ以外の subclass は、その型の構築子で作れなければ基底の型で作る（値は同じ。型は基底の型になる）。
+    外の constructor / `_make` は呼ばない（作り直すときに葉を scalar の subclass へ包み直し得る）。subclass の容器・
+    named tuple・`OrderedDict` / `defaultdict` / `Counter` は基底の型（tuple / list / dict / set / frozenset）の
+    容器になり、`deque` は list になる（値は同じ。型は保たない）。
     """
 
-    holder = type(node)
-    pairs = list(zip(items[0::2], items[1::2])) if kind is dict else None
-    if holder is kind:
-        return dict(pairs) if kind is dict else kind(items)
-    if isinstance(node, tuple) and hasattr(holder, "_make"):
-        return holder._make(items)
-    if isinstance(node, collections.defaultdict):
-        return holder(node.default_factory, dict(pairs))
-    if isinstance(node, collections.deque):
-        return holder(items, node.maxlen)
-    try:
-        return holder(dict(pairs)) if kind is dict else holder(items)
-    except (TypeError, ValueError):  # 構築子の形が違う subclass: 値は同じ基底の型で
-        return dict(pairs) if kind is dict else kind(items)
+    if kind is dict:
+        return dict(zip(items[0::2], items[1::2]))
+    if (
+        kind is collections.deque or kind is _DICT_VIEWS[0] or kind is _DICT_VIEWS[1] or kind is _DICT_VIEWS[2]
+    ):
+        return list(items)
+    return kind(items)
 
 
 def exact_tree(value: Any) -> Any:
-    """比べる・hash する・文字列にする前の値の写し: 組み込みの容器を辿り、scalar の subclass の葉を基底型の値にする。
+    """比べる・hash する・文字列にする前の値の写し（**組み込みの木**）。
+
+    **読み方**: 組み込みの tuple / list / dict（key と値）/ set / frozenset とその subclass（named tuple・
+    `OrderedDict` / `defaultdict` / `Counter` を含む）と `deque`・dict の view を（`OrderedDict` の view は反復が key を
+    hash で引き直すので辿らずに `TypeError`）、型の MRO（型は identity で比べる:
+    metaclass の `__eq__` を呼ばない）で見分けて基底型の slot で辿る
+    （値の `__class__`・容器の `__iter__` / `__getitem__` の上書きを呼ばない）。辿る要素の数の和は値の storage の
+    読みの 1 つの量（反復の確かめ）として上限と比べる（#22）。
+
+    **返す値の保証**: 容器は組み込みの tuple / list / dict / set / frozenset **そのもの**（subclass は基底の型、
+    `deque` と dict の view は list。外の constructor / `_make` を呼ばずに組み込みの型の constructor で作る）、scalar の葉は組み込み
+    の型そのもの（`exact_scalar`）、それ以外の葉（enum の member・scalar でない object）は同じ object（その object
+    の code は外の code）。葉と容器がどれも既に組み込みの型そのものなら同じ object を返す。共有された容器は 1 度
+    だけ辿って結果も共有する（辿った容器は走査の終わりまで生かす: memo の `id` を再利用させない）。写しが要る閉路は
+    `TypeError`（元の容器を指す写しを作らない: fail-closed）。
 
     外の object（代わりの型・API の object）の method の戻り値（key など）や、受理したまま持つ容器を、比べる・
-    並べる・dict の key にする・`str()` にする前に読む reader（Issue #242）。辿る容器は組み込みの tuple / list /
-    dict（key と値）/ set / frozenset とその subclass（named tuple・`OrderedDict` / `defaultdict` / `Counter`）と
-    `deque` で、要素は基底型の slot で読み、型と並びを保って作り直す（構築子の形が違う subclass は基底の型で
-    作る: 値は同じ）。それ以外の object は辿らない（外の code）。葉の規則は `exact_scalar`（exact な値・enum の
-    member・scalar でない object は変えない）。葉がどれも変わらない容器は同じ object を返し、共有された容器は
-    1 度だけ辿って結果も共有する。明示 stack の後順走査（入れ子が深くても再帰の上限に当たらない）。閉路を
-    持つ容器は、写しが要らなければ同じ object、要るなら `TypeError`（元の容器を指す写しを作らない: fail-closed）。
-    容器の反復は基底型の slot で行い（容器の subclass の上書きを呼ばない）、辿る要素の数の和は値の storage の
-    読みの 1 つの量（反復の確かめ: 呼ぶ側が辿ると頼んだ読み）として上限と比べる。
+    並べる・dict の key にする・`str()` にする前に読む reader（Issue #242）。型を保たないことの影響: subclass の
+    容器の型・`repr` は基底の型のもの（named tuple は tuple、`deque` は list: `deque` と list は `==` が違う）。
     """
+
+    tree = _exact_tree_read(value)[0]
+    if tree is _CYCLIC:
+        raise TypeError("a cyclic container of container subclasses is not copied to a plain tree")
+    return tree
+
+
+def holds_scalar_subclass(value: Any) -> bool:
+    """`exact_tree` が辿る木の葉に scalar の subclass が在るか（読み方は `exact_tree` と同じ。返す値は `bool`）。
+
+    在らなければ、元の値の文字列化・`repr` は双子と同じ（容器の型の `repr` を保つために、元の値で文字列にする
+    reader が使う）。
+    """
+
+    return _exact_tree_read(value)[1]
+
+
+#: 組み込みの木を作れない閉路（葉に scalar の subclass は無い）
+_CYCLIC = object()
+
+
+def _exact_tree_read(value: Any) -> Tuple[Any, bool]:
+    """`exact_tree` の本体: (組み込みの木, scalar の葉を写したか)。"""
 
     kind = type(value)
     if value is None or kind is int or kind is str or kind is bool or kind is float:
-        return value  # exact な scalar（最も多い形）
-    if kind is tuple or kind is list:
-        # よくある形（葉が exact な scalar だけの平らな列）: 何も作らずに同じ object を返す
-        length = len(value)
-        if length <= SCAN_LIMIT:
+        return value, False  # exact な scalar（最も多い形）
+    if kind is tuple or kind is list or kind is set or kind is frozenset or kind is dict:
+        # よくある形（既に組み込みの木）: 確かめるだけで何も作らずに同じ object を返す。葉が exact な scalar だけの
+        # 平らな tuple / list はさらに短い経路
+        if (kind is tuple or kind is list) and len(value) <= SCAN_LIMIT:
             for item in value:
                 holder = type(item)
                 if not (item is None or holder is int or holder is str or holder is bool or holder is float):
                     break
             else:
-                return value
+                return value, False
+        if _already_plain(value):
+            return value, False
     elif _tree_kind(value) is None:
-        return exact_scalar(value)
+        leaf = exact_scalar(value)
+        return leaf, leaf is not value
     read = _StorageRead(_TREE_NODES, traversal=True)
     done: Dict[int, Any] = {}
     children_of: Dict[int, List[Any]] = {}
     active: set = set()  # 入って、まだ出ていない容器（ここへ戻る要素は閉路）
+    alive: List[Any] = []  # 入った容器（memo の key の `id` が指す object を走査の間は生かす）
     cyclic = False
     changed = False
+    leaves = False  # scalar の葉を写したか
     stack: List[Tuple[Any, bool]] = [(value, False)]
     while stack:
         node, leaving = stack.pop()
@@ -1131,6 +1273,7 @@ def exact_tree(value: Any) -> Any:
             if id(node) in done:
                 continue
             done[id(node)] = node  # 入った印（同じ容器に再び出会うのは共有か閉路: 閉路は辿り直さない）
+            alive.append(node)  # `id` を走査の終わりまで再利用させない（view が反復のたびに作る組を含む）
             active.add(id(node))
             read.admit(_tree_length(node, kind))
             children = _tree_children(node, kind)
@@ -1141,7 +1284,11 @@ def exact_tree(value: Any) -> Any:
                     stack.append((item, False))
             continue
         children = children_of.pop(id(node))
-        items: Optional[List[Any]] = None
+        # 組み込みの型そのものでない容器（subclass・named tuple・`deque`）は、葉が変わらなくても基底の型へ写す
+        # 型は identity で比べる（`in` は metaclass の `__eq__` を呼ぶ）
+        node_type = type(node)
+        plain = node_type is tuple or node_type is list or node_type is dict or node_type is set or node_type is frozenset
+        items: Optional[List[Any]] = None if plain else list(children)
         for index, item in enumerate(children):
             holder = type(item)
             if item is None or holder is int or holder is str or holder is bool or holder is float:
@@ -1151,6 +1298,7 @@ def exact_tree(value: Any) -> Any:
                 new = done[id(item)]
             else:
                 new = exact_scalar(item)
+                leaves = leaves or new is not item
             if new is not item:
                 if items is None:
                     items = list(children)
@@ -1160,9 +1308,12 @@ def exact_tree(value: Any) -> Any:
             changed = True
             done[id(node)] = _tree_rebuild(node, kind, items)
     if cyclic and changed:
-        # 閉路を持つ容器の写しは元の容器を指してしまう: 読めない値として扱う（空や元の値にしない）
-        raise TypeError("a cyclic container holding scalar subclasses is not copied")
-    return done[id(value)]
+        # 閉路を持つ容器の写しは元の容器を指してしまう: 組み込みの木を作れない（空や元の値にしない）。葉に scalar の
+        # subclass が無ければ、元の値の文字列化だけは双子と同じにできる（呼ぶ側が `_CYCLIC` を見る）
+        if leaves:
+            raise TypeError("a cyclic container holding scalar subclasses is not copied")
+        return _CYCLIC, False
+    return done[id(value)], leaves
 
 
 def as_int(value: Any) -> int:
@@ -1501,6 +1652,54 @@ class readable_property(property):
     `attribute()` が呼ぶ property はこれで宣言したものだけ（普通の `property` は呼ばない）。
     宣言した getter は `tests/unit/_live_flow_audit.py` が root として監査する（field は live な値）。
     """
+
+
+def attribute_of(value: Any, name: str, default: Any = _MISSING) -> Any:
+    """外の値（注釈が Any / record の値・他の object・代わりの型）の属性を、値の葉を写してから読む（Issue #242）。
+
+    `getattr(value, name[, default])` と同じ値。ただし値が scalar の subclass なら基底型の値の属性を読む（subclass の
+    `__getattribute__` / `__getattr__` / class の descriptor を呼ばない）。それ以外の object は自分の属性の仕組みで
+    読む（外の code）。返す値は読んだ属性そのもの（中身は呼ぶ側が reader で読む）。
+    """
+
+    target = exact_scalar(value)
+    if default is _MISSING:
+        return getattr(target, name)
+    return getattr(target, name, default)
+
+
+def method_of(value: Any, name: str, /) -> Any:
+    """`value.name`（外の値の method を呼ぶ前の読み。呼ぶ側が `method_of(x, "m")(...)` と書く: 引数の評価と
+    属性の読みの順序・例外は `x.m(...)` と同じ。Issue #242）。
+
+    読み方: 名前は値の葉を写してから読む（`attribute_of`: scalar の subclass の `__getattribute__` / `__getattr__` /
+    class の descriptor を呼ばない。基底型に無い名前は双子と同じく `AttributeError`）。
+    返す値の保証: 無い（外の code。呼んだ結果は、比べる・hash する・真偽にする前に、呼ぶ側が reader で読む）。
+    """
+
+    return attribute_of(value, name)
+
+
+def defined_attribute(kind: type, name: str, default: Any = _MISSING) -> Any:
+    """型 `kind` の MRO で `name` を最初に定義する class の名前空間の値（Issue #242）。
+
+    読み方: MRO と各 class の名前空間を `type` の slot の descriptor で読む（`kind` の metaclass の
+    `__getattribute__` / `__getattr__` を呼ばない）。返す値は名前空間にある object そのもの（descriptor の `__get__` を
+    呼ばない: `type(x).__str__ is KeyError.__str__` のような同一性の判定に使う。組み込みの slot の wrapper と関数は
+    class から読んだ値と同じ object）。定義が無ければ `default`、`default` も無ければ `AttributeError`。MRO の長さが
+    `SCAN_LIMIT` を超える型は判定しない（`TypeError`: 成功にも「無い」にもしない）。
+    """
+
+    mro = _TYPE_MRO.__get__(kind)
+    if not _within_scan(tuple.__len__(mro)):
+        raise TypeError("the MRO of the type is beyond the scan limit")
+    for klass in mro:
+        namespace = _TYPE_DICT.__get__(klass)
+        if name in namespace:
+            return namespace[name]
+    if default is _MISSING:
+        raise AttributeError(name)
+    return default
 
 
 def attribute(value: Any, name: str, default: Any = None) -> Any:
@@ -2087,6 +2286,11 @@ __all__ = [
     "state_setter",
     "copied_container",
     "attribute",
+    "attribute_of",
+    "method_of",
+    "holds_scalar_subclass",
+    "scalar_repr",
+    "defined_attribute",
     "builtin_container",
     "builtin_iterator",
     "builtin_mapping",
