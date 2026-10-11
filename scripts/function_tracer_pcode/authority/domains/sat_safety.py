@@ -154,6 +154,8 @@ class SatSafetyPilotEncoder:
         ):
             raise ValueError("SAT safety transformed observation is duplicated")
         self.commit_emitted_signal(session, signal, intents)
+        # 他の domain の取引の中の commit: 巻き戻しはその取引の owner（ABI の写し）が持つ。
+        session.domain_signal_state.get(_COMMITTED_TRANSACTIONS_KEY, {}).pop(id(signal), None)
 
     def __call__(self, session: Any, signal: Any) -> tuple[EventIntent, ...]:
         if type(signal) is SafeCounterexampleProductionSignal:

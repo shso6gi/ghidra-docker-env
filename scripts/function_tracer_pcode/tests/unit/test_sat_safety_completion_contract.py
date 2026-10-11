@@ -1263,3 +1263,87 @@ def test_a_completion_that_fails_after_the_encoder_commit_restores_the_ledger(mo
         monkeypatch.setattr(session, "_commit_phase7_signal_transaction", real_commit)
         _complete_conditionally(_completion(observed))
         assert _ledger_state(session, observed) is BlockerState.COMPLETED
+
+
+def _patch_abi_transaction_identity(monkeypatch):
+    """取引の識別を class でも固定する（emit_many の committed replay の判定は class method が読む）。"""
+    from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
+        AbiWidthReadonlyPilotEncoder,
+    )
+
+    monkeypatch.setattr(AbiWidthReadonlyPilotEncoder, "_solver_batch_transaction_key",
+                        staticmethod(lambda _session, _batch: ("abi-transaction",)))
+    monkeypatch.setattr(AbiWidthReadonlyPilotEncoder, "_solver_batch_transaction_digest",
+                        classmethod(lambda _cls, _session, _batch: "abi-transaction-digest"))
+
+
+def _abi_batch_intents(session):
+    """取引が出す event（別の blocker の観測。ここでは中身を問わない、有効な event であればよい）。"""
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
+        CauseObservedEventAuthority,
+        EventIntent,
+        EventType,
+    )
+
+    other = _observed(PARTITION, ("abi-batch-event",), key=("abi-batch-event",))
+    authority = session.domain_signal_encoder.authority_for_signal(session, other)
+    return (EventIntent(EventType.CAUSE_OBSERVED, CauseObservedEventAuthority(authority)),)
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["success", "phase7-commit-failure"])
+def test_the_abi_batch_transaction_call_site_restores_or_keeps_every_ledger(fails, monkeypatch):
+    """本番の呼び手（``_emit_solver_batch_transaction``）を本物の ``emit_many`` で通す。同じ取引の
+    Phase 7 の commit が ABI の commit の後で失敗したら全ての台帳を取引の前へ戻し、成功したら
+    変換した観測の公開を残して巻き戻し用の写しを捨てる。"""
+    _patch_abi_transaction_identity(monkeypatch)
+    session, abi, batch, handoff = _abi_transaction_with_one_sat_handoff()
+    with production_signal_scope(session):
+        intents = _abi_batch_intents(session)
+        pending = session.domain_signal_state["abi_width_pending_emission_transactions"]
+        digest, _intents, payload = pending[("abi-transaction",)]
+        pending[("abi-transaction",)] = (digest, intents, payload)
+        before = _state(session)
+        abi_before = {key: session.domain_signal_state.get(key) for key in _ABI_TRANSACTION_KEYS}
+        if fails:
+            # Phase 7 の取引を持つ session と同じ順序（domain の commit → Phase 7 の commit）で、
+            # Phase 7 の commit だけが失敗する。
+            class _Phase7Runtime:
+                def buffer_execution_intent(self, _intent):
+                    pass
+
+            def fail_phase7_commit(_transaction):
+                raise RuntimeError("forced Phase 7 commit failure after the domain commit")
+
+            monkeypatch.setattr(session, "phase7_runtime", _Phase7Runtime(), raising=False)
+            monkeypatch.setattr(session, "_begin_phase7_transaction", lambda: object())
+            monkeypatch.setattr(session, "_commit_phase7_transaction", fail_phase7_commit)
+            monkeypatch.setattr(session, "_rollback_phase7_transaction", lambda _transaction: None)
+            with pytest.raises(RuntimeError, match="forced Phase 7 commit failure"):
+                abi._emit_solver_batch_transaction(session, batch, intents)
+            assert _ledger_state(session, handoff) is BlockerState.ABSENT
+            assert _state(session) == before
+            assert {key: session.domain_signal_state.get(key) for key in _ABI_TRANSACTION_KEYS} == abi_before
+        else:
+            abi._emit_solver_batch_transaction(session, batch, intents)
+            assert _ledger_state(session, handoff) is BlockerState.PUBLISHED
+            assert session.recorder.event_count == before["events"] + 1
+        assert "abi_width_committed_rollback_snapshots" not in session.domain_signal_state
+        assert "sat_safety_committed_transactions" not in session.domain_signal_state or not (
+            session.domain_signal_state["sat_safety_committed_transactions"]
+        )
+
+
+def test_a_later_abi_transaction_never_restores_an_earlier_transactions_snapshot():
+    """generic な route の取引が成功して写しが残っても、次の ABI の取引の始まりで捨てる。後の取引の
+    巻き戻しが、別の取引（その後の SAT-safety の公開を含む）を消すことはない。"""
+    session, abi, batch, handoff = _abi_transaction_with_one_sat_handoff()
+    with production_signal_scope(session):
+        abi.commit_emitted_signal(session, batch, ())  # 成功した取引（写しは残る）
+        other = _observed(REPLAY, (R,), key=("unrelated",))
+        assert _observe(other) == 1
+        # 次の ABI の取引の始まり（generic な route の __call__）。batch の中身は問わない。
+        with pytest.raises(Exception):
+            abi(session, batch)
+        abi.rollback_emitted_signal(session, batch)
+        assert _ledger_state(session, handoff) is BlockerState.PUBLISHED
+        assert _ledger_state(session, other) is BlockerState.PUBLISHED

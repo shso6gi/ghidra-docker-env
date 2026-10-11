@@ -2992,6 +2992,9 @@ class AbiWidthReadonlyPilotEncoder:
         self, session: Any, signal: Any
     ) -> tuple[EventIntent, ...]:
         if type(signal) is AbiWidthReadonlySolverExecutionBatchSignal:
+            # generic な route の取引の始まり: 前の取引の巻き戻し用の写しを捨てる
+            # （rollback が他の取引の写しを戻さない）。
+            session.domain_signal_state.pop(_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY, None)
             return self._solver_batch_intents(session, signal)
         if self.has_observed(session, signal):
             return ()
@@ -3961,17 +3964,7 @@ class AbiWidthReadonlyPilotEncoder:
             # while preserving the same atomic producer-state transaction as
             # ProductionDualWritePilotSession.emit_domain_signal().
             intents = tuple(self._solver_batch_intents(session, batch))
-            try:
-                session.emit_many(
-                    intents,
-                    lambda: self.commit_emitted_signal(session, batch, intents),
-                    transaction_signal=batch,
-                )
-            except Exception:
-                self.rollback_emitted_signal(session, batch)
-                raise
-            # 取引は成功した: 巻き戻し用の写しはもう要らない。
-            session.domain_signal_state.pop(_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY, None)
+            self._emit_solver_batch_transaction(session, batch, intents)
             handoffs = tuple(session.domain_signal_state.pop(
                 "abi_width_sat_safety_handoffs", ()
             ))
@@ -3987,6 +3980,27 @@ class AbiWidthReadonlyPilotEncoder:
                     )
                 for handoff in handoffs:
                     session.emit_domain_signal(handoff)
+
+    def _emit_solver_batch_transaction(
+        self, session: Any, batch: Any, intents: tuple[EventIntent, ...],
+    ) -> None:
+        """solver の batch を 1 つの取引として公開する（失敗なら全ての台帳を取引の前へ戻す）。
+
+        取引の始まりで前の取引の巻き戻し用の写しを捨てる（前の取引は成功したか
+        巻き戻されたかで終わっている）。commit の後で同じ取引の Phase 7 の commit などが
+        失敗したら ``rollback_emitted_signal`` が commit の写しから戻し、成功したら写しを捨てる。
+        """
+        session.domain_signal_state.pop(_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY, None)
+        try:
+            session.emit_many(
+                intents,
+                lambda: self.commit_emitted_signal(session, batch, intents),
+                transaction_signal=batch,
+            )
+        except Exception:
+            self.rollback_emitted_signal(session, batch)
+            raise
+        session.domain_signal_state.pop(_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY, None)
 
     def finalize_open_execution_history(self, session: Any) -> None:
         from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
