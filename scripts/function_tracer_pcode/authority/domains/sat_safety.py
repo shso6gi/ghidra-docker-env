@@ -72,6 +72,10 @@ SAT_SAFETY_REASON_REGISTRY = SealedReasonRegistry.build(
 SAT_SAFETY_RECOVERY_REGISTRY = SealedRecoveryRegistry.build((SAT_SAFETY_CONTRACT,))
 
 
+#: commit で台帳を遷移させた取引の、遷移の前の写し（次の取引の開始で捨てる）。
+_COMMITTED_TRANSACTIONS_KEY = "sat_safety_committed_transactions"
+
+
 class SatSafetyPilotEncoder:
     def __init__(self) -> None:
         self._cause_factory = SemanticCauseIdentityFactory(SAT_SAFETY_REASON_REGISTRY)
@@ -167,6 +171,9 @@ class SatSafetyPilotEncoder:
             ),)
         if type(signal) is not SatSafetyBlockerProductionSignal:
             return ()
+        # 前の SAT-safety の取引は、成功したか巻き戻されたかのどちらかで終わっている
+        # （emission は直列）。その巻き戻し用の写しはもう要らない。
+        session.domain_signal_state.pop(_COMMITTED_TRANSACTIONS_KEY, None)
         authority, requirement_id = self._authority(session, signal)
         occurrence_key = authority.occurrence.occurrence_id
         # 判定は台帳の owner が記録の正本（約束か公開済みの観測）に照らして行う。
@@ -244,8 +251,13 @@ class SatSafetyPilotEncoder:
             raise ValueError("SAT safety emission transaction is missing") from exc
         if tuple(intents) != expected_intents:
             raise ValueError("SAT safety emission transaction intents changed")
-        # event を commit した後の遷移は台帳の owner だけが行う（公開は約束を退ける）。
+        # event の commit での遷移は台帳の owner だけが行う（公開は約束を退ける）。
+        # この後の commit（外部・Phase 7）が失敗したら session が rollback を呼ぶので、
+        # 遷移の前の写しを残し、rollback で台帳を戻す（成功の確認 → 状態の確定）。
         ledger = SatSafetyBlockerLedger(session)
+        session.domain_signal_state.setdefault(_COMMITTED_TRANSACTIONS_KEY, {})[
+            id(signal)
+        ] = ledger.snapshot()
         if action == "OBSERVED":
             ledger.record_publication(occurrence_key, signal)
         else:
@@ -257,6 +269,10 @@ class SatSafetyPilotEncoder:
     def rollback_emitted_signal(self, session: Any, signal: Any) -> None:
         if type(signal) is not SatSafetyBlockerProductionSignal:
             return
+        committed = session.domain_signal_state.get(_COMMITTED_TRANSACTIONS_KEY, {})
+        if id(signal) in committed:
+            # commit の遷移の後に取引が失敗した: 台帳を遷移の前へ戻す。
+            SatSafetyBlockerLedger(session).restore(committed.pop(id(signal)))
         pending_key = "sat_safety_pending_emission_transactions"
         pending = session.domain_signal_state.get(pending_key)
         if pending is None:

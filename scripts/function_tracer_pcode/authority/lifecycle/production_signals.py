@@ -1459,13 +1459,11 @@ def _emit_sat_safety_blocker(
     except SatSafetyBlockerInconsistent as exc:
         _refuse_sat_safety_signal(session, exc)
         return None
-    if (
-        signal.action == "OBSERVED"
-        and signal.defer_until_terminal
-        and session.stream_truncated
-    ):
-        # Issue #110: a truncated stream takes no new promise (O(1), before the
-        # occurrence authority is built).  The pair is decided by the limitation.
+    if session.stream_truncated:
+        # Issue #110: a truncated stream takes no new (non-limitation) signal; it is
+        # refused in O(1) before the occurrence authority is built, as the session
+        # refuses every encoding after the truncation.  The pair is decided by the
+        # limitation, so no lifecycle judgement is made.
         return 0
     authority_for_signal = getattr(
         session.domain_signal_encoder, "authority_for_signal", None
@@ -1628,11 +1626,8 @@ def finalize_deferred_sat_safety_observations(session: Any) -> None:
                 manifest_id, terminal_signal
             )
         session.emit_domain_signal(terminal_signal)
-        if ledger.state_of(occurrence_id)[0] is BlockerState.PROMISED:
-            # 公開されなかった。予算による打切り（Issue #110）なら約束は枠を持たない
-            # ので退ける。検証の拒否なら失敗は記録済みで、状態を変えない。
-            if session.stream_truncated or session.event_contract.exceeded is not None:
-                ledger.retire_promise(occurrence_id)
+        # 公開されなかった約束の決着（打切りなら退役、検証の拒否なら保持）は台帳の規則。
+        ledger.settle_unpublished_promise(occurrence_id)
 
 
 def emit_call_effect_signal(

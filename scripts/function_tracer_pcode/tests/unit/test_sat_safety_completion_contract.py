@@ -115,6 +115,8 @@ def _state(session):
         "deferred": dict(state.get("sat_safety_deferred_observations", {})),
         "pending_tx": dict(state.get("sat_safety_pending_emission_transactions", {})),
         "reserved": session.event_contract.deferred_unpublished,
+        "promised_ids": set(session.event_contract._deferred_ids),
+        "published_ids": set(session.event_contract._published_ids),
         "events": session.recorder.event_count,
         "phase7_pending": dict(getattr(runtime, "_pending", {}) or {}),
         "phase7_tx": dict(getattr(runtime, "_signal_transactions", {}) or {}),
@@ -920,6 +922,29 @@ _OPS = {
 }
 
 
+_FAILURE_MESSAGES = {
+    "observe-collide": "collides with its recorded observation",
+    "complete-swapped": "does not restate its recorded observation",
+    "complete-nothing": "no observed active occurrence",
+    "complete-generic-promise": "goes through the lifecycle entry",
+    "phase7-noop": "",
+}
+
+
+def _expected_message(state, op, manifest):
+    now = "published" if state == "published_from_promise" else state
+    kind, route = (op.split("/") + [""])[:2]
+    if kind.startswith("observe-collide") and now != "absent":
+        return _FAILURE_MESSAGES["observe-collide"]
+    if kind in {"complete-same", "complete-swapped"} and now == "absent":
+        return _FAILURE_MESSAGES["complete-nothing"]
+    if kind == "complete-swapped":
+        return _FAILURE_MESSAGES["complete-swapped"]
+    if kind == "complete-same" and now == "promised" and route == "generic":
+        return _FAILURE_MESSAGES["complete-generic-promise"]
+    return _FAILURE_MESSAGES["phase7-noop"]
+
+
 def _oracle(state, op, manifest=False):
     """台帳の契約から導いた (次の状態, 失敗を記録するか)。"""
     next_state, failure = _ledger_oracle(state, op)
@@ -981,6 +1006,10 @@ def test_every_transition_follows_the_ledger_contract(manifest, state, op):
         assert bool(failures) is expected_failure, failures
         if expected_failure:
             assert _state(session) == before, "a refusal must not change the ledger"
+            # 拒否は、この cell の契約の検査による（後段の別の検査に救われていない）。
+            message = _expected_message(state, op, manifest)
+            assert len(failures) == 1
+            assert message in session.domain_signal_error_details[0], session.domain_signal_error_details
         assert _ledger_state(session, published).value == {
             "absent": BlockerState.ABSENT, "promised": BlockerState.PROMISED,
             "published": BlockerState.PUBLISHED, "completed": BlockerState.COMPLETED,
@@ -1054,3 +1083,47 @@ def test_the_ledger_refuses_to_read_a_promise_and_a_publication_of_one_occurrenc
             SatSafetyBlockerLedger(session).state_of(occurrence_id)
         assert _complete_conditionally(_completion(observed)) == 0
         assert session.domain_signal_error_kinds == ["ValueError"]
+
+
+# ---- 成功の確認 → 状態の確定: event の commit の後に取引が失敗したら台帳を戻す --------
+
+
+@pytest.mark.parametrize("start", ["absent", "promised"])
+def test_a_publication_that_fails_after_the_encoder_commit_restores_the_ledger(start, monkeypatch):
+    """encoder の commit（台帳の遷移）の後で取引の別の commit（ここでは Phase 7）が失敗したら、
+    台帳も予約も取引の前に戻る（公開されていない観測を公開済みとして残さない）。"""
+    session = _manifest_connector().begin({"phase": "pr-a", "case": f"post-commit-{start}"})
+    promise = _observed(REPLAY, (R,), defer=True)
+    with production_signal_scope(session):
+        if start == "promised":
+            _observe(promise)
+        before = _state(session)
+
+        def fail_phase7_commit(_signal):
+            raise RuntimeError("forced Phase 7 commit failure")
+
+        monkeypatch.setattr(session, "_commit_phase7_signal_transaction", fail_phase7_commit)
+        assert _observe(replace(promise, defer_until_terminal=False)) == 0
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["RuntimeError"]
+
+
+def test_finalize_keeps_a_promise_whose_terminal_publication_is_refused(monkeypatch):
+    """finalize の終端の公開が（打切りでなく）拒まれたら、約束・予約・約束の印を残す。"""
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        finalize_deferred_sat_safety_observations,
+    )
+
+    session = _connector().begin({"phase": "pr-a", "case": "finalize-refused"})
+    with production_signal_scope(session):
+        _observe(_observed(REPLAY, (R,), defer=True))
+        before = _state(session)
+
+        def fail_append(_intents, _commit_callback=None, **_k):
+            raise RuntimeError("forced stream append failure")
+
+        monkeypatch.setattr(session, "emit_many", fail_append)
+        finalize_deferred_sat_safety_observations(session)
+        assert not session.stream_truncated
+        assert _state(session) == before
+        assert session.domain_signal_error_kinds == ["RuntimeError"]

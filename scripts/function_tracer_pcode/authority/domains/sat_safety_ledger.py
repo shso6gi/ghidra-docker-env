@@ -120,12 +120,13 @@ class SatSafetyBlockerLedger:
         if signal.action == "OBSERVED":
             if state is BlockerState.ABSENT:
                 return Disposition.PROMISE if signal.defer_until_terminal else Disposition.PUBLISH
+            # 言い直しの規則は状態によらず 1 つ（同じ blocker・同じ束縛）。
             signal.require_restates(record)
             if state is BlockerState.PROMISED:
                 if not signal.defer_until_terminal:
                     return Disposition.PUBLISH_PROMISE
-                if (signal, site) != (record, promised_site):
-                    # 約束は (signal, site) ごと記録する。持ち主を黙って差し替えない。
+                if site is not None and site != promised_site:
+                    # 約束の持ち主（site）を黙って差し替えない。site を持つのは入口だけ。
                     raise ValueError("deferred SAT safety authority collided")
             return Disposition.DUPLICATE
         if state is BlockerState.ABSENT:
@@ -145,22 +146,54 @@ class SatSafetyBlockerLedger:
         self._state.setdefault(DEFERRED_KEY, {})[occurrence_id] = (signal, site)
 
     def retire_promise(self, occurrence_id: str) -> None:
+        """event の無い退役（未公開の約束の完了・予算による打切り）。予約を返す。"""
+        self._drop_promise(occurrence_id)
+        self._session.event_contract.release(occurrence_id)
+
+    def _drop_promise(self, occurrence_id: str) -> None:
         if self.state_of(occurrence_id)[0] is not BlockerState.PROMISED:
             raise ValueError("SAT safety promise retirement needs a promise")
         promises = self._state[DEFERRED_KEY]
         promises.pop(occurrence_id)
         if not promises:
             self._state.pop(DEFERRED_KEY, None)
-        self._session.event_contract.release(occurrence_id)
+
+    def settle_unpublished_promise(self, occurrence_id: str) -> None:
+        """終端の公開を試みた後、まだ約束のままの occurrence を決着させる。
+
+        予算による打切り（Issue #110: stream が切られた）なら約束は枠を持たないので退ける。
+        検証の拒否なら失敗は記録済みで、状態を変えない。
+        """
+        if self.state_of(occurrence_id)[0] is not BlockerState.PROMISED:
+            return
+        if self._session.stream_truncated:
+            self.retire_promise(occurrence_id)
+
+    def snapshot(self) -> dict:
+        """台帳の key の写し（event を伴う遷移の巻き戻し用）。"""
+        copied = {}
+        for key in SAT_SAFETY_LEDGER_KEYS:
+            if key in self._state:
+                value = self._state[key]
+                copied[key] = dict(value) if type(value) is dict else set(value)
+        return copied
+
+    def restore(self, snapshot: dict) -> None:
+        for key in SAT_SAFETY_LEDGER_KEYS:
+            if key in snapshot:
+                self._state[key] = snapshot[key]
+            else:
+                self._state.pop(key, None)
 
     def record_publication(self, occurrence_id: str, signal: Any) -> None:
-        """公開の event を commit した後に呼ぶ。約束があれば退ける（予約は event contract が
-        公開で数え済みなので、release は約束の印を消すだけ）。"""
+        """公開の event の commit で呼ぶ。約束があれば台帳から外す。"""
         state = self.state_of(occurrence_id)[0]
         if state not in {BlockerState.ABSENT, BlockerState.PROMISED}:
             raise ValueError("SAT safety transaction duplicates committed state")
         if state is BlockerState.PROMISED:
-            self.retire_promise(occurrence_id)
+            # 約束は果たされた。予約は event contract が公開の commit で数え済みで、
+            # その undo が戻すので、ここでは release しない（台帳だけを変える）。
+            self._drop_promise(occurrence_id)
         self._state.setdefault(PUBLISHED_KEY, set()).add(occurrence_id)
         self._state.setdefault(PUBLISHED_SIGNALS_KEY, {})[occurrence_id] = signal
 
