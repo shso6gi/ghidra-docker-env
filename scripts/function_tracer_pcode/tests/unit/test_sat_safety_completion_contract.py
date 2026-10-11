@@ -1038,3 +1038,19 @@ def test_a_promised_analysis_cause_never_completes_across_entries(publish_route,
         )[0] is BlockerState.PUBLISHED
     with pytest.raises(ValueError, match="not admissible for an analysis-unsafety cause"):
         _finish(session, connector, "xentry-analysis")
+
+
+def test_the_ledger_refuses_to_read_a_promise_and_a_publication_of_one_occurrence():
+    """台帳の不変量: 約束と公開は共存しない。共存を見つけたら片方を優先せずに止める。"""
+    session = _connector().begin({"phase": "pr-a", "case": "ledger-both"})
+    observed = _observed(REPLAY, (R,))
+    with production_signal_scope(session):
+        _observe(observed)
+        occurrence_id = session.domain_signal_encoder.authority_for_signal(session, observed).occurrence.occurrence_id
+        session.domain_signal_state["sat_safety_deferred_observations"] = {
+            occurrence_id: (replace(observed, defer_until_terminal=True), "site"),
+        }
+        with pytest.raises(ValueError, match="both a promise and a publication"):
+            SatSafetyBlockerLedger(session).state_of(occurrence_id)
+        assert _complete_conditionally(_completion(observed)) == 0
+        assert session.domain_signal_error_kinds == ["ValueError"]
