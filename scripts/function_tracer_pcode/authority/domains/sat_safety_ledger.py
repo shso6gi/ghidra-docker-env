@@ -22,7 +22,17 @@ handoff・finalize のすべてが同じものを使う。整合しない対・�
 * ``record_publication`` — ABSENT/PROMISED → PUBLISHED（event の commit の後。約束は退ける）
 * ``record_completion``  — PUBLISHED → COMPLETED（event の commit の後）
 
+event を伴う遷移の後で同じ取引が失敗したら、``restore_occurrence`` が遷移の前の
+写しからその occurrence だけを戻す。
+
 保存の形は既存の session の state の key のまま（Issue #110 の test と互換）。
+
+取引の境界: 判定から遷移・巻き戻しまでは session の取引
+（``session.domain_signal_transaction()``）の中で行う。遷移と巻き戻しはその中で
+しか受け付けない（``_require_transaction``）。判定と遷移の間に別の取引が同じ
+occurrence を変えることも、巻き戻しの写しを別の取引が消すこともない。巻き戻しの
+写しは occurrence 単位（``snapshot_occurrence``）で、失敗した取引の occurrence だけを
+戻す（他の取引が確定させた記録は消さない）。
 """
 
 from __future__ import annotations
@@ -140,17 +150,31 @@ class SatSafetyBlockerLedger:
 
     # ---- 遷移（台帳と予約を変える唯一の場所） ---------------------------------
 
+    def _require_transaction(self, *, entry: bool = False) -> None:
+        """遷移は session の取引の中だけ。入口の遷移（event の無い約束と約束の退役）は
+        さらに、別の取引の commit から終わりまでの間（commit window）には起きない
+        （その取引の巻き戻しの範囲に入ってしまう）。event を伴う遷移と巻き戻しは、
+        その取引自身の commit window の中で起きる。"""
+        holds = getattr(self._session, "holds_domain_signal_transaction", None)
+        if not callable(holds) or not holds():
+            raise RuntimeError("SAT safety ledger changes outside the session transaction")
+        if entry and self._session.producer_commit_open():
+            raise RuntimeError("SAT safety ledger entry transition inside another transaction's commit")
+
     def record_promise(self, occurrence_id: str, signal: Any, site: Optional[str]) -> None:
+        self._require_transaction(entry=True)
         if self.state_of(occurrence_id)[0] is not BlockerState.ABSENT:
             raise ValueError("SAT safety promise needs an absent occurrence")
         self._state.setdefault(DEFERRED_KEY, {})[occurrence_id] = (signal, site)
 
     def retire_promise(self, occurrence_id: str) -> None:
         """event の無い退役（未公開の約束の完了・予算による打切り）。予約を返す。"""
+        self._require_transaction(entry=True)
         self._drop_promise(occurrence_id)
         self._session.event_contract.release(occurrence_id)
 
     def _drop_promise(self, occurrence_id: str) -> None:
+        self._require_transaction()
         if self.state_of(occurrence_id)[0] is not BlockerState.PROMISED:
             raise ValueError("SAT safety promise retirement needs a promise")
         promises = self._state[DEFERRED_KEY]
@@ -169,24 +193,44 @@ class SatSafetyBlockerLedger:
         if self._session.stream_truncated:
             self.retire_promise(occurrence_id)
 
-    def snapshot(self) -> dict:
-        """台帳の key の写し（event を伴う遷移の巻き戻し用）。"""
-        copied = {}
-        for key in SAT_SAFETY_LEDGER_KEYS:
-            if key in self._state:
-                value = self._state[key]
-                copied[key] = dict(value) if type(value) is dict else set(value)
-        return copied
+    def snapshot_occurrence(self, occurrence_id: str) -> tuple:
+        """1 つの occurrence の記録の写し（event を伴う遷移の巻き戻し用）。"""
+        return (
+            occurrence_id,
+            self._table(DEFERRED_KEY, dict).get(occurrence_id),
+            occurrence_id in self._table(PUBLISHED_KEY, set),
+            self._table(PUBLISHED_SIGNALS_KEY, dict).get(occurrence_id),
+            occurrence_id in self._table(COMPLETED_KEY, set),
+        )
 
-    def restore(self, snapshot: dict) -> None:
-        for key in SAT_SAFETY_LEDGER_KEYS:
-            if key in snapshot:
-                self._state[key] = snapshot[key]
-            else:
-                self._state.pop(key, None)
+    def restore_occurrence(self, snapshot: tuple) -> None:
+        """写しの occurrence だけを写しの時点へ戻す（他の occurrence の記録は触らない）。"""
+        self._require_transaction()
+        occurrence_id, promised, published, published_signal, completed = snapshot
+        for key, kind, present, value in (
+            (DEFERRED_KEY, dict, promised is not None, promised),
+            (PUBLISHED_KEY, set, published, None),
+            (PUBLISHED_SIGNALS_KEY, dict, published_signal is not None, published_signal),
+            (COMPLETED_KEY, set, completed, None),
+        ):
+            table = self._table(key, kind)
+            if present:
+                if kind is dict:
+                    table[occurrence_id] = value
+                else:
+                    table.add(occurrence_id)
+                self._state[key] = table
+            elif occurrence_id in table:
+                if kind is dict:
+                    table.pop(occurrence_id)
+                else:
+                    table.discard(occurrence_id)
+                if not table:
+                    self._state.pop(key, None)
 
     def record_publication(self, occurrence_id: str, signal: Any) -> None:
         """公開の event の commit で呼ぶ。約束があれば台帳から外す。"""
+        self._require_transaction()
         state = self.state_of(occurrence_id)[0]
         if state not in {BlockerState.ABSENT, BlockerState.PROMISED}:
             raise ValueError("SAT safety transaction duplicates committed state")
@@ -198,6 +242,7 @@ class SatSafetyBlockerLedger:
         self._state.setdefault(PUBLISHED_SIGNALS_KEY, {})[occurrence_id] = signal
 
     def record_completion(self, occurrence_id: str) -> None:
+        self._require_transaction()
         if self.state_of(occurrence_id)[0] is not BlockerState.PUBLISHED:
             raise ValueError("SAT safety transaction duplicates committed state")
         self._state.setdefault(COMPLETED_KEY, set()).add(occurrence_id)

@@ -1053,6 +1053,13 @@ class CompositeProductionSignalEncoder:
         if callable(rollback):
             rollback(session, signal)
 
+    def finish_emitted_signal(self, session: Any, signal: Any) -> None:
+        """取引の公開が確定した後の、その signal の owner の後始末（巻き戻し用の状態の破棄）。"""
+        encoder = self._routes.get(type(signal))
+        finish = getattr(encoder, "finish_emitted_signal", None)
+        if callable(finish):
+            finish(session, signal)
+
     def is_committed_signal_replay(
         self, session: Any, signal: Any, intents: tuple[EventIntent, ...] = ()
     ) -> bool:
@@ -1437,6 +1444,18 @@ def emit_sat_safety_signal(
     return int(emit(signal))
 
 
+def _sat_safety_transaction(session: Any) -> Any:
+    """SAT-safety の台帳を読んで遷移させる取引の境界（session の唯一の取引の境界）。
+
+    判定（``decide``）から予約・encoding・公開・commit・巻き戻しまでを 1 つの取引に
+    する。境界を持たない session は台帳を変えられない（fail-closed）。
+    """
+    transaction = getattr(session, "domain_signal_transaction", None)
+    if not callable(transaction):
+        raise TypeError("active production pilot session lacks a transaction boundary")
+    return transaction()
+
+
 def _emit_sat_safety_blocker(
     session: Any,
     signal: SatSafetyBlockerProductionSignal,
@@ -1450,8 +1469,22 @@ def _emit_sat_safety_blocker(
     この関数は結論に従って event を出すか、event の無い遷移（約束・約束の退役）を
     台帳に頼むだけ。違反は状態を変えずに失敗として記録し ``None`` を返す。
     event を出す結論は generic な route（encoder）でも同じ判定を受け、成功したときだけ
-    encoder の commit が台帳を遷移させる。
+    encoder の commit が台帳を遷移させる。判定から遷移・巻き戻しまでが 1 つの取引
+    （``_sat_safety_transaction``）なので、判定と遷移の間に別の取引は入らない。
     """
+    with _sat_safety_transaction(session):
+        return _emit_sat_safety_blocker_in_transaction(
+            session, signal, producer_site_manifest_id, conditional=conditional,
+        )
+
+
+def _emit_sat_safety_blocker_in_transaction(
+    session: Any,
+    signal: SatSafetyBlockerProductionSignal,
+    producer_site_manifest_id: Optional[str],
+    *,
+    conditional: bool,
+) -> Optional[int]:
     if session.domain_signal_encoder is None:
         return 0
     if session.stream_truncated:
@@ -1467,6 +1500,10 @@ def _emit_sat_safety_blocker(
         raise TypeError("SAT safety encoder lacks occurrence authority")
     ledger = SatSafetyBlockerLedger(session)
     try:
+        if session.producer_commit_open():
+            # 別の取引の commit の中（commit の callback）からの入口: その取引の巻き戻しの
+            # 範囲に入るので受け付けない（状態を変えずに失敗として記録する）。
+            raise ValueError("SAT safety signal inside another transaction's commit")
         # identity の owner は検証済みの blocker からしか identity を作らない（owner の分類は
         # ここで 1 回、identity・台帳より前）。
         occurrence_id = authority_for_signal(session, signal).occurrence.occurrence_id
@@ -1546,6 +1583,15 @@ def complete_observed_sat_safety_for_counterexample(
     if session is None:
         return 0
 
+    # 記録の読み出しから全ての完了の公開までを 1 つの取引の境界の中で行う
+    # （読んだ記録と完了の間に別の取引が台帳を変えない）。
+    with _sat_safety_transaction(session):
+        return _complete_observed_sat_safety_in_transaction(session, signal)
+
+
+def _complete_observed_sat_safety_in_transaction(
+    session: Any, signal: SafeCounterexampleProductionSignal,
+) -> int:
     from scripts.function_tracer_pcode.authority.domains.sat_safety_sites import (
         SAT_SAFETY_COUNTEREXAMPLE_BOUND_COMPLETED_SITE,
     )
@@ -1608,6 +1654,12 @@ def finalize_deferred_sat_safety_observations(session: Any) -> None:
     NOT_EQ on Eq benchmarks (Issue #25), so they are always emitted and the
     decision authority decides whether they block the counterexample.
     """
+    # 約束の一覧の読み出しから各約束の公開と決着までを 1 つの取引の境界の中で行う。
+    with _sat_safety_transaction(session):
+        _finalize_deferred_sat_safety_in_transaction(session)
+
+
+def _finalize_deferred_sat_safety_in_transaction(session: Any) -> None:
     ledger = SatSafetyBlockerLedger(session)
     for occurrence_id, signal, manifest_id in ledger.promises():
         # 約束は公開の遷移で処理する（独自に台帳や予約を消さない）。公開に成功すれば
@@ -1912,26 +1964,44 @@ def execute_loop_solver_rendered_query(
     batch = LoopSolverExecutionBatchSignal.from_issuer_results(
         blocker, query, membership, receipts, context.lifecycle_projection
     )
-    commit = getattr(session.domain_signal_encoder, "commit_emitted_signal", None)
-    rollback = getattr(session.domain_signal_encoder, "rollback_emitted_signal", None)
-    try:
-        intents = tuple(session.domain_signal_encoder(session, batch))
-        session.emit_many(
+    encoder = session.domain_signal_encoder
+    commit = getattr(encoder, "commit_emitted_signal", None)
+    rollback = getattr(encoder, "rollback_emitted_signal", None)
+    finish = getattr(encoder, "finish_emitted_signal", None)
+    # encoding から公開・commit・巻き戻し・後始末までが session の 1 つの取引。
+    with _sat_safety_transaction(session):
+        encoded = False
+        try:
+            intents = tuple(encoder(session, batch))
+            encoded = True
+        finally:
+            if not encoded and callable(rollback):
+                rollback(session, batch)
+        session.publish_signal_transaction(
+            batch,
             intents,
-            (lambda: commit(session, batch, intents)) if callable(commit) else None,
+            (lambda: commit(session, batch, intents)) if callable(commit) else _no_op,
+            (lambda: rollback(session, batch)) if callable(rollback) else _no_op,
+            finish=(lambda: finish(session, batch)) if callable(finish) else None,
         )
-    except Exception:
-        if callable(rollback):
-            rollback(session, batch)
-        raise
     emitted = len(intents)
     emitted += _consume_loop_sat_safety_handoffs(session)
     return emitted
 
 
+def _no_op() -> None:
+    return None
+
+
 def _consume_loop_sat_safety_handoffs(session: Any) -> int:
     """Consume each handoff only after an event or typed duplicate is proven."""
 
+    # handoff の一覧の読み出しから各 handoff の判定・公開・消費までが 1 つの取引。
+    with _sat_safety_transaction(session):
+        return _consume_loop_sat_safety_handoffs_in_transaction(session)
+
+
+def _consume_loop_sat_safety_handoffs_in_transaction(session: Any) -> int:
     state = session.domain_signal_state
     key = "loop_sat_safety_handoffs"
     pending = state.get(key)

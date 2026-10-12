@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import wraps
 import os
 import secrets
-from threading import RLock
+from threading import RLock, get_ident
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.authority.decision.candidate import (
@@ -519,6 +520,17 @@ class LegacyOutcomeObservationReceipt:
 _CONSEQUENCE_DETAIL_CHARS = 500
 
 
+def _holding_domain_signal_transaction(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Run a session method inside the session's producer transaction boundary."""
+
+    @wraps(method)
+    def holding(self: Any, *args: Any, **kwargs: Any) -> Any:
+        with self.domain_signal_transaction():
+            return method(self, *args, **kwargs)
+
+    return holding
+
+
 class ProductionDualWritePilotSession:
     def __init__(
         self,
@@ -552,6 +564,14 @@ class ProductionDualWritePilotSession:
         self._phase7_signal_sites: dict[int, str] = {}
         self._phase7_signal_transactions: dict[int, Any] = {}
         self._domain_signal_transaction_lock = RLock()
+        #: The thread holding the transaction lock and its reentry depth
+        #: (``holds_domain_signal_transaction``).
+        self._transaction_owner: Optional[int] = None
+        self._transaction_depth = 0
+        #: The signal whose producer commit has started and whose transaction
+        #: has not ended (published or rolled back) yet.  Its rollback state is
+        #: live, so no other producer transaction may start inside this window.
+        self._commit_window_signal: Any = None
         # Issue #110: the publication gate owns one event-contract ledger per
         # session.  Every transaction is admitted against the authority event
         # contract before any event is staged or digested.
@@ -572,10 +592,103 @@ class ProductionDualWritePilotSession:
 
     @contextmanager
     def domain_signal_transaction(self) -> Any:
-        """Serialize one producer transaction across preview and commit."""
+        """The single producer transaction boundary of this session.
 
-        with self._domain_signal_transaction_lock:
+        One reentrant lock serializes every producer transaction: the
+        judgement against a producer ledger, the reservation, the encoding,
+        the publication with its producer / external / Phase 7 commits, the
+        rollback of a failure and the end-of-transaction hook all run while
+        the same thread holds it.  It is the outermost authority lock (the
+        solver issuer / ledger locks are taken inside it, never around it),
+        reentry by the owning thread nests (an ABI transaction committing a
+        transformed SAT-safety observation), and the lock is released when
+        the block exits, also by an exception.
+        """
+
+        self._enter_transaction()
+        try:
             yield
+        finally:
+            self._exit_transaction()
+
+    def _enter_transaction(self) -> None:
+        self._domain_signal_transaction_lock.acquire()
+        self._transaction_owner = get_ident()
+        self._transaction_depth += 1
+
+    def _exit_transaction(self) -> None:
+        self._transaction_depth -= 1
+        if self._transaction_depth == 0:
+            self._transaction_owner = None
+        self._domain_signal_transaction_lock.release()
+
+    def holds_domain_signal_transaction(self) -> bool:
+        """Whether the calling thread is inside ``domain_signal_transaction``."""
+
+        return self._transaction_owner == get_ident()
+
+    def producer_commit_open(self) -> bool:
+        """Whether a producer transaction is between its commit and its end.
+
+        Inside this window only that transaction's own commit callbacks and
+        rollback may change producer state: no other transaction may start
+        (its changes would fall inside the open transaction's rollback scope).
+        """
+
+        return self._commit_window_signal is not None
+
+    def _refuse_inside_commit_window(self) -> None:
+        if self._commit_window_signal is not None:
+            raise ValueError(
+                "producer transaction started inside another transaction's commit"
+            )
+
+    def publish_signal_transaction(
+        self, signal: Any, intents: Sequence[Any], commit: Callable[[], None],
+        rollback: Callable[[], None], *, finish: Optional[Callable[[], None]] = None,
+        replay_aware: bool = False,
+    ) -> tuple[int, ...]:
+        """Publish precomputed ``intents`` of ``signal`` as one producer transaction.
+
+        ``commit`` runs inside the publication (before the events are
+        appended).  If the transaction fails at any point, ``rollback`` runs
+        and the exception propagates; if it is published, ``finish`` runs.
+        The producer may keep rollback state from ``commit`` until one of the
+        two ends this transaction: no other transaction can start, discard it
+        or interleave with it in between (``domain_signal_transaction`` and
+        the commit window).  ``replay_aware`` lets the publication gate treat
+        a committed replay of ``signal`` as a no-op (the encoder's
+        ``is_committed_signal_replay``).
+        """
+
+        with self.domain_signal_transaction():
+            opened = False
+
+            def commit_in_window() -> None:
+                nonlocal opened
+                self._commit_window_signal = signal
+                opened = True
+                commit()
+
+            published = False
+            try:
+                # A refusal is a failure of this transaction too: it is rolled back.
+                self._refuse_inside_commit_window()
+                sequences = self.emit_many(
+                    intents, commit_in_window,
+                    transaction_signal=signal if replay_aware else None,
+                )
+                published = True
+            finally:
+                try:
+                    if not published:
+                        rollback()
+                    elif finish is not None:
+                        finish()
+                finally:
+                    if opened:
+                        self._commit_window_signal = None
+            return sequences
 
     def emit(self, intent: Any) -> int:
         return self.emit_many((intent,))[0]
@@ -665,7 +778,7 @@ class ProductionDualWritePilotSession:
             AuthorityEventContractExceeded,
         )
 
-        with self._domain_signal_transaction_lock:
+        with self.domain_signal_transaction():
             try:
                 return self._emit_many_locked(
                     intents,
@@ -923,16 +1036,29 @@ class ProductionDualWritePilotSession:
                 or signal_id in self._phase7_signal_transactions
             ):
                 raise ValueError("production signal already owns a Phase 7 transaction")
-            transaction = self._begin_phase7_transaction()
+            # The activation opens the signal's producer transaction: the
+            # session's transaction boundary is held from here until the
+            # signal's Phase 7 transaction is committed or rolled back (the
+            # Phase 7 runtime owns one open signal transaction at a time, and
+            # the judgement / encoding between them belongs to the same
+            # transaction).
+            self._enter_transaction()
+            opened = False
             try:
-                self.phase7_runtime.record_pre_emission_activation(
-                    producer_site_manifest_id, signal
-                )
-            except Exception:
-                self._rollback_phase7_transaction(transaction)
-                raise
-            self._phase7_signal_sites[signal_id] = producer_site_manifest_id
-            self._phase7_signal_transactions[signal_id] = transaction
+                transaction = self._begin_phase7_transaction()
+                try:
+                    self.phase7_runtime.record_pre_emission_activation(
+                        producer_site_manifest_id, signal
+                    )
+                except Exception:
+                    self._rollback_phase7_transaction(transaction)
+                    raise
+                self._phase7_signal_sites[signal_id] = producer_site_manifest_id
+                self._phase7_signal_transactions[signal_id] = transaction
+                opened = True
+            finally:
+                if not opened:
+                    self._exit_transaction()
 
     def _commit_phase7_signal_transaction(self, signal: Any) -> None:
         if self.phase7_runtime is None:
@@ -945,6 +1071,8 @@ class ProductionDualWritePilotSession:
         self._commit_phase7_transaction(transaction)
         self._phase7_signal_transactions.pop(signal_id)
         self._phase7_signal_sites.pop(signal_id)
+        # The signal transaction opened by its activation has ended.
+        self._exit_transaction()
 
     def _rollback_phase7_signal_transaction(self, signal: Any) -> None:
         if self.phase7_runtime is None:
@@ -954,7 +1082,11 @@ class ProductionDualWritePilotSession:
         self._phase7_signal_sites.pop(signal_id, None)
         if transaction is None:
             return
-        self._rollback_phase7_transaction(transaction)
+        try:
+            self._rollback_phase7_transaction(transaction)
+        finally:
+            # The signal transaction opened by its activation has ended.
+            self._exit_transaction()
 
     def terminalize(self, event_sequence_number: int, proof_requirement_id: str) -> None:
         if self.closed:
@@ -966,25 +1098,42 @@ class ProductionDualWritePilotSession:
     def emit_domain_signal(self, signal: Any) -> int:
         return self._emit_domain_signal_with_commit(signal)
 
+    @_holding_domain_signal_transaction
     def _emit_domain_signal_with_commit(
         self, signal: Any, external_commit: Any = None,
         external_rollback: Any = None,
     ) -> int:
-        """Commit one signal together with an optional external authority."""
+        """Commit one signal together with an optional external authority.
 
-        if self.closed:
-            raise ValueError("production dual-write pilot session is closed")
-        if (external_commit is None) != (external_rollback is None):
-            raise TypeError(
-                "external signal commit and rollback must be supplied together"
-            )
-        if external_commit is not None and (
-            not callable(external_commit) or not callable(external_rollback)
-        ):
-            raise TypeError("external signal transaction callbacks must be callable")
-        self.observed_domain_signal_count += 1
-        if self.domain_signal_encoder is None:
-            return 0
+        The whole producer transaction -- encoding, admission, publication, the
+        producer/external/Phase 7 commits, the rollback of a failure and the
+        encoder's end-of-transaction hook -- holds the session's transaction
+        lock, so another transaction can neither interleave with it nor discard
+        its rollback state (an encoder may keep rollback state from its commit
+        until ``finish_emitted_signal`` / ``rollback_emitted_signal``).
+        """
+
+        # Every exit before the encoding closes the signal's Phase 7
+        # transaction (and so the boundary its activation entered).
+        handed_over = False
+        try:
+            if self.closed:
+                raise ValueError("production dual-write pilot session is closed")
+            if (external_commit is None) != (external_rollback is None):
+                raise TypeError(
+                    "external signal commit and rollback must be supplied together"
+                )
+            if external_commit is not None and (
+                not callable(external_commit) or not callable(external_rollback)
+            ):
+                raise TypeError("external signal transaction callbacks must be callable")
+            self.observed_domain_signal_count += 1
+            if self.domain_signal_encoder is None:
+                return 0
+            handed_over = True
+        finally:
+            if not handed_over:
+                self._rollback_phase7_signal_transaction(signal)
         if self.stream_truncated and type(signal) is not AnalysisLimitationBlockerSignal:
             # Issue #110: a truncated stream publishes only limitation causes.
             # Refuse before encoding (O(1)): close the wrapper's Phase 7
@@ -992,7 +1141,11 @@ class ProductionDualWritePilotSession:
             self._rollback_phase7_signal_transaction(signal)
             return 0
         external_committed = False
+        opened_window = False
         try:
+            # A producer callback inside another transaction's commit must not
+            # start a transaction: that one's rollback state is still live.
+            self._refuse_inside_commit_window()
             intents = tuple(self.domain_signal_encoder(self, signal))
             site_id = None
             if self.phase7_runtime is not None:
@@ -1033,7 +1186,9 @@ class ProductionDualWritePilotSession:
             )
 
             def commit_all() -> None:
-                nonlocal external_committed
+                nonlocal external_committed, opened_window
+                self._commit_window_signal = signal
+                opened_window = True
                 if callable(commit):
                     commit(self, signal, intents)
                 if external_commit is not None:
@@ -1057,7 +1212,6 @@ class ProductionDualWritePilotSession:
                 )
             finally:
                 self._domain_admission = None
-            return len(recorded_sequences)
         except Exception as exc:
             from scripts.function_tracer_pcode.authority.event_contract import (
                 AuthorityEventContractExceeded,
@@ -1090,6 +1244,10 @@ class ProductionDualWritePilotSession:
                     "Phase 7 rollback: "
                     + f"{type(rollback_exc).__name__}: {rollback_exc}"
                 )
+            if opened_window:
+                # This transaction has ended (rolled back).
+                opened_window = False
+                self._commit_window_signal = None
             if rollback_failures:
                 # A failed rollback leaves producer / Phase 7 state that the
                 # prefix does not describe: an error even on a truncated stream.
@@ -1111,7 +1269,19 @@ class ProductionDualWritePilotSession:
                 type(exc).__name__, f"{type(signal).__name__}: {exc}"
             )
             return 0
+        # The transaction is published (outside the rollback handler: nothing
+        # after the publication may undo it).  The encoder drops the rollback
+        # state it kept from its commit, and the commit window closes.
+        try:
+            finish = getattr(self.domain_signal_encoder, "finish_emitted_signal", None)
+            if callable(finish):
+                finish(self, signal)
+        finally:
+            if opened_window:
+                self._commit_window_signal = None
+        return len(recorded_sequences)
 
+    @_holding_domain_signal_transaction  # the observed check and the emission are one transaction
     def emit_domain_signal_if_observed(
         self, signal: Any, producer_site_manifest_id: str = None,
     ) -> int:

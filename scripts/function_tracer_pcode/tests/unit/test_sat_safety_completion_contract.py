@@ -1224,12 +1224,14 @@ def test_an_abi_transaction_failing_after_its_commit_restores_the_sat_safety_led
     with production_signal_scope(session):
         before = _state(session)
         abi_before = {key: session.domain_signal_state.get(key) for key in _ABI_TRANSACTION_KEYS}
-        abi.commit_emitted_signal(session, batch, ())
-        # commit は SAT-safety の観測を公開済みとして台帳に記録した。
-        assert _ledger_state(session, handoff) is BlockerState.PUBLISHED
-        # 同じ取引の後の commit（Phase 7 など）が失敗したときの、本番の呼び手の巻き戻し。
-        abi.rollback_emitted_signal(session, batch)
+        with session.domain_signal_transaction():
+            abi.commit_emitted_signal(session, batch, ())
+            # commit は SAT-safety の観測を公開済みとして台帳に記録した。
+            assert _ledger_state(session, handoff) is BlockerState.PUBLISHED
+            # 同じ取引の後の commit（Phase 7 など）が失敗したときの、本番の呼び手の巻き戻し。
+            abi.rollback_emitted_signal(session, batch)
         assert _ledger_state(session, handoff) is BlockerState.ABSENT
+        assert "abi_width_committed_rollback_snapshots" not in session.domain_signal_state
         assert _state(session) == before
         assert {key: session.domain_signal_state.get(key) for key in _ABI_TRANSACTION_KEYS} == abi_before
 
@@ -1238,9 +1240,24 @@ def test_a_completed_abi_transaction_keeps_its_sat_safety_publication():
     """対照: 取引が成功したら（呼び手が巻き戻さない）、変換した観測の公開は残る。"""
     session, abi, batch, handoff = _abi_transaction_with_one_sat_handoff()
     with production_signal_scope(session):
-        abi.commit_emitted_signal(session, batch, ())
+        with session.domain_signal_transaction():
+            abi.commit_emitted_signal(session, batch, ())
+            abi.finish_emitted_signal(session, batch)
         assert _ledger_state(session, handoff) is BlockerState.PUBLISHED
         assert session.domain_signal_error_kinds == []
+        # 取引の終わりがこの取引の写しを捨てた。
+        assert "abi_width_committed_rollback_snapshots" not in session.domain_signal_state
+
+
+def test_the_sat_safety_ledger_refuses_a_change_outside_the_session_transaction():
+    """台帳の遷移は session の取引の境界の中でしか起きない（境界の外の commit は台帳を変えない）。"""
+    session, abi, batch, handoff = _abi_transaction_with_one_sat_handoff()
+    with production_signal_scope(session):
+        before = _state(session)
+        with pytest.raises(RuntimeError, match="outside the session transaction"):
+            abi.commit_emitted_signal(session, batch, ())
+        assert _state(session) == before
+        assert _ledger_state(session, handoff) is BlockerState.ABSENT
 
 
 def test_a_completion_that_fails_after_the_encoder_commit_restores_the_ledger(monkeypatch):
@@ -1301,8 +1318,15 @@ def test_the_abi_batch_transaction_call_site_restores_or_keeps_every_ledger(fail
         intents = _abi_batch_intents(session)
         pending = session.domain_signal_state["abi_width_pending_emission_transactions"]
         digest, _intents, payload = pending[("abi-transaction",)]
-        pending[("abi-transaction",)] = (digest, intents, payload)
+        pending.pop(("abi-transaction",))
         before = _state(session)
+
+        def encode(_session, _batch):
+            # encoding が取引を予約する（本物の ``_solver_batch_intents`` と同じ形）。
+            pending[("abi-transaction",)] = (digest, intents, payload)
+            return intents
+
+        monkeypatch.setattr(abi, "_solver_batch_intents", encode)
         abi_before = {key: session.domain_signal_state.get(key) for key in _ABI_TRANSACTION_KEYS}
         if fails:
             # Phase 7 の取引を持つ session と同じ順序（domain の commit → Phase 7 の commit）で、
@@ -1319,12 +1343,12 @@ def test_the_abi_batch_transaction_call_site_restores_or_keeps_every_ledger(fail
             monkeypatch.setattr(session, "_commit_phase7_transaction", fail_phase7_commit)
             monkeypatch.setattr(session, "_rollback_phase7_transaction", lambda _transaction: None)
             with pytest.raises(RuntimeError, match="forced Phase 7 commit failure"):
-                abi._emit_solver_batch_transaction(session, batch, intents)
+                abi._emit_solver_batch_transaction(session, batch)
             assert _ledger_state(session, handoff) is BlockerState.ABSENT
             assert _state(session) == before
             assert {key: session.domain_signal_state.get(key) for key in _ABI_TRANSACTION_KEYS} == abi_before
         else:
-            abi._emit_solver_batch_transaction(session, batch, intents)
+            abi._emit_solver_batch_transaction(session, batch)
             assert _ledger_state(session, handoff) is BlockerState.PUBLISHED
             assert session.recorder.event_count == before["events"] + 1
         assert "abi_width_committed_rollback_snapshots" not in session.domain_signal_state
@@ -1334,16 +1358,257 @@ def test_the_abi_batch_transaction_call_site_restores_or_keeps_every_ledger(fail
 
 
 def test_a_later_abi_transaction_never_restores_an_earlier_transactions_snapshot():
-    """generic な route の取引が成功して写しが残っても、次の ABI の取引の始まりで捨てる。後の取引の
-    巻き戻しが、別の取引（その後の SAT-safety の公開を含む）を消すことはない。"""
+    """写しはその取引の終わりで捨てられる。終わった取引の識別で後から巻き戻しても、その取引も
+    その後の別の取引（SAT-safety の公開）も消えない。終わっていない取引の写しは、同じ識別の
+    次の commit が上書きできない（上書きすれば先の取引を戻せなくなる）。"""
     session, abi, batch, handoff = _abi_transaction_with_one_sat_handoff()
     with production_signal_scope(session):
-        abi.commit_emitted_signal(session, batch, ())  # 成功した取引（写しは残る）
+        payload_entry = dict(session.domain_signal_state["abi_width_pending_emission_transactions"])
+        with session.domain_signal_transaction():
+            abi.commit_emitted_signal(session, batch, ())
+            abi.finish_emitted_signal(session, batch)  # 成功した取引の終わり
         other = _observed(REPLAY, (R,), key=("unrelated",))
         assert _observe(other) == 1
-        # 次の ABI の取引の始まり（generic な route の __call__）。batch の中身は問わない。
-        with pytest.raises(Exception):
-            abi(session, batch)
-        abi.rollback_emitted_signal(session, batch)
+        with session.domain_signal_transaction():
+            abi.rollback_emitted_signal(session, batch)
         assert _ledger_state(session, handoff) is BlockerState.PUBLISHED
         assert _ledger_state(session, other) is BlockerState.PUBLISHED
+
+    session, abi, batch, handoff = _abi_transaction_with_one_sat_handoff()
+    with production_signal_scope(session):
+        with session.domain_signal_transaction():
+            abi.commit_emitted_signal(session, batch, ())  # 終わっていない取引
+            session.domain_signal_state["abi_width_pending_emission_transactions"] = dict(payload_entry)
+            with pytest.raises(ValueError, match="already owns a committed rollback"):
+                abi.commit_emitted_signal(session, batch, ())
+            abi.rollback_emitted_signal(session, batch)
+        assert _ledger_state(session, handoff) is BlockerState.ABSENT
+
+
+# ---- 取引の境界: 並行する取引・commit の中からの入口 --------------------------------
+#
+# 契約: 判定から予約・encoding・公開・commit・巻き戻しまでが session の 1 つの取引で、
+# 取引は互いに割り込まない。commit の後で失敗した取引はその取引の occurrence だけを
+# 取引の前へ戻し（新規の観測は ABSENT、約束の公開は PROMISED、完了は PUBLISHED）、
+# 別の取引が確定させた状態は残る。巻き戻しの写しはその取引の終わりでだけ捨てられる。
+#
+# 順序は Event で決める。取引 A を encoder の commit の後（同じ取引の Phase 7 の commit）で
+# 止め、その間に別の thread で取引 B を始める。正しい直列化では B は A の終わりまで待つ
+# ので、A を進める合図は B の進行に依らない（main thread が出す）。待ちの上限は失敗として扱う。
+
+import threading
+
+_WAIT_SECONDS = 30.0
+
+
+def _in_thread(session, call):
+    """``call`` を session の scope の中で別の thread で走らせる（scope は thread ごと）。"""
+    outcome = {}
+    entered = threading.Event()
+
+    def body():
+        with production_signal_scope(session):
+            entered.set()
+            try:
+                outcome["value"] = call()
+            except BaseException as exc:  # thread の例外を main thread で調べる
+                outcome["error"] = exc
+
+    thread = threading.Thread(target=body, daemon=True)
+    thread.start()
+    return thread, entered, outcome
+
+
+def _hold_the_first_commit_of(session, monkeypatch, thread_ident, *, fail):
+    """``thread_ident`` の最初の取引を encoder の commit の後で止める（合図で失敗か成功）。"""
+    reached = threading.Event()
+    release = threading.Event()
+    held = []
+    real = session._commit_phase7_signal_transaction
+
+    def hook(signal):
+        if threading.get_ident() == thread_ident[0] and not held:
+            held.append(signal)
+            reached.set()
+            assert release.wait(_WAIT_SECONDS), "the held transaction was never released"
+            if fail:
+                raise RuntimeError("forced failure after the encoder commit")
+        return real(signal)
+
+    monkeypatch.setattr(session, "_commit_phase7_signal_transaction", hook)
+    return reached, release
+
+
+_A_KEY = ("transaction-a",)
+_B_KEY = ("transaction-b",)
+
+
+def _a_observe(session):
+    observed = _observed(REPLAY, (R,), key=_A_KEY)
+    return observed, (lambda: None), (lambda: _observe(observed)), BlockerState.ABSENT, BlockerState.PUBLISHED
+
+
+def _a_publish_promise(session):
+    promise = _observed(ANALYSIS, (A,), key=_A_KEY, defer=True)
+    return (
+        promise, (lambda: _observe(promise)), (lambda: _finalize(session, promise)),
+        BlockerState.PROMISED, BlockerState.PUBLISHED,
+    )
+
+
+def _a_complete(session):
+    observed = _observed(REPLAY, (R,), key=_A_KEY)
+    return observed, (lambda: _observe(observed)), (
+        lambda: _complete_conditionally(_completion(observed))
+    ), BlockerState.PUBLISHED, BlockerState.COMPLETED
+
+
+def _a_handoff(session):
+    observed = replace(_observed(ANALYSIS, (A,), key=_A_KEY), producer_id=_LOOP_HANDOFF_PRODUCER)
+    return (
+        observed, (lambda: None), (lambda: _handoff(session, observed)),
+        BlockerState.ABSENT, BlockerState.PUBLISHED,
+    )
+
+
+def _a_generic(session):
+    observed = _observed(REPLAY, (R,), key=_A_KEY)
+    return (
+        observed, (lambda: None), (lambda: _generic(session, observed)),
+        BlockerState.ABSENT, BlockerState.PUBLISHED,
+    )
+
+
+_A_TRANSACTIONS = {
+    "observe": _a_observe,
+    "publish-promise": _a_publish_promise,
+    "complete": _a_complete,
+    "loop-handoff": _a_handoff,
+    "generic": _a_generic,
+}
+
+_B_TRANSACTIONS = {
+    # (signal, call, 期待する状態, event の数, 約束の予約の数)
+    "observe": lambda s: (_observed(PARTITION, ("pairwise",), key=_B_KEY), _observe, BlockerState.PUBLISHED, 1, 0),
+    "promise": lambda s: (_observed(ANALYSIS, (A,), key=_B_KEY, defer=True), _observe, BlockerState.PROMISED, 0, 1),
+    "generic": lambda s: (
+        _observed(REPLAY, (R,), key=_B_KEY), lambda sig: _generic(s, sig), BlockerState.PUBLISHED, 1, 0,
+    ),
+}
+
+
+@pytest.mark.parametrize("fails", [True, False], ids=["a-fails", "a-succeeds"])
+@pytest.mark.parametrize("b_name", sorted(_B_TRANSACTIONS))
+@pytest.mark.parametrize("a_name", sorted(_A_TRANSACTIONS))
+@pytest.mark.parametrize("manifest", [False, True], ids=["plain", "phase7"])
+def test_a_concurrent_transaction_neither_interleaves_nor_erases_the_other(
+    a_name, b_name, fails, manifest, monkeypatch,
+):
+    if a_name == "loop-handoff" and not manifest:
+        pytest.skip("the loop handoff site is audited only under the producer manifest")
+    session = (_manifest_connector() if manifest else _connector()).begin(
+        {"phase": "pr-a", "case": f"concurrent-{a_name}-{b_name}-{fails}-{manifest}"},
+    )
+    with production_signal_scope(session):
+        a_signal, a_setup, a_call, a_before, a_after = _A_TRANSACTIONS[a_name](session)
+        b_signal, b_entry, b_expected, b_events, b_promises = _B_TRANSACTIONS[b_name](session)
+        a_setup()
+        assert _ledger_state(session, a_signal) is a_before
+        before = _state(session)
+        errors_before = list(session.domain_signal_error_kinds)
+
+    a_ident = [None]
+    reached, release = _hold_the_first_commit_of(session, monkeypatch, a_ident, fail=fails)
+
+    def run_a():
+        a_ident[0] = threading.get_ident()
+        return a_call()
+
+    a_thread, _a_entered, a_outcome = _in_thread(session, run_a)
+    assert reached.wait(_WAIT_SECONDS), "transaction A never reached its commit"
+    # A は commit の後で止まっている。B を始める。
+    b_thread, b_entered, b_outcome = _in_thread(session, lambda: b_entry(b_signal))
+    assert b_entered.wait(_WAIT_SECONDS)
+    b_thread.join(0.3)
+    # 直列化: B は A が終わるまで取引に入れない（A の写しにも台帳にも触れない）。
+    assert b_thread.is_alive(), ("transaction B ran inside transaction A", b_outcome)
+    release.set()
+    a_thread.join(_WAIT_SECONDS)
+    b_thread.join(_WAIT_SECONDS)
+    assert not a_thread.is_alive() and not b_thread.is_alive()
+    assert "error" not in b_outcome, b_outcome
+    if a_name == "loop-handoff" and fails:
+        # handoff の消費は、公開も重複の証明も無ければ handoff を消費せずに止まる（既存の契約）。
+        assert isinstance(a_outcome.get("error"), ValueError), a_outcome
+        assert "neither emitted nor deduplicated" in str(a_outcome["error"])
+    else:
+        assert "error" not in a_outcome, a_outcome
+
+    with production_signal_scope(session):
+        # A: 失敗なら A の occurrence だけが取引の前へ戻り、失敗は 1 件記録される。
+        assert _ledger_state(session, a_signal) is (a_before if fails else a_after)
+        expected_errors = errors_before + (["RuntimeError"] if fails else [])
+        assert session.domain_signal_error_kinds == expected_errors
+        # B: A の成否に依らず確定し、A の巻き戻しで消えない。
+        assert _ledger_state(session, b_signal) is b_expected
+        after = _state(session)
+        a_events = 0 if fails else 1
+        assert after["events"] == before["events"] + a_events + b_events
+        # 約束の予約（未公開の約束の数）: B の約束が増え、公開できた A の約束が減る。
+        promised_delta = b_promises - (1 if a_name == "publish-promise" and not fails else 0)
+        assert after["reserved"] == before["reserved"] + promised_delta
+        # 進行中の取引の情報は残らない（写し・予約中の encoding・Phase 7 の取引）。
+        assert "sat_safety_committed_transactions" not in session.domain_signal_state
+        assert after["pending_tx"] == {}
+        assert after["phase7_tx"] == {}
+        assert not session.producer_commit_open()
+        assert not session.holds_domain_signal_transaction()
+
+
+@pytest.mark.parametrize("b_name", sorted(_B_TRANSACTIONS))
+@pytest.mark.parametrize("fails", [True, False], ids=["a-fails", "a-succeeds"])
+def test_a_producer_inside_another_transactions_commit_is_refused_without_state_change(
+    b_name, fails, monkeypatch,
+):
+    """commit の callback（同じ thread・再入）から別の取引を始めると、その取引の巻き戻しの
+    範囲に入る。入口は状態を変えずに拒否を記録し、外側の取引の成否と巻き戻しは変わらない。"""
+    session = _connector().begin({"phase": "pr-a", "case": f"nested-{b_name}-{fails}"})
+    with production_signal_scope(session):
+        a_signal = _observed(REPLAY, (R,), key=_A_KEY)
+        b_signal, b_entry, _b_expected, _b_events, _b_promises = _B_TRANSACTIONS[b_name](session)
+        before = _state(session)
+        real = session._commit_phase7_signal_transaction
+        nested = []
+
+        def hook(signal):
+            if not nested:
+                nested.append(b_entry(b_signal))
+                if fails:
+                    raise RuntimeError("forced failure after the encoder commit")
+            return real(signal)
+
+        monkeypatch.setattr(session, "_commit_phase7_signal_transaction", hook)
+        _observe(a_signal)
+        assert nested and not nested[0]
+        assert _ledger_state(session, b_signal) is BlockerState.ABSENT
+        assert _ledger_state(session, a_signal) is (BlockerState.ABSENT if fails else BlockerState.PUBLISHED)
+        assert session.domain_signal_error_kinds == ["ValueError"] + (["RuntimeError"] if fails else [])
+        after = _state(session)
+        assert after["promised_ids"] == before["promised_ids"]
+        assert after["reserved"] == before["reserved"]
+        assert after["events"] == before["events"] + (0 if fails else 1)
+        assert "sat_safety_committed_transactions" not in session.domain_signal_state
+
+
+def test_an_exception_inside_a_transaction_releases_the_boundary():
+    """取引の中の例外でも境界は解放され、別の thread の取引が進む。"""
+    session = _connector().begin({"phase": "pr-a", "case": "release-on-exception"})
+    with pytest.raises(RuntimeError, match="inside the boundary"):
+        with session.domain_signal_transaction():
+            assert session.holds_domain_signal_transaction()
+            raise RuntimeError("inside the boundary")
+    assert not session.holds_domain_signal_transaction()
+    observed = _observed(REPLAY, (R,), key=_B_KEY)
+    thread, _entered, outcome = _in_thread(session, lambda: _observe(observed))
+    thread.join(_WAIT_SECONDS)
+    assert not thread.is_alive() and outcome == {"value": 1}

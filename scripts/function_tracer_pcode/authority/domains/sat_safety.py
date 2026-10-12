@@ -72,7 +72,11 @@ SAT_SAFETY_REASON_REGISTRY = SealedReasonRegistry.build(
 SAT_SAFETY_RECOVERY_REGISTRY = SealedRecoveryRegistry.build((SAT_SAFETY_CONTRACT,))
 
 
-#: commit で台帳を遷移させた取引の、遷移の前の写し（次の取引の開始で捨てる）。
+#: commit で台帳を遷移させた取引（signal）ごとの、遷移した occurrence の遷移の前の写し。
+#: 写しの寿命はその取引と同じで、取引の終わり（rollback か finish）がその取引の分だけ
+#: 捨てる。取引は session の取引の境界（``domain_signal_transaction``）の中で始まって
+#: 終わるので、進行中の取引の写しを別の取引が消すことも、写しの間に別の取引が同じ
+#: occurrence を変えることもない。
 _COMMITTED_TRANSACTIONS_KEY = "sat_safety_committed_transactions"
 
 
@@ -153,9 +157,12 @@ class SatSafetyPilotEncoder:
             or intents[0].event_type is not EventType.CAUSE_OBSERVED
         ):
             raise ValueError("SAT safety transformed observation is duplicated")
-        self.commit_emitted_signal(session, signal, intents)
-        # 他の domain の取引の中の commit: 巻き戻しはその取引の owner（ABI の写し）が持つ。
-        session.domain_signal_state.get(_COMMITTED_TRANSACTIONS_KEY, {}).pop(id(signal), None)
+        try:
+            self.commit_emitted_signal(session, signal, intents)
+        finally:
+            # 他の domain の取引の中の commit: 巻き戻しはその取引の owner（ABI の写し）が
+            # 持つので、成否に依らずこの commit の写しはここで捨てる。
+            self.finish_emitted_signal(session, signal)
 
     def __call__(self, session: Any, signal: Any) -> tuple[EventIntent, ...]:
         if type(signal) is SafeCounterexampleProductionSignal:
@@ -173,9 +180,6 @@ class SatSafetyPilotEncoder:
             ),)
         if type(signal) is not SatSafetyBlockerProductionSignal:
             return ()
-        # 前の SAT-safety の取引は、成功したか巻き戻されたかのどちらかで終わっている
-        # （emission は直列）。その巻き戻し用の写しはもう要らない。
-        session.domain_signal_state.pop(_COMMITTED_TRANSACTIONS_KEY, None)
         authority, requirement_id = self._authority(session, signal)
         occurrence_key = authority.occurrence.occurrence_id
         # 判定は台帳の owner が記録の正本（約束か公開済みの観測）に照らして行う。
@@ -255,11 +259,17 @@ class SatSafetyPilotEncoder:
             raise ValueError("SAT safety emission transaction intents changed")
         # event の commit での遷移は台帳の owner だけが行う（公開は約束を退ける）。
         # この後の commit（外部・Phase 7）が失敗したら session が rollback を呼ぶので、
-        # 遷移の前の写しを残し、rollback で台帳を戻す（成功の確認 → 状態の確定）。
+        # 遷移する occurrence の遷移の前の写しをこの取引（signal）の分として残す。
+        # 失敗なら ``rollback_emitted_signal`` がその occurrence だけを戻し、成功なら
+        # ``finish_emitted_signal`` が捨てる。
         ledger = SatSafetyBlockerLedger(session)
-        session.domain_signal_state.setdefault(_COMMITTED_TRANSACTIONS_KEY, {})[
-            id(signal)
-        ] = ledger.snapshot()
+        committed = session.domain_signal_state.setdefault(_COMMITTED_TRANSACTIONS_KEY, {})
+        if type(committed) is not dict:
+            raise TypeError("SAT safety committed transaction ledger is not exact")
+        if id(signal) in committed:
+            # 前の取引が終わっていない（写しを上書きすれば、その取引を戻せなくなる）。
+            raise ValueError("SAT safety signal already owns a committed transaction")
+        committed[id(signal)] = ledger.snapshot_occurrence(occurrence_key)
         if action == "OBSERVED":
             ledger.record_publication(occurrence_key, signal)
         else:
@@ -268,13 +278,26 @@ class SatSafetyPilotEncoder:
         if not pending:
             session.domain_signal_state.pop(pending_key, None)
 
+    def finish_emitted_signal(self, session: Any, signal: Any) -> None:
+        """この取引の公開は確定した: 巻き戻し用の写しを捨てる。"""
+        if type(signal) is not SatSafetyBlockerProductionSignal:
+            return
+        committed = session.domain_signal_state.get(_COMMITTED_TRANSACTIONS_KEY)
+        if committed:
+            committed.pop(id(signal), None)
+            if not committed:
+                session.domain_signal_state.pop(_COMMITTED_TRANSACTIONS_KEY, None)
+
     def rollback_emitted_signal(self, session: Any, signal: Any) -> None:
         if type(signal) is not SatSafetyBlockerProductionSignal:
             return
         committed = session.domain_signal_state.get(_COMMITTED_TRANSACTIONS_KEY, {})
         if id(signal) in committed:
-            # commit の遷移の後に取引が失敗した: 台帳を遷移の前へ戻す。
-            SatSafetyBlockerLedger(session).restore(committed.pop(id(signal)))
+            # commit の遷移の後にこの取引が失敗した: 遷移した occurrence だけを遷移の前へ
+            # 戻す（他の取引が確定させた記録は消さない）。
+            SatSafetyBlockerLedger(session).restore_occurrence(committed.pop(id(signal)))
+            if not committed:
+                session.domain_signal_state.pop(_COMMITTED_TRANSACTIONS_KEY, None)
         pending_key = "sat_safety_pending_emission_transactions"
         pending = session.domain_signal_state.get(pending_key)
         if pending is None:

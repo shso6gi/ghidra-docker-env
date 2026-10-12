@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import copy
 from dataclasses import replace
 import json
@@ -1344,6 +1345,8 @@ def test_loop_sat_handoff_is_retained_when_encoder_returns_zero(monkeypatch):
     session = SimpleNamespace(
         domain_signal_state={"loop_sat_safety_handoffs": [handoff]},
         domain_signal_encoder=_LoopSatHandoffRoute(),
+        # 本番の session と同じ取引の境界（handoff の消費は 1 つの取引）。
+        domain_signal_transaction=nullcontext,
     )
     monkeypatch.setattr(module, "emit_sat_safety_signal", lambda *_a, **_k: 0)
     with pytest.raises(ValueError, match="neither emitted nor deduplicated"):
@@ -1358,6 +1361,8 @@ def test_loop_sat_handoff_is_retained_when_phase7_activation_fails(monkeypatch):
     session = SimpleNamespace(
         domain_signal_state={"loop_sat_safety_handoffs": [handoff]},
         domain_signal_encoder=_LoopSatHandoffRoute(),
+        # 本番の session と同じ取引の境界（handoff の消費は 1 つの取引）。
+        domain_signal_transaction=nullcontext,
     )
 
     def fail_activation(*_args, **_kwargs):
@@ -1377,6 +1382,8 @@ def test_loop_sat_handoff_consumes_only_successful_prefix(monkeypatch):
     session = SimpleNamespace(
         domain_signal_state={"loop_sat_safety_handoffs": [first, second]},
         domain_signal_encoder=_LoopSatHandoffRoute(),
+        # 本番の session と同じ取引の境界（handoff の消費は 1 つの取引）。
+        domain_signal_transaction=nullcontext,
     )
     results = iter((1, 0))
     monkeypatch.setattr(
@@ -1394,6 +1401,8 @@ def test_loop_sat_handoff_consumes_typed_duplicate_without_emit(monkeypatch):
     session = SimpleNamespace(
         domain_signal_state={"loop_sat_safety_handoffs": [handoff]},
         domain_signal_encoder=_LoopSatHandoffRoute((id(handoff),)),
+        # 本番の session と同じ取引の境界（handoff の消費は 1 つの取引）。
+        domain_signal_transaction=nullcontext,
     )
 
     def unexpected_emit(*_args, **_kwargs):

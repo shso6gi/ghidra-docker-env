@@ -536,9 +536,6 @@
       "_run_conditional_lane": {"logged": 0, "unlogged": 1},
       "run_check_from_binaries_with_v2_pilot": {"logged": 0, "unlogged": 2}
     },
-    "authority.lifecycle.production_signals": {
-      "execute_loop_solver_rendered_query": {"logged": 0, "unlogged": 1}
-    },
     "authority.process.supervisor": {
       "DurableCheckpointStore._commit_pending_active_locked": {"logged": 0, "unlogged": 1},
       "DurableCheckpointStore._decode_active_transaction_locked": {"logged": 0, "unlogged": 2},
