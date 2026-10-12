@@ -30,11 +30,11 @@ class LoopVariableIdentityRef:
     varnode_key: Tuple[Any, ...]
     binder_ordinal: int = 0
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         return None
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def binder_key(self) -> Tuple[Any, ...]:
         return (
             "loop_variable_binder",
@@ -42,7 +42,7 @@ class LoopVariableIdentityRef:
             int(self.binder_ordinal),
         )
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         if not self.varnode_key:
             return None
@@ -336,7 +336,7 @@ def _loop_expression_semantic_key(
         if any(operand_key is None for operand_key in operand_keys):
             return None
         return (
-            expr_type_name.lower(),
+            exact_tree(method_of(expr_type_name, "lower")()),  # 名前の object の method の結果も読む
             exact_tree(attribute_of(value, "operator", None)) or exact_tree(attribute_of(value, "name", None)) or "",
             None if attribute_of(value, "opcode", None) is None else scalar_int(attribute_of(value, "opcode")),
             size,
@@ -503,7 +503,7 @@ class LoopBodyEffectRef:
     keyable: bool = True
     unkeyable_reason: Optional[str] = None
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         if not self.keyable:
             return None
@@ -550,7 +550,7 @@ class LoopBodyEffectRef:
             bool(self.keyable),
         )
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         if not self.keyable or self.guard_paths_incomplete:
             return None
@@ -684,7 +684,7 @@ class LoopSideEffectProfileRef:
         )
 
     def requires_effect_proof(self) -> bool:
-        profile = (self.profile or "").lower()
+        profile = exact_tree(method_of(self.profile or "", "lower")())  # 型の誤りの値の method の結果も読む
         effect_descriptors = tuple(self.effect_descriptors or ())
         context_descriptors = tuple(self.context_descriptors or ())
 
@@ -852,7 +852,7 @@ class LoopCaseRef:
     case_kind: str = "body_term"
     source: str = "recurrence_summary"
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         path_keys = tuple(_loop_object_key(condition) for condition in self.path_conditions)
         body_effect_key = _loop_object_key(self.body_effect)
@@ -872,7 +872,7 @@ class LoopCaseRef:
             self.source,
         )
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         path_keys = tuple(_loop_object_semantic_key(condition) for condition in self.path_conditions)
         body_effect_key = _loop_object_semantic_key(self.body_effect)
@@ -1083,19 +1083,19 @@ class LoopSummaryRef:
             return False
         return {residue for _modulus, residue in residue_keys} == set(range(modulus))
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         if self.requires_effect_proof() or self.requires_path_proof():
             return None
         return loop_summary_method_b_key(self)
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
         if self.requires_effect_proof() or self.requires_path_proof():
             return None
         return self.stable_key()
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def pairwise_semantic_key(self) -> Optional[Tuple[Any, ...]]:
         return self.semantic_key()
 
@@ -1222,11 +1222,11 @@ class ComposedLoopSummaryRef:
             self.source,
         )
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
         return self.stable_key()
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def pairwise_semantic_key(self) -> Optional[Tuple[Any, ...]]:
         return self.semantic_key()
 
@@ -1439,7 +1439,7 @@ def compare_loop_summaries(
     )
 
 
-@runtime_ref_key
+@runtime_ref_key(proven=True)
 @runtime_ref_entry
 def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tuple[Any, ...]]:
     """Canonical Method-B key for pure loop summaries.
@@ -1548,7 +1548,7 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
     )
 
 
-@runtime_ref_key
+@runtime_ref_key(proven=True)
 @runtime_ref_entry
 def loop_summary_method_b_key_at_result_size(
     summary: Optional[LoopSummaryRef],
@@ -1868,13 +1868,13 @@ class CountedLoopSummaryRef:
             residue_bias_keys,
         )
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
         if self.loop_summary is not None and self.loop_summary.pairwise_exact_key() is None:
             return None
         return self.stable_key()
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def pairwise_semantic_key(self) -> Optional[Tuple[Any, ...]]:
         return self.semantic_key()
 
@@ -1964,7 +1964,7 @@ class StateTransitionLoopSummaryRef:
             self.source,
         )
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         binding_context = _loop_variable_binding_context_from_values(
             self.state_guard,

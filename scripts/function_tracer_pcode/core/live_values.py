@@ -893,13 +893,13 @@ def is_kind(value: Any, base: Any) -> bool:
     subclass の metaclass の hook を呼ばない。scalar でない値の型の hook は外の code）。返す値は `bool`。
     """
 
+    if type(base) is type:  # 最も多い形（組み込みの型・素の class）
+        return issubclass(type(value), base)
     if type(base) is tuple:
         for item in base:
             if is_kind(value, item):
                 return True
         return False
-    if type(base) is type:
-        return issubclass(type(value), base)
     return issubclass(type(exact_scalar(value)), base)
 
 
@@ -985,6 +985,10 @@ def float_value(value: Any) -> Any:
     return NOT_PLAIN
 
 
+#: scalar の subclass を見分ける基底の型（`exact_scalar` と、1 つの frame で読む reader が同じ判定を使う）
+_SCALAR_BASES = (int, float, str)
+
+
 def exact_scalar(value: Any) -> Any:
     """scalar の subclass（JPype の `JInt` / `JLong` / `JDouble` など、組み込みの scalar の型を継承する外の
     runtime の型）を、基底型の値へ写す（写し方は `plain_scalar` が唯一の owner）。
@@ -997,7 +1001,7 @@ def exact_scalar(value: Any) -> Any:
     kind = type(value)
     if value is None or kind is int or kind is str or kind is bool or kind is float:
         return value  # exact な scalar
-    if not issubclass(kind, (int, float, str)):
+    if not issubclass(kind, _SCALAR_BASES):
         return value  # scalar でない値（MRO は C の slot で見る: hook を呼ばない）
     plain = plain_scalar(value)
     return value if plain is NOT_PLAIN else plain
@@ -1051,6 +1055,223 @@ def scalar_text(value: Any) -> str:
     # 葉に scalar の subclass が無ければ元の値の `str()`（双子と同じ文字列: 容器の型の `repr` を保つ）。在れば写した木の
     # `str()`（組み込みの容器の `repr`）。外の object の `__str__` は str の subclass を返し得る: 返した値も基底型の slot で読む
     return exact_scalar(str(tree if leaves else value))
+
+
+def exception_text(error: Any) -> str:
+    """`str(error)` と同じ文字列（例外の文字列化が読む状態を基底型の値で。Issue #242）。
+
+    読み方: 例外の状態（`args`、MRO の名前空間の member / getset の descriptor の field: `OSError` の `filename` /
+    `filename2`・`UnicodeError` の `object`・`__slots__` の field など、instance の `__dict__`、その中の例外の状態）を
+    descriptor の slot で読む。どれにも scalar の subclass が無ければ `str(error)`（双子と同じ）。在れば、**同じ型**の
+    例外を組み込みの `__new__` で作り（`__init__` は呼ばない）、状態を基底型の値で置いて（中の例外も同じ規則で写す）、
+    その `str()` にする: 文字列化の dispatch（組み込みの `__str__`・別名の slot・自前の `__str__`）は双子と同じ。
+    返す値の保証: 組み込みの `str` そのもの。写せない例外（`__new__` を自分で持つ型・閉路・型の検査に通らない状態）は
+    判定しない: CPython が文字列化できない例外に使う `<unprintable ... object>`（推測した文を返さない）。値が `None` の
+    field は置かない（constructor が作る「無い」状態: C の NULL）。属性の代入で明示的に `None` を置いた field
+    （`OSError` の `filename2` など）は Python からは NULL と見分けられず、その例外がほかに scalar の subclass を持つ
+    ときだけ、文字列が「無い」状態のものになる。型の class の属性（自前の `__str__` が読む class の値）は型の code と
+    data（外の code）で、写さない。
+    """
+
+    kind = type(error)
+    if not issubclass(kind, BaseException):
+        return scalar_text(error)
+    try:
+        holds = holds_scalar_subclass(tuple(_exception_state_values(error, set())))
+    except (TypeError, RecursionError):
+        return f"<unprintable {type_name(kind)} object>"  # 状態を読めない（閉路・写せない値・辿れない view）
+    if not holds:
+        return scalar_text(error)
+    try:
+        clone = _exception_copy(error, {})
+    except (TypeError, ValueError, AttributeError, RecursionError):
+        return f"<unprintable {type_name(kind)} object>"
+    return exact_scalar(str(clone))
+
+
+def _exception_state_values(error: Any, seen: set) -> List[Any]:
+    """例外の文字列化が読み得る状態の値（field と instance の `__dict__`。中の例外は再帰で 1 度ずつ。閉路は写すとき
+    （`_exception_copy`）に見つかる）。"""
+
+    if id(error) in seen:
+        return []
+    seen.add(id(error))
+    values = [value for _descriptor, value in _exception_fields(error, type(error))]
+    for name, value in _exception_instance_dict(error):
+        values.append(name)
+        values.append(value)
+    for value in list(values):
+        for nested in _nested_exceptions(exact_tree(value)):
+            values.extend(_exception_state_values(nested, seen))
+    return values
+
+
+def _nested_exceptions(tree: Any) -> List[Any]:
+    """組み込みの木（`exact_tree` の結果）の葉の例外。"""
+
+    found: List[Any] = []
+    stack = [tree]
+    count = 0
+    while stack:
+        node = stack.pop()
+        count += 1
+        if count > SCAN_LIMIT:
+            raise TypeError("an exception state beyond the scan limit is not read")
+        kind = type(node)
+        if kind is tuple or kind is list or kind is set or kind is frozenset:
+            stack.extend(kind.__iter__(node))
+        elif kind is dict:
+            for key, item in dict.items(node):
+                stack.append(key)
+                stack.append(item)
+        elif issubclass(kind, BaseException):
+            found.append(node)
+    return found
+
+
+def _exception_instance_dict(error: Any) -> List[Tuple[Any, Any]]:
+    """instance の `__dict__` の (名前, 値) の列（無ければ空）。`object` の slot で読み、dict の subclass も dict の slot
+    で辿る（例外の型の `__getattribute__` を呼ばない。名前を hash し直さない）。"""
+
+    try:
+        state = _OBJECT_GETATTRIBUTE(error, "__dict__")
+    except AttributeError:
+        return []
+    if not issubclass(type(state), dict):
+        raise TypeError("an exception __dict__ that is not a dict is not read")
+    return list(dict.items(state))
+
+
+def _exception_copy(error: Any, copies: Dict[int, Any]) -> Any:
+    """同じ型の例外を、状態を基底型の値（中の例外も写す）にして作る。`__new__` は組み込みのものだけ（`__init__` は
+    呼ばない）。読みだけの field（`BaseExceptionGroup` の `message` / `exceptions`）は、その値を `__new__` に渡して作り、
+    作った例外の値が同じことを確かめる。"""
+
+    if id(error) in copies:
+        if copies[id(error)] is None:
+            raise TypeError("a cyclic exception state is not copied")  # 写している途中の例外へ戻る: 閉路
+        return copies[id(error)]  # 共有された例外（`args` と field の両方など）: 同じ写し
+    copies[id(error)] = None
+    kind = type(error)
+    owner = _defining_class(kind, "__new__")
+    if type(owner) is not type or _TYPE_MODULE.__get__(owner) != "builtins" or not issubclass(owner, BaseException):
+        raise TypeError("an exception type with its own __new__ is not copied")
+    fields = [
+        (descriptor, _exception_value(value, copies))
+        for descriptor, value in _exception_fields(error, kind) if value is not None
+    ]
+    readonly = [(d, v) for d, v in fields if _is_readonly_member(d)]
+    clone = _new_exception(kind, [value for _descriptor, value in readonly])
+    for descriptor, value in fields:
+        if _is_readonly_member(descriptor):
+            if exact_tree(descriptor.__get__(clone, kind)) != value:
+                raise TypeError("a read-only exception field differs after rebuilding")
+            continue
+        descriptor.__set__(clone, value)
+    state = _exception_instance_dict(error)
+    if state:
+        target = _OBJECT_GETATTRIBUTE(clone, "__dict__")
+        for name, value in state:
+            dict.__setitem__(target, exact_tree(name), _exception_value(value, copies))
+    copies[id(error)] = clone
+    return clone
+
+
+def _new_exception(kind: type, args: List[Any]) -> Any:
+    """`kind` の例外を組み込みの `__new__` で作る（`__init__` は呼ばない）。組み込みの基底を複数持つ型は、instance の
+    形が合う組み込みの class の `__new__` を MRO の順に試す（`LookupError.__new__(X)` は形が違えば `TypeError`）。"""
+
+    last: Optional[BaseException] = None
+    mro = _TYPE_MRO.__get__(kind)
+    if not _within_scan(tuple.__len__(mro)):
+        raise TypeError("the MRO of the type is beyond the scan limit")
+    for klass in mro:
+        if type(klass) is not type or _TYPE_MODULE.__get__(klass) != "builtins" or not issubclass(klass, BaseException):
+            continue
+        if "__new__" not in _TYPE_DICT.__get__(klass):
+            continue
+        try:
+            return klass.__new__(kind, *args)
+        except TypeError as error:
+            last = error
+    raise TypeError(f"no builtin __new__ makes the exception: {last}")
+
+
+def _is_readonly_member(descriptor: Any) -> bool:
+    """`__new__` だけが置ける読みだけの field（`BaseExceptionGroup` の `message` / `exceptions`。名前空間の順に渡す）。"""
+
+    return (
+        _BASE_EXCEPTION_GROUP is not None and type(descriptor) is _FIELD_DESCRIPTORS[0]
+        and descriptor.__objclass__ is _BASE_EXCEPTION_GROUP
+    )
+
+
+def _exception_value(value: Any, copies: Dict[int, Any]) -> Any:
+    """例外の状態の値の写し: 組み込みの木（`exact_tree`）で、葉の例外は同じ規則で写した例外。"""
+
+    tree = exact_tree(value)
+    if not _nested_exceptions(tree):
+        return tree
+    return _replace_exceptions(tree, copies, [0])
+
+
+def _replace_exceptions(node: Any, copies: Dict[int, Any], count: List[int]) -> Any:
+    count[0] += 1
+    if count[0] > SCAN_LIMIT:
+        raise TypeError("an exception state beyond the scan limit is not copied")
+    kind = type(node)
+    if kind is tuple or kind is list or kind is set or kind is frozenset:
+        return kind(_replace_exceptions(item, copies, count) for item in kind.__iter__(node))
+    if kind is dict:
+        return {
+            _replace_exceptions(k, copies, count): _replace_exceptions(v, copies, count) for k, v in dict.items(node)
+        }
+    if issubclass(kind, BaseException):
+        return _exception_copy(node, copies)
+    return node
+
+
+_OBJECT_GETATTRIBUTE = object.__getattribute__
+_BASE_EXCEPTION_GROUP = getattr(__import__("builtins"), "BaseExceptionGroup", None)
+
+
+def _defining_class(kind: type, name: str) -> type:
+    """`kind` の MRO で `name` を名前空間に持つ最初の class（metaclass の hook を呼ばない。無ければ `object`）。"""
+
+    mro = _TYPE_MRO.__get__(kind)
+    if not _within_scan(tuple.__len__(mro)):
+        raise TypeError("the MRO of the type is beyond the scan limit")
+    for klass in mro:
+        if name in _TYPE_DICT.__get__(klass):
+            return klass
+    return object
+
+
+#: 例外の連鎖の field（組み込みの `__str__` は読まないが、自前の `__str__` が読み得る状態）
+_CHAIN_FIELDS = frozenset({"__cause__", "__context__", "__suppress_context__"})
+#: 組み込みの例外の C の field の descriptor の型
+_FIELD_DESCRIPTORS = (types.MemberDescriptorType, types.GetSetDescriptorType)
+
+
+def _exception_fields(error: Any, owner: type) -> List[Tuple[Any, Any]]:
+    """`owner`（組み込みの例外の型）の MRO の名前空間の field の descriptor と、その値（descriptor の slot で読む）。
+
+    `__` で始まる名前（`__traceback__` / `__context__` など: 文字列化に使わない）は除く。値の無い field は除く。
+    """
+
+    fields: List[Tuple[Any, Any]] = []
+    for klass in _TYPE_MRO.__get__(owner):
+        for name, descriptor in _TYPE_DICT.__get__(klass).items():
+            holder = type(descriptor)
+            if type(name) is not str or (name.startswith("__") and name not in _CHAIN_FIELDS):
+                continue
+            if holder is not _FIELD_DESCRIPTORS[0] and holder is not _FIELD_DESCRIPTORS[1]:
+                continue
+            try:
+                fields.append((descriptor, descriptor.__get__(error, type(error))))
+            except AttributeError:
+                continue
+    return fields
 
 
 def scalar_repr(value: Any) -> str:
@@ -1119,33 +1340,121 @@ def _subclass_tree_kind(kind: type) -> Optional[type]:
     return _kind_entry(kind)[1]
 
 
-def _already_plain(value: Any) -> bool:
+class _VerifiedTrees:
+    """1 回の ref の層の呼び出しの間（入口・key の出口の包み: `runtime_ref_record` が `depth` を数える）に確かめた、
+    変わらない組み込みの木の memo（Issue #242）。
+
+    入れ子の key の出口と子の key の読みは、同じ部分木を何度も `exact_tree` に通す。`depth` が 0 でない間は、確かめ済みの
+    tuple / frozenset（部分木に変わる容器が無いもの）を辿らずに組み込みの木として扱い、1 回の呼び出し全体の走査を
+    作った容器の数に比例させる。変わる容器（list / dict / set）とそれを部分木に持つ tuple は毎回確かめる（外の code が
+    途中で変え得る: 健全さのための読み直し）。各段に新しい変わる容器を持つ鎖だけは段の 2 乗の走査になる（production
+    の鎖の key は tuple だけ）。最も外の呼び出しが抜けるとき（例外を含む）に memo を捨てる。
+
+    入れるのは tuple / frozenset で、その部分木に変わる容器（list / dict / set）を持たないもの（葉は exact な scalar か
+    辿らない外の object）: 確かめた後に外の code が中身を変えられない。memo の key は `id` で、object を持って生かす
+    （走査の間に `id` が別の object に再利用されない）。最も外の呼び出しが抜けると空にする（長く持つ cache ではない）。
+    thread ごとに 1 つ（`threading.local`）: 同じ thread の中の呼び出しは同期で、入れ子だけが重なる。
+    """
+
+    __slots__ = ("nodes", "depth")
+
+    def __init__(self) -> None:
+        self.nodes: Dict[int, Any] = {}
+        self.depth = 0
+
+
+_VERIFIED_LOCAL = threading.local()
+#: `exact_tree` が確かめた容器の数（走査量: test が読む。scope の memo で飛ばした容器は数えない）
+_TREE_VISITS = [0]
+
+
+def _verified_trees() -> _VerifiedTrees:
+    holder = getattr(_VERIFIED_LOCAL, "holder", None)
+    if holder is None:
+        holder = _VERIFIED_LOCAL.holder = _VerifiedTrees()
+    return holder
+
+
+def _active_memo() -> Optional[_VerifiedTrees]:
+    """今の thread の scope の memo（scope の外なら `None`）。"""
+
+    holder = getattr(_VERIFIED_LOCAL, "holder", None)
+    return holder if holder is not None and holder.depth else None
+
+
+def verified_tree_holder() -> _VerifiedTrees:
+    """今の thread の memo の入れ物（入口・key の出口の包みが深さを数え、最も外の呼び出しが抜けるときに空にする）。"""
+
+    holder = getattr(_VERIFIED_LOCAL, "holder", None)
+    if holder is None:
+        holder = _VERIFIED_LOCAL.holder = _VerifiedTrees()
+    return holder
+
+
+def exact_tree_in(value: Any, holder: _VerifiedTrees) -> Any:
+    """`exact_tree(value)` を、包みが既に持つ scope の入れ物で読む（保証と読み方は `exact_tree` と同じ）。
+
+    葉が exact な scalar だけの平らな tuple（最も多い key の形）は、ここで確かめて memo に入れる。
+    """
+
+    kind = type(value)
+    if value is None or kind is int or kind is str or kind is bool or kind is float:
+        return value
+    if kind is tuple and tuple.__len__(value) <= SCAN_LIMIT:
+        for item in value:
+            held = type(item)
+            if not (item is None or held is int or held is str or held is bool or held is float):
+                break
+        else:
+            _TREE_VISITS[0] += 1
+            if holder.depth:
+                holder.nodes[id(value)] = value
+            return value
+    tree = _exact_tree_read(value, holder if holder.depth else None)[0]
+    if tree is _CYCLIC:
+        raise TypeError("a cyclic container of container subclasses is not copied to a plain tree")
+    return tree
+
+
+def _already_plain(value: Any, memo: Optional[_VerifiedTrees] = None) -> bool:
     """`value` が既に組み込みの木か（容器は組み込みの型そのもの・共有と閉路が無い・葉は exact な scalar か scalar でも
     容器でもない object・要素の数は `SCAN_LIMIT` まで）。確かめるだけで何も作らない（`exact_tree` の速い経路。
-    当てはまらなければ遅い経路が同じ規則で読む）。"""
+    当てはまらなければ遅い経路が同じ規則で読む）。`memo` の確かめ済みの木は辿らない。確かめた tuple / frozenset の
+    うち、部分木に変わる容器（list / dict / set）を持たないものを `memo` に入れる（変わる容器が無ければ全部、在れば
+    部分木ごとに: 先順の逆で子から決める）。"""
 
     stack: List[Any] = [value]
     seen: set = set()
     count = 0
+    frozen: List[Any] = []
+    mutable_seen = False
     while stack:
         node = stack.pop()
         kind = type(node)
         if node is None or kind is int or kind is str or kind is bool or kind is float:
             continue
         if kind is tuple or kind is list or kind is set or kind is frozenset or kind is dict:
+            if memo is not None and id(node) in memo.nodes:
+                continue  # 確かめ済みの変わらない木
             if id(node) in seen:
                 if kind is tuple or kind is frozenset:
                     continue  # 共有された変わらない容器は確かめ済み（閉路は変わる容器を通るので、そこで見つかる）
                 return False  # 変わる容器の共有・閉路は遅い経路（memo と閉路の規則）
             seen.add(id(node))
+            _TREE_VISITS[0] += 1
             count += kind.__len__(node) * (2 if kind is dict else 1)
             if count > SCAN_LIMIT:
                 return False  # 上限の外の意味は遅い経路の読み（文脈の owner）
-            if kind is dict:
+            if kind is tuple or kind is frozenset:
+                frozen.append(node)
+                stack.extend(kind.__iter__(node))
+            elif kind is dict:
+                mutable_seen = True
                 for key, item in dict.items(node):
                     stack.append(key)
                     stack.append(item)
             else:
+                mutable_seen = True
                 stack.extend(kind.__iter__(node))
             continue
         if (
@@ -1154,6 +1463,23 @@ def _already_plain(value: Any) -> bool:
             or not _kind_entry(kind)[2]
         ):
             return False
+    if memo is not None:
+        if not mutable_seen:
+            for node in frozen:
+                memo.nodes[id(node)] = node
+        else:
+            # 先順の逆（子が親より先）: 子の容器がどれも変わらない木なら、その tuple / frozenset も変わらない木
+            immutable: set = set()
+            for node in reversed(frozen):
+                for child in type(node).__iter__(node):
+                    held = type(child)
+                    if held is list or held is dict or held is set:
+                        break
+                    if (held is tuple or held is frozenset) and not (id(child) in immutable or id(child) in memo.nodes):
+                        break
+                else:
+                    immutable.add(id(node))
+                    memo.nodes[id(node)] = node
     return True
 
 
@@ -1209,13 +1535,23 @@ def exact_tree(value: Any) -> Any:
     の型そのもの（`exact_scalar`）、それ以外の葉（enum の member・scalar でない object）は同じ object（その object
     の code は外の code）。葉と容器がどれも既に組み込みの型そのものなら同じ object を返す。共有された容器は 1 度
     だけ辿って結果も共有する（辿った容器は走査の終わりまで生かす: memo の `id` を再利用させない）。写しが要る閉路は
-    `TypeError`（元の容器を指す写しを作らない: fail-closed）。
+    `TypeError`（元の容器を指す写しを作らない: fail-closed）。それ以外の葉の object から後で取得する値（その method /
+    属性の結果）は保証しない（読んだ側が reader で読む）。
+
+    **走査量**: ref の層の呼び出しの中（`_VerifiedTrees`）では、確かめ済みの変わらない木（部分木に変わる容器の無い
+    tuple / frozenset）を辿らない。1 回の ref の層の呼び出しの走査は、作った容器の数に比例する。
 
     外の object（代わりの型・API の object）の method の戻り値（key など）や、受理したまま持つ容器を、比べる・
     並べる・dict の key にする・`str()` にする前に読む reader（Issue #242）。型を保たないことの影響: subclass の
     容器の型・`repr` は基底の型のもの（named tuple は tuple、`deque` は list: `deque` と list は `==` が違う）。
     """
 
+    kind = type(value)
+    if value is None or kind is int or kind is str or kind is bool or kind is float:
+        return value  # exact な scalar（最も多い形: 読みの層を通らない）
+    entry = _KIND_CACHE.get(id(kind))
+    if entry is not None and entry[0] is kind and entry[2]:
+        return value  # 型を確かめ済みの、scalar でも容器でもない葉（API の object）: 同じ object（`_exact_tree_read` と同じ）
     tree = _exact_tree_read(value)[0]
     if tree is _CYCLIC:
         raise TypeError("a cyclic container of container subclasses is not copied to a plain tree")
@@ -1236,13 +1572,20 @@ def holds_scalar_subclass(value: Any) -> bool:
 _CYCLIC = object()
 
 
-def _exact_tree_read(value: Any) -> Tuple[Any, bool]:
-    """`exact_tree` の本体: (組み込みの木, scalar の葉を写したか)。"""
+_ACTIVE = object()
+
+
+def _exact_tree_read(value: Any, memo: Any = _ACTIVE) -> Tuple[Any, bool]:
+    """`exact_tree` の本体: (組み込みの木, scalar の葉を写したか)。`memo` は今の scope（渡されなければ読む）。"""
 
     kind = type(value)
     if value is None or kind is int or kind is str or kind is bool or kind is float:
         return value, False  # exact な scalar（最も多い形）
+    if memo is _ACTIVE:
+        memo = _active_memo()
     if kind is tuple or kind is list or kind is set or kind is frozenset or kind is dict:
+        if memo is not None and id(value) in memo.nodes:
+            return value, False  # この scope で確かめ済みの変わらない木
         # よくある形（既に組み込みの木）: 確かめるだけで何も作らずに同じ object を返す。葉が exact な scalar だけの
         # 平らな tuple / list はさらに短い経路
         if (kind is tuple or kind is list) and len(value) <= SCAN_LIMIT:
@@ -1251,8 +1594,11 @@ def _exact_tree_read(value: Any) -> Tuple[Any, bool]:
                 if not (item is None or holder is int or holder is str or holder is bool or holder is float):
                     break
             else:
+                _TREE_VISITS[0] += 1
+                if memo is not None and kind is tuple:
+                    memo.nodes[id(value)] = value
                 return value, False
-        if _already_plain(value):
+        if _already_plain(value, memo):
             return value, False
     elif _tree_kind(value) is None:
         leaf = exact_scalar(value)
@@ -1265,6 +1611,7 @@ def _exact_tree_read(value: Any) -> Tuple[Any, bool]:
     cyclic = False
     changed = False
     leaves = False  # scalar の葉を写したか
+    frozen_out: set = set()  # 部分木に変わる容器の無い結果の tuple / frozenset（後順で決める: memo に入れる）
     stack: List[Tuple[Any, bool]] = [(value, False)]
     while stack:
         node, leaving = stack.pop()
@@ -1275,11 +1622,14 @@ def _exact_tree_read(value: Any) -> Tuple[Any, bool]:
             done[id(node)] = node  # 入った印（同じ容器に再び出会うのは共有か閉路: 閉路は辿り直さない）
             alive.append(node)  # `id` を走査の終わりまで再利用させない（view が反復のたびに作る組を含む）
             active.add(id(node))
+            _TREE_VISITS[0] += 1
             read.admit(_tree_length(node, kind))
             children = _tree_children(node, kind)
             children_of[id(node)] = children
             stack.append((node, True))
             for item in children:
+                if memo is not None and id(item) in memo.nodes:
+                    continue  # 確かめ済みの変わらない木（辿らない）
                 if _tree_kind(item) is not None and id(item) not in done:
                     stack.append((item, False))
             continue
@@ -1293,7 +1643,9 @@ def _exact_tree_read(value: Any) -> Tuple[Any, bool]:
             holder = type(item)
             if item is None or holder is int or holder is str or holder is bool or holder is float:
                 continue
-            if _tree_kind(item) is not None:
+            if memo is not None and id(item) in memo.nodes:
+                new = item
+            elif _tree_kind(item) is not None:
                 cyclic = cyclic or id(item) in active
                 new = done[id(item)]
             else:
@@ -1307,12 +1659,31 @@ def _exact_tree_read(value: Any) -> Tuple[Any, bool]:
         if items is not None:
             changed = True
             done[id(node)] = _tree_rebuild(node, kind, items)
+        result = done[id(node)]
+        if type(result) is tuple or type(result) is frozenset:
+            whole = True
+            for child in type(result).__iter__(result):
+                held = type(child)
+                if held is list or held is dict or held is set:
+                    whole = False
+                    break
+                if (held is tuple or held is frozenset) and not (
+                    id(child) in frozen_out or (memo is not None and id(child) in memo.nodes)
+                ):
+                    whole = False
+                    break
+            if whole:
+                frozen_out.add(id(result))
     if cyclic and changed:
         # 閉路を持つ容器の写しは元の容器を指してしまう: 組み込みの木を作れない（空や元の値にしない）。葉に scalar の
         # subclass が無ければ、元の値の文字列化だけは双子と同じにできる（呼ぶ側が `_CYCLIC` を見る）
         if leaves:
             raise TypeError("a cyclic container holding scalar subclasses is not copied")
         return _CYCLIC, False
+    if memo is not None and not cyclic:
+        for result in done.values():
+            if id(result) in frozen_out:
+                memo.nodes[id(result)] = result
     return done[id(value)], leaves
 
 
@@ -1662,10 +2033,12 @@ def attribute_of(value: Any, name: str, default: Any = _MISSING) -> Any:
     読む（外の code）。返す値は読んだ属性そのもの（中身は呼ぶ側が reader で読む）。
     """
 
-    target = exact_scalar(value)
+    # 1 つの frame で読む（ref の層の hot path: Ghidra の API の object の読み）。判定は `exact_scalar` と同じ MRO の比較
+    if issubclass(type(value), _SCALAR_BASES):
+        value = exact_scalar(value)
     if default is _MISSING:
-        return getattr(target, name)
-    return getattr(target, name, default)
+        return getattr(value, name)
+    return getattr(value, name, default)
 
 
 def method_of(value: Any, name: str, /) -> Any:
@@ -1677,7 +2050,9 @@ def method_of(value: Any, name: str, /) -> Any:
     返す値の保証: 無い（外の code。呼んだ結果は、比べる・hash する・真偽にする前に、呼ぶ側が reader で読む）。
     """
 
-    return attribute_of(value, name)
+    if issubclass(type(value), _SCALAR_BASES):  # `attribute_of` と同じ読み（1 つの frame）
+        value = exact_scalar(value)
+    return getattr(value, name)
 
 
 def defined_attribute(kind: type, name: str, default: Any = _MISSING) -> Any:
@@ -2289,6 +2664,9 @@ __all__ = [
     "attribute_of",
     "method_of",
     "holds_scalar_subclass",
+    "exception_text",
+    "verified_tree_holder",
+    "exact_tree_in",
     "scalar_repr",
     "defined_attribute",
     "builtin_container",

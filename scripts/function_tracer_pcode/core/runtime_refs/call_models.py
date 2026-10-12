@@ -105,7 +105,7 @@ class CallModelCandidateRef:
                 )
         object.__setattr__(self, "candidate_key", derived)
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[Any, ...]:
         return self.candidate_key
 

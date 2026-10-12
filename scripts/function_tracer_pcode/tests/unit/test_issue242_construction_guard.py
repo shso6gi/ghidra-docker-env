@@ -603,11 +603,11 @@ def test_the_guard_does_not_trust_attributes_read_by_a_dynamic_name():
         ("@classmethod\ndef make(cls, value):\n    items = []\n    alias = items\n    alias.append(value)\n    return cls(flag=items[0] > 1)\n", ["comparison of unknown"]),
         ("@classmethod\ndef make(cls, value):\n    items = []\n    def add(x):\n        items.append(x)\n    add(value)\n    return cls(flag=items[0] > 1)\n",
          ["comparison of unknown"]),
-        # package の中でこの解析が辿らない module の関数へ読まずに渡す
-        ("@classmethod\ndef make(cls, value):\n    from scripts.function_tracer_pcode.core.signature import is_void_data_type\n"
-         "    return cls(flag=scalar_bool(is_void_data_type(value)))\n", ["passes unknown to package code outside the guard"]),
-        ("@classmethod\ndef make(cls, value):\n    from scripts.function_tracer_pcode.core.signature import is_void_data_type\n"
-         "    return cls(flag=scalar_bool(is_void_data_type(exact_tree(value))))\n", []),
+        # 辿れない（source の無い）package の module の関数へ読まずに渡す
+        ("@classmethod\ndef make(cls, value):\n    from scripts.function_tracer_pcode.core.no_such_module import judge\n"
+         "    return cls(flag=scalar_bool(judge(value)))\n", ["passes unknown to package code outside the guard"]),
+        ("@classmethod\ndef make(cls, value):\n    from scripts.function_tracer_pcode.core.no_such_module import judge\n"
+         "    return cls(flag=scalar_bool(judge(exact_tree(value))))\n", []),
         # 例外の照合は型の `__subclasscheck__`
         ("@classmethod\ndef make(cls, value):\n    try:\n        return cls(name='a')\n    except value:\n        return None\n", ["except matches an unread value"]),
     ],
@@ -620,3 +620,171 @@ def test_the_guard_requires_unevaluated_annotations():
     source = HEADER.replace("from __future__ import annotations\n", "") + "    name: str = ''\n"
     guard = ConstructionGuard({"scripts.function_tracer_pcode.core.runtime_refs.sample": source}, _World())
     assert [v.split(": ", 2)[1] for v in guard.violations()] == ["annotations are evaluated (line 1)"]
+
+
+DEPENDENCY = """
+from __future__ import annotations
+from scripts.function_tracer_pcode.core import live_values
+
+
+def is_void(data_type):
+    length = data_type.getLength()
+    return int(length) == 0
+
+
+def is_void_read(data_type):
+    length = live_values.method_of(data_type, "getLength")()
+    return live_values.scalar_int(length) == 0
+"""
+
+
+@pytest.mark.parametrize(
+    "call, expected",
+    [
+        # 依存先（ref module でない package の module）の到達した関数も同じ規則で検査する（第 5 回 P1: opaque な
+        # object を読んだことを、その先で API から取得する値の安全の根拠にしない）
+        ("is_void", ["dependency.py:is_void: comparison of unknown: int(length) == 0", "dependency.py:is_void: int() of foreign: int(length)"]),
+        ("is_void_read", []),
+    ],
+)
+def test_the_guard_follows_reached_package_dependencies(call, expected):
+    body = (
+        "@classmethod\ndef make(cls, value):\n"
+        f"    from scripts.function_tracer_pcode.core.dependency import {call}\n"
+        f"    return cls(flag=scalar_bool({call}(exact_tree(value))))\n"
+    )
+    source = HEADER + textwrap.indent(textwrap.dedent(body), "    ")
+    guard = ConstructionGuard(
+        {"scripts.function_tracer_pcode.core.runtime_refs.sample": source}, _World(),
+        dependency_sources={"scripts.function_tracer_pcode.core.dependency": DEPENDENCY},
+    )
+    assert [v.rsplit(" (line ", 1)[0] for v in guard.violations()] == expected
+    assert f"dependency:None.{call}" in guard.reached()
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        # `exact_tree` の結果（組み込みの木）の葉は外の object かもしれない: その method / 属性の結果は外の code の結果
+        ("@classmethod\ndef make(cls, value):\n    data = exact_tree(value)\n    return cls(flag=int(data.getLength()) == 0)\n",
+         ["comparison of unknown", "int() of foreign"]),
+        ("@classmethod\ndef make(cls, value):\n    data = exact_tree(value)\n    return cls(flag=scalar_int(data.getLength()) == 0)\n", []),
+        ("@classmethod\ndef make(cls, value):\n    data = exact_tree(value)\n    return cls(flag=bool(data.size))\n", ["bool() of foreign"]),
+        # 葉を写した値（`exact_scalar`）の method の結果も、外の object なら外の code の結果
+        ("@classmethod\ndef make(cls, value):\n    name = exact_scalar(value)\n    return cls(flag=name.lower() == 'x')\n",
+         ["comparison of foreign"]),
+        # 木そのものの消費は clean と同じ（容器と scalar の葉は組み込みの型そのもの）
+        ("@classmethod\ndef make(cls, value):\n    data = exact_tree(value)\n    return cls(flag=data == (1,), name=str(data))\n", []),
+        # import した外の class の静的な method・属性は読んでよい（値ではない）。結果は外の code の結果
+        ("@classmethod\ndef make(cls, value):\n    from math import nan\n    from ghidra.program.model.data import VoidDataType\n"
+         "    return cls(flag=bool(VoidDataType.isVoidDataType(exact_tree(value))))\n", ["bool() of foreign"]),
+        ("@classmethod\ndef make(cls, value):\n    from ghidra.program.model.data import VoidDataType\n"
+         "    return cls(flag=scalar_bool(VoidDataType.isVoidDataType(exact_tree(value))))\n", []),
+        ("@classmethod\ndef make(cls, value):\n    from ghidra.program.model.data import VoidDataType\n"
+         "    return cls(flag=bool(VoidDataType.ALL))\n", ["bool() of foreign"]),
+    ],
+)
+def test_the_guard_does_not_trust_values_obtained_from_objects_it_only_read(body, expected):
+    assert _violations(body) == expected
+
+
+DEPENDENCY_LAYERS = {
+    "scripts.function_tracer_pcode.core.dependency": """
+from __future__ import annotations
+from scripts.function_tracer_pcode.core.dependency2 import deep as reexported
+
+
+def via_module(data_type):
+    return int(data_type.getLength()) == 0
+
+
+def via_alias(data_type):
+    return int(data_type.getLength()) == 0
+
+
+def via_assigned(data_type):
+    return int(data_type.getLength()) == 0
+
+
+def via_table(data_type):
+    return int(data_type.getLength()) == 0
+
+
+def via_local_table(data_type):
+    return int(data_type.getLength()) == 0
+
+
+def via_getattr(data_type):
+    return int(data_type.getLength()) == 0
+
+
+table = {"void": via_table}
+via_lambda = lambda data_type: int(data_type.getLength()) == 0
+""",
+    "scripts.function_tracer_pcode.core.dependency2": """
+from __future__ import annotations
+
+
+def deep(data_type):
+    return int(data_type.getLength()) == 0
+""",
+}
+
+
+@pytest.mark.parametrize(
+    "call, target",
+    [
+        pytest.param("from scripts.function_tracer_pcode.core import dependency\n    return dependency.via_module(exact_tree(value))",
+                     "dependency.py:via_module", id="module_form"),
+        pytest.param("import scripts.function_tracer_pcode.core.dependency as dep\n    return dep.via_alias(exact_tree(value))",
+                     "dependency.py:via_alias", id="module_alias"),
+        pytest.param("from scripts.function_tracer_pcode.core.dependency import via_assigned\n    check = via_assigned\n"
+                     "    return check(exact_tree(value))", "dependency.py:via_assigned", id="assigned_alias"),
+        pytest.param("from scripts.function_tracer_pcode.core.dependency import table\n    return table['void'](exact_tree(value))",
+                     "dependency.py:via_table", id="table_in_dependency"),
+        pytest.param("from scripts.function_tracer_pcode.core.dependency import via_local_table\n"
+                     "    return {'k': via_local_table}['k'](exact_tree(value))", "dependency.py:via_local_table", id="local_table"),
+        pytest.param("from scripts.function_tracer_pcode.core import dependency\n    return getattr(dependency, 'via_getattr')(exact_tree(value))",
+                     "dependency.py:via_getattr", id="getattr_module"),
+        pytest.param("from scripts.function_tracer_pcode.core.dependency import via_lambda\n    return via_lambda(exact_tree(value))",
+                     "dependency.py:via_lambda", id="module_lambda"),
+        pytest.param("from scripts.function_tracer_pcode.core.dependency import reexported\n    return reexported(exact_tree(value))",
+                     "dependency2.py:deep", id="reexport"),
+    ],
+)
+def test_the_guard_follows_dependencies_however_they_are_reached(call, target):
+    """依存先の関数を名前で直接呼ぶ以外の形（module の形・別名・表・`getattr`・lambda・再 export）でも検査する。
+    呼び出し以外の位置で参照される関数は、どこから何で呼ばれるか追えないので起点（引数は未確認）として検査する。
+    形ごとに別の関数を置き、違反がその関数の中に出ることを確かめる（別の形が同じ関数を検査して隠さない）。"""
+
+    body = "@classmethod\ndef make(cls, value):\n    " + call + "\n"
+    source = HEADER + textwrap.indent(body, "    ")
+    guard = ConstructionGuard(
+        {"scripts.function_tracer_pcode.core.runtime_refs.sample": source}, _World(),
+        dependency_sources=DEPENDENCY_LAYERS,
+    )
+    found = [v.rsplit(": ", 1)[0] for v in guard.violations()]
+    assert any(v.startswith(target + ": int() of") for v in found), guard.violations()
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        # 出口で写さない key（`proven=True`）は、本体がどの経路でも読み終えた値を返すことを guard が確かめる
+        ("@runtime_ref_key(proven=True)\ndef semantic_key(self, value):\n    return ('k', exact_tree(value))\n", []),
+        ("@runtime_ref_key(proven=True)\ndef semantic_key(self, value):\n    return ('k', method_of(value, 'key')())\n",
+         ['proven key returns tup:["clean", "foreign"]', "returns an unread result of foreign code"]),
+        # 出口で写す key は外の code の結果を返してよい（出口が組み込みの木にする）
+        ("@runtime_ref_key\ndef semantic_key(self, value):\n    return ('k', method_of(value, 'key')())\n", []),
+    ],
+)
+def test_the_guard_checks_keys_that_skip_the_exit_copy(body, expected):
+    assert _violations(body) == expected
+
+
+def test_the_guard_reads_scalar_fields_as_trees_from_the_owner():
+    """scalar / bool の field は owner が組み込みの木にした値（型の誤りの容器の葉に外の object があり得る）: その
+    method の結果は外の code の結果。"""
+
+    assert _violations("def describe(self):\n    return int(self.name.getLength())\n") == ["int() of foreign"]
+    assert _violations("def describe(self):\n    return self.name == 'x'\n") == []

@@ -78,7 +78,7 @@ class AbiArgumentSlotRef:
             tuple(key) if is_kind(key, (tuple, list)) else None,
         )
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[Any, ...]:
         """Cross-binary comparable identity.
 

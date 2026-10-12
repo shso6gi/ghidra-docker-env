@@ -37,7 +37,7 @@ class AddressValueRef:
     object_base_offset: Optional[int] = None
     object_size: Optional[int] = None
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         return (
             "address",
@@ -300,7 +300,7 @@ class LocationBaseRef:
             and int(self.storage_size or 0) == int(other.storage_size or 0)
         )
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         if self.is_parameter():
             if self.parameter_index is not None:
@@ -331,7 +331,7 @@ class LocationBaseRef:
             int(self.storage_size or 0),
         )
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         """Program-independent identity for comparing function-local locations.
 
@@ -426,7 +426,7 @@ class LocationStep:
         if self.kind not in {"offset", "deref"}:
             raise ValueError(f"Unsupported location step kind: {self.kind}")
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[str, int]:
         return (self.kind, int(self.value))
 
@@ -534,7 +534,7 @@ class PostStateSnapshotRef:
     def function_return(cls) -> "PostStateSnapshotRef":
         return cls()
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "post_state_snapshot",

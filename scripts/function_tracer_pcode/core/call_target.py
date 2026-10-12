@@ -27,59 +27,10 @@ def _is_jvm_not_running_error(error: Exception) -> bool:
     )
 
 
-#: 既定の `__str__`（型の名前空間の値: 例外の型の metaclass の `__getattribute__` を呼ばずに比べる）
-_KEY_ERROR_STR = live_values.defined_attribute(KeyError, "__str__")
-_BASE_EXCEPTION_STR = live_values.defined_attribute(BaseException, "__str__")
-
-
 def _error_text(error: BaseException) -> str:
-    """`str(error)` と同じ文字列（例外の引数の scalar の subclass の `__str__` を呼ばない。Issue #242）。
+    """`str(error)` と同じ文字列（例外の文字列化が読む状態を基底型の値で: `live_values.exception_text`。Issue #242）。"""
 
-    引数（の木の葉）に scalar の subclass が無い例外は `str(error)` のまま。既定の `BaseException.__str__` の例外は、
-    引数を基底型の値で読んでから同じ規則（引数が 1 つならその `str()`、無ければ空、2 つ以上なら tuple の `str()`）で、
-    `KeyError` は引数が 1 つならその `repr()`（`KeyError.__str__` と同じ）で文字列にする。それ以外の `__str__` を
-    自分で持つ例外の型（`OSError` など）は `str(error)` のまま（外の code）。
-    """
-
-    args = live_values.attribute_of(error, "args", None)
-    if type(args) is not tuple or not live_values.holds_scalar_subclass(args):
-        return live_values.scalar_text(error)
-    try:
-        defined_str = live_values.defined_attribute(type(error), "__str__")
-    except TypeError:
-        return live_values.scalar_text(error)  # 型を判定できない: `str(error)` のまま（外の code）
-    if defined_str is _KEY_ERROR_STR and len(args) == 1:
-        return live_values.scalar_repr(args[0])
-    if defined_str is not _BASE_EXCEPTION_STR:
-        return _builtin_error_text(error, args)
-    if not args:
-        return ""
-    return live_values.scalar_text(args[0] if len(args) == 1 else args)
-
-
-def _builtin_error_text(error: BaseException, args: Tuple[Any, ...]) -> str:
-    """自分の `__str__` を持つ組み込みの例外（`OSError` など）の文字列を、引数を基底型の値にした同じ型の例外から作る。
-
-    組み込みの型の constructor と `__str__` は組み込みの code（引数の scalar の subclass の code を呼ばない）。
-    `OSError` の file 名（`args` の外に持つ）も写して渡す。組み込みでない型の `__str__` は外の code（`str(error)`）。
-    作れないときは、写した引数の組の文字列（判定できない値を成功にしないが、例外の流れも変えない）。
-    """
-
-    kind = type(error)
-    if type(kind) is not type or live_values.type_module(kind) != "builtins":
-        return live_values.scalar_text(error)
-    exact = live_values.exact_tree(args)
-    extra: Tuple[Any, ...] = ()
-    if live_values.is_kind(error, OSError) and len(exact) == 2:
-        first = live_values.attribute_of(error, "filename", None)
-        second = live_values.attribute_of(error, "filename2", None)
-        if first is not None or second is not None:
-            extra = (live_values.exact_tree(first), None, live_values.exact_tree(second))
-    try:
-        rebuilt = kind(*exact, *extra)
-    except (TypeError, ValueError):
-        return live_values.scalar_text(exact)
-    return live_values.scalar_text(rebuilt)
+    return live_values.exception_text(error)
 
 
 def _safe_getattr(owner: Any, name: str) -> Any:
@@ -309,7 +260,7 @@ class CallTargetRef:
     def is_unknown(self) -> bool:
         return live_values.str_value(self.kind) == "unknown"
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[Any, ...]:
         if self.is_function():
             if self.entry_offset is not None:
@@ -330,7 +281,7 @@ class CallTargetRef:
             return ("code_address", self.program_id, self.address_offset)
         return ("unknown", self.program_id)
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def analysis_key(self) -> Optional[Tuple[Any, ...]]:
         if self.is_unknown():
             return None
@@ -416,8 +367,7 @@ def _declared_return_data_type(function_obj: Any) -> Any:
         return_type = getter()
     except Exception:
         return None
-    # 外の API の値: scalar の subclass は基底型の値にしてから、この解析が辿らない package の code（`signature`）へ渡す
-    return_type = live_values.exact_tree(return_type)
+    # 宣言の型（API の object）は `signature` が読む（construction guard は到達した依存先も検査する）
     if return_type is None:
         return None
     from scripts.function_tracer_pcode.core.signature import (

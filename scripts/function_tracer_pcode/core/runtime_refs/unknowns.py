@@ -272,7 +272,7 @@ class UnknownValueRef:
             origin_key,
         )
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def diagnostic_key(self) -> Tuple[Any, ...]:
         key = self.stable_key()
         if self.origin_kind is None and self.origin_ref is None:

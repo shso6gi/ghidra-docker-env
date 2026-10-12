@@ -29,6 +29,9 @@ field に、外の runtime の scalar の subclass（JPype の `JInt` / `JLong` 
   object）。list とそれ以外の容器は辿らない（そのまま: 中身は検証・読み手が reader で読む）。
 - 注釈が record（dataclass の型: ref の class など）の field は、scalar の subclass（型の誤り）だけを基底型の値に
   する（その値の属性の読みが subclass の `__getattribute__` を呼ばないように。record の instance はそのまま）。
+- 注釈が scalar / bool / record の field に置かれた容器（型の誤り）は組み込みの木（`exact_tree`: 容器は組み込みの型
+  そのもの、葉は同じ規則）にする（その field を組み込む key を出口で写さなくても、葉に scalar の subclass が残らない）。
+  写せない閉路・`OrderedDict` の view は `TypeError`。
 - 注釈が `Any`・式などの field と、写せない値（scalar でない object）は変えない。
 - 型は identity で見る（型の `__eq__` / `__hash__`、metaclass の hook を呼ばない）。
 
@@ -47,8 +50,14 @@ field に、外の runtime の scalar の subclass（JPype の `JInt` / `JLong` 
 （`field(init=False, default=...)`）のどれでも、属性として読む（`object.__getattribute__`）。値が無い field
 （自前の `__init__` が置かなかった field）は写さない。
 
+**1 回の呼び出しの走査**: 入口（`runtime_ref_entry` と自前の `__init__`）と key の出口は `live_values` の thread ごとの
+確かめ済みの木の memo（`verified_tree_holder`）の深さを数える。最も外の呼び出しの間、確かめ済みの変わらない木（部分木に変わる容器の無い tuple / frozenset）を再び辿らない
+（入れ子の key の出口・子の key の読みが同じ部分木を辿り直さない: 走査は作った容器の数に比例する）。
+
 **key の出口**（`runtime_ref_key`）: key を返す公開の method / 関数は、戻り値を `live_values.exact_tree`（組み込みの
-木）にして返す。ただし `self.m()` の上書き（ref の class を継承した型の method）と、他の object の key の method の
+木）にして返す。本体がどの経路でも読み終えた値（clean / 組み込みの木）だけを返すと construction guard が静的に
+確かめた key は `@runtime_ref_key(proven=True)` で、出口で写さない（証明が出口の写しの代わり: guard は本体の戻り値が
+clean でなければ違反にする）。ただし `self.m()` の上書き（ref の class を継承した型の method）と、他の object の key の method の
 結果は包みを通らないので、ref の層の中で受け取った側が `exact_tree` で読む（construction guard が確かめる）。
 
 field の分類は class ごとに最初の構築で 1 度だけ決め（前方参照の注釈を解決できるのはその時点）、この
@@ -57,14 +66,18 @@ module の dict に置く。class の namespace には書かない（`live_value
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import functools
 import inspect
+import operator
 import types
 import typing
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from scripts.function_tracer_pcode.core.live_values import NOT_PLAIN, exact_scalar, exact_tree, int_value
+from scripts.function_tracer_pcode.core.live_values import (
+    NOT_PLAIN, exact_scalar, exact_tree, exact_tree_in, int_value, verified_tree_holder as _holder,
+)
 
 #: class → 写す field の (名前, 分類) の列。最初の構築で決める。
 _FIELD_KINDS: Dict[type, Tuple[Tuple[str, str], ...]] = {}
@@ -144,6 +157,49 @@ def field_kinds(cls: type) -> Tuple[Tuple[str, str], ...]:
     return known
 
 
+#: `id(型)` → (型, 写す field 全部を 1 度に読む C の reader `operator.attrgetter`)。entry が型を持つので `id` は再利用
+#: されない。型を dict の key にしない（型の metaclass の `__hash__` / `__eq__` を呼ばない）
+_FIELD_READERS: Dict[int, Tuple[type, Callable[[Any], Tuple[Any, ...]]]] = {}
+_FIELD_READERS_LIMIT = 4096
+
+#: 写さなくてよい値の型の `id`（`_exact` と同じ: `None` と exact な組み込みの scalar）。型は `id` で比べる（外の型の
+#: metaclass の `__hash__` / `__eq__` を呼ばない。組み込みの型は process の間生きているので `id` は再利用されない）
+_EXACT_TYPE_IDS = frozenset(map(id, (type(None), int, str, bool, float)))
+
+#: 型の MRO と名前空間の読み（metaclass の `__getattribute__` を通らない、`type` の descriptor）
+_TYPE_MRO = type.__dict__["__mro__"].__get__
+_TYPE_NAMESPACE = type.__dict__["__dict__"].__get__
+
+
+def _plain_attribute_lookup(cls: type) -> bool:
+    """型の MRO が属性の読みを上書きしないか（`__getattribute__` / `__getattr__` が `object` のもの）。そのときの
+    `getattr` は `object.__getattribute__` と同じ読み。MRO と名前空間は `type` の descriptor で読む。"""
+
+    for base in _TYPE_MRO(cls):
+        namespace = _TYPE_NAMESPACE(base)
+        if "__getattribute__" in namespace or "__getattr__" in namespace:
+            return base is object
+    return True
+
+
+def _field_reader(cls: type, kinds: Tuple[Tuple[str, str], ...]) -> Optional[Callable[[Any], Tuple[Any, ...]]]:
+    """`cls` の写す field 全部（`kinds` は `field_kinds(cls)`）を 1 度に読む reader。使えないときは `None`。
+
+    属性の読みを上書きしないかは使うたびに確かめる（後から型に `__getattribute__` / `__getattr__` を足したり
+    `__bases__` を変えたりしても、古い判断を使わない）。
+    """
+
+    if len(kinds) < 2 or not _plain_attribute_lookup(cls):
+        return None
+    entry = _FIELD_READERS.get(id(cls))
+    if entry is None or entry[0] is not cls:
+        if len(_FIELD_READERS) >= _FIELD_READERS_LIMIT:
+            _FIELD_READERS.clear()
+        entry = (cls, operator.attrgetter(*(name for name, _kind in kinds)))
+        _FIELD_READERS[id(cls)] = entry  # 並行に作っても同じ値
+    return entry[1]
+
+
 def _exact(value: Any) -> bool:
     """値が写さなくてよい値か（`None` と exact な組み込みの scalar。型は identity で見る）。"""
 
@@ -155,10 +211,10 @@ def exact_field_value(value: Any, kind: str) -> Any:
     """分類 `kind` の field に置く値（規則は module の docstring）。変えない値は同じ object を返す。"""
 
     holder = type(value)
-    if holder is tuple or (kind == "tuple" and issubclass(holder, tuple)):
+    if kind == "tuple" and issubclass(holder, tuple):
         # tuple の注釈の field の tuple（subclass・named tuple を含む）は組み込みの tuple の木にする
-        return _exact_tree(value) if kind == "tuple" else value
-    if _exact(value):
+        return _exact_tree(value)
+    if _exact(value) and holder is not tuple:
         return value
     if kind == "tuple":
         # tuple の注釈に tuple でない値: list や object は辿らない。scalar の subclass は値の基底型へ
@@ -167,8 +223,20 @@ def exact_field_value(value: Any, kind: str) -> Any:
         number = int_value(value)
         if number is not NOT_PLAIN:
             return number != 0
-    # scalar / record: scalar の subclass は基底型の値（record の位置の object・enum の member はそのまま）
-    return exact_scalar(value)
+    if kind == "object" or not issubclass(holder, _TREE_TYPES):
+        # scalar の subclass は基底型の値（record の位置の object・enum の member はそのまま）
+        return exact_scalar(value)
+    # scalar / bool / record の位置の型の誤りの容器: 組み込みの木（`exact_tree`: 容器の中の葉も基底型の値。写せない
+    # 閉路・`OrderedDict` の view は `TypeError`）
+    return exact_tree(value)
+
+
+#: `exact_tree` が辿る（または拒む）容器の型（subclass を含む: `issubclass` は C の MRO の比較）
+_TREE_TYPES = (
+    tuple, list, dict, set, frozenset, collections.deque,
+    type({}.keys()), type({}.values()), type({}.items()),
+    type(collections.OrderedDict().keys()), type(collections.OrderedDict().values()), type(collections.OrderedDict().items()),
+)
 
 
 def _exact_tree(root: Tuple[Any, ...]) -> Tuple[Any, ...]:
@@ -182,6 +250,14 @@ def _exact_tree(root: Tuple[Any, ...]) -> Tuple[Any, ...]:
     結果も共有する。
     """
 
+    if type(root) is tuple:
+        # 最も多い形（葉が exact な scalar だけの平らな tuple）: 同じ tuple（走査の stack を作らない）
+        for item in root:
+            holder = type(item)
+            if not (item is None or holder is int or holder is str or holder is bool or holder is float):
+                break
+        else:
+            return root
     done: Dict[int, Tuple[Any, ...]] = {}
     stack: List[Tuple[Tuple[Any, ...], bool]] = [(root, False)]
     while stack:
@@ -217,13 +293,33 @@ def _exact_tree(root: Tuple[Any, ...]) -> Tuple[Any, ...]:
     return done[id(root)]
 
 
-def _normalize(instance: Any, kinds: Tuple[Tuple[str, str], ...]) -> List[Any]:
+def _normalize(instance: Any, kinds: Tuple[Tuple[str, str], ...], whole: bool = False) -> List[Any]:
     """`kinds` の field を写し、写した後の値の列を返す（検証の後に、書き直された field を見分けるため）。
 
     field は属性として読む（`__dict__`・slot・class の既定値のどこに在っても同じ）。値が無い field は
     `_ABSENT`。構築ごとに通る hot path なので、`_exact` と同じ判定をここでは展開して書く。
     """
 
+    reader = _field_reader(type(instance), kinds) if whole else None  # `whole`: `kinds` は型の写す field 全部
+    if reader is not None:
+        try:
+            current = reader(instance)
+        except AttributeError:
+            current = None  # 値が無い field（自前の `__init__`）: 1 つずつ読む
+        if current is not None:
+            if _EXACT_TYPE_IDS.issuperset(map(id, map(type, current))):
+                return list(current)  # 最も多い形: どの field も写さなくてよい値（C の 1 回の読みと型の確かめ）
+            # 読んだ値で写す（写すのは reader だけで外の code を呼ばないので、他の field の値は読んだ時と同じ）
+            written: List[Any] = []
+            for (name, kind), value in zip(kinds, current):
+                holder = type(value)
+                if not (value is None or holder is int or holder is str or holder is bool or holder is float):
+                    new = exact_field_value(value, kind)
+                    if new is not value:
+                        object.__setattr__(instance, name, new)
+                        value = new
+                written.append(value)
+            return written
     values: List[Any] = []
     append = values.append
     read = object.__getattribute__
@@ -246,6 +342,13 @@ def _normalize(instance: Any, kinds: Tuple[Tuple[str, str], ...]) -> List[Any]:
 def _renormalize_rewritten(instance: Any, kinds: Tuple[Tuple[str, str], ...], before: List[Any]) -> None:
     """class 自身の `__post_init__`（検証）が書き直した field だけを、もう一度写す。"""
 
+    reader = _field_reader(type(instance), kinds)  # `kinds` は型の写す field 全部（包みの `__post_init__` だけが呼ぶ）
+    if reader is not None:
+        try:
+            if all(map(operator.is_, reader(instance), before)):
+                return  # 最も多い形: 検証がどの field も書き直していない（identity の比較だけ）
+        except AttributeError:
+            pass
     read = object.__getattribute__
     rewritten = []
     for entry, old in zip(kinds, before):
@@ -262,7 +365,7 @@ def _renormalize_rewritten(instance: Any, kinds: Tuple[Tuple[str, str], ...], be
 def normalize_fields(instance: Any) -> None:
     """`instance` の scalar / tuple の field を規則で写す（frozen でも書く）。"""
 
-    _normalize(instance, field_kinds(type(instance)))
+    _normalize(instance, field_kinds(type(instance)), whole=True)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -337,6 +440,9 @@ def entry_arguments(
     count = len(positional)
     rewritten: Optional[List[Any]] = None
     for index, value in enumerate(args):
+        holder = type(value)
+        if value is None or holder is int or holder is str or holder is bool or holder is float:
+            continue  # exact な scalar（`_entry_value` と同じ: どの分類でも変えない）
         new = _entry_value(value, positional[index] if index < count else plan.var_positional)
         if new is not value:
             if rewritten is None:
@@ -347,6 +453,9 @@ def entry_arguments(
     by_name = plan.by_name
     copied = False
     for name, value in kwargs.items():
+        holder = type(value)
+        if value is None or holder is int or holder is str or holder is bool or holder is float:
+            continue
         new = _entry_value(value, by_name[name] if name in by_name else plan.var_keyword)
         if new is not value:
             if not copied:
@@ -369,11 +478,19 @@ def _entry_wrapper(function: Callable[..., Any], finish: Optional[Callable[[Any]
         )
 
     def entry(*args: Any, **kwargs: Any) -> Any:
-        args, kwargs = entry_arguments(function, args, kwargs)
-        result = function(*args, **kwargs)
-        if finish is not None:
-            finish(args[0])
-        return result
+        # 1 回の呼び出しの間、確かめ済みの変わらない木を再び辿らない（入れ子の呼び出しは外の scope を使う）
+        scope = _holder()
+        scope.depth += 1
+        try:
+            args, kwargs = entry_arguments(function, args, kwargs)
+            result = function(*args, **kwargs)
+            if finish is not None:
+                finish(args[0])
+            return result
+        finally:
+            scope.depth -= 1
+            if not scope.depth and scope.nodes:
+                scope.nodes.clear()
 
     functools.update_wrapper(entry, function)
     _ENTRY_WRAPPERS[entry] = function
@@ -397,8 +514,16 @@ def runtime_ref_entry(function: Callable[..., Any]) -> Callable[..., Any]:
 _KEY_WRAPPERS: Dict[Callable[..., Any], Callable[..., Any]] = {}
 
 
-def runtime_ref_key(function: Callable[..., Any]) -> Callable[..., Any]:
+#: 本体が組み込みの木だけを返すと construction guard が確かめた key（出口で写さない）
+_PROVEN_KEYS: set = set()
+
+
+def runtime_ref_key(function: Optional[Callable[..., Any]] = None, *, proven: bool = False) -> Any:
     """key を返す method / 関数の出口: 戻り値を **組み込みの木**（`live_values.exact_tree`）にして返す。
+
+    `proven=True`: 本体が返す値はどの経路でも読み終えた値（clean / 組み込みの木）だと construction guard が静的に
+    確かめた key（guard は本体の戻り値の状態が clean でなければ違反にする: 出口の写しの代わりの証明）。出口で写さず、
+    関数をそのまま返す（hot path の `__hash__` / `__eq__` が使う key の費用を増やさない）。
 
     ref の key は field の値（注釈が Any の値を含む）と、他の object（注釈だけの値・代わりの型）の key から
     作る。それらは外の code が作った値で、scalar の subclass の葉や、作り直すと葉を包み直す容器を含み得る。
@@ -407,11 +532,23 @@ def runtime_ref_key(function: Callable[..., Any]) -> Callable[..., Any]:
     本体が reader で読む（出口の写しは本体の消費を守らない）。
     """
 
+    if function is None:
+        return functools.partial(runtime_ref_key, proven=proven)
     if type(function) is not types.FunctionType:
         raise TypeError(f"runtime ref keys must wrap a plain function: {function!r}")
+    if proven:
+        _PROVEN_KEYS.add(function)
+        return function
 
     def key(*args: Any, **kwargs: Any) -> Any:
-        return exact_tree(function(*args, **kwargs))
+        scope = _holder()  # 1 回の呼び出しの走査の memo（`live_values._VerifiedTrees`）: 深さを数え、最も外で空にする
+        scope.depth += 1
+        try:
+            return exact_tree_in(function(*args, **kwargs), scope)
+        finally:
+            scope.depth -= 1
+            if not scope.depth and scope.nodes:
+                scope.nodes.clear()
 
     functools.update_wrapper(key, function)
     _KEY_WRAPPERS[key] = function
@@ -422,7 +559,7 @@ def is_runtime_ref_key(function: Any) -> bool:
     """`function` が `runtime_ref_key` の包みか。"""
 
     inner = getattr(function, "__func__", function)
-    return type(inner) is types.FunctionType and inner in _KEY_WRAPPERS
+    return type(inner) is types.FunctionType and (inner in _KEY_WRAPPERS or inner in _PROVEN_KEYS)
 
 
 def is_runtime_ref_entry(function: Any) -> bool:
@@ -456,7 +593,7 @@ def runtime_ref_record(cls: type) -> type:
     else:
         def __post_init__(self: Any, *init_vars: Any) -> None:
             kinds = field_kinds(type(self))
-            before = _normalize(self, kinds)
+            before = _normalize(self, kinds, whole=True)
             original(self, *init_vars)
             _renormalize_rewritten(self, kinds, before)
 

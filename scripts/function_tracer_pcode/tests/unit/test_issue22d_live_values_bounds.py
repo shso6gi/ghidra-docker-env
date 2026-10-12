@@ -368,6 +368,22 @@ LIVE_VALUES_WORK_OWNERS = {
     "defined_attribute": _B,
     # 写した木と元の値のどちらかの `repr`（読みは `_exact_tree_read`）
     "scalar_repr": _A,
+    # 組み込みの例外の型（`__str__` を定義する組み込みの class）の MRO と名前空間の field だけ
+    "exception_text": _A,
+    "_exception_fields": _A,
+    # 例外の状態（組み込みの例外の field・instance の `__dict__`・中の例外）: 写す値は `exact_tree` が上限の中で読む
+    "_exception_copy": _A,
+    # MRO の長さを `SCAN_LIMIT` と比べてから辿る
+    "_new_exception": _B,
+    "_exception_state_values": _A,
+    "_exception_instance_dict": _A,
+    # 辿る数を `SCAN_LIMIT` と比べる（超えれば `TypeError`: 文字列化できない印）
+    "_nested_exceptions": _B,
+    "_replace_exceptions": _B,
+    # 平らな tuple の確かめ（長さを `SCAN_LIMIT` と比べてから辿る）。それ以外は `_exact_tree_read`
+    "exact_tree_in": _B,
+    # MRO の長さを `SCAN_LIMIT` と比べてから辿る
+    "_defining_class": _B,
 }
 
 #: `core/read_limits`（作業量を受け取らない読みの固定の上限の owner）の入力に比例する関数

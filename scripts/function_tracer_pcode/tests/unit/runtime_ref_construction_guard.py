@@ -9,11 +9,16 @@ ref の class かどうかに依らない）、およびそこから **実際に
 
 **値の状態**（文字列で表す）:
 
-- `clean`: 組み込みの値、または葉まで組み込みの値の容器（定数、`scalar_*` / `exact_tree` の結果、owner が写した
-  scalar の field、写した引数、比較や `not` の結果）
+- `clean`: 組み込みの値、または葉まで組み込みの値の容器（定数、`scalar_*` の結果、owner が写した scalar の field、
+  写した引数、比較や `not` の結果）
+- `tree`: `exact_tree` の結果（組み込みの木）。容器と scalar の葉は組み込みの型そのもの、それ以外の葉は読んでいない
+  外の object。消費は `clean` と同じ。属性・method の結果は `foreign`（object を読んだことを、その先で API から
+  取得する値の安全の根拠にしない）
 - `leaf`: 葉だけを写した値（`exact_scalar` / `exact_field_value` の結果）。scalar の subclass ではないが、容器なら
   中の葉は未確認。真偽・scalar の定数との比較（と定数の tuple / list への `in`）・数への変換・反復はよい。
-  文字列化・hash・定数でない値との比較は違反
+  文字列化・hash・定数でない値との比較は違反。method の結果は `foreign`
+- `imported`: 外の module から import した名前（Ghidra の class など）。値ではない: 属性・method の読みはよく、
+  結果は `foreign`
 - `scalar?`: `isinstance(x, str)` などで絞った値（subclass かもしれない）。葉の reader で読むと clean
 - `seq:<要素>` / `tup:[位置ごと]` / `map:[key, 値]`: 組み込みの容器（真偽・長さ・反復・連結は要素の code を呼ばない）
 - `ref:C`: ref の class C の本物の instance（`self`、構築の結果、`type(x) is C` で絞った値）。field は構築を終えた
@@ -32,7 +37,8 @@ ref の class かどうかに依らない）、およびそこから **実際に
 
 **外の code の結果**（`foreign`）: 注釈だけの値・`is_kind` で絞った値・外の object の method と property、正体の
 分からない callable の戻り値。消費は `unknown` と同じ。加えて **読まずに ref の層の外へ出すと違反**: 外から呼べる
-関数の戻り値（`runtime_ref_key` の key の出口は owner が組み込みの木にするので除く）、ref の構築の引数のうち owner
+関数の戻り値（`runtime_ref_key` の key の出口は owner が組み込みの木にするので除く。ただし出口で写さない
+`runtime_ref_key(proven=True)` の key は除かず、さらに本体の戻り値の状態が clean でなければ違反）、ref の構築の引数のうち owner
 が読まない field（分類が scalar / bool / record の field と、検証がどの経路でも reader で書き直す field は owner が
 読む）、`object.__setattr__` で置く値。
 
@@ -60,7 +66,12 @@ f-string の入れ子の format の指定も消費。入れ子の class の本�
 target・関数の中の `global`）と、関数の中で同じ名前の局所変数・引数が隠すもの（名前の形・module の形の両方）は
 reader ではない。
 
-**到達**: 同じ module の関数、import した ref module の関数、入れ子の関数、別の呼び出しの引数の中の呼び出し、
+**到達**: 同じ module の関数、import した ref module の関数、**到達した package の module（依存先: `core/signature`
+など。ref module でも reader でもないもの）の関数**（起点にはしないが、到達した関数は同じ規則で検査する。名前の形・
+module の形（`dep.f(...)`）・再 export・module の名前空間の `name = lambda` を辿る）、**呼び出し以外の位置で参照
+される関数**（別名・表・値として渡す・`getattr` で読む module の関数: どこから何で呼ばれるか追えないので、引数を
+未確認とした起点として検査する）、入れ子の関数、
+別の呼び出しの引数の中の呼び出し、
 `self.m()` / `cls.m()` / `C.m()`、`ref:C` / `typed:C` / `obj:C` の値の method と property。戻り値の状態は本体の
 `return` / `yield` の meet、引数の状態は呼び出し元の実引数（と既定値）の meet（fixpoint）。外から呼べる関数の
 引数は注釈の状態（入口なら写した後の状態）から始める。制御の流れは分岐ごとに追い、`continue` / `break` の状態は
@@ -79,7 +90,8 @@ reader ではない。
   引数・field など `self` 以外の位置に来る subclass の instance は対象（`typed:` / `rtyped:` / `nref:` の規則）。
   `C.method(代わりの型)` のように class から外の object を渡して呼ぶ使い方も対象外。`ref:C` の field は構築のときの値として扱う（後から
   `object.__setattr__` で書き換えた値は追わない）。
-- `exact_tree` の結果は clean として扱う: 容器は組み込みの型そのもの、scalar の葉は組み込みの型そのもの
+- `exact_tree` の結果は `tree` として扱う（消費は clean と同じ、属性・method の結果は foreign）: 容器は組み込みの
+  型そのもの、scalar の葉は組み込みの型そのもの
   （`live_values.exact_tree` の保証。外の constructor / `_make` を呼ばない）。辿らない値は scalar でも組み込みの容器
   （subclass・named tuple・`deque`・dict の view を含む）でもない object（外の code: その `__eq__` / `repr` などは
   検査しない。`OrderedDict` の view は反復が key を hash するので `exact_tree` が拒む（`TypeError`）。`MappingProxyType` / `UserList` / `ChainMap` は中身を写さずに残る: その `repr` は中の値の `repr` を呼ぶ）だけ。
@@ -114,6 +126,13 @@ LEAF = "leaf"
 #: field への書き込み）と違反（外の constructor / method は作り直すときに scalar の subclass を混ぜ得る）
 FOREIGN = "foreign"
 CONTAINER = "seq:unknown"
+#: 標準の library・外の package（Ghidra の class など）から `from x import Name` した名前: 値ではない（scalar の
+#: subclass ではない）。属性・method の読みはよいが、その結果は外の code の結果（`foreign`）
+IMPORTED = "imported"
+#: `exact_tree` の結果（組み込みの木）: 容器は組み込みの型そのもの、scalar の葉は組み込みの型そのもの、それ以外の葉は
+#: 外の object（読んでいない）。消費は `clean` と同じ。ただし属性・method の結果（外の object が API から返す値）は
+#: 外の code の結果（`foreign`）: object を読んだことを、その先で取得する値の安全の根拠にしない
+TREE = "tree"
 
 PACKAGE = pathlib.Path(__file__).resolve().parents[2]
 
@@ -135,8 +154,10 @@ READERS = frozenset({
     "scalar_int", "scalar_text", "scalar_bool", "as_bool", "as_int", "as_str", "str_value",
     "int_value", "json_scalar", "is_kind", "type_name", "type_module",
     "builtin_str", "builtin_sequence", "size", "scalar_int_or", "is_json_record", "type_name", "type_module",
-    "is_kind", "materialize", "defined_attribute", "holds_scalar_subclass", "scalar_repr",
+    "is_kind", "materialize", "defined_attribute", "holds_scalar_subclass", "scalar_repr", "exception_text",
 })
+#: 出力の記述を作る `json_encoding` の関数（`_Source`: 値は `json_encoding` が書くときに読む）
+JSON_SOURCES = frozenset({"each", "inline", "raw", "mapping_of", "as_list", "as_dict", "pairs_of", "nested"})
 #: 値を「組み込みの容器（要素は未確認）」にする reader
 CONTAINER_READERS = frozenset({"builtin_items", "elements_of", "elements_within_limit"})
 #: 値を「比べてよい容器」にする reader（組み込みの tuple / list を辿り、scalar の subclass の葉を基底型の値にする）
@@ -183,6 +204,17 @@ def _decorated(node: Any, names: Iterable[str]) -> bool:
     names = set(names)
     return any(
         (isinstance(d, ast.Name) and d.id in names) or (isinstance(d, ast.Attribute) and d.attr in names)
+        or (isinstance(d, ast.Call) and _decorated(ast.FunctionDef(decorator_list=[d.func]), names))
+        for d in node.decorator_list
+    )
+
+
+def _proven_key(node: Any) -> bool:
+    """`@runtime_ref_key(proven=True)`: 出口で写さない key（本体の戻り値が clean であることを guard が確かめる）。"""
+
+    return any(
+        isinstance(d, ast.Call) and _decorated(ast.FunctionDef(decorator_list=[d.func]), {"runtime_ref_key"})
+        and any(k.arg == "proven" and isinstance(k.value, ast.Constant) and k.value.value is True for k in d.keywords)
         for d in node.decorator_list
     )
 
@@ -224,7 +256,7 @@ def as_seq(state: str) -> str:
 def clean_tree(state: str) -> bool:
     """組み込みの値と、葉まで組み込みの値の容器。"""
 
-    if state in (CLEAN, BOTTOM):
+    if state in (CLEAN, BOTTOM, TREE):
         return True
     if state.startswith("seq:"):
         return clean_tree(state[4:])
@@ -240,7 +272,7 @@ def widen(state: str, depth: int = 3) -> str:
 
     if state.count("seq:") + state.count("tup:") + state.count("map:") <= depth:
         return state
-    return "seq:" * depth + (CLEAN if clean_tree(state) else UNKNOWN)
+    return "seq:" * depth + ((TREE if TREE in state else CLEAN) if clean_tree(state) else UNKNOWN)
 
 
 def meet(a: str, b: str) -> str:
@@ -252,6 +284,10 @@ def meet(a: str, b: str) -> str:
 def _meet(a: str, b: str) -> str:
     if a == b:
         return a
+    if TREE in (a, b):
+        other = b if a == TREE else a
+        if clean_tree(other):
+            return TREE  # 組み込みの値・木との合流は木（葉に外の object があり得る）
     if (FOREIGN in a or FOREIGN in b) and not (is_container(a) and is_container(b)):
         # 外の code の結果を含む値: 由来を落とさない（消費は unknown と同じ、出口で違反）。組み込みの容器どうしは
         # 容器のまま（要素の状態で由来を持つ）
@@ -288,6 +324,8 @@ def _meet(a: str, b: str) -> str:
 
 
 def element_of(state: str) -> str:
+    if state == TREE:
+        return TREE
     if state.startswith("seq:"):
         return state[4:]
     if state.startswith("tup:"):
@@ -424,6 +462,18 @@ class _Module:
         self.name = name
         self.tree = tree
         self.functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+        # module の名前空間の `name = lambda ...` も関数として辿る（本体は 1 つの式の `return`）
+        for node in tree.body:
+            if (
+                isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                and isinstance(node.value, ast.Lambda) and node.targets[0].id not in self.functions
+            ):
+                body = ast.Return(value=node.value.body)
+                function = ast.FunctionDef(name=node.targets[0].id, args=node.value.args, body=[body], decorator_list=[], returns=None)
+                ast.copy_location(body, node.value.body)
+                ast.copy_location(function, node)
+                function.type_comment = None
+                self.functions[function.name] = function
         self.methods: Dict[Tuple[str, str], ast.FunctionDef] = {}
         self.record_classes: List[ast.ClassDef] = []
         #: ref でない class（`ExpansionBudgetCollector` など）: method は辿るが、field は owner が写した値ではない
@@ -442,7 +492,10 @@ class _Module:
             if isinstance(node, ast.ImportFrom) and node.module in READER_MODULES:
                 self.reader_names.update(alias.asname or alias.name for alias in node.names)
             if isinstance(node, ast.ImportFrom) and node.module == "scripts.function_tracer_pcode.core":
-                self.reader_modules.update(alias.asname or alias.name for alias in node.names if alias.name == "live_values")
+                self.reader_modules.update(
+                    alias.asname or alias.name for alias in node.names
+                    if f"scripts.function_tracer_pcode.core.{alias.name}" in READER_MODULES
+                )
         # module の名前空間で束縛し直した名前は reader ではない（関数の中の局所変数は呼び出しのときに env で見分ける）
         defined = _module_bindings(tree)
         # reader の名前と reader の module の名前を同じ名前に束縛した import も、どちらも信用しない
@@ -471,6 +524,8 @@ class _Module:
         self.imports: Dict[str, Tuple[str, str]] = {}
         #: package の中で、この解析が辿らない module（ref module でも reader でもない）から import した名前
         self.outside_names: Set[str] = set()
+        #: package の module（reader でない）から import した名前: 名前 → (module, 名前)。到達したら辿る（依存先）
+        self.package_imports: Dict[str, Tuple[str, str]] = {}
         #: `import x` で束縛した module の名前（標準の library など）
         self.module_names: Set[str] = set()
         #: 標準の library などから `from x import name` した関数（引数は読んでから渡す）
@@ -485,12 +540,38 @@ class _Module:
                 and node.module not in READER_MODULES
             ):
                 self.outside_names.update(alias.asname or alias.name for alias in node.names)
+                for alias in node.names:
+                    self.package_imports[alias.asname or alias.name] = (node.module, alias.name)
             elif isinstance(node, ast.Import):
                 self.module_names.update((alias.asname or alias.name).split(".")[0] for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module and not node.module.startswith("scripts.") and node.module not in (
                 "__future__", "typing", "dataclasses", "enum", "collections.abc",
             ):
                 self.stdlib_names.update(alias.asname or alias.name for alias in node.names)
+        #: package の module（reader でない）を束縛した名前: 名前 → module（`dep.f(...)` を辿る）
+        self.package_modules: Dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.startswith("scripts.function_tracer_pcode.") and alias.name not in READER_MODULES and alias.asname:
+                        self.package_modules[alias.asname] = alias.name
+            elif isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("scripts.function_tracer_pcode"):
+                for alias in node.names:
+                    full = f"{node.module}.{alias.name}"
+                    if full not in READER_MODULES:
+                        # module かどうかは guard が読めるかで決める（`from pkg import func` の関数は読めない）
+                        self.package_modules[alias.asname or alias.name] = full
+        #: 呼び出し以外の位置で参照する関数の名前・package の module の名前（別名・表・値として渡す: どこから何で
+        #: 呼ばれるか追えない）。guard はその関数を起点（引数は未確認）として検査する
+        callee_ids = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+        callee_ids |= {
+            id(node.func.value) for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name)
+        }
+        self.escaping: Set[str] = {
+            node.id for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and id(node) not in callee_ids
+        }
         self.constants: Dict[str, str] = {}
         for node in tree.body:
             if isinstance(node, ast.Assign) and all(isinstance(t, ast.Name) for t in node.targets):
@@ -544,8 +625,13 @@ def _parameters(unit: _Unit) -> List[ast.arg]:
 class ConstructionGuard:
     """構築の経路の消費を検査する（`violations()` が違反の一覧）。"""
 
-    def __init__(self, sources: Dict[str, str], world: RefWorld, external: Iterable[str] = ()):
+    def __init__(
+        self, sources: Dict[str, str], world: RefWorld, external: Iterable[str] = (),
+        dependency_sources: Optional[Dict[str, str]] = None,
+    ):
         self.world = world
+        #: 依存先の source（test が与える。無ければ package の file を読む）
+        self.dependency_sources = dict(dependency_sources or {})
         names = set(sources)
         self.modules = {name: _Module(name, ast.parse(text), names) for name, text in sources.items()}
         #: ref module の外から import される `_` で始まる名前（外から呼べるので起点にする）
@@ -561,6 +647,8 @@ class ConstructionGuard:
                 self.plain_classes.add(node.name)
         self._violations: List[str] = []
         self._reached: List[str] = []
+        #: 到達して足した依存先の module（`core/signature` など）
+        self.dependencies: Set[str] = set()
         self.edges: Set[Tuple[str, str]] = set()
         #: ref の class → `__post_init__` を抜けたときの field の状態（検証が写し直した field を含む）
         self.post_states: Dict[str, Dict[str, str]] = {}
@@ -593,7 +681,7 @@ class ConstructionGuard:
         """
 
         units: Dict[Tuple[str, Optional[str], str], ast.FunctionDef] = {}
-        for module in self.modules.values():
+        for module in [m for name, m in self.modules.items() if name not in self.dependencies]:
             for name, function in module.functions.items():
                 units[(module.name, None, name)] = function
             for (owner, name), function in module.methods.items():
@@ -667,10 +755,57 @@ class ConstructionGuard:
 
     # -- 名前の解決 ----------------------------------------------------------------------------------
 
-    def _resolve(self, module: _Module, name: str) -> Optional[_Unit]:
+    def _escaped_units(self) -> List[_Unit]:
+        """呼び出し以外の位置で参照される関数（別名・表・値として渡す関数・`getattr` で読む module の関数）。"""
+
+        out = []
+        for module in list(self.modules.values()):
+            for name in module.escaping:
+                if name in module.reader_names or name in module.reader_modules:
+                    continue
+                if name in module.package_modules and self._load_dependency(module.package_modules[name]):
+                    target = self.modules[module.package_modules[name]]
+                    out.extend(_Unit(target.name, None, function) for function in target.functions.values())
+                    continue
+                unit = self._resolve(module, name)
+                if unit is not None:
+                    out.append(unit)
+        return out
+
+    def _load_dependency(self, module_name: str) -> bool:
+        """到達した package の module（ref module・reader でない依存先）を解析の対象に足す（起点にはしない: 到達した
+        関数だけを辿る）。source が無ければ足さない（呼ぶ側は辿れない呼び先として扱う）。"""
+
+        if module_name in self.modules:
+            return True
+        path = PACKAGE.parents[1].joinpath(*module_name.split(".")).with_suffix(".py")
+        if module_name in self.dependency_sources:
+            text = self.dependency_sources[module_name]
+        elif module_name.startswith("scripts.function_tracer_pcode.") and path.exists():
+            text = path.read_text()
+        else:
+            return False
+        module = _Module(module_name, ast.parse(text), set(self.modules) | {module_name})
+        self.modules[module_name] = module
+        self.dependencies.add(module_name)
+        for node in module.record_classes + module.plain_classes:
+            self.class_modules.setdefault(node.name, module_name)
+            if node in module.plain_classes:
+                self.plain_classes.add(node.name)
+        return True
+
+    def _resolve(self, module: _Module, name: str, depth: int = 0) -> Optional[_Unit]:
         if name in module.functions:
             return _Unit(module.name, None, module.functions[name])
-        target = module.imports.get(name)
+        target = module.imports.get(name) or module.package_imports.get(name)
+        if target is not None and target[0] not in self.modules:
+            self._load_dependency(target[0])
+        if (
+            target is not None and target[0] in self.modules and target[1] not in self.modules[target[0]].functions
+            and depth < 8
+        ):
+            # 再 export（`from dep2 import f as g` を import した名前）: 定義した module まで辿る
+            return self._resolve(self.modules[target[0]], target[1], depth + 1)
         if target is not None and target[0] in self.modules and target[1] in self.modules[target[0]].functions:
             other = self.modules[target[0]]
             return _Unit(other.name, None, other.functions[target[1]])
@@ -699,7 +834,7 @@ class ConstructionGuard:
         外から呼べるものの引数は呼び出し元が何でも渡せるので、注釈の状態（写さない）で検査する。"""
 
         seeds = []
-        for module in self.modules.values():
+        for module in [m for name, m in self.modules.items() if name not in self.dependencies]:
             for node in module.record_classes + module.plain_classes:
                 for item in node.body:
                     if not isinstance(item, ast.FunctionDef):
@@ -744,6 +879,10 @@ class ConstructionGuard:
                 if key not in units:
                     units[key] = unit
                     roles[key] = "helper"
+            for unit in self._escaped_units():
+                if roles.get(unit.key) != "external" and roles.get(unit.key) not in ("entry", "construct"):
+                    units[unit.key] = unit
+                    roles[unit.key] = "external"  # どこから何で呼ばれるか追えない: 引数は未確認
             new_params = {
                 key: _meet_parameters(units[key], calls.get(key, [])) for key in units if roles[key] == "helper"
             }
@@ -768,6 +907,13 @@ class ConstructionGuard:
             unit = units[key]
             _FunctionCheck(self, unit, roles[key], params.get(key, {}), summaries, {}, {}, report).run()
             self._reached.append(unit.label)
+        for key, unit in units.items():
+            if _proven_key(unit.function) and not clean_tree(summaries.get(key, BOTTOM)):
+                # 出口で写さない key は、本体がどの経路でも読み終えた値（clean / 組み込みの木）を返すこと
+                report.append(
+                    f"{unit.module.rsplit('.', 1)[-1]}.py:{unit.function.name}: proven key returns {summaries.get(key)}: "
+                    f"{unit.function.name} (line {unit.function.lineno})"
+                )
         self._violations = sorted(set(report))
 
 
@@ -1003,7 +1149,7 @@ class _FunctionCheck:
             self.calls.setdefault(target.key, []).append((positional, keywords))
         else:
             self.calls.setdefault(target.key, []).append(({}, {}))
-        if _decorated(target.function, {"runtime_ref_key"}):
+        if _decorated(target.function, {"runtime_ref_key"}) and not _proven_key(target.function):
             return CLEAN  # key の出口は owner が組み込みの木にして返す（`runtime_ref_key`）
         return self.summaries.get(target.key, BOTTOM)
 
@@ -1022,6 +1168,8 @@ class _FunctionCheck:
                 return f"class:{e.id}"
             if e.id in self.module.constants:
                 return self.module.constants[e.id]
+            if e.id in self.module.stdlib_names:
+                return IMPORTED
             return UNKNOWN
         if isinstance(e, ast.Attribute):
             return self._attribute(e, env)
@@ -1072,6 +1220,8 @@ class _FunctionCheck:
                 return as_seq(base) if is_container(base) else UNKNOWN
             if base == CLEAN:
                 return CLEAN  # 組み込みの文字列の 1 文字
+            if base == TREE:
+                return TREE  # 組み込みの木の要素
             if base.startswith("map:"):
                 return map_parts(base)[1]
             if base.startswith("tup:") and isinstance(e.slice, ast.Constant) and isinstance(e.slice.value, int):
@@ -1117,9 +1267,9 @@ class _FunctionCheck:
         if proven and after_validation:
             post = self.guard.post_states.get(owner, {}).get(name)
             if info.kind in ("scalar", "bool"):
-                return CLEAN
+                return TREE  # owner が写した値（型の誤りの容器は組み込みの木: 葉に外の object があり得る）
             if post is not None and post != BOTTOM:
-                if info.kind == "tuple" and not is_container(post) and post != CLEAN:
+                if info.kind == "tuple" and not is_container(post) and post not in (CLEAN, TREE):
                     post = CONTAINER
                 return post
         if info.ref:
@@ -1132,7 +1282,7 @@ class _FunctionCheck:
                 return f"seq:rtyped:{info.element}"
             return CONTAINER  # exact な tuple の葉は写すが、list のまま受理した値の要素は写さない
         if proven and info.kind in ("scalar", "bool"):
-            return CLEAN  # 本物の instance の scalar の field は owner が写した値
+            return TREE  # 本物の instance の scalar の field は owner が写した値
         return UNKNOWN
 
     def _attribute(self, e: ast.Attribute, env: Dict[str, str], *, default: Optional[ast.AST] = None) -> str:
@@ -1142,6 +1292,8 @@ class _FunctionCheck:
         return self._attribute_of(self.state(e.value, env), e.attr, env)
 
     def _attribute_of(self, base: str, name: str, env: Dict[str, str]) -> str:
+        if base == IMPORTED:
+            return FOREIGN  # import した class / 関数の属性: 外の code の値
         if base.startswith("ref:"):
             owner = base[4:]
             found = self._field(owner, name, proven=True)
@@ -1198,6 +1350,8 @@ class _FunctionCheck:
             return UNKNOWN
         if base == CLEAN:
             return CLEAN  # 組み込みの値・型の属性（`type(x).__qualname__` など）
+        if base == TREE:
+            return FOREIGN  # 木の葉の外の object の属性（API の値）: 読んでいない
         return UNKNOWN
 
     def _reader_call(self, node: ast.AST, reader: str, env: Dict[str, str]) -> bool:
@@ -1244,6 +1398,10 @@ class _FunctionCheck:
             if len(call.args) == 3:
                 found = meet(found, self.state(call.args[2], env))
             return found
+        if through_owner and name in JSON_SOURCES:
+            return CLEAN  # 出力の記述（`json_encoding` の `_Source`）。中の値は書くときに reader が読む
+        if through_owner and name == "items_of":
+            return "seq:" + make_tup([UNKNOWN, UNKNOWN])  # 組み込みの mapping の (key, 値): 中身は未確認
         if through_owner and name == "method_of":
             return FOREIGN  # 葉を写してから読んだ属性（呼ぶ前の method）: 外の code
         if through_owner and name in CONTAINER_READERS:
@@ -1252,7 +1410,7 @@ class _FunctionCheck:
                 return argument[len("uncertain:"):]
             return argument if is_container(argument) and name != "elements_within_limit" else CONTAINER
         if through_owner and name in TREE_READERS:
-            return CLEAN  # 組み込みの値か、葉まで組み込みの値の容器（形は分からない: 反復・添字・method は clean）
+            return TREE  # 組み込みの木（形は分からない: 反復・添字は木、属性・method の結果は外の code）
         if through_owner and name in LEAF_READERS:
             argument = self.state(call.args[0], env) if call.args else UNKNOWN
             if argument == MAYBE_SCALAR:
@@ -1316,6 +1474,17 @@ class _FunctionCheck:
                 return self._call_bound(state, call, env)
             return FOREIGN  # 正体の分からない callable（`getattr` で取った method など）の戻り値
         if isinstance(callee, ast.Attribute):
+            if (
+                isinstance(callee.value, ast.Name) and callee.value.id in self.module.package_modules
+                and callee.value.id not in env and callee.value.id not in self.module.reader_modules
+            ):
+                # package の module の関数（`dep.f(...)`）: 依存先として辿る。辿れなければ外の code
+                module_name = self.module.package_modules[callee.value.id]
+                if self.guard._load_dependency(module_name):
+                    unit = self.guard._resolve(self.guard.modules[module_name], callee.attr)
+                    if unit is not None:
+                        return self._follow(unit, call, env)
+                    return FOREIGN
             if isinstance(callee.value, ast.Name) and callee.value.id in BUILTIN_TYPES:
                 return CLEAN  # 基底型の slot の実装（subclass の上書きを呼ばない）
             if ast.unparse(callee) == "json.dumps":
@@ -1339,8 +1508,10 @@ class _FunctionCheck:
                 return UNKNOWN
             if base == CLEAN:
                 return CLEAN  # clean な値（組み込みの値）の method
+            if base == TREE:
+                return FOREIGN  # 木の葉の外の object の method（API の戻り値）: 読んでから消費する
             if base == LEAF:
-                return LEAF  # 基底型の str なら基底型の method、外の object なら外の code
+                return FOREIGN  # 基底型の str なら基底型の method だが、外の object なら外の code の結果（読んでから消費する）
             if base.startswith("map:"):
                 key, value = map_parts(base)
                 if callee.attr in ("get", "pop", "setdefault"):
@@ -1497,7 +1668,7 @@ class _FunctionCheck:
 
     @staticmethod
     def _truth_ok(state: str) -> bool:
-        return state in (CLEAN, BOTTOM, LEAF) or state.startswith(("seq:", "tup:", "map:", "ref:", "nref:", "class:", "bound:", "classattr:"))
+        return state in (CLEAN, BOTTOM, LEAF, TREE) or state.startswith(("seq:", "tup:", "map:", "ref:", "nref:", "class:", "bound:", "classattr:"))
 
     def _compare_ok(self, state: str) -> bool:
         """`==` / 順序 / hash に渡してよい値（組み込みの値、比べても未確認の値に届かない ref と、その容器）。"""
@@ -1553,7 +1724,7 @@ class _FunctionCheck:
             elif names and set(names) <= SCALAR_TYPES | {"bool"}:
                 current = out.get(t.args[0].id, UNKNOWN)
                 # 葉だけを写した値は exact な scalar。それ以外は subclass かもしれない（葉の reader で読む）
-                out[t.args[0].id] = CLEAN if current in (CLEAN, LEAF) else MAYBE_SCALAR
+                out[t.args[0].id] = CLEAN if current in (CLEAN, LEAF, TREE) else MAYBE_SCALAR
         elif (
             isinstance(t, ast.Compare) and len(t.ops) == 1
             and isinstance(t.ops[0], ast.Is if positive else ast.IsNot)  # `type(x) is C` が成り立つ側
@@ -1604,7 +1775,7 @@ class _FunctionCheck:
     def _unpack(self, target: ast.AST, state: str, node: ast.AST) -> None:
         """tuple の target への代入は値を反復する（組み込みの容器か clean な値でなければ違反）。"""
 
-        if isinstance(target, (ast.Tuple, ast.List)) and not is_container(state) and state not in (CLEAN, BOTTOM):
+        if isinstance(target, (ast.Tuple, ast.List)) and not is_container(state) and state not in (CLEAN, BOTTOM, TREE):
             self.flag(node, f"unpacking of {state}")
 
     def _bind(self, target: ast.AST, state: str, env: Dict[str, str]) -> None:
@@ -1681,7 +1852,7 @@ class _FunctionCheck:
         elif isinstance(s, ast.For):
             self._expr(s.iter, env)
             iterated = self.state(s.iter, env)
-            if not is_container(iterated) and iterated not in (CLEAN, BOTTOM, LEAF):
+            if not is_container(iterated) and iterated not in (CLEAN, BOTTOM, LEAF, TREE):
                 self.flag(s.iter, f"iteration of {iterated}")
             element = element_of(iterated) if iterated != CLEAN else CLEAN
             self._unpack(s.target, element, s.iter)
@@ -1722,7 +1893,7 @@ class _FunctionCheck:
                 state = self.state(s.value, env)
                 if (
                     FOREIGN in state and self.role in ("entry", "external", "construct")
-                    and not _decorated(self.unit.function, {"runtime_ref_key"})
+                    and not (_decorated(self.unit.function, {"runtime_ref_key"}) and not _proven_key(self.unit.function))
                 ):
                     self.flag(s, "returns an unread result of foreign code")
                 self._returns(state, env)
@@ -1734,7 +1905,7 @@ class _FunctionCheck:
                 if value.value is not None:
                     self._expr(value.value, env)
                     state = self.state(value.value, env)
-                    if isinstance(value, ast.YieldFrom) and not is_container(state) and state not in (CLEAN, BOTTOM, LEAF):
+                    if isinstance(value, ast.YieldFrom) and not is_container(state) and state not in (CLEAN, BOTTOM, LEAF, TREE):
                         self.flag(value, f"yield from iterates {state}")  # `__iter__` は値の型の code
                     self._returns("seq:" + (element_of(state) if isinstance(value, ast.YieldFrom) else state))
                 return
@@ -1892,7 +2063,7 @@ class _FunctionCheck:
             if check:
                 self._expr(generator.iter, inner)
             iterated = self.state(generator.iter, inner)
-            if check and not is_container(iterated) and iterated not in (CLEAN, BOTTOM, LEAF):
+            if check and not is_container(iterated) and iterated not in (CLEAN, BOTTOM, LEAF, TREE):
                 self.flag(generator.iter, f"iteration of {iterated}")
             if check:
                 self._unpack(generator.target, element_of(iterated) if iterated != CLEAN else CLEAN, generator.iter)
@@ -2011,7 +2182,7 @@ class _FunctionCheck:
                 for k, v in zip(e.keys, e.values):
                     if k is None:  # `{**x}`: mapping の key と値を読む
                         state = self.state(v, env)
-                        if not state.startswith("map:") and state not in (CLEAN, BOTTOM):
+                        if not state.startswith("map:") and state not in (CLEAN, BOTTOM, TREE):
                             self.flag(e, f"unpacking of {state}")
             keys = e.elts if isinstance(e, ast.Set) else [k for k in e.keys if k is not None]
             if any(not self._compare_ok(self.state(k, env)) for k in keys):
@@ -2036,7 +2207,10 @@ class _FunctionCheck:
             if isinstance(callee, ast.Attribute):
                 self._method_receiver(e, callee, env)
             self._call_consumption(e, callee, name, env)
-            if isinstance(callee, ast.Name) and name in self.module.outside_names and name not in env:
+            if (
+                isinstance(callee, ast.Name) and name in self.module.outside_names and name not in env
+                and self.guard._resolve(self.module, name) is None
+            ):
                 # package の中でこの解析が辿らない関数（`core/signature` など）: 渡す値は読んでから渡す
                 for argument in [*e.args, *(k.value for k in e.keywords)]:
                     state = self.state(argument.value if isinstance(argument, ast.Starred) else argument, env)
@@ -2068,11 +2242,11 @@ class _FunctionCheck:
                     self.flag(e, f"json.dumps() of {states[0]}")  # key の並べ替え・値の repr
             elif ast.unparse(callee).startswith("hashlib.") and states:
                 for state in states:
-                    if state not in (CLEAN, BOTTOM):
+                    if state not in (CLEAN, BOTTOM, TREE):
                         self.flag(e, f"hashlib reads {state}")  # buffer の読み（`bytes` の subclass の `__buffer__`）
             elif name in ("len", *CONTAINER_BUILTINS) and name != "range" and states:
                 for state in states:
-                    if not is_container(state) and state not in (CLEAN, BOTTOM, LEAF):
+                    if not is_container(state) and state not in (CLEAN, BOTTOM, LEAF, TREE):
                         self.flag(e, f"{name}() iterates {state}")  # `__len__` / `__iter__` は値の型の code
                         break
             elif name == "bool" and states:
@@ -2089,7 +2263,7 @@ class _FunctionCheck:
                 pass  # 基底型の slot の実装
             elif isinstance(callee, ast.Attribute) and callee.attr in SCALAR_METHODS:
                 base = self.state(callee.value, env)
-                if base not in (CLEAN, LEAF) and not base.startswith(("seq:", "ref:", "class:")):
+                if base not in (CLEAN, LEAF, TREE) and not base.startswith(("seq:", "ref:", "class:")):
                     self.flag(e, f"method {callee.attr}() on {base}")
                 elif callee.attr == "join" and base == CLEAN and states and not self._value_ok(states[0]):
                     self.flag(e, f"join() of {states[0]}")
@@ -2107,7 +2281,7 @@ class _FunctionCheck:
                 base = self.state(callee.value, env)
                 if is_container(base) and not any(k.arg == "key" for k in e.keywords) and not self._compare_ok(element_of(base)):
                     self.flag(e, f"sort() compares {element_of(base)}")
-                elif not is_container(base) and base not in (CLEAN, BOTTOM):
+                elif not is_container(base) and base not in (CLEAN, BOTTOM, TREE):
                     self.flag(e, f"sort() on {base}")
             if isinstance(callee, ast.Attribute) and callee.attr in ("index", "count", "remove") and e.args:
                 base = self.state(callee.value, env)
@@ -2131,7 +2305,7 @@ class _FunctionCheck:
             base = self.state(e.value, env)
             if is_container(base) and not isinstance(e.slice, ast.Slice) and not self._compare_ok(self.state(e.slice, env)):
                 self.flag(e, "hash")  # dict の key / list の添字（`__index__`）
-            if not is_container(base) and base not in (CLEAN, BOTTOM, LEAF):
+            if not is_container(base) and base not in (CLEAN, BOTTOM, LEAF, TREE):
                 self.flag(e, f"subscript of {base}")
             self._expr(e.value, env)
             self._expr(e.slice, env)
@@ -2151,7 +2325,7 @@ class _FunctionCheck:
                 self._expr(item, env)
         elif isinstance(e, ast.Starred):
             state = self.state(e.value, env)
-            if not is_container(state) and state not in (CLEAN, BOTTOM, LEAF):
+            if not is_container(state) and state not in (CLEAN, BOTTOM, LEAF, TREE):
                 self.flag(e, f"unpacking of {state}")  # `*x` は反復する
             self._expr(e.value, env)
         elif isinstance(e, ast.NamedExpr):
@@ -2169,6 +2343,4 @@ ACCEPTED: Dict[str, str] = {
     "_reading.py:items: tuple() iterates unknown: tuple(value)":
         "組み込みの列・scalar でない iterable（generator・deque など）の反復は置き換える前と同じくその object の code"
         "（scalar の subclass はその前の分岐が基底型の値で読む）",
-    "pcode.py:_local_op_ordinal_from_parent: comparison of foreign: candidate == pcode_op":
-        "Ghidra の PcodeOp object どうしの等しさ（Java の equals）。scalar ではなく、ref の field にも入らない",
 }

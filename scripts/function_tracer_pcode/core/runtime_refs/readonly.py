@@ -59,7 +59,7 @@ class ReadonlyReductionTermRef:
     byte_offset: int
     access_size: int
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "readonly_reduction_term",
@@ -269,11 +269,11 @@ class ReductionAccumulatorProof:
         lane_terms = tuple(self.lane_terms or ())
         return int(start_index) + len(seed_terms) + int(implicit_seed_count) + len(lane_terms)
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         return self.readonly_term_sequence_contract_key()
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     @runtime_ref_entry
     def readonly_term_sequence_contract_key(
         self,
@@ -1294,13 +1294,13 @@ class ReadonlyReductionRef:
             return None
         return tuple(prefix)
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
         if self.loop_summary is not None and self.loop_summary.pairwise_exact_key() is None:
             return None
         return self.stable_key()
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def pairwise_semantic_key(self) -> Optional[Tuple[Any, ...]]:
         return self.semantic_key()
 

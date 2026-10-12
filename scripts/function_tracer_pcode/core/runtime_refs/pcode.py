@@ -13,6 +13,8 @@ _MAX_PARENT_PCODE_OP_SCAN = 10000
 
 
 def _coerce_nonnegative_int(value: Any) -> Optional[int]:
+    if type(value) is int:
+        return value if value >= 0 else None  # exact な整数（最も多い形: API の offset / seq）
     if value is None or is_kind(value, bool):
         return None
     try:
@@ -42,52 +44,82 @@ def _address_components(address: Any) -> Tuple[Optional[str], Optional[int]]:
     if address is None:
         return None, None
     space_name = None
+    # 受け手は 1 度だけ葉を写して読む（`method_of` と同じ読み: 親の block の走査の hot path なので method ごとに写さない）
+    address = exact_scalar(address)
     try:
-        space = method_of(address, "getAddressSpace")()
+        space = address.getAddressSpace()
     except Exception:
         space = None
     if space is not None:
         try:
-            space_name = method_of(space, "getName")()
+            space_name = exact_scalar(space).getName()
         except Exception:
             space_name = None
     try:
-        offset = method_of(address, "getOffset")()
+        offset = address.getOffset()
     except Exception:
         offset = None
     return _coerce_optional_text(space_name), _coerce_nonnegative_int(offset)
 
 
-def _pcode_op_ordinal_signature(pcode_op: Any) -> Tuple[Any, ...]:
+def _pcode_op_ordinal_signature(pcode_op: Any, target: Optional[Tuple[Any, ...]] = None) -> Optional[Tuple[Any, ...]]:
+    """op の (target_space, target_offset, seq_time, seq_order, opcode, mnemonic)。
+
+    `target` を渡すと、親の block の走査の候補の比較: field を違いが出やすい順（seq の order・time、target、opcode、
+    mnemonic）に読み、`target` の field と違う最初の field で読むのを止めて `None` を返す（同じ block の他の op は多く
+    order で違う: 候補ごとに 6 つの field 全部を読まない）。違わなければ signature（`== target`）。field の値はどれも
+    写した組み込みの値なので、読む順も止める位置も、`signature == target` の真偽を変えない。
+    """
+
+    if target is not None:
+        target = exact_tree(target)  # 比べる前の読み（呼ぶ側が渡す値: 組み込みの木）
+        shape = type(target)
+        if shape is not tuple or len(target) != 6:
+            return None  # signature（6 つの field の tuple）と等しくなり得ない値
     target_space = None
     target_offset = None
     seq_time = None
     seq_order = None
+    # 受け手は 1 度だけ葉を写して読む（`_address_components` と同じ）
+    pcode_op = exact_scalar(pcode_op)
     try:
-        seq = method_of(pcode_op, "getSeqnum")()
+        seq = pcode_op.getSeqnum()
     except Exception:
         seq = None
     if seq is not None:
+        seq = exact_scalar(seq)
         try:
-            target_space, target_offset = _address_components(method_of(seq, "getTarget")())
-        except Exception:
-            target_space, target_offset = None, None
-        try:
-            seq_time = _coerce_nonnegative_int(method_of(seq, "getTime")())
-        except Exception:
-            seq_time = None
-        try:
-            seq_order = _coerce_nonnegative_int(method_of(seq, "getOrder")())
+            seq_order = _coerce_nonnegative_int(seq.getOrder())
         except Exception:
             seq_order = None
+        if target is not None and seq_order != target[3]:
+            return None
+        try:
+            seq_time = _coerce_nonnegative_int(seq.getTime())
+        except Exception:
+            seq_time = None
+        if target is not None and seq_time != target[2]:
+            return None
+        try:
+            target_space, target_offset = _address_components(seq.getTarget())
+        except Exception:
+            target_space, target_offset = None, None
+    if target is not None and (
+        target_offset != target[1] or target_space != target[0] or seq_time != target[2] or seq_order != target[3]
+    ):
+        return None
     try:
-        opcode = _coerce_opcode(method_of(pcode_op, "getOpcode")())
+        opcode = _coerce_opcode(pcode_op.getOpcode())
     except Exception:
         opcode = None
+    if target is not None and opcode != target[4]:
+        return None
     try:
-        mnemonic = _coerce_optional_text(method_of(pcode_op, "getMnemonic")())
+        mnemonic = _coerce_optional_text(pcode_op.getMnemonic())
     except Exception:
         mnemonic = None
+    if target is not None and mnemonic != target[5]:
+        return None
     return (target_space, target_offset, seq_time, seq_order, opcode, mnemonic)
 
 
@@ -101,23 +133,34 @@ def _local_op_ordinal_from_parent(pcode_op: Any) -> Optional[int]:
     iterator = attribute_of(parent, "getIterator", lambda: None)()
     if iterator is None:
         return None
+    iterator = exact_scalar(iterator)  # 受け手は 1 度だけ葉を写す（候補ごとに写さない）
     target_signature = _pcode_op_ordinal_signature(pcode_op)
+    # `pcode_op` の読み（初めて要るときに 1 度だけ: 走査の op ごとに読み直さない）
+    target_tree = None
+    target_read = False
     ordinal = 0
     while ordinal < _MAX_PARENT_PCODE_OP_SCAN:
         try:
-            has_next = method_of(iterator, "hasNext")()
+            has_next = iterator.hasNext()
         except Exception:
             return None
         # 組み込みの bool だけを受ける（`bool` は subclass を作れないので、真偽は identity で読める）
         if has_next is not True:
             return None
         try:
-            candidate = method_of(iterator, "next")()
+            candidate = iterator.next()
         except Exception:
             return None
-        if candidate is pcode_op or candidate == pcode_op:
+        # API の object どうしの等しさ（Java の equals）。どちらかが scalar の subclass でも、その `__eq__` を呼ばない
+        if candidate is pcode_op:
             return ordinal
-        if _pcode_op_ordinal_signature(candidate) == target_signature:
+        candidate_tree = exact_tree(candidate)  # 読む順は変えない（候補が先）
+        if not target_read:
+            target_tree = exact_tree(pcode_op)
+            target_read = True
+        if candidate_tree == target_tree:
+            return ordinal
+        if _pcode_op_ordinal_signature(candidate, target_signature) is not None:
             return ordinal
         ordinal += 1
     return None
@@ -302,7 +345,7 @@ class PcodeOpRef:
             local_op_ordinal=local_op_ordinal,
         )
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[Any, ...]:
         if self._has_full_identity_context():
             return (
@@ -390,7 +433,7 @@ class PcodeBlockRef:
         # `binary_id` は stable key の scalar（`PcodeOpRef` と同じ読み方。Issue #242）
         object.__setattr__(self, "binary_id", exact_tree(self.binary_id))
 
-    @runtime_ref_key
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[Any, ...]:
         if (
             self.binary_id is not None
