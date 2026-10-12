@@ -510,7 +510,7 @@
       "write_pair_status_public_key": {"logged": 0, "unlogged": 1}
     },
     "authority.domains.abi_width_readonly": {
-      "AbiWidthReadonlyPilotEncoder._execute_pending_solver_queries": {"logged": 0, "unlogged": 2},
+      "AbiWidthReadonlyPilotEncoder._execute_pending_solver_queries": {"logged": 0, "unlogged": 1},
       "AbiWidthReadonlyPilotEncoder.commit_emitted_signal": {"logged": 0, "unlogged": 1},
       "_sealed_void_effect_surface_fact": {"logged": 0, "unlogged": 1}
     },

@@ -3991,15 +3991,18 @@ class AbiWidthReadonlyPilotEncoder:
         失敗したら ``rollback_emitted_signal`` が commit の写しから戻し、成功したら写しを捨てる。
         """
         session.domain_signal_state.pop(_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY, None)
+        published = False
         try:
             session.emit_many(
                 intents,
                 lambda: self.commit_emitted_signal(session, batch, intents),
                 transaction_signal=batch,
             )
-        except Exception:
-            self.rollback_emitted_signal(session, batch)
-            raise
+            published = True
+        finally:
+            if not published:
+                # どの失敗でも取引の前へ戻し、例外はそのまま上げる。
+                self.rollback_emitted_signal(session, batch)
         session.domain_signal_state.pop(_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY, None)
 
     def finalize_open_execution_history(self, session: Any) -> None:
