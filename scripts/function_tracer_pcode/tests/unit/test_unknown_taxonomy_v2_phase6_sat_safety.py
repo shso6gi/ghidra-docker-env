@@ -913,12 +913,12 @@ def test_sat_safety_completion_commits_only_after_stream_append(monkeypatch):
     )
     with production_signal_scope(session):
         assert emit_sat_safety_signal(observed) == 1
-        real_emit_many = session.emit_many
+        real_emit_many = session._emit_many_admitted
 
         def fail_append(_intents, _commit_callback=None):
             raise RuntimeError("forced SAT safety completion append failure")
 
-        monkeypatch.setattr(session, "emit_many", fail_append)
+        monkeypatch.setattr(session, "_emit_many_admitted", fail_append)
         assert emit_sat_safety_signal(completed) == 0
         assert session.recorder.event_count == 1
         assert "sat_safety_completed" not in session.domain_signal_state
@@ -926,7 +926,7 @@ def test_sat_safety_completion_commits_only_after_stream_append(monkeypatch):
             session.domain_signal_state
         )
 
-        monkeypatch.setattr(session, "emit_many", real_emit_many)
+        monkeypatch.setattr(session, "_emit_many_admitted", real_emit_many)
         assert emit_sat_safety_signal(completed) == 1
     assert session.recorder.event_count == 2
     assert len(session.domain_signal_state["sat_safety_completed"]) == 1

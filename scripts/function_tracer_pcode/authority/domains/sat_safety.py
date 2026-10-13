@@ -78,6 +78,8 @@ SAT_SAFETY_RECOVERY_REGISTRY = SealedRecoveryRegistry.build((SAT_SAFETY_CONTRACT
 #: 終わるので、進行中の取引の写しを別の取引が消すことも、写しの間に別の取引が同じ
 #: occurrence を変えることもない。
 _COMMITTED_TRANSACTIONS_KEY = "sat_safety_committed_transactions"
+#: safe counterexample の取引の写し（commit の前は印が未設定だった）。
+_SAFE_COUNTEREXAMPLE_UNSET = ("safe-counterexample", "unset")
 
 
 class SatSafetyPilotEncoder:
@@ -239,6 +241,11 @@ class SatSafetyPilotEncoder:
                 "sat_safety_safe_counterexample_committed"
             ):
                 raise ValueError("safe counterexample was already committed")
+            committed = session.domain_signal_state.setdefault(_COMMITTED_TRANSACTIONS_KEY, {})
+            if id(signal) in committed:
+                raise ValueError("SAT safety signal already owns a committed transaction")
+            # 後段の失敗で戻せるよう、この取引の分の写し（commit の前は未設定）を残す。
+            committed[id(signal)] = _SAFE_COUNTEREXAMPLE_UNSET
             session.domain_signal_state[
                 "sat_safety_safe_counterexample_committed"
             ] = signal.proof_artifact_digest
@@ -280,7 +287,7 @@ class SatSafetyPilotEncoder:
 
     def finish_emitted_signal(self, session: Any, signal: Any) -> None:
         """この取引の公開は確定した: 巻き戻し用の写しを捨てる。"""
-        if type(signal) is not SatSafetyBlockerProductionSignal:
+        if type(signal) not in {SatSafetyBlockerProductionSignal, SafeCounterexampleProductionSignal}:
             return
         committed = session.domain_signal_state.get(_COMMITTED_TRANSACTIONS_KEY)
         if committed:
@@ -289,6 +296,15 @@ class SatSafetyPilotEncoder:
                 session.domain_signal_state.pop(_COMMITTED_TRANSACTIONS_KEY, None)
 
     def rollback_emitted_signal(self, session: Any, signal: Any) -> None:
+        if type(signal) is SafeCounterexampleProductionSignal:
+            committed = session.domain_signal_state.get(_COMMITTED_TRANSACTIONS_KEY, {})
+            if committed.pop(id(signal), None) is _SAFE_COUNTEREXAMPLE_UNSET:
+                # commit の後でこの取引が失敗した: 決め手の印を commit の前（未設定）へ戻す
+                # （残すと、再試行が重複として黙って捨てられる）。
+                session.domain_signal_state.pop("sat_safety_safe_counterexample_committed", None)
+            if not committed:
+                session.domain_signal_state.pop(_COMMITTED_TRANSACTIONS_KEY, None)
+            return
         if type(signal) is not SatSafetyBlockerProductionSignal:
             return
         committed = session.domain_signal_state.get(_COMMITTED_TRANSACTIONS_KEY, {})

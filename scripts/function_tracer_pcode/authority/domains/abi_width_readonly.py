@@ -4000,30 +4000,17 @@ class AbiWidthReadonlyPilotEncoder:
                     session.emit_domain_signal(handoff)
 
     def _emit_solver_batch_transaction(self, session: Any, batch: Any) -> None:
-        """solver の batch を 1 つの取引として encode し公開する（失敗なら全ての台帳を取引の前へ戻す）。
+        """solver の batch を 1 つの producer の取引（attempt）として encode し公開する。
 
-        encoding から公開までが session の 1 つの取引（``domain_signal_transaction``）。
-        公開は ``publish_signal_transaction``: commit の後で同じ取引の Phase 7 の commit
-        などが失敗したら ``rollback_emitted_signal`` が commit の写しから戻し、公開できたら
-        ``finish_emitted_signal`` がこの取引の写しを捨てる。例外はそのまま上げる。
+        境界は session の ``run_signal_transaction``: encoding が予約した取引、commit の後で
+        同じ取引の Phase 7 の commit などが失敗したら ``rollback_emitted_signal`` が commit の
+        写しから全ての台帳を戻し、公開できたら ``finish_emitted_signal`` がこの取引の写しを
+        捨てる。例外はそのまま上げる。
         """
-        with session.domain_signal_transaction():
-            encoded = False
-            try:
-                intents = tuple(self._solver_batch_intents(session, batch))
-                encoded = True
-            finally:
-                if not encoded:
-                    self.rollback_emitted_signal(session, batch)
-            self._publish_solver_batch(session, batch, intents)
-
-    def _publish_solver_batch(
-        self, session: Any, batch: Any, intents: tuple[EventIntent, ...],
-    ) -> None:
-        session.publish_signal_transaction(
+        session.run_signal_transaction(
             batch,
-            intents,
-            lambda: self.commit_emitted_signal(session, batch, intents),
+            lambda: self._solver_batch_intents(session, batch),
+            lambda intents: self.commit_emitted_signal(session, batch, intents),
             lambda: self.rollback_emitted_signal(session, batch),
             finish=lambda: self.finish_emitted_signal(session, batch),
             replay_aware=True,

@@ -723,7 +723,7 @@ def test_a_refused_publication_of_a_promise_keeps_the_promise(monkeypatch):
         def fail_append(_intents, _commit_callback=None, **_k):
             raise RuntimeError("forced stream append failure")
 
-        monkeypatch.setattr(session, "emit_many", fail_append)
+        monkeypatch.setattr(session, "_emit_many_admitted", fail_append)
         assert _observe(replace(promise, defer_until_terminal=False)) == 0
         assert _state(session) == before
         assert session.domain_signal_error_kinds == ["RuntimeError"]
@@ -1122,7 +1122,7 @@ def test_finalize_keeps_a_promise_whose_terminal_publication_is_refused(monkeypa
         def fail_append(_intents, _commit_callback=None, **_k):
             raise RuntimeError("forced stream append failure")
 
-        monkeypatch.setattr(session, "emit_many", fail_append)
+        monkeypatch.setattr(session, "_emit_many_admitted", fail_append)
         finalize_deferred_sat_safety_observations(session)
         assert not session.stream_truncated
         assert _state(session) == before
@@ -1617,7 +1617,7 @@ def test_a_producer_inside_another_transactions_commit_is_refused_without_state_
         assert nested and not nested[0]
         assert _ledger_state(session, b_signal) is BlockerState.ABSENT
         assert _ledger_state(session, a_signal) is (BlockerState.ABSENT if fails else BlockerState.PUBLISHED)
-        assert session.domain_signal_error_kinds == ["ValueError"] + (["RuntimeError"] if fails else [])
+        assert session.domain_signal_error_kinds == ["ProducerTransactionRefused"] + (["RuntimeError"] if fails else [])
         after = _state(session)
         assert after["promised_ids"] == before["promised_ids"]
         assert after["reserved"] == before["reserved"]
@@ -1770,3 +1770,280 @@ def test_a_concurrent_consumer_never_drops_a_loop_handoff(monkeypatch):
         assert _ledger_state(session, first) is BlockerState.PUBLISHED
         assert _ledger_state(session, second) is BlockerState.PUBLISHED
     assert "loop_sat_safety_handoffs" not in session.domain_signal_state
+
+
+# ---- 取引の所有権: 同じ thread からの再入（review 8） ------------------------------
+#
+# 契約: 1 つの session で生きている producer の取引（attempt）は 1 つ。生きている取引の
+# 準備（encoding）・commit・後始末の中から新しい取引や直接の公開を始めると、それは何も
+# 取得せずに拒否され、拒否は記録される（pair は ERROR）。拒否は外側の取引の写し・Phase 7
+# の取引・予約・lock を解放しない。外側の取引は自分の成否どおりに終わる。signal の object
+# の同一性（同じ object・同じ内容の別 object・別の occurrence）に依らない。
+
+
+def _nested_calls(session, outer):
+    """外側の取引の中から試す呼び出し（入口 × object・occurrence の関係）。"""
+    other = _observed(PARTITION, ("pairwise",), key=_B_KEY)
+
+    def direct_emit():
+        authority = session.domain_signal_encoder.authority_for_signal(session, other)
+        from scripts.function_tracer_pcode.authority.lifecycle.stream import (
+            CauseObservedEventAuthority,
+            EventIntent,
+            EventType,
+        )
+
+        return session.emit(EventIntent(EventType.CAUSE_OBSERVED, CauseObservedEventAuthority(authority)))
+
+    return {
+        "same-object-generic": (lambda: session.emit_domain_signal(outer), outer),
+        "same-object-entry": (lambda: _observe(outer), outer),
+        "equal-object-generic": (lambda: session.emit_domain_signal(replace(outer)), outer),
+        "other-occurrence-generic": (lambda: session.emit_domain_signal(other), other),
+        "other-promise-entry": (lambda: _observe(replace(other, defer_until_terminal=True)), other),
+        "direct-emit": (direct_emit, other),
+    }
+
+
+_NESTED = ["same-object-generic", "same-object-entry", "equal-object-generic",
+           "other-occurrence-generic", "other-promise-entry", "direct-emit"]
+
+
+def _install_reentry(session, monkeypatch, stage, call, *, fail):
+    """外側の取引の ``stage`` で ``call`` を 1 回だけ呼ぶ（commit の段では、その後で失敗させられる）。"""
+    seen = []
+
+    def run_nested():
+        try:
+            seen.append(("value", call()))
+        except Exception as exc:  # 入れ子の結果を外側から調べる
+            seen.append(("error", exc))
+
+    if stage == "preparing":
+        # session の encoder（composite でも SAT の encoder でも）の encoding の中。
+        encoder_class = type(session.domain_signal_encoder)
+        real_call = encoder_class.__call__
+
+        def encoding(self, session_, signal):
+            if not seen and session_ is session:
+                run_nested()
+            return real_call(self, session_, signal)
+
+        monkeypatch.setattr(encoder_class, "__call__", encoding)
+    elif stage == "committing":
+        real_commit = session._commit_phase7_signal_transaction
+
+        def committing(signal):
+            if not seen:
+                run_nested()
+                if fail:
+                    raise RuntimeError("forced failure after the encoder commit")
+            return real_commit(signal)
+
+        monkeypatch.setattr(session, "_commit_phase7_signal_transaction", committing)
+    else:
+        encoder = session.domain_signal_encoder
+        real_finish = encoder.finish_emitted_signal
+
+        def finishing(session_, signal):
+            if not seen:
+                run_nested()
+            return real_finish(session_, signal)
+
+        monkeypatch.setattr(encoder, "finish_emitted_signal", finishing)
+    return seen
+
+
+@pytest.mark.parametrize("manifest", [False, True], ids=["plain", "phase7"])
+@pytest.mark.parametrize("nested", _NESTED)
+@pytest.mark.parametrize(("stage", "fail"), [
+    ("preparing", False), ("committing", False), ("committing", True), ("finishing", False),
+], ids=["preparing", "committing", "committing-then-fails", "finishing"])
+def test_a_reentrant_transaction_is_refused_without_touching_the_outer_one(
+    stage, fail, nested, manifest, monkeypatch,
+):
+    connector = _manifest_connector() if manifest else _connector()
+    session = connector.begin({"phase": "pr-a", "case": f"reentry-{stage}-{fail}-{nested}-{manifest}"})
+    outer = _observed(REPLAY, (R,), key=_A_KEY)
+    with production_signal_scope(session):
+        settled = _observed(REPLAY, (R,), key=("settled-before",))
+        assert _observe(settled) == 1
+        call, nested_signal = _nested_calls(session, outer)[nested]
+        before = _state(session)
+        seen = _install_reentry(session, monkeypatch, stage, call, fail=fail)
+        published = _observe(outer)
+        monkeypatch.undo()
+        # 入れ子の試行は拒否された（何も公開せず、直接の公開は例外）。
+        assert len(seen) == 1
+        kind, result = seen[0]
+        if nested == "direct-emit":
+            assert kind == "error" and type(result).__name__ == "ProducerTransactionRefused"
+        else:
+            assert (kind, result) == ("value", 0)
+        # 外側の取引は自分の成否どおり。拒否は外側の写し・Phase 7・予約・lock を解放しない。
+        outer_failed = stage == "committing" and fail
+        assert published == (0 if outer_failed else 1)
+        assert _ledger_state(session, outer) is (BlockerState.ABSENT if outer_failed else BlockerState.PUBLISHED)
+        if nested_signal is not outer:
+            assert _ledger_state(session, nested_signal) is BlockerState.ABSENT
+        assert _ledger_state(session, settled) is BlockerState.PUBLISHED
+        after = _state(session)
+        assert after["events"] == before["events"] + (0 if outer_failed else 1)
+        assert after["reserved"] == before["reserved"] and after["promised_ids"] == before["promised_ids"]
+        assert after["pending_tx"] == {} and after["phase7_tx"] == {}
+        assert "sat_safety_committed_transactions" not in session.domain_signal_state
+        assert session._phase7_signal_transactions == {}
+        assert not session.producer_commit_open()
+        assert not session.holds_domain_signal_transaction()
+        assert session.domain_signal_error_kinds == (
+            ["ProducerTransactionRefused"] + (["RuntimeError"] if outer_failed else [])
+        )
+        # stream の prefix の chain は正しい（入れ子の公開が混ざっていない）。
+        session.preview_lifecycle_projection()
+    # 拒否は記録されたので、最終判定は ERROR（encoding の失敗として止まる）。
+    with pytest.raises(ValueError, match="encoding is incomplete"):
+        _finish(session, connector, "reentry")
+
+
+@pytest.mark.parametrize("manifest", [False, True], ids=["plain", "phase7"])
+@pytest.mark.parametrize("stage", ["preparing", "committing", "finishing"])
+def test_reentry_hooks_without_a_nested_call_change_nothing(stage, manifest, monkeypatch):
+    """対照: 同じ hook で入れ子の呼び出しをしなければ、外側は普通に公開され失敗も無い。"""
+    connector = _manifest_connector() if manifest else _connector()
+    session = connector.begin({"phase": "pr-a", "case": f"reentry-control-{stage}-{manifest}"})
+    outer = _observed(REPLAY, (R,), key=_A_KEY)
+    with production_signal_scope(session):
+        before = _state(session)
+        seen = _install_reentry(session, monkeypatch, stage, lambda: None, fail=False)
+        assert _observe(outer) == 1
+        monkeypatch.undo()
+        assert seen == [("value", None)]
+        assert _ledger_state(session, outer) is BlockerState.PUBLISHED
+        assert _state(session)["events"] == before["events"] + 1
+        assert session.domain_signal_error_kinds == []
+        session.preview_lifecycle_projection()
+    _finish(session, connector, "reentry-control")
+
+
+@pytest.mark.parametrize("manifest", [False, True], ids=["plain", "phase7"])
+def test_a_failing_end_of_transaction_hook_keeps_the_publication_and_is_recorded(manifest, monkeypatch):
+    connector = _manifest_connector() if manifest else _connector()
+    session = connector.begin({"phase": "pr-a", "case": f"finish-failure-{manifest}"})
+    outer = _observed(REPLAY, (R,), key=_A_KEY)
+    encoder = session.domain_signal_encoder
+
+    def failing_finish(_session, _signal):
+        raise RuntimeError("forced end-of-transaction hook failure")
+
+    with production_signal_scope(session):
+        before = _state(session)
+        monkeypatch.setattr(encoder, "finish_emitted_signal", failing_finish)
+        with pytest.raises(RuntimeError, match="end-of-transaction hook failure"):
+            _observe(outer)
+        monkeypatch.undo()
+        # 公開した event は残り、失敗は記録され、取引は終わっている（lock・window は解放）。
+        assert _ledger_state(session, outer) is BlockerState.PUBLISHED
+        assert _state(session)["events"] == before["events"] + 1
+        assert session.domain_signal_error_kinds == ["ProducerTransactionFinishFailed"]
+        assert not session.producer_commit_open()
+        assert not session.holds_domain_signal_transaction()
+        assert _observe(_observed(PARTITION, ("pairwise",), key=_B_KEY)) == 1
+        session.preview_lifecycle_projection()
+    with pytest.raises(ValueError, match="encoding is incomplete"):
+        _finish(session, connector, "finish-failure")
+
+
+def test_a_failing_rollback_still_ends_the_attempt_and_releases_the_boundary(monkeypatch):
+    session = _connector().begin({"phase": "pr-a", "case": "rollback-failure"})
+    outer = _observed(REPLAY, (R,), key=_A_KEY)
+    encoder = session.domain_signal_encoder
+
+    def failing_rollback(_session, _signal):
+        raise RuntimeError("forced encoder rollback failure")
+
+    def failing_phase7(_signal):
+        raise RuntimeError("forced failure after the encoder commit")
+
+    with production_signal_scope(session):
+        monkeypatch.setattr(encoder, "rollback_emitted_signal", failing_rollback)
+        monkeypatch.setattr(session, "_commit_phase7_signal_transaction", failing_phase7)
+        assert _observe(outer) == 0
+        monkeypatch.undo()
+        assert session.domain_signal_error_kinds == ["RuntimeError"]
+        assert "rollback failures" in session.domain_signal_error_details[0]
+        assert not session.producer_commit_open()
+        assert not session.holds_domain_signal_transaction()
+        assert session._producer_boundary.has_live_attempt is False
+
+
+def test_a_reentrant_abi_batch_transaction_is_refused_and_the_outer_one_rolls_back(monkeypatch):
+    """ABI の batch の commit の中から同じ batch の取引を始めると拒否される。拒否は外側の写しを
+    消さず、拒否で失敗した外側の取引は ABI と SAT-safety の全ての台帳を取引の前へ戻す。正当な
+    入れ子（ABI の commit の中の SAT-safety の commit）は新しい取引ではないので拒否されない。"""
+    _patch_abi_transaction_identity(monkeypatch)
+    session, abi, batch, handoff = _abi_transaction_with_one_sat_handoff()
+    with production_signal_scope(session):
+        intents = _abi_batch_intents(session)
+        pending = session.domain_signal_state["abi_width_pending_emission_transactions"]
+        digest, _intents, payload = pending.pop(("abi-transaction",))
+        before = _state(session)
+        abi_before = {key: session.domain_signal_state.get(key) for key in _ABI_TRANSACTION_KEYS}
+
+        def encode(_session, _batch):
+            pending[("abi-transaction",)] = (digest, intents, payload)
+            return intents
+
+        monkeypatch.setattr(abi, "_solver_batch_intents", encode)
+        real_commit = abi.commit_emitted_signal
+        nested = []
+
+        def commit_then_reenter(session_, batch_, intents_):
+            real_commit(session_, batch_, intents_)
+            assert _ledger_state(session, handoff) is BlockerState.PUBLISHED  # 正当な入れ子
+            try:
+                abi._emit_solver_batch_transaction(session, batch)
+            except Exception as exc:
+                nested.append(exc)
+                raise
+
+        monkeypatch.setattr(abi, "commit_emitted_signal", commit_then_reenter)
+        with pytest.raises(Exception) as raised:
+            abi._emit_solver_batch_transaction(session, batch)
+        assert type(raised.value).__name__ == "ProducerTransactionRefused"
+        assert [type(exc).__name__ for exc in nested] == ["ProducerTransactionRefused"]
+        assert _ledger_state(session, handoff) is BlockerState.ABSENT
+        assert _state(session) == before
+        assert {key: session.domain_signal_state.get(key) for key in _ABI_TRANSACTION_KEYS} == abi_before
+        assert "abi_width_committed_rollback_snapshots" not in session.domain_signal_state
+        assert ("abi-transaction",) not in pending
+        assert session.domain_signal_error_kinds == ["ProducerTransactionRefused"]
+        assert not session.holds_domain_signal_transaction()
+
+
+def test_a_safe_counterexample_that_fails_after_its_commit_can_be_published_again(monkeypatch):
+    """決め手の counterexample の commit の後で同じ取引が失敗したら、印を commit の前へ戻す。
+    印が残ると、再試行が重複として黙って捨てられ、決め手の event が出ない。"""
+    session = _connector().begin({"phase": "pr-a", "case": "safe-counterexample-rollback"})
+    real = session._commit_phase7_signal_transaction
+    failures = []
+
+    def fail_once(signal):
+        if not failures:
+            failures.append(signal)
+            raise RuntimeError("forced failure after the counterexample commit")
+        return real(signal)
+
+    monkeypatch.setattr(session, "_commit_phase7_signal_transaction", fail_once)
+    # safe receipt は scope の中で作ると event を出すので、scope の外で作る。
+    first, retry = _safe_pairwise_receipt(), _safe_pairwise_receipt()
+    with production_signal_scope(session):
+        before = session.recorder.event_count
+        emit_safe_counterexample_production_signal(safety_receipt=first)
+        assert failures and session.recorder.event_count == before
+        assert "sat_safety_safe_counterexample_committed" not in session.domain_signal_state
+        assert "sat_safety_committed_transactions" not in session.domain_signal_state
+        emit_safe_counterexample_production_signal(safety_receipt=retry)
+        assert session.recorder.event_count == before + 1
+        assert session.domain_signal_state.get("sat_safety_safe_counterexample_committed")
+        assert "sat_safety_committed_transactions" not in session.domain_signal_state
+    assert session.domain_signal_error_kinds == ["RuntimeError"]

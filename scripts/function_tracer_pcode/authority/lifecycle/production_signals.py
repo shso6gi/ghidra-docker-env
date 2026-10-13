@@ -1500,10 +1500,10 @@ def _emit_sat_safety_blocker_in_transaction(
         raise TypeError("SAT safety encoder lacks occurrence authority")
     ledger = SatSafetyBlockerLedger(session)
     try:
-        if session.producer_commit_open():
-            # 別の取引の commit の中（commit の callback）からの入口: その取引の巻き戻しの
-            # 範囲に入るので受け付けない（状態を変えずに失敗として記録する）。
-            raise ValueError("SAT safety signal inside another transaction's commit")
+        # 新しい取引を始められるか（別の取引の commit・公開の中、同じ signal object の
+        # 取引が進行中）を、台帳を変える前に session の境界に聞く。拒否は状態を変えずに
+        # 失敗として記録する。
+        session.ensure_producer_admissible(signal)
         # identity の owner は検証済みの blocker からしか identity を作らない（owner の分類は
         # ここで 1 回、identity・台帳より前）。
         occurrence_id = authority_for_signal(session, signal).occurrence.occurrence_id
@@ -1968,28 +1968,24 @@ def execute_loop_solver_rendered_query(
     commit = getattr(encoder, "commit_emitted_signal", None)
     rollback = getattr(encoder, "rollback_emitted_signal", None)
     finish = getattr(encoder, "finish_emitted_signal", None)
-    # encoding から公開・commit・巻き戻し・後始末までが session の 1 つの取引。
-    with _sat_safety_transaction(session):
-        encoded = False
-        try:
-            intents = tuple(encoder(session, batch))
-            encoded = True
-        finally:
-            if not encoded and callable(rollback):
-                rollback(session, batch)
-        session.publish_signal_transaction(
-            batch,
-            intents,
-            (lambda: commit(session, batch, intents)) if callable(commit) else _no_op,
-            (lambda: rollback(session, batch)) if callable(rollback) else _no_op,
-            finish=(lambda: finish(session, batch)) if callable(finish) else None,
-        )
-    emitted = len(intents)
+    # encoding から公開・commit・巻き戻し・後始末までが session の 1 つの取引（attempt）。
+    published = session.run_signal_transaction(
+        batch,
+        lambda: encoder(session, batch),
+        (lambda intents: commit(session, batch, intents)) if callable(commit) else _ignore_intents,
+        (lambda: rollback(session, batch)) if callable(rollback) else _no_op,
+        finish=(lambda: finish(session, batch)) if callable(finish) else None,
+    )
+    emitted = len(published)
     emitted += _consume_loop_sat_safety_handoffs(session)
     return emitted
 
 
 def _no_op() -> None:
+    return None
+
+
+def _ignore_intents(_intents: Any) -> None:
     return None
 
 
