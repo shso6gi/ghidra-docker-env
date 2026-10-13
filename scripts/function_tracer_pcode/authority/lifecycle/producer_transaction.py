@@ -26,21 +26,21 @@ Stages of an attempt and who may change what:
 * PREPARING  -- admitted; the attempt owns its Phase 7 wrapper transaction
   (when it claimed one) and, once it calls the encoder, the encoder's
   in-flight state for its signal object.
-* COMMITTING -- the producer commit has started (the *commit window*): until
-  the attempt ends no other attempt may start and no direct publication may
-  be staged, so the rollback state of this attempt describes only its own
+* COMMITTING -- the producer commit has started.  As in every stage of a live
+  attempt, no other attempt may start and no direct publication may be
+  staged, so the rollback state of this attempt describes only its own
   changes.  Commits that belong to this attempt (an ABI transaction committing
   its transformed SAT-safety observation through the encoder's commit API)
-  are not new attempts and run inside the window.
+  are not new attempts and run inside it.
 * PUBLISHED  -- the events are appended; nothing may undo them.  The
   end-of-transaction hook runs; its failure is recorded and propagated, the
   events stay.
 * ROLLED_BACK -- the attempt's own resources were restored.
-* ENDED      -- the window is closed and the signal object is free again.
+* ENDED      -- the signal object is free again.
 
 The boundary (one reentrant lock, the outermost authority lock) serializes
-attempts across threads; the attempt registry and the window refuse reentry
-from the same thread.  The lock is released by the context manager, also on
+attempts across threads; the attempt registry (one live attempt per session)
+and the publication guard refuse reentry from the same thread.  The lock is released by the context manager, also on
 exceptions; the Phase 7 wrapper transaction holds one level of it from its
 activation until the attempt that claimed it commits or rolls it back.
 """
@@ -88,7 +88,6 @@ class ProducerTransactionBoundary:
         self._owner: Optional[int] = None
         self._depth = 0
         self._live: Dict[int, ProducerAttempt] = {}
-        self._window: Optional[ProducerAttempt] = None
         self._publishing = 0
 
     # ---- the lock ----------------------------------------------------------
@@ -119,7 +118,13 @@ class ProducerTransactionBoundary:
 
     @property
     def commit_open(self) -> bool:
-        return self._window is not None
+        """A live attempt is between its producer commit and its end (diagnostic stage)."""
+        return any(attempt.stage is AttemptStage.COMMITTING for attempt in self._live.values())
+
+    @property
+    def work_in_progress(self) -> bool:
+        """An attempt is live or a publication is being staged: no new producer work may start."""
+        return bool(self._live) or self._publishing > 0
 
     @property
     def publishing_open(self) -> bool:
@@ -146,10 +151,6 @@ class ProducerTransactionBoundary:
         """
         if self._live:
             raise ProducerTransactionRefused(f"{what} inside a live producer transaction")
-        if self._window is not None:
-            raise ProducerTransactionRefused(
-                f"{what} inside another producer transaction's commit"
-            )
         if self._publishing:
             raise ProducerTransactionRefused(f"{what} inside a publication")
 
@@ -168,19 +169,15 @@ class ProducerTransactionBoundary:
 
     # ---- stages --------------------------------------------------------------
 
-    def open_window(self, attempt: ProducerAttempt) -> None:
+    def begin_commit(self, attempt: ProducerAttempt) -> None:
+        """``attempt``'s producer commit starts (the COMMITTING stage)."""
         if self._live.get(id(attempt.signal)) is not attempt:
             raise RuntimeError("producer commit of an attempt that is not live")
-        if self._window is not None and self._window is not attempt:
-            raise ProducerTransactionRefused("producer commit inside another commit")
-        self._window = attempt
         attempt.stage = AttemptStage.COMMITTING
 
     def end(self, attempt: ProducerAttempt, stage: AttemptStage) -> None:
-        """End ``attempt`` (published or rolled back): close its window, free its object."""
+        """End ``attempt`` (published or rolled back): free its signal object."""
         attempt.stage = stage
-        if self._window is attempt:
-            self._window = None
         if self._live.get(id(attempt.signal)) is attempt:
             del self._live[id(attempt.signal)]
         attempt.stage = AttemptStage.ENDED

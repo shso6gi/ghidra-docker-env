@@ -3528,7 +3528,7 @@ class AbiWidthReadonlyPilotEncoder:
         # 取引の前へ戻せるよう、写しをこの取引の分として取引の終わりまで残す。写しを
         # 捨てるのはこの取引の終わり（``rollback_emitted_signal`` か
         # ``finish_emitted_signal``）だけ。取引は session の取引の境界の中で始まって終わり、
-        # commit から終わりまでの間に別の取引は始まらない（commit window）ので、写しの
+        # 取引が生きている間は別の取引が始まらない（producer の取引の境界）ので、写しの
         # 時点からの変化はこの取引のものだけ。
         rollbacks[transaction_key] = snapshots
         pending.pop(transaction_key)

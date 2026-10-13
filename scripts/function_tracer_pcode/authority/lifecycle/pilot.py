@@ -569,7 +569,7 @@ class ProductionDualWritePilotSession:
         self._phase7_signal_sites: dict[int, str] = {}
         self._phase7_signal_transactions: dict[int, Any] = {}
         #: The single producer transaction boundary: lock, live attempts,
-        #: commit window and publication (``producer_transaction``).
+        #: and publication guard (``producer_transaction``).
         self._producer_boundary = ProducerTransactionBoundary()
         # Issue #110: the publication gate owns one event-contract ledger per
         # session.  Every transaction is admitted against the authority event
@@ -601,7 +601,7 @@ class ProductionDualWritePilotSession:
         solver issuer / ledger locks are taken inside it, never around it)
         and is released when the block exits, also by an exception.
         Reentry by the owning thread is serialized by the attempt registry and
-        the commit window (``producer_transaction``), not by the lock.
+        the publication guard (``producer_transaction``), not by the lock.
         """
 
         with self._producer_boundary.hold():
@@ -625,13 +625,12 @@ class ProductionDualWritePilotSession:
         direct publication) may start while this holds.
         """
 
-        boundary = self._producer_boundary
-        return boundary.has_live_attempt or boundary.commit_open or boundary.publishing_open
+        return self._producer_boundary.work_in_progress
 
     def producer_commit_open(self) -> bool:
         """Whether a producer attempt is between its commit and its end.
 
-        Inside this window only that attempt's own commit callbacks and
+        Inside it only that attempt's own commit callbacks and
         rollback may change producer state: no other attempt may start and no
         direct publication may be staged (its changes would fall inside the
         open attempt's rollback scope, or inside its publication).
@@ -767,12 +766,12 @@ class ProductionDualWritePilotSession:
                         attempt.encoder_touched = False
                         sequences = ()
                     else:
-                        def commit_in_window() -> None:
-                            boundary.open_window(attempt)
+                        def commit_in_attempt() -> None:
+                            boundary.begin_commit(attempt)
                             commit(intents)
 
                         sequences = self._emit_many_admitted(
-                            intents, commit_in_window,
+                            intents, commit_in_attempt,
                             transaction_signal=signal if replay_aware else None,
                         )
                     published = True
@@ -1179,7 +1178,7 @@ class ProductionDualWritePilotSession:
                 # no new attempt may start, it acquires nothing and returns: the
                 # attempt's admission that follows refuses and records it, so
                 # every entry refuses the same way (no state changes, 0).
-                if boundary.has_live_attempt or boundary.commit_open or boundary.publishing_open:
+                if boundary.work_in_progress:
                     return
                 if (
                     signal_id in self._phase7_signal_sites
@@ -1358,7 +1357,7 @@ class ProductionDualWritePilotSession:
 
             def commit_all() -> None:
                 nonlocal external_committed
-                boundary.open_window(attempt)
+                boundary.begin_commit(attempt)
                 if callable(commit):
                     commit(self, signal, intents)
                 if external_commit is not None:

@@ -2109,3 +2109,76 @@ def test_a_committed_replay_of_a_batch_attempt_keeps_the_earlier_attempts_state(
         assert session.domain_signal_state["abi_width_committed_emission_transactions"] == committed
         assert _ledger_state(session, handoff) is BlockerState.PUBLISHED
         assert session.domain_signal_error_kinds == []
+
+
+def _cause_intent(session, signal):
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
+        CauseObservedEventAuthority,
+        EventIntent,
+        EventType,
+    )
+
+    authority = session.domain_signal_encoder.authority_for_signal(session, signal)
+    return EventIntent(EventType.CAUSE_OBSERVED, CauseObservedEventAuthority(authority))
+
+
+def test_a_publication_inside_a_direct_publications_commit_is_refused():
+    """取引（attempt）でない直接の公開の commit の callback の中から公開すると、それは staging の
+    前に拒否される。外側の公開も失敗して戻り、stream の chain は壊れない。"""
+    session = _connector().begin({"phase": "pr-a", "case": "nested-direct-publication"})
+    with production_signal_scope(session):
+        outer = _cause_intent(session, _observed(REPLAY, (R,), key=_A_KEY))
+        inner = _cause_intent(session, _observed(PARTITION, ("pairwise",), key=_B_KEY))
+        before = _state(session)
+        with pytest.raises(ValueError, match="inside a publication") as raised:
+            session.emit_many((outer,), lambda: session.emit(inner))
+        assert type(raised.value).__name__ == "ProducerTransactionRefused"
+        after = _state(session)
+        assert after["events"] == before["events"]
+        assert after["published_ids"] == before["published_ids"]
+        assert session.domain_signal_error_kinds == ["ProducerTransactionRefused"]
+        assert not session.holds_domain_signal_transaction()
+        session.preview_lifecycle_projection()
+        assert session.emit_many((outer,)) == (before["events"] + 1,)  # sequence は 1 から
+
+
+def test_an_attempt_that_fails_before_encoding_never_rolls_back_another_attempts_encoder_state(monkeypatch):
+    """encoder を呼ぶ前に失敗した取引は、encoder の state を巻き戻さない。ABI の batch は内容で
+    取引を識別するので、巻き戻すと前に公開した同じ内容の取引の確定を消してしまう。"""
+    _patch_abi_transaction_identity(monkeypatch)
+    session, abi, batch, handoff = _abi_transaction_with_one_sat_handoff()
+    with production_signal_scope(session):
+        intents = _abi_batch_intents(session)
+        pending = session.domain_signal_state["abi_width_pending_emission_transactions"]
+        digest, _intents, payload = pending.pop(("abi-transaction",))
+
+        def encode(_session, _batch):
+            pending[("abi-transaction",)] = (digest, intents, payload)
+            return intents
+
+        monkeypatch.setattr(abi, "_solver_batch_intents", encode)
+        abi._emit_solver_batch_transaction(session, batch)
+        committed = dict(session.domain_signal_state["abi_width_committed_emission_transactions"])
+        same_content = object.__new__(type(batch))
+        # 外部の commit だけを渡す（rollback が無い）: encoder を呼ぶ前に失敗する。
+        assert session._emit_domain_signal_with_commit(same_content, external_commit=lambda: None) == 0
+        assert session.domain_signal_error_kinds == ["TypeError"]
+        assert session.domain_signal_state["abi_width_committed_emission_transactions"] == committed
+        assert _ledger_state(session, handoff) is BlockerState.PUBLISHED
+
+
+def test_a_phase7_wrapper_transaction_is_released_only_by_its_own_transaction_object():
+    """Phase 7 の wrapper の取引は、所有する取引の object を名指したときだけ閉じる（同じ signal
+    の object に別の取引の object を渡しても、開いた取引も境界の lock も変わらない）。"""
+    connector = _manifest_connector()
+    session = connector.begin({"phase": "pr-a", "case": "phase7-ownership"})
+    signal = _observed(REPLAY, (R,), key=_A_KEY)
+    with production_signal_scope(session):
+        session.record_phase7_pre_emission_activation(SAT_SAFETY_BLOCKER_OBSERVED_SITE.site_id, signal)
+        opened = session._phase7_signal_transactions[id(signal)]
+        session._release_phase7_transaction(signal, object(), commit=False)
+        assert session._phase7_signal_transactions[id(signal)] is opened
+        assert session.holds_domain_signal_transaction()  # activation の 1 段はまだ保持
+        session._release_phase7_transaction(signal, opened, commit=False)
+        assert id(signal) not in session._phase7_signal_transactions
+        assert not session.holds_domain_signal_transaction()
