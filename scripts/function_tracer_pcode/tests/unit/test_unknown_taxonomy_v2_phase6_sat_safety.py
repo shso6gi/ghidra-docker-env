@@ -3,6 +3,7 @@
 from unittest.mock import Mock
 from dataclasses import replace
 import json
+import functools
 from pathlib import Path
 
 import pytest
@@ -124,17 +125,24 @@ def _connector():
     )
 
 
+@functools.lru_cache(maxsize=1)
+def _audited_manifest():
+    """source tree の AST から作る manifest（test の実行中に source は変わらないので 1 回だけ作る。
+    runtime は使うたびに manifest の digest を検査するので、変更されれば fail-closed）。"""
+    from scripts.function_tracer_pcode.reporting.phase7_producer_manifest import (
+        build_phase7_producer_manifest,
+    )
+
+    return build_phase7_producer_manifest(Path(__file__).resolve().parents[4])
+
+
 def _manifest_connector():
     from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
     from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         CompositeProductionSignalEncoder,
     )
-    from scripts.function_tracer_pcode.reporting.phase7_producer_manifest import (
-        build_phase7_producer_manifest,
-    )
 
-    root = Path(__file__).resolve().parents[4]
-    manifest = build_phase7_producer_manifest(root)
+    manifest = _audited_manifest()
     encoder = SatSafetyPilotEncoder()
     return ProductionDualWritePilotConnector(
         ShadowLifecycleReducer(
