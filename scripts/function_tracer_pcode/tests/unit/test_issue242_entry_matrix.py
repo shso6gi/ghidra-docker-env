@@ -66,6 +66,7 @@ from scripts.function_tracer_pcode.core.runtime_refs.unknowns import ExpansionBu
 from scripts.function_tracer_pcode.tests.fixtures.runtime_ref_golden import corpus
 from scripts.function_tracer_pcode.tests.unit.runtime_ref_adversaries import (
     HOOK_CALLS,
+    callbacks,
     Liar,
     LiarStr,
     disguise,
@@ -811,8 +812,9 @@ def _api_variants(case: EntryCase):
                 yield f"api:{key}:{label}", key, item, corpus.twin_value(item, "element")
 
 
-#: 入力全体を変える variant: すべての scalar を偽る / ref を代わりの型（偽る・正直な双子）にする / その両方
-DEEP_VARIANTS = ("lie_all", "duck", "duck_lie_all", "duck_objects")
+#: 入力全体を変える variant: すべての scalar を偽る / ref を代わりの型（偽る・正直な双子）にする / その両方 /
+#: すべての scalar（引数と API の戻り値）を、比較・hash・文字列化の callback が偽る値を返す外の object にする
+DEEP_VARIANTS = ("lie_all", "duck", "duck_lie_all", "duck_objects", "callback_all")
 
 
 def _matrix():
@@ -888,6 +890,10 @@ def _inputs(case: EntryCase, where: str, name: Optional[str], value: Any, shape:
         api = {key: (Liar(int(item)) if key in BOOLEAN_API else lie(item)) for key, item in api.items()}
     elif where in ("lie_all", "duck_lie_all") and twin:
         api = {key: (bool(item) if key in BOOLEAN_API else item) for key, item in api.items()}
+    elif where == "callback_all":
+        # 外の object（Java の object の代わり）: 双子は callback が基底型の値を返す同じ形
+        kwargs = {key: callbacks(item, not twin) for key, item in kwargs.items()}
+        api = {key: (item if key in BOOLEAN_API else callbacks(item, not twin)) for key, item in api.items()}
     if where in ("duck", "duck_lie_all", "duck_objects"):
         # `duck_objects`: 式・storage など ref 以外の package の object も代わりの型にする（注釈が Any の位置）
         lying = not twin

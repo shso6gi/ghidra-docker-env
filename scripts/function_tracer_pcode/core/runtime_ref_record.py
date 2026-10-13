@@ -54,6 +54,12 @@ field に、外の runtime の scalar の subclass（JPype の `JInt` / `JLong` 
 確かめ済みの木の memo（`verified_tree_holder`）の深さを数える。最も外の呼び出しの間、確かめ済みの変わらない木（部分木に変わる容器の無い tuple / frozenset）を再び辿らない
 （入れ子の key の出口・子の key の読みが同じ部分木を辿り直さない: 走査は作った容器の数に比例する）。
 
+**比較と文字列化**（Issue #242 第 6 回）: ref の `==` と `repr` は owner が置く（`_ref_equal` / `_ref_repr`。class が自分の
+ものを持たなければ）。値は dataclass の生成するものと同じで、field の値の型（外の object）の callback が返す値は
+`live_values` の reader で読む（`equal` / `scalar_repr`）: dataclass の生成した `__eq__` は field の値の tuple を比べ、その
+組み込みの比較は葉の `__eq__` の戻り値の `__bool__` を呼ぶ。`__hash__` は dataclass のまま（戻り値は C が基底型の値で
+読む）。
+
 **key の出口**（`runtime_ref_key`）: key を返す公開の method / 関数は、戻り値を `live_values.exact_tree`（組み込みの
 木）にして返す。本体がどの経路でも読み終えた値（clean / 組み込みの木）だけを返すと construction guard が静的に
 確かめた key は `@runtime_ref_key(proven=True)` で、出口で写さない（証明が出口の写しの代わり: guard は本体の戻り値が
@@ -71,12 +77,14 @@ import dataclasses
 import functools
 import inspect
 import operator
+import threading
 import types
 import typing
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.live_values import (
-    NOT_PLAIN, exact_scalar, exact_tree, exact_tree_in, int_value, verified_tree_holder as _holder,
+    NOT_PLAIN, equal, exact_scalar, exact_tree, exact_tree_in, int_value, scalar_repr, type_name,
+    verified_tree_holder as _holder,
 )
 
 #: class → 写す field の (名前, 分類) の列。最初の構築で決める。
@@ -569,11 +577,137 @@ def is_runtime_ref_entry(function: Any) -> bool:
     return type(inner) is types.FunctionType and inner in _ENTRY_WRAPPERS
 
 
+#: `id(型)` → (型, 比べる field（dataclass の `compare=True`）の値の tuple を読む関数)。entry が型を持つので `id` は再利用
+#: されない
+_COMPARE_READERS: Dict[int, Tuple[type, Callable[[Any], Tuple[Any, ...]]]] = {}
+
+
+def _compare_values(instance: Any) -> Tuple[Any, ...]:
+    """dataclass の生成した `__eq__` が比べる値の tuple（`compare=True` の field の値を宣言の順に）。
+
+    field は `object.__getattribute__` と同じ読み（型の MRO が属性の読みを上書きしないときだけ C の 1 回の読み）。
+    """
+
+    cls = type(instance)
+    entry = _COMPARE_READERS.get(id(cls))
+    if entry is None or entry[0] is not cls:
+        names = tuple(item.name for item in dataclasses.fields(cls) if item.compare)
+        if len(_COMPARE_READERS) >= _FIELD_READERS_LIMIT:
+            _COMPARE_READERS.clear()
+        entry = (cls, _tuple_reader(names))
+        _COMPARE_READERS[id(cls)] = entry  # 並行に作っても同じ値
+    if len(entry[1].names) >= 2 and _plain_attribute_lookup(cls):
+        return entry[1](instance)
+    read = object.__getattribute__
+    return tuple(read(instance, name) for name in entry[1].names)
+
+
+class _tuple_reader:
+    """名前の列の値を tuple で返す C の読み（`operator.attrgetter`。名前が 1 つ以下でも tuple を返す）。"""
+
+    __slots__ = ("names", "_getter")
+
+    def __init__(self, names: Tuple[str, ...]) -> None:
+        self.names = names
+        self._getter = operator.attrgetter(*names) if len(names) >= 2 else None
+
+    def __call__(self, instance: Any) -> Tuple[Any, ...]:
+        return self._getter(instance)
+
+
+_OBJECT_EQUALITY = object.__eq__
+
+
+def _class_equality(kind: type) -> Any:
+    """型の `==` の実装（MRO で `__eq__` を最初に持つ class の名前空間の値。metaclass の hook を通らない読み。使うたびに
+    読む: 後から型に `__eq__` を足しても古い判断を使わない）。"""
+
+    for base in _TYPE_MRO(kind):
+        namespace = _TYPE_NAMESPACE(base)
+        if "__eq__" in namespace:
+            return namespace["__eq__"]
+    return object.__eq__
+
+
+def _ref_equal(self: Any, other: Any) -> Any:
+    """ref の `==`（owner が置く。dataclass の生成した `__eq__` と同じ値の比べ方: 同じ型なら比べる field の値の tuple）。
+
+    比べる値の tuple は `live_values.equal` で比べる: field の値の型の `__eq__` が返す値（暗黙の callback の戻り値）は
+    基底型の値の真偽で読み、組み込みの tuple の比較が葉の比較の戻り値の `__bool__` を呼ばない（Issue #242）。型は
+    identity で比べる（`__class__` を読まない）。返す値は組み込みの `bool` か `NotImplemented`。
+    """
+
+    if other is self:
+        return True
+    if type(other) is not type(self):
+        return NotImplemented
+    left, right = _compare_values(self), _compare_values(other)
+    # tuple の比較の規則（要素を左から、identity を先に見て、最初に違う要素で止まる）をなぞる速い経路: exact な scalar
+    # どうしは組み込みの `==`、同じ型の ref どうしは owner の `__eq__`（組み込みの `bool`）。それ以外の最初の要素から先は
+    # `live_values.equal`（前の要素の比較を繰り返さない: 同じ長さの tuple の残りを比べる）
+    for index in range(len(left)):
+        x, y = left[index], right[index]
+        if x is y:
+            continue
+        kx = type(x)
+        if (x is None or kx is int or kx is str or kx is bool or kx is float) and _exact(y):
+            if not x == y:
+                return False
+            continue
+        if kx is type(y):
+            implementation = _class_equality(kx)
+            if implementation is _ref_equal:
+                if not _ref_equal(x, y):
+                    return False
+                continue
+            if implementation is _OBJECT_EQUALITY:
+                return False  # 同じ型で `==` が identity（`object.__eq__`: 式など）の別の object: 等しくない
+        return equal(left[index:], right[index:])
+    return True
+
+
+#: 文字列にしている途中の (`id(ref)`, thread)（dataclass の生成した `__repr__` と同じく、入れ子の自分自身は `...`）
+_REPR_RUNNING: set = set()
+
+
+def _ref_repr(self: Any) -> str:
+    """ref の `repr`（owner が置く。dataclass の生成した `__repr__` と同じ文字列: `型の名前(field=repr, ...)`、`repr=True` の
+    field を宣言の順に、入れ子の自分自身は `...`）。
+
+    field の値の `repr` は `live_values.scalar_repr` で読む: field の値の型（外の object）の `__repr__` が返した値が str の
+    subclass でも、組み込みの f-string の書式（その subclass の `__format__`）を呼ばない（Issue #242）。
+    """
+
+    key = (id(self), threading.get_ident())
+    if key in _REPR_RUNNING:
+        return "..."
+    _REPR_RUNNING.add(key)
+    try:
+        cls = type(self)
+        parts = [
+            item.name + "=" + scalar_repr(object.__getattribute__(self, item.name))
+            for item in dataclasses.fields(cls) if item.repr
+        ]
+        return type_name(cls) + "(" + ", ".join(parts) + ")"
+    finally:
+        _REPR_RUNNING.discard(key)
+
+
 def runtime_ref_record(cls: type) -> type:
-    """runtime ref の class に scalar の正規化を付ける（`@dataclass(...)` の **下** に置く）。"""
+    """runtime ref の class に scalar の正規化を付ける（`@dataclass(...)` の **下** に置く）。
+
+    class が自分の `__eq__` / `__repr__` を持たなければ、owner のもの（`_ref_equal` / `_ref_repr`: dataclass の生成するものと
+    同じ値で、field の値の callback の戻り値を reader で読む）を置く。dataclass は class が持つ `__eq__` / `__repr__` を
+    作り直さず、frozen の `__hash__`（比べる field の値の tuple の hash: 戻り値は C が基底型の値で読む）は今までどおり
+    作る。自分の `__eq__` を持つ class（`LocationBaseRef`）の比較は、その本体を構築の guard が検査する。
+    """
 
     if "__dataclass_fields__" in cls.__dict__:
         raise TypeError(f"@runtime_ref_record must be applied below @dataclass ({cls.__qualname__})")
+    if "__eq__" not in cls.__dict__:
+        cls.__eq__ = _ref_equal  # type: ignore[assignment]
+    if "__repr__" not in cls.__dict__:
+        cls.__repr__ = _ref_repr  # type: ignore[assignment]
     custom_init = cls.__dict__.get("__init__")
     if custom_init is not None:
         # `init=False` で自前の `__init__` を持つ class（`CanonicalLocation`）: 引数は入口として本体の前に写し、

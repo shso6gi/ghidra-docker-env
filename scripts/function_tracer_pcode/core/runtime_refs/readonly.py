@@ -6,11 +6,12 @@ from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, exact_tree, scalar_bool, scalar_int, scalar_int_or, type_name, is_kind, attribute_of, method_of
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, contains, exact_scalar, exact_tree, scalar_bool, scalar_int, scalar_int_or, scalar_repr, scalar_text, type_name, is_kind, attribute_of, method_of
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     LocationBaseRef,
 )
 from scripts.function_tracer_pcode.core.runtime_refs._reading import (
+    decided_equal as _decided_equal,
     items as _items,
     optional_rows as _optional_rows,
     rows as _scalar_rows,
@@ -187,14 +188,14 @@ class ReductionAccumulatorProof:
         return_op_refs = tuple(
             sorted(
                 (ref for ref in (self.return_op_refs or ()) if is_kind(ref, PcodeOpRef)),
-                key=lambda ref: repr(exact_tree(ref.stable_key())),
+                key=lambda ref: scalar_repr(exact_tree(ref.stable_key())),
             )
         )
         object.__setattr__(self, "return_op_refs", return_op_refs)
         return_value_op_refs = tuple(
             sorted(
                 (ref for ref in (self.return_value_op_refs or ()) if is_kind(ref, PcodeOpRef)),
-                key=lambda ref: repr(exact_tree(ref.stable_key())),
+                key=lambda ref: scalar_repr(exact_tree(ref.stable_key())),
             )
         )
         object.__setattr__(self, "return_value_op_refs", return_value_op_refs)
@@ -356,7 +357,7 @@ class ReductionAccumulatorProof:
             return None
         if (
             target_result_size < proof_result_size
-            and self.reduction_kind not in {"sum", "memory_sum"}
+            and not contains({"sum", "memory_sum"}, self.reduction_kind)
             and not self._readonly_reduction_uses_distinct_term_width()
         ):
             return None
@@ -401,7 +402,7 @@ class ReductionAccumulatorProof:
         return term_start_offset, index_scale
 
     def _readonly_reduction_uses_distinct_term_width(self) -> bool:
-        return str(self.reduction_kind or "").startswith("fp_")
+        return scalar_text(self.reduction_kind or "").startswith("fp_")
 
     def _readonly_term_access_size(self) -> int:
         if self._readonly_reduction_uses_distinct_term_width():
@@ -612,12 +613,12 @@ class ReductionAccumulatorProof:
                 )
                 for index in range(exact_count)
             )
-            if _term_keys(terms[:exact_count]) != tuple(
+            if _decided_equal(_term_keys(terms[:exact_count]), tuple(
                 term.stable_key() for term in expected_witness
-            ):
+            )) is not True:
                 continue
             candidate = tuple(terms[:count_value])
-            if _term_keys(candidate) == expected_prefix_key:
+            if _decided_equal(_term_keys(candidate), expected_prefix_key) is True:
                 return candidate
         return None
 
@@ -818,9 +819,9 @@ class ReductionAccumulatorProof:
                 )
                 for index in range(count_value)
             )
-            if _term_keys(terms) == tuple(
+            if _decided_equal(_term_keys(terms), tuple(
                 term.stable_key() for term in expected_terms
-            ):
+            )) is True:
                 matching_counts.append(int(count_value))
         if not matching_counts:
             return self
@@ -875,9 +876,9 @@ class ReductionAccumulatorProof:
                 )
                 for index in range(count)
             )
-            if terms is None or _term_keys(terms) != tuple(
+            if terms is None or _decided_equal(_term_keys(terms), tuple(
                 term.stable_key() for term in expected
-            ):
+            )) is not True:
                 return ()
         return tuple((index * access_size, access_size) for index in range(lane_count))
 
@@ -952,9 +953,9 @@ class ReductionAccumulatorProof:
                     )
                     for index in range(count)
                 )
-                if terms is None or _term_keys(terms) != tuple(
+                if terms is None or _decided_equal(_term_keys(terms), tuple(
                     term.stable_key() for term in expected
-                ):
+                )) is not True:
                     return ()
         return normalized_lanes
 
@@ -988,9 +989,9 @@ class ReductionAccumulatorProof:
                 )
                 for index in range(count_value)
             )
-            if _term_keys(witness_terms) != tuple(
+            if _decided_equal(_term_keys(witness_terms), tuple(
                 term.stable_key() for term in expected_terms
-            ):
+            )) is not True:
                 return self
         seed_terms = tuple(
             ReadonlyReductionTermRef(

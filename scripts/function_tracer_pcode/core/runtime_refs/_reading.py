@@ -10,9 +10,25 @@ iterable（generator・deque など）は、置き換える前と同じくその
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 
-from scripts.function_tracer_pcode.core.live_values import exact_scalar, exact_tree, scalar_bool, scalar_int, is_kind, type_name
+from scripts.function_tracer_pcode.core.live_values import (
+    UndecidableComparison, equal, exact_scalar, exact_tree, is_kind, scalar_bool, scalar_int, type_name,
+)
+
+
+def decided_equal(left: Any, right: Any) -> Optional[bool]:
+    """ref の層の key（葉に外の object を持ち得る木）の比較: 等しければ `True`、違えば `False`、組み込みの code だけでは
+    忠実に比べられなければ `None`（判定しない。`live_values.UndecidableComparison`）。
+
+    比較の戻り値（暗黙の callback の値）は基底型の値の真偽で読む（`live_values.equal`）。呼ぶ側は `None` を、受理する
+    向き（等しいので同じとする・違うので別とする）のどちらにも使わない。
+    """
+
+    try:
+        return equal(left, right)
+    except UndecidableComparison:
+        return None
 
 
 def items(value: Any) -> Tuple[Any, ...]:

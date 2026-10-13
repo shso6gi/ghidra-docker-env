@@ -28,6 +28,7 @@ from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record, runtime_ref_key
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 from scripts.function_tracer_pcode.core.live_values import as_int, as_str, attribute, exact_tree, scalar_int, scalar_text, is_kind, method_of
+from scripts.function_tracer_pcode.core.runtime_refs._reading import decided_equal
 
 
 _ABI_SLOT_KIND = "abi_argument_slot"
@@ -215,4 +216,5 @@ def fresh_call_argument_refs_are_side_distinct(
 
     if left is None or right is None:
         return False
-    return exact_tree(method_of(left, "stable_key")()) != exact_tree(method_of(right, "stable_key")())
+    # 違うと決まったときだけ真（組み込みの code だけでは比べられない key は「違うと保証できない」。Issue #242）
+    return decided_equal(method_of(left, "stable_key")(), method_of(right, "stable_key")()) is False

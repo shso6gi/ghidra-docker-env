@@ -655,6 +655,11 @@ def test_keys_read_type_violating_containers_in_scalar_fields_like_their_twins()
                 keys = {name: getattr(built, name)() for name in names}
                 assert HOOK_CALLS == {}, (cls.__name__, item.name, dict(HOOK_CALLS))
                 assert view(keys) == view(twin_keys), (cls.__name__, item.name)
+                # 出力の保証そのもの: key と field の値に scalar の subclass の葉が残らない（受け取った側が比べても
+                # subclass の code を呼ばない）
+                stored = object.__getattribute__(built, item.name)
+                assert not live_values.holds_scalar_subclass(tuple(keys.values())), (cls.__name__, item.name)
+                assert not live_values.holds_scalar_subclass(stored), (cls.__name__, item.name)
                 checked += 1
     assert checked >= 20
 

@@ -12,11 +12,16 @@ ref の class かどうかに依らない）、およびそこから **実際に
 - `clean`: 組み込みの値、または葉まで組み込みの値の容器（定数、`scalar_*` の結果、owner が写した scalar の field、
   写した引数、比較や `not` の結果）
 - `tree`: `exact_tree` の結果（組み込みの木）。容器と scalar の葉は組み込みの型そのもの、それ以外の葉は読んでいない
-  外の object。消費は `clean` と同じ。属性・method の結果は `foreign`（object を読んだことを、その先で API から
-  取得する値の安全の根拠にしない）
-- `leaf`: 葉だけを写した値（`exact_scalar` / `exact_field_value` の結果）。scalar の subclass ではないが、容器なら
-  中の葉は未確認。真偽・scalar の定数との比較（と定数の tuple / list への `in`）・数への変換・反復はよい。
-  文字列化・hash・定数でない値との比較は違反。method の結果は `foreign`
+  外の object。真偽・数への変換・反復は `clean` と同じ。属性・method の結果は `foreign`（object を読んだことを、その先で
+  API から取得する値の安全の根拠にしない）。**不活性でない**: 比較・`in`・並べる・hash の容器（dict の key・set の
+  要素）は、葉の外の object の `__eq__` / `__lt__` の戻り値を C が真偽で読む（暗黙の callback）ので違反
+  （`live_values.equal` / `unequal` / `contains` / `less` / `sorted_trees` / `inert_key` で読む）。`str` / `repr` /
+  `format` / 1 つの値だけの f-string / `abs` / `round` / `sum` の結果は葉の callback の戻り値なので `foreign`
+  （`scalar_text` / `scalar_repr` で読む）。注釈が scalar / bool の field と入口の引数も `tree`（owner は scalar の
+  subclass だけを写し、外の object はそのまま残る）
+- `leaf`: 葉だけを写した値（`exact_scalar` / `exact_field_value` の結果）。scalar の subclass ではないが、外の object
+  かもしれない。真偽・数への変換・反復はよい。比較（定数との比較・定数の容器への `in` を含む）・文字列化・hash は違反。
+  method の結果は `foreign`
 - `imported`: 外の module から import した名前（Ghidra の class など）。値ではない: 属性・method の読みはよく、
   結果は `foreign`
 - `scalar?`: `isinstance(x, str)` などで絞った値（subclass かもしれない）。葉の reader で読むと clean
@@ -117,9 +122,9 @@ CLEAN = "clean"
 UNKNOWN = "unknown"
 BOTTOM = "bottom"  # まだ値が流れていない（fixpoint の初期値）
 CLEAN_CONTAINER = "seq:clean"
-#: 葉だけを写した値（`exact_scalar` の結果）: scalar の subclass ではないが、容器なら中の葉は未確認。真偽・
-#: scalar の定数との `==` / 順序・数への変換はよい（容器と scalar の比較は要素を読まない）。文字列化・hash・
-#: 定数でない値との比較は要素の code を呼び得る
+#: 葉だけを写した値（`exact_scalar` の結果）: scalar の subclass ではないが、外の object かもしれない。真偽・数への
+#: 変換はよい。比較（定数との `==` / `in` を含む）は外の object の `__eq__` を呼び、その戻り値の真偽を C が読む
+#: （暗黙の callback: 不活性でない値の比較は `equal` / `contains` で読む）。文字列化・hash は要素の code を呼び得る
 LEAF = "leaf"
 #: 外の code（注釈だけの値・`isinstance` で絞った値・外の object の method、正体の分からない callable）が返した値。
 #: 消費は `unknown` と同じ。加えて、読まずに ref の層の外へ出す（外から呼べる関数の戻り値・ref の構築の引数・
@@ -130,8 +135,10 @@ CONTAINER = "seq:unknown"
 #: subclass ではない）。属性・method の読みはよいが、その結果は外の code の結果（`foreign`）
 IMPORTED = "imported"
 #: `exact_tree` の結果（組み込みの木）: 容器は組み込みの型そのもの、scalar の葉は組み込みの型そのもの、それ以外の葉は
-#: 外の object（読んでいない）。消費は `clean` と同じ。ただし属性・method の結果（外の object が API から返す値）は
-#: 外の code の結果（`foreign`）: object を読んだことを、その先で取得する値の安全の根拠にしない
+#: 外の object（読んでいない）。変換・文字列化・真偽は `clean` と同じ。ただし属性・method の結果（外の object が API から
+#: 返す値）は外の code の結果（`foreign`）: object を読んだことを、その先で取得する値の安全の根拠にしない。比較・
+#: hash の容器（dict の key・set の要素）・並べることは **不活性でない** 値の扱い（葉の外の object の `__eq__` / `__lt__`
+#: の戻り値を C が真偽で読む: 暗黙の callback）。`equal` / `contains` / `less` / `sorted_trees` / `inert_key` で読む
 TREE = "tree"
 
 PACKAGE = pathlib.Path(__file__).resolve().parents[2]
@@ -155,7 +162,11 @@ READERS = frozenset({
     "int_value", "json_scalar", "is_kind", "type_name", "type_module",
     "builtin_str", "builtin_sequence", "size", "scalar_int_or", "is_json_record", "type_name", "type_module",
     "is_kind", "materialize", "defined_attribute", "holds_scalar_subclass", "scalar_repr", "exception_text",
+    # 比べる側の契約（`live_values` の比較・所属・順序）: 暗黙の callback の戻り値を基底型の値の真偽で読む
+    "equal", "unequal", "same", "contains", "less", "truth", "inert", "inert_key",
 })
+#: 比べた結果の並びを返す reader（要素は組み込みの木: 葉の外の object は読んでいない）
+TREE_SEQUENCE_READERS = frozenset({"sorted_trees"})
 #: 出力の記述を作る `json_encoding` の関数（`_Source`: 値は `json_encoding` が書くときに読む）
 JSON_SOURCES = frozenset({"each", "inline", "raw", "mapping_of", "as_list", "as_dict", "pairs_of", "nested"})
 #: 値を「組み込みの容器（要素は未確認）」にする reader
@@ -251,6 +262,20 @@ def make_tup(states: List[str]) -> str:
 
 def as_seq(state: str) -> str:
     return "seq:" + element_of(state) if state.startswith("tup:") else state
+
+
+def _holds_tree(state: str) -> bool:
+    """状態が `exact_tree` の結果（葉に外の object を持ち得る木）を含むか。"""
+
+    if state == TREE:
+        return True
+    if state.startswith("seq:"):
+        return _holds_tree(state[4:])
+    if state.startswith("tup:"):
+        return any(_holds_tree(item) for item in tup_items(state))
+    if state.startswith("map:"):
+        return any(_holds_tree(part) for part in map_parts(state))
+    return False
 
 
 def clean_tree(state: str) -> bool:
@@ -1015,7 +1040,7 @@ class _FunctionCheck:
         自分の容器の method を除く）、入れ子の関数・lambda が参照する外の名前。"""
 
         names: Set[str] = set()
-        reading = READERS | LEAF_READERS | CONTAINER_READERS | TREE_READERS | CONSUMING_BUILTINS | CONTAINER_BUILTINS | SAFE_ANY | {
+        reading = READERS | LEAF_READERS | CONTAINER_READERS | TREE_READERS | TREE_SEQUENCE_READERS | CONSUMING_BUILTINS | CONTAINER_BUILTINS | SAFE_ANY | {
             "len", "getattr", "hasattr", "method_of", "attribute_of", "attribute",
         }
         for node in ast.walk(function):
@@ -1063,7 +1088,7 @@ class _FunctionCheck:
             elif self.role == "helper":
                 env[arg.arg] = self.params.get(arg.arg, BOTTOM)
             elif arg is function.args.vararg or arg is function.args.kwarg:
-                env[arg.arg] = CLEAN_CONTAINER if normalized and self._annotation_state(arg.annotation, normalized=True) == CLEAN else CONTAINER
+                env[arg.arg] = "seq:" + TREE if normalized and self._annotation_state(arg.annotation, normalized=True) == TREE else CONTAINER
             else:
                 env[arg.arg] = self._annotation_state(arg.annotation, normalized=normalized)
         if self.role == "construct":
@@ -1112,9 +1137,11 @@ class _FunctionCheck:
                 return f"seq:rtyped:{name}" if normalized else CONTAINER
         if not normalized:
             return UNKNOWN
-        # `runtime_ref_entry` が写した引数（owner の分類と同じ: scalar / bool / tuple）
+        # `runtime_ref_entry` が写した引数（owner の分類と同じ: scalar / bool / tuple）。owner は scalar の subclass を基底型の
+        # 値に、型の誤りの容器を組み込みの木にするが、外の object（scalar でない値）はそのまま: 状態は field と同じ `tree`
+        # （比べると葉の外の object の callback の戻り値を読む。Issue #242 第 6 回）
         if bare in ("int", "str", "bool", "float"):
-            return CLEAN
+            return TREE
         if bare.startswith(("Tuple[", "tuple[")) or bare in ("Tuple", "tuple"):
             return CONTAINER  # exact な tuple の葉は写すが、list のまま渡された値の要素は写さない
         return UNKNOWN
@@ -1213,6 +1240,12 @@ class _FunctionCheck:
         if isinstance(e, ast.IfExp):
             return meet(self.state(e.body, self._narrowed(e.test, env)), self.state(e.orelse, env))
         if isinstance(e, ast.JoinedStr):
+            # 1 つの値だけの f-string（`f"{x}"`）は `__format__` の戻り値そのもの（str の subclass かもしれない）。
+            # 文字列の定数を含むなら、組み込みの code が部分を読んで作った組み込みの `str`
+            if len(e.values) == 1 and isinstance(e.values[0], ast.FormattedValue):
+                inner = self.state(e.values[0].value, env)
+                if not (clean_tree(inner) and not _holds_tree(inner)):
+                    return FOREIGN
             return CLEAN
         if isinstance(e, ast.Subscript):
             base = self.state(e.value, env)
@@ -1411,6 +1444,8 @@ class _FunctionCheck:
             return argument if is_container(argument) and name != "elements_within_limit" else CONTAINER
         if through_owner and name in TREE_READERS:
             return TREE  # 組み込みの木（形は分からない: 反復・添字は木、属性・method の結果は外の code）
+        if through_owner and name in TREE_SEQUENCE_READERS:
+            return "seq:" + TREE  # 並べた木の list（比べた順。要素の葉の外の object は読んでいない）
         if through_owner and name in LEAF_READERS:
             argument = self.state(call.args[0], env) if call.args else UNKNOWN
             if argument == MAYBE_SCALAR:
@@ -1461,9 +1496,17 @@ class _FunctionCheck:
                     for state in inner:
                         result = meet(result, state)
                     return result
-                if name in ("int", "float", "abs", "round") and inner and all(clean_tree(s) or s == LEAF for s in inner):
-                    return CLEAN  # 数への変換の結果は組み込みの数（容器なら例外）
-                return CLEAN if all(clean_tree(s) for s in inner) else UNKNOWN
+                if name in ("int", "float", "bool", "len", "hash") and inner and all(clean_tree(s) or s == LEAF for s in inner):
+                    # 結果は組み込みの値そのもの（`__int__` / `__float__` が返す subclass は CPython が組み込みの値へ写し、
+                    # `__bool__` は `bool` を返すことを強制され、`__len__` / `__hash__` の戻り値は C が基底型の値で読む）
+                    return CLEAN
+                if all(clean_tree(s) and not _holds_tree(s) for s in inner):
+                    return CLEAN  # 不活性な値だけ: 組み込みの code の結果
+                if all(clean_tree(s) or s == LEAF for s in inner):
+                    # 葉の外の object の callback（`__str__` / `__repr__` / `__format__` / `__abs__` / `__round__` /
+                    # `__add__` など）が返した値: scalar の subclass かもしれない（暗黙の callback の戻り値）
+                    return FOREIGN
+                return UNKNOWN
             if name in self.local_functions:
                 return self.local_functions[name]
             target = self.guard._resolve(self.module, name)
@@ -1671,12 +1714,17 @@ class _FunctionCheck:
         return state in (CLEAN, BOTTOM, LEAF, TREE) or state.startswith(("seq:", "tup:", "map:", "ref:", "nref:", "class:", "bound:", "classattr:"))
 
     def _compare_ok(self, state: str) -> bool:
-        """`==` / 順序 / hash に渡してよい値（組み込みの値、比べても未確認の値に届かない ref と、その容器）。"""
+        """`==` / `in` / 順序 / hash の容器に渡してよい値: 不活性な値（組み込みの値と、葉まで組み込みの値の容器）と ref。
 
-        if clean_tree(state) or state.startswith(("class:", "classattr:")):
+        `exact_tree` の結果（`tree`）・葉だけを写した値（`leaf`）は不活性でない（葉の外の object の比較の戻り値を C が
+        真偽で読む）。ref の `==` は owner の `__eq__`（`live_values.equal`）か、guard が本体を検査する class 自身の `__eq__`、
+        hash は比べる field の値の hash（戻り値は C が基底型の値で読む）。
+        """
+
+        if (clean_tree(state) and not _holds_tree(state)) or state.startswith(("class:", "classattr:")):
             return True
         if state.startswith(("ref:", "nref:")):
-            return not self.world.eq_unsafe(state.split(":", 1)[1])
+            return True
         if state.startswith("seq:"):
             return self._compare_ok(state[4:])
         if state.startswith("tup:"):
@@ -2127,19 +2175,6 @@ class _FunctionCheck:
                 operands = (e.left, *e.comparators)
                 for index, operand in enumerate(operands):
                     state = self.state(operand, env)
-                    if state == LEAF:
-                        # 葉だけを写した値: scalar の定数（と定数の tuple / list への `in`）との比較は要素を読まない
-                        others = [o for o in operands if o is not operand]
-                        # 定数の tuple / list は `in` の右だけ（`==` の右なら容器どうしの比較で要素を読む）
-                        in_literal = len(e.ops) == 1 and isinstance(e.ops[0], (ast.In, ast.NotIn)) and operand is e.left
-                        if all(
-                            _scalar_constant(o)
-                            or (in_literal and isinstance(o, (ast.Tuple, ast.List)) and all(_scalar_constant(x) for x in o.elts))
-                            for o in others
-                        ):
-                            continue
-                        self.flag(e, "comparison of leaf")
-                        break
                     container_side = index > 0 and isinstance(e.ops[index - 1], (ast.In, ast.NotIn))
                     if container_side:
                         state = element_of(state) if is_container(state) else state

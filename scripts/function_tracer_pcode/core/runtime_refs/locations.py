@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw)
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, exact_scalar, exact_tree, scalar_int, scalar_text, str_value, is_kind, method_of
+from scripts.function_tracer_pcode.core.live_values import (
+    as_bool, as_int, contains, equal, exact_scalar, exact_tree, is_kind, method_of, scalar_int, scalar_text, str_value, unequal,
+)
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
 )
@@ -72,7 +74,8 @@ class AddressValueRef:
         offset = int(self.address_offset) - int(self.object_base_offset)
         if offset < 0 or offset >= size:
             return None
-        return (str(self.object_symbol_name), size, offset)
+        # 注釈が str の field にも外の object が残り得る: その `__str__` の戻り値も基底型の値で読む（Issue #242）
+        return (scalar_text(self.object_symbol_name), size, offset)
 
     def is_readonly_memory(self) -> bool:
         # field の真偽は owner の API で読む（`bool(...)` と同じ値）
@@ -150,16 +153,18 @@ class LocationBaseRef:
     display_hint: Optional[str] = None
 
     def __post_init__(self) -> None:
-        if self.kind not in {"parameter", "stack_frame", "storage", "global"}:
+        # 注釈が str の field にも外の object が残り得る（owner は scalar の subclass だけを写す）: 比較の戻り値は基底型の
+        # 値の真偽で読む（`live_values.contains` / `equal`。Issue #242）
+        if not contains({"parameter", "stack_frame", "storage", "global"}, self.kind):
             raise ValueError(f"Unsupported location base kind: {self.kind}")
         if self.storage_identity_key is not None:
             # key は `==`・hash・文字列化で読む: list のまま受理した値の葉も基底型の値にする（Issue #242）
             object.__setattr__(self, "storage_identity_key", exact_tree(self.storage_identity_key))
-        if self.kind == "global":
+        if equal(self.kind, "global"):
             # 構築中の key は list のこともある（owner は exact な tuple だけを写す）: 要素は基底型の値で比べる
-            if not self.storage_identity_key or exact_scalar(self.storage_identity_key[0]) != "global_object":
+            if not self.storage_identity_key or unequal(self.storage_identity_key[0], "global_object"):
                 raise ValueError("global location base requires a global_object identity key")
-        if self.kind == "parameter":
+        if equal(self.kind, "parameter"):
             normalized_index = None
             if self.parameter_index is not None:
                 try:
@@ -168,7 +173,7 @@ class LocationBaseRef:
                     candidate = None
                 if candidate is not None and candidate >= 0:
                     normalized_index = candidate
-            if normalized_index != self.parameter_index:
+            if unequal(normalized_index, self.parameter_index):
                 object.__setattr__(self, "parameter_index", normalized_index)
 
     @classmethod
@@ -261,7 +266,7 @@ class LocationBaseRef:
     def global_symbol_name(self) -> Optional[str]:
         if not self.is_global() or not self.storage_identity_key:
             return None
-        return str(self.storage_identity_key[1])
+        return scalar_text(self.storage_identity_key[1])
 
     def __hash__(self) -> int:
         return hash(self.stable_key())
@@ -269,7 +274,7 @@ class LocationBaseRef:
     def __eq__(self, other: object) -> bool:
         if not is_kind(other, LocationBaseRef):
             return False
-        if self.kind != other.kind:
+        if unequal(self.kind, other.kind):
             return False
         if self.is_parameter():
             if self.parameter_index is not None and other.parameter_index is not None:
@@ -280,8 +285,8 @@ class LocationBaseRef:
                     or other.owner_entry_offset is not None
                 ):
                     return (
-                        self.owner_program_id == other.owner_program_id
-                        and self.owner_entry_offset == other.owner_entry_offset
+                        equal(self.owner_program_id, other.owner_program_id)
+                        and equal(self.owner_entry_offset, other.owner_entry_offset)
                         and int(self.parameter_index) == int(other.parameter_index)
                     )
                 return int(self.parameter_index) == int(other.parameter_index)
@@ -292,10 +297,10 @@ class LocationBaseRef:
             return (
                 self.storage_identity_key is not None
                 and other.storage_identity_key is not None
-                and self.storage_identity_key == other.storage_identity_key
+                and equal(self.storage_identity_key, other.storage_identity_key)
             )
         return (
-            self.storage_space_id == other.storage_space_id
+            equal(self.storage_space_id, other.storage_space_id)
             and int(self.storage_offset or 0) == int(other.storage_offset or 0)
             and int(self.storage_size or 0) == int(other.storage_size or 0)
         )
@@ -382,8 +387,8 @@ class LocationBaseRef:
                 if self.owner_program_id is not None or self.owner_entry_offset is not None:
                     return (
                         scalar_int(param_index) == int(self.parameter_index)
-                        and exact_tree(method_of(param, "get")("owner_program_id")) == self.owner_program_id
-                        and exact_tree(method_of(param, "get")("owner_entry_offset")) == self.owner_entry_offset
+                        and equal(method_of(param, "get")("owner_program_id"), self.owner_program_id)
+                        and equal(method_of(param, "get")("owner_entry_offset"), self.owner_entry_offset)
                     )
                 return scalar_int(param_index) == int(self.parameter_index)
         except Exception:
@@ -423,7 +428,7 @@ class LocationStep:
     value: int
 
     def __post_init__(self) -> None:
-        if self.kind not in {"offset", "deref"}:
+        if not contains({"offset", "deref"}, self.kind):
             raise ValueError(f"Unsupported location step kind: {self.kind}")
 
     @runtime_ref_key(proven=True)
@@ -456,7 +461,7 @@ class CanonicalLocation:
     ) -> None:
         normalized_base = base_ref
         if normalized_base is None:
-            if base_param in {"stackframe", "__locbase__stackframe"}:
+            if contains({"stackframe", "__locbase__stackframe"}, base_param):
                 normalized_base = LocationBaseRef.stack_frame()
             else:
                 normalized_base = LocationBaseRef.parameter(base_param or "param")

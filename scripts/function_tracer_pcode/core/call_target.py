@@ -155,7 +155,7 @@ class CallTargetRef:
     function_obj: Any = field(default=None, compare=False, hash=False, repr=False)
 
     def __post_init__(self) -> None:
-        if self.kind not in {"function", "code_address", "unknown"}:
+        if not live_values.contains({"function", "code_address", "unknown"}, self.kind):
             raise ValueError(f"Unsupported call target kind: {self.kind}")
 
     @classmethod

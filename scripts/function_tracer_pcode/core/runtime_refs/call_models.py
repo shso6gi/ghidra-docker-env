@@ -28,6 +28,7 @@ from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record, runtime_ref_key
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
 from scripts.function_tracer_pcode.core.live_values import exact_scalar, exact_tree, is_kind
+from scripts.function_tracer_pcode.core.runtime_refs._reading import decided_equal
 
 
 CALL_MODEL_CANDIDATE_KIND = "call_model_candidate"
@@ -99,7 +100,8 @@ class CallModelCandidateRef:
         if supplied is not None:
             if not is_kind(supplied, (tuple, list)):
                 raise TypeError("call model candidate candidate_key must be a tuple")
-            if _frozen_key(supplied, "candidate_key") != derived:
+            # 等しいと決まらなければ（違う・組み込みの code だけでは比べられない）受理しない（Issue #242）
+            if decided_equal(_frozen_key(supplied, "candidate_key"), derived) is not True:
                 raise ValueError(
                     "call model candidate candidate_key does not match its derivation"
                 )

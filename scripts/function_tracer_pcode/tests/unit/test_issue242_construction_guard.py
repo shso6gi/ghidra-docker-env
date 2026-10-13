@@ -74,7 +74,7 @@ HEADER = """
 from __future__ import annotations
 import hashlib
 from scripts.function_tracer_pcode.core import live_values
-from scripts.function_tracer_pcode.core.live_values import attribute_of, builtin_items, method_of, exact_scalar, exact_tree, is_kind, scalar_bool, scalar_int, scalar_text
+from scripts.function_tracer_pcode.core.live_values import attribute_of, builtin_items, contains, equal, inert_key, less, method_of, exact_scalar, exact_tree, is_kind, scalar_bool, scalar_int, scalar_text, sorted_trees, unequal
 from scripts.function_tracer_pcode.core.runtime_ref_record import exact_field_value, runtime_ref_key
 @dataclass(frozen=True)
 @runtime_ref_record
@@ -288,13 +288,17 @@ def test_the_guard_counts_in_place_sorting_as_comparison():
         ("@classmethod\ndef make(cls, value):\n    return cls(name=str(exact_scalar(value)))\n", ["str() of leaf"]),
         ("@classmethod\ndef make(cls, value):\n    return cls(flag=exact_scalar(value) in {'a', 'b'})\n", ["comparison of leaf"]),
         ("@classmethod\ndef make(cls, left, right):\n    return cls(flag=exact_scalar(left) == exact_scalar(right))\n", ["comparison of leaf"]),
-        # 定数との比較・数への変換・tuple の定数への `in` はよい
-        ("@classmethod\ndef make(cls, value):\n    return cls(flag=exact_scalar(value) == 'a', name=str(int(exact_scalar(value))))\n", []),
-        ("@classmethod\ndef make(cls, value):\n    return cls(flag=exact_scalar(value) in ('a', 'b'))\n", []),
+        # 定数との比較・tuple の定数への `in` も、葉が外の object なら `__eq__` の戻り値を C が真偽で読む（Issue #242
+        # 第 6 回: 暗黙の callback）。数への変換はよい。比較は `equal` / `contains` で読む
+        ("@classmethod\ndef make(cls, value):\n    return cls(flag=exact_scalar(value) == 'a', name=str(int(exact_scalar(value))))\n", ["comparison of leaf"]),
+        ("@classmethod\ndef make(cls, value):\n    return cls(flag=exact_scalar(value) in ('a', 'b'))\n", ["comparison of leaf"]),
+        ("@classmethod\ndef make(cls, value):\n    return cls(flag=equal(exact_scalar(value), 'a'), name=str(int(exact_scalar(value))))\n", []),
+        ("@classmethod\ndef make(cls, value):\n    return cls(flag=contains(('a', 'b'), exact_scalar(value)))\n", []),
         # 葉の reader の後で scalar に絞った値は exact
         ("@classmethod\ndef make(cls, value):\n    value = exact_scalar(value)\n    if isinstance(value, str):\n        return cls(name=value.strip())\n    return None\n", []),
-        # 木の reader（`exact_tree` / `scalar_text`）の結果は比べても文字列化してもよい
-        ("@classmethod\ndef make(cls, left, right):\n    return cls(flag=exact_tree(left) == exact_tree(right), name=scalar_text(left))\n", []),
+        # 木の reader（`exact_tree`）の結果は文字列化してよいが、比べると葉の外の object の `__eq__` の戻り値を読む
+        ("@classmethod\ndef make(cls, left, right):\n    return cls(flag=exact_tree(left) == exact_tree(right), name=scalar_text(left))\n", ["comparison of tree"]),
+        ("@classmethod\ndef make(cls, left, right):\n    return cls(flag=equal(exact_tree(left), exact_tree(right)), name=scalar_text(left))\n", []),
     ],
 )
 def test_the_guard_tells_leaf_readers_from_tree_readers(body, expected):
@@ -376,7 +380,9 @@ def test_the_guard_trusts_readers_only_by_import():
     "body, extra, expected",
     [
         # module の形の reader: import した module の名前だけを信用する
-        ("@classmethod\ndef make(cls, value):\n    return cls(flag=live_values.exact_tree(value) == (1,))\n", "", []),
+        ("@classmethod\ndef make(cls, value):\n    return cls(flag=live_values.equal(live_values.exact_tree(value), (1,)))\n", "", []),
+        # 信用した reader の木でも、そのまま比べると葉の `__eq__` の戻り値を読む（暗黙の callback）
+        ("@classmethod\ndef make(cls, value):\n    return cls(flag=live_values.exact_tree(value) == (1,))\n", "", ["comparison of tree"]),
         # 引数・局所変数・module の代入がその名前を隠すと reader ではない（review 4 の非 blocker）
         (
             "@classmethod\ndef make(cls, value, live_values):\n    return cls(flag=live_values.exact_tree(value) == (1,))\n",
@@ -494,15 +500,17 @@ def test_the_guard_follows_values_into_module_helpers():
         # decorator が写した引数（注釈が scalar）
         "@classmethod\n@runtime_ref_entry\ndef make(cls, name: str, size: int):\n    return cls(name=f'{name or size}')\n",
         # 構築中に写した field と、写した後の値
-        "def __post_init__(self):\n    if self.name not in {'a', 'b'} or self.flag:\n        raise ValueError()\n",
-        "def __post_init__(self):\n    if self.key and exact_scalar(self.key[0]) != 'x':\n        raise ValueError()\n",
+        "def __post_init__(self):\n    if not contains({'a', 'b'}, self.name) or self.flag:\n        raise ValueError()\n",
+        "def __post_init__(self):\n    if self.key and unequal(self.key[0], 'x'):\n        raise ValueError()\n",
         # bool への絞り込み（bool は subclass を作れない）・identity の比較
         "@classmethod\ndef make(cls, value):\n    if is_kind(value, bool) and value:\n        return cls(flag=value)\n    return cls(flag=value is True)\n",
         # 本物の instance への絞り込み（scalar の field は owner が写した値）・否定の早期 return
-        "@classmethod\ndef make(cls, value):\n    if not is_kind(value, Term):\n        return None\n    return cls(flag=value.offset > 0)\n",
+        "@classmethod\ndef make(cls, value):\n    if not is_kind(value, Term):\n        return None\n    return cls(flag=less(0, value.offset))\n",
         # reader で読んだ外の値・外の method の戻り値
         "def __post_init__(self):\n    for term in self.terms:\n        if scalar_int(attribute_of(term, 'offset')) > 0:\n            raise ValueError()\n",
-        "def __post_init__(self):\n    if exact_tree(self.child.key()) == ('a',):\n        raise ValueError()\n",
+        "def __post_init__(self):\n    if equal(self.child.key(), ('a',)):\n        raise ValueError()\n",
+        # dict の key・並べる値は不活性な木だけ（`inert_key` / `sorted_trees`）
+        "@classmethod\ndef make(cls, items):\n    table = {inert_key(item): 1 for item in builtin_items(items)}\n    return cls(key=tuple(sorted_trees(builtin_items(items))), name=str(len(table)))\n",
         "@classmethod\ndef make(cls, items):\n    return cls(key=builtin_items(items), name=str(len(builtin_items(items))))\n",
     ],
 )
@@ -673,8 +681,9 @@ def test_the_guard_follows_reached_package_dependencies(call, expected):
         # 葉を写した値（`exact_scalar`）の method の結果も、外の object なら外の code の結果
         ("@classmethod\ndef make(cls, value):\n    name = exact_scalar(value)\n    return cls(flag=name.lower() == 'x')\n",
          ["comparison of foreign"]),
-        # 木そのものの消費は clean と同じ（容器と scalar の葉は組み込みの型そのもの）
-        ("@classmethod\ndef make(cls, value):\n    data = exact_tree(value)\n    return cls(flag=data == (1,), name=str(data))\n", []),
+        # 木の文字列化は clean と同じ（容器と scalar の葉は組み込みの型そのもの）。比較は葉の `__eq__` の戻り値を読む
+        ("@classmethod\ndef make(cls, value):\n    data = exact_tree(value)\n    return cls(flag=data == (1,), name=str(data))\n", ["comparison of tree"]),
+        ("@classmethod\ndef make(cls, value):\n    data = exact_tree(value)\n    return cls(flag=equal(data, (1,)), name=str(data))\n", []),
         # import した外の class の静的な method・属性は読んでよい（値ではない）。結果は外の code の結果
         ("@classmethod\ndef make(cls, value):\n    from math import nan\n    from ghidra.program.model.data import VoidDataType\n"
          "    return cls(flag=bool(VoidDataType.isVoidDataType(exact_tree(value))))\n", ["bool() of foreign"]),
@@ -787,4 +796,26 @@ def test_the_guard_reads_scalar_fields_as_trees_from_the_owner():
     method の結果は外の code の結果。"""
 
     assert _violations("def describe(self):\n    return int(self.name.getLength())\n") == ["int() of foreign"]
-    assert _violations("def describe(self):\n    return self.name == 'x'\n") == []
+    # 比較は葉の外の object の `__eq__` の戻り値を読む（暗黙の callback）: `equal` で読む
+    assert _violations("def describe(self):\n    return self.name == 'x'\n") == ["comparison of tree"]
+    assert _violations("def describe(self):\n    return equal(self.name, 'x')\n") == []
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        # Issue #242 第 6 回: 葉の外の object の callback が返した値（str の subclass かもしれない）
+        ("def describe(self):\n    return str(self.name) == 'x'\n", ["comparison of foreign"]),
+        ("def describe(self):\n    return scalar_text(self.name) == 'x'\n", []),
+        ("def describe(self):\n    return f'{self.name}'.startswith('x')\n", ["method of foreign", "method startswith() on foreign", "returns an unread result of foreign code"]),
+        ("def describe(self):\n    return f'k:{self.name}'.startswith('x')\n", []),
+        # hash で置く容器（set / frozenset / dict）の要素・key は不活性な値だけ
+        ("@classmethod\ndef make(cls, items):\n    return cls(name=str(len(set(exact_tree(items)))))\n", ["set() hashes tree"]),
+        ("@classmethod\ndef make(cls, items):\n    return cls(name=str(len({inert_key(item) for item in builtin_items(items)})))\n", []),
+        # 注釈が scalar の入口の引数も外の object かもしれない（owner は scalar の subclass だけを写す）
+        ("@classmethod\n@runtime_ref_entry\ndef make(cls, name: str):\n    return cls(flag=name in {'a', 'b'})\n", ["comparison of tree"]),
+        ("@classmethod\n@runtime_ref_entry\ndef make(cls, name: str):\n    return cls(flag=contains({'a', 'b'}, name))\n", []),
+    ],
+)
+def test_the_guard_reads_values_returned_by_implicit_callbacks(body, expected):
+    assert _violations(body) == expected

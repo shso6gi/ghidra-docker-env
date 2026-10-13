@@ -169,6 +169,8 @@ def view(value: Any, _depth: int = 0) -> Any:
         return ("bytes", bytes(value))
     if _depth > 12:
         return ("deep", kind.__qualname__)
+    if kind is Callback:  # 暗黙の callback の adversary（偽る / 正直な双子）は包んだ値で比べる
+        return ("callback", view(object.__getattribute__(value, "value"), _depth + 1))
     if kind is Duck:  # 代わりの型（偽る / 正直な双子）は包んだ本物の値で比べる
         return ("duck", view(object.__getattribute__(value, "_ref"), _depth + 1))
     if kind is tuple or kind is list:
@@ -194,6 +196,104 @@ def view(value: Any, _depth: int = 0) -> Any:
                 state[slot] = getattr(value, slot)
         return ("object", kind.__qualname__, tuple((key, view(item, _depth + 1)) for key, item in sorted(state.items())))
     return ("object", kind.__qualname__)
+
+
+class Callback:
+    """暗黙の callback の adversary（Issue #242 第 6 回）: scalar の値を包む外の object（scalar の subclass ではない）。
+
+    比較（`==` / `!=` / 順序）・hash・文字列化・長さ・数への変換・`in` の callback は、包んだ値どうし（相手が
+    `Callback` ならその値、exact な scalar ならその値）の結果を返す。`lying=True` なら戻り値を値を偽る scalar の
+    subclass（`Liar` / `LiarStr`: `__bool__` が真偽を偽り、数えられる）にし、`lying=False`（正直な双子）は同じ値の
+    組み込みの値を返す（真偽の結果は `int` の 0 / 1: 偽る側の基底型の値と同じ）。組み込みの code が callback の
+    戻り値の真偽を読む（容器の比較・`in`・dict / set の引き・並べる）と、偽る側だけ結果が変わり hook が数えられる。
+    """
+
+    __slots__ = ("value", "lying")
+
+    def __init__(self, value: Any, lying: bool) -> None:
+        self.value = value
+        self.lying = lying
+
+    def _other(self, other: Any) -> Any:
+        if type(other) is Callback:
+            return other.value
+        if other is None or type(other) in (int, str, float, bool):
+            return other
+        return NotImplemented
+
+    def _result(self, result: Any) -> Any:
+        if type(result) is bool:
+            result = int(result)
+        return lie(result) if self.lying else result
+
+    def _compare(self, other: Any, operation: Any) -> Any:
+        value = self._other(other)
+        if value is NotImplemented:
+            return NotImplemented
+        return self._result(operation(self.value, value))
+
+    def __eq__(self, other: Any) -> Any:
+        return self._compare(other, lambda a, b: a == b)
+
+    def __ne__(self, other: Any) -> Any:
+        return self._compare(other, lambda a, b: a != b)
+
+    def __lt__(self, other: Any) -> Any:
+        return self._compare(other, lambda a, b: a < b)
+
+    def __le__(self, other: Any) -> Any:
+        return self._compare(other, lambda a, b: a <= b)
+
+    def __gt__(self, other: Any) -> Any:
+        return self._compare(other, lambda a, b: a > b)
+
+    def __ge__(self, other: Any) -> Any:
+        return self._compare(other, lambda a, b: a >= b)
+
+    def __hash__(self) -> Any:
+        return self._result(hash(self.value))
+
+    def __bool__(self) -> bool:
+        return bool(self.value)
+
+    def __len__(self) -> Any:
+        return self._result(len(self.value))
+
+    def __contains__(self, item: Any) -> Any:
+        return self._result(item in self.value)
+
+    def __str__(self) -> Any:
+        return self._result(str(self.value))
+
+    def __repr__(self) -> Any:
+        return self._result(f"Callback({self.value!r})")
+
+    def __format__(self, spec: str) -> Any:
+        return self._result(format(self.value, spec))
+
+    def __int__(self) -> Any:
+        return self._result(int(self.value))
+
+    def __index__(self) -> Any:
+        return self._result(int(self.value))
+
+    def __float__(self) -> Any:
+        return self._result(float(self.value))
+
+
+def callbacks(value: Any, lying: bool, _depth: int = 0) -> Any:
+    """容器（tuple / list / dict の値）を辿って exact な scalar の葉を `Callback` にする（dict の key は変えない）。"""
+
+    kind = type(value)
+    if kind in (int, str, float):
+        return Callback(value, lying)
+    if _depth > 12:
+        return value
+    if kind is tuple or kind is list:
+        return kind(callbacks(item, lying, _depth + 1) for item in value)
+    if kind is dict:
+        return {key: callbacks(item, lying, _depth + 1) for key, item in value.items()}
+    return value
 
 
 def _is_record(value: Any) -> bool:

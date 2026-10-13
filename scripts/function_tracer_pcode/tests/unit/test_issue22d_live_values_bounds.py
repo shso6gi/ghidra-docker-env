@@ -384,6 +384,21 @@ LIVE_VALUES_WORK_OWNERS = {
     "exact_tree_in": _B,
     # MRO の長さを `SCAN_LIMIT` と比べてから辿る
     "_defining_class": _B,
+    # Issue #242 第 6 回: 比べる側の契約（辿る数・容器の長さを `SCAN_LIMIT` と比べる。超えれば判定しない:
+    # `UndecidableComparison`）
+    "inert": _B,
+    "_equal_trees": _B,
+    "contains": _B,
+    "less": _B,
+    "sorted_trees": _B,
+    "_exact_elements": _B_CALLER,
+    # Python の frame の数（再帰の上限まで: 固定の数）だけ
+    "_comparison_depth_limit": _A,
+    # 例外の状態（型が決める field の数・型の traverse が辿る参照の数）だけ
+    "_none_referents": _A,
+    # 割り当ての候補は `_ASSIGNMENT_LIMIT`（固定の数）まで: 型が決める field の数
+    "_none_assignments": _A,
+    "_exception_state_matches": _A,
 }
 
 #: `core/read_limits`（作業量を受け取らない読みの固定の上限の owner）の入力に比例する関数

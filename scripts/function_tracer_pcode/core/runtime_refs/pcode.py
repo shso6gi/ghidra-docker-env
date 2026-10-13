@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
-from scripts.function_tracer_pcode.core.live_values import exact_scalar, exact_tree, scalar_int, scalar_text, is_kind, attribute_of, method_of
+from scripts.function_tracer_pcode.core.live_values import (
+    attribute_of, equal, exact_scalar, exact_tree, inert, inert_key, is_kind, method_of, scalar_int, scalar_text,
+)
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 
@@ -76,6 +78,12 @@ def _pcode_op_ordinal_signature(pcode_op: Any, target: Optional[Tuple[Any, ...]]
         shape = type(target)
         if shape is not tuple or len(target) != 6:
             return None  # signature（6 つの field の tuple）と等しくなり得ない値
+        if not inert(target):
+            # 葉に外の object を持つ target: field ごとに止める比べ方は、tuple の比較（左から順に、外の object の
+            # `__eq__` を呼ぶ）と例外の起き方が違う。signature 全体を `equal`（tuple の比較の規則）で比べる
+            signature = _pcode_op_ordinal_signature(pcode_op)
+            return signature if signature is not None and equal(signature, target) else None
+        target = inert_key(target)  # 不活性な木（field の比較は組み込みの code だけ）
     target_space = None
     target_offset = None
     seq_time = None
@@ -151,14 +159,16 @@ def _local_op_ordinal_from_parent(pcode_op: Any) -> Optional[int]:
             candidate = iterator.next()
         except Exception:
             return None
-        # API の object どうしの等しさ（Java の equals）。どちらかが scalar の subclass でも、その `__eq__` を呼ばない
+        # API の object どうしの等しさ（Java の equals）。どちらかが scalar の subclass でも、その `__eq__` を呼ばない。
+        # 比較の戻り値（暗黙の callback の値）も基底型の値で読む
         if candidate is pcode_op:
             return ordinal
         candidate_tree = exact_tree(candidate)  # 読む順は変えない（候補が先）
         if not target_read:
             target_tree = exact_tree(pcode_op)
             target_read = True
-        if candidate_tree == target_tree:
+        # 葉の外の object（Java の object）の `__eq__` の戻り値は基底型の値の真偽で読む（`live_values.equal`）
+        if equal(candidate_tree, target_tree):
             return ordinal
         if _pcode_op_ordinal_signature(candidate, target_signature) is not None:
             return ordinal
