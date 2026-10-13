@@ -1307,6 +1307,27 @@ def _abi_batch_intents(session):
     return (EventIntent(EventType.CAUSE_OBSERVED, CauseObservedEventAuthority(authority)),)
 
 
+def test_the_abi_batch_transaction_call_site_rolls_back_a_failed_encoding(monkeypatch):
+    """encoding が取引を予約した後で失敗しても、予約は残らない（取引の境界の中の巻き戻し）。"""
+    _patch_abi_transaction_identity(monkeypatch)
+    session, abi, batch, handoff = _abi_transaction_with_one_sat_handoff()
+    with production_signal_scope(session):
+        pending = session.domain_signal_state["abi_width_pending_emission_transactions"]
+        entry = pending.pop(("abi-transaction",))
+        before = _state(session)
+
+        def encode(_session, _batch):
+            pending[("abi-transaction",)] = entry
+            raise RuntimeError("forced encoding failure after the reservation")
+
+        monkeypatch.setattr(abi, "_solver_batch_intents", encode)
+        with pytest.raises(RuntimeError, match="forced encoding failure"):
+            abi._emit_solver_batch_transaction(session, batch)
+        assert ("abi-transaction",) not in pending
+        assert _state(session) == before
+        assert not session.holds_domain_signal_transaction()
+
+
 @pytest.mark.parametrize("fails", [False, True], ids=["success", "phase7-commit-failure"])
 def test_the_abi_batch_transaction_call_site_restores_or_keeps_every_ledger(fails, monkeypatch):
     """本番の呼び手（``_emit_solver_batch_transaction``）を本物の ``emit_many`` で通す。同じ取引の
@@ -1512,6 +1533,9 @@ def test_a_concurrent_transaction_neither_interleaves_nor_erases_the_other(
     with production_signal_scope(session):
         a_signal, a_setup, a_call, a_before, a_after = _A_TRANSACTIONS[a_name](session)
         b_signal, b_entry, b_expected, b_events, b_promises = _B_TRANSACTIONS[b_name](session)
+        # 既に確定した別の occurrence（A の巻き戻しが消してはならない）。
+        settled = _observed(REPLAY, (R,), key=("settled-before",))
+        assert _observe(settled) == 1
         a_setup()
         assert _ledger_state(session, a_signal) is a_before
         before = _state(session)
@@ -1551,6 +1575,7 @@ def test_a_concurrent_transaction_neither_interleaves_nor_erases_the_other(
         assert session.domain_signal_error_kinds == expected_errors
         # B: A の成否に依らず確定し、A の巻き戻しで消えない。
         assert _ledger_state(session, b_signal) is b_expected
+        assert _ledger_state(session, settled) is BlockerState.PUBLISHED
         after = _state(session)
         a_events = 0 if fails else 1
         assert after["events"] == before["events"] + a_events + b_events
@@ -1612,3 +1637,136 @@ def test_an_exception_inside_a_transaction_releases_the_boundary():
     thread, _entered, outcome = _in_thread(session, lambda: _observe(observed))
     thread.join(_WAIT_SECONDS)
     assert not thread.is_alive() and outcome == {"value": 1}
+
+
+# ---- 写しの所有権（encoder・台帳の契約。境界に依らず成り立つ） --------------------
+
+
+def _encode_and_commit(session, signal):
+    encoder = session.domain_signal_encoder
+    intents = tuple(encoder(session, signal))
+    encoder.commit_emitted_signal(session, signal, intents)
+    return intents
+
+
+def test_another_encoding_never_discards_an_in_flight_transactions_rollback_state():
+    """commit した取引 A の写しは A の終わりまで残る。その間に別の signal を encode しても
+    A の写しは消えず、A の失敗は A の occurrence だけを戻す。"""
+    session = _connector().begin({"phase": "pr-a", "case": "in-flight-snapshot"})
+    a = _observed(REPLAY, (R,), key=_A_KEY)
+    b = _observed(PARTITION, ("pairwise",), key=_B_KEY)
+    encoder = session.domain_signal_encoder
+    with production_signal_scope(session), session.domain_signal_transaction():
+        _encode_and_commit(session, a)
+        assert _ledger_state(session, a) is BlockerState.PUBLISHED
+        tuple(encoder(session, b))  # 別の取引の encoding（A は終わっていない）
+        encoder.rollback_emitted_signal(session, a)
+        encoder.rollback_emitted_signal(session, b)
+        assert _ledger_state(session, a) is BlockerState.ABSENT
+        assert "sat_safety_committed_transactions" not in session.domain_signal_state
+
+
+def test_an_unfinished_transactions_rollback_state_cannot_be_overwritten():
+    session = _connector().begin({"phase": "pr-a", "case": "overwrite-snapshot"})
+    a = _observed(REPLAY, (R,), key=_A_KEY)
+    encoder = session.domain_signal_encoder
+    with production_signal_scope(session), session.domain_signal_transaction():
+        intents = _encode_and_commit(session, a)
+        pending = session.domain_signal_state.setdefault("sat_safety_pending_emission_transactions", {})
+        pending[id(a)] = (intents, "OBSERVED", "unused")
+        with pytest.raises(ValueError, match="already owns a committed transaction"):
+            encoder.commit_emitted_signal(session, a, intents)
+        encoder.rollback_emitted_signal(session, a)
+        assert _ledger_state(session, a) is BlockerState.ABSENT
+
+
+def test_the_ledger_refuses_an_entry_transition_inside_another_transactions_commit(monkeypatch):
+    """約束と約束の退役（event の無い入口の遷移）は、別の取引の commit window の中で台帳を変えない。"""
+    from scripts.function_tracer_pcode.authority.domains.sat_safety_ledger import SatSafetyBlockerLedger
+
+    session = _connector().begin({"phase": "pr-a", "case": "ledger-window"})
+    a = _observed(REPLAY, (R,), key=_A_KEY)
+    promise = _observed(ANALYSIS, (A,), key=_B_KEY, defer=True)
+    real = session._commit_phase7_signal_transaction
+    seen = []
+
+    def hook(signal):
+        ledger = SatSafetyBlockerLedger(session)
+        with pytest.raises(RuntimeError, match="inside another transaction's commit"):
+            ledger.record_promise("occurrence-in-window", promise, None)
+        seen.append(dict(session.domain_signal_state.get("sat_safety_deferred_observations", {})))
+        return real(signal)
+
+    monkeypatch.setattr(session, "_commit_phase7_signal_transaction", hook)
+    with production_signal_scope(session):
+        assert _observe(a) == 1
+    assert seen == [{}]
+
+
+def test_the_observed_check_and_its_emission_are_one_transaction(monkeypatch):
+    """条件付きの公開は、観測の確認から公開までの間に別の取引を入れない。"""
+    session = _connector().begin({"phase": "pr-a", "case": "if-observed-atomic"})
+    observed = _observed(REPLAY, (R,), key=_A_KEY)
+    with production_signal_scope(session):
+        _observe(observed)
+    encoder = session.domain_signal_encoder
+    reached, release = threading.Event(), threading.Event()
+    real = encoder.has_observed
+
+    def held(session_, signal):
+        if not reached.is_set():
+            reached.set()
+            assert release.wait(_WAIT_SECONDS)
+        return real(session_, signal)
+
+    monkeypatch.setattr(encoder, "has_observed", held)
+    a_thread, _e, a_outcome = _in_thread(
+        session, lambda: session.emit_domain_signal_if_observed(_completion(observed)),
+    )
+    assert reached.wait(_WAIT_SECONDS)
+    other = _observed(PARTITION, ("pairwise",), key=_B_KEY)
+    b_thread, b_entered, b_outcome = _in_thread(session, lambda: _generic(session, other))
+    assert b_entered.wait(_WAIT_SECONDS)
+    b_thread.join(0.3)
+    assert b_thread.is_alive(), ("a transaction ran between the observed check and its emission", b_outcome)
+    release.set()
+    a_thread.join(_WAIT_SECONDS)
+    b_thread.join(_WAIT_SECONDS)
+    assert a_outcome == {"value": 1} and b_outcome == {"value": 1}
+    with production_signal_scope(session):
+        assert _ledger_state(session, observed) is BlockerState.COMPLETED
+        assert _ledger_state(session, other) is BlockerState.PUBLISHED
+
+
+def test_a_concurrent_consumer_never_drops_a_loop_handoff(monkeypatch):
+    """loop の handoff の一覧は 1 つの取引で消費する。別の thread の消費が、公開中の handoff を
+    消したり次の handoff を落としたりしない。"""
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        _consume_loop_sat_safety_handoffs,
+    )
+
+    session = _manifest_connector().begin({"phase": "pr-a", "case": "handoff-consumers"})
+    first = replace(_observed(ANALYSIS, (A,), key=("handoff-1",)), producer_id=_LOOP_HANDOFF_PRODUCER)
+    second = replace(_observed(ANALYSIS, (A,), key=("handoff-2",)), producer_id=_LOOP_HANDOFF_PRODUCER)
+    session.domain_signal_state["loop_sat_safety_handoffs"] = [first, second]
+    a_ident = [None]
+    reached, release = _hold_the_first_commit_of(session, monkeypatch, a_ident, fail=False)
+
+    def run_a():
+        a_ident[0] = threading.get_ident()
+        return _consume_loop_sat_safety_handoffs(session)
+
+    a_thread, _e, a_outcome = _in_thread(session, run_a)
+    assert reached.wait(_WAIT_SECONDS)
+    b_thread, b_entered, b_outcome = _in_thread(session, lambda: _consume_loop_sat_safety_handoffs(session))
+    assert b_entered.wait(_WAIT_SECONDS)
+    b_thread.join(0.3)
+    release.set()
+    a_thread.join(_WAIT_SECONDS)
+    b_thread.join(_WAIT_SECONDS)
+    assert "error" not in a_outcome and "error" not in b_outcome, (a_outcome, b_outcome)
+    assert a_outcome["value"] + b_outcome["value"] == 2
+    with production_signal_scope(session):
+        assert _ledger_state(session, first) is BlockerState.PUBLISHED
+        assert _ledger_state(session, second) is BlockerState.PUBLISHED
+    assert "loop_sat_safety_handoffs" not in session.domain_signal_state
