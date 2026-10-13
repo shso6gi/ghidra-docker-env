@@ -152,14 +152,14 @@ class SatSafetyBlockerLedger:
 
     def _require_transaction(self, *, entry: bool = False) -> None:
         """遷移は session の取引の中だけ。入口の遷移（event の無い約束と約束の退役）は
-        さらに、別の取引の commit から終わりまでの間（commit window）には起きない
+        さらに、別の producer の取引（attempt）が生きている間・公開の最中には起きない
         （その取引の巻き戻しの範囲に入ってしまう）。event を伴う遷移と巻き戻しは、
         その取引自身の commit window の中で起きる。"""
         holds = getattr(self._session, "holds_domain_signal_transaction", None)
         if not callable(holds) or not holds():
             raise RuntimeError("SAT safety ledger changes outside the session transaction")
-        if entry and self._session.producer_commit_open():
-            raise RuntimeError("SAT safety ledger entry transition inside another transaction's commit")
+        if entry and self._session.producer_work_in_progress():
+            raise RuntimeError("SAT safety ledger entry transition inside another producer transaction")
 
     def record_promise(self, occurrence_id: str, signal: Any, site: Optional[str]) -> None:
         self._require_transaction(entry=True)

@@ -618,6 +618,16 @@ class ProductionDualWritePilotSession:
 
         return self._producer_boundary.held_by_current_thread()
 
+    def producer_work_in_progress(self) -> bool:
+        """Whether a producer attempt is live or a publication is being staged.
+
+        No new producer work (an attempt, an entry's ledger transition, a
+        direct publication) may start while this holds.
+        """
+
+        boundary = self._producer_boundary
+        return boundary.has_live_attempt or boundary.commit_open or boundary.publishing_open
+
     def producer_commit_open(self) -> bool:
         """Whether a producer attempt is between its commit and its end.
 
@@ -638,6 +648,8 @@ class ProductionDualWritePilotSession:
         """
 
         boundary = self._producer_boundary
+        if not boundary.held_by_current_thread():
+            raise RuntimeError("producer admission checked outside the transaction boundary")
         boundary.refuse_new_work("producer transaction")
         if boundary.live_attempt(signal) is not None:
             raise ProducerTransactionRefused(
@@ -693,6 +705,33 @@ class ProductionDualWritePilotSession:
             finally:
                 self._producer_boundary.end(attempt, AttemptStage.PUBLISHED)
 
+    def _end_failed_attempt(self, attempt: ProducerAttempt, rollback: Callable[[], None]) -> None:
+        """Roll back what a failed attempt owns and end it (called while its exception propagates).
+
+        A failing rollback is recorded as a producer error even on a truncated
+        stream (the prefix no longer describes the producer state); its
+        exception replaces the original one.  The contract cause of a
+        truncated stream is published once the attempt has ended.
+        """
+
+        rolled_back = not attempt.encoder_touched
+        try:
+            if attempt.encoder_touched:
+                rollback()
+                rolled_back = True
+        finally:
+            try:
+                if not rolled_back:
+                    self.domain_signal_error_kinds.append("ProducerRollbackFailed")
+                    self.domain_signal_error_details.append(
+                        f"{type(attempt.signal).__name__}: the attempt's rollback failed"
+                    )
+                self._rollback_attempt_phase7(attempt)
+            finally:
+                self._producer_boundary.end(attempt, AttemptStage.ROLLED_BACK)
+                if self.stream_truncated:
+                    self.publish_event_contract_limitation()
+
     def run_signal_transaction(
         self, signal: Any, encode: Callable[[], Sequence[Any]],
         commit: Callable[[Sequence[Any]], None], rollback: Callable[[], None], *,
@@ -722,25 +761,24 @@ class ProductionDualWritePilotSession:
                 try:
                     attempt.encoder_touched = True
                     intents = tuple(encode())
+                    if replay_aware and intents and self._is_committed_replay(signal, intents):
+                        # A committed replay publishes nothing, and the encoder
+                        # state it names belongs to the attempt that committed it.
+                        attempt.encoder_touched = False
+                        sequences = ()
+                    else:
+                        def commit_in_window() -> None:
+                            boundary.open_window(attempt)
+                            commit(intents)
 
-                    def commit_in_window() -> None:
-                        boundary.open_window(attempt)
-                        commit(intents)
-
-                    sequences = self._emit_many_admitted(
-                        intents, commit_in_window,
-                        transaction_signal=signal if replay_aware else None,
-                    )
+                        sequences = self._emit_many_admitted(
+                            intents, commit_in_window,
+                            transaction_signal=signal if replay_aware else None,
+                        )
                     published = True
                 finally:
                     if not published:
-                        try:
-                            rollback()
-                        finally:
-                            try:
-                                self._rollback_attempt_phase7(attempt)
-                            finally:
-                                boundary.end(attempt, AttemptStage.ROLLED_BACK)
+                        self._end_failed_attempt(attempt, rollback)
             except AuthorityEventContractExceeded:
                 # The attempt has ended: publish the contract cause now.
                 self.publish_event_contract_limitation()
@@ -1137,16 +1175,12 @@ class ProductionDualWritePilotSession:
             self._enter_transaction()
             opened = False
             try:
-                # The activation starts a producer attempt: it passes the same
-                # boundary check (a refusal acquires nothing and is recorded).
-                try:
-                    boundary.refuse_new_work("Phase 7 activation")
-                    if boundary.live_attempt(signal) is not None:
-                        raise ProducerTransactionRefused(
-                            "Phase 7 activation for a signal object with a live producer transaction"
-                        )
-                except ProducerTransactionRefused as exc:
-                    raise self._refuse(exc, type(signal).__name__)
+                # The activation is the first step of a producer attempt.  When
+                # no new attempt may start, it acquires nothing and returns: the
+                # attempt's admission that follows refuses and records it, so
+                # every entry refuses the same way (no state changes, 0).
+                if boundary.has_live_attempt or boundary.commit_open or boundary.publishing_open:
+                    return
                 if (
                     signal_id in self._phase7_signal_sites
                     or signal_id in self._phase7_signal_transactions

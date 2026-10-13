@@ -1692,7 +1692,7 @@ def test_the_ledger_refuses_an_entry_transition_inside_another_transactions_comm
 
     def hook(signal):
         ledger = SatSafetyBlockerLedger(session)
-        with pytest.raises(RuntimeError, match="inside another transaction's commit"):
+        with pytest.raises(RuntimeError, match="inside another producer transaction"):
             ledger.record_promise("occurrence-in-window", promise, None)
         seen.append(dict(session.domain_signal_state.get("sat_safety_deferred_observations", {})))
         return real(signal)
@@ -1781,7 +1781,7 @@ def test_a_concurrent_consumer_never_drops_a_loop_handoff(monkeypatch):
 # の同一性（同じ object・同じ内容の別 object・別の occurrence）に依らない。
 
 
-def _nested_calls(session, outer):
+def _nested_calls(session, outer, settled):
     """外側の取引の中から試す呼び出し（入口 × object・occurrence の関係）。"""
     other = _observed(PARTITION, ("pairwise",), key=_B_KEY)
 
@@ -1802,11 +1802,18 @@ def _nested_calls(session, outer):
         "other-occurrence-generic": (lambda: session.emit_domain_signal(other), other),
         "other-promise-entry": (lambda: _observe(replace(other, defer_until_terminal=True)), other),
         "direct-emit": (direct_emit, other),
+        # Phase 7 の activation から始まる入口（activation は何も取得せず、受付が拒否する）。
+        "activation-first-entry": (
+            lambda: session.emit_domain_signal_if_observed(
+                _completion(settled), SAT_SAFETY_BLOCKER_COMPLETED_SITE.site_id,
+            ),
+            settled,
+        ),
     }
 
 
 _NESTED = ["same-object-generic", "same-object-entry", "equal-object-generic",
-           "other-occurrence-generic", "other-promise-entry", "direct-emit"]
+           "other-occurrence-generic", "other-promise-entry", "direct-emit", "activation-first-entry"]
 
 
 def _install_reentry(session, monkeypatch, stage, call, *, fail):
@@ -1868,7 +1875,7 @@ def test_a_reentrant_transaction_is_refused_without_touching_the_outer_one(
     with production_signal_scope(session):
         settled = _observed(REPLAY, (R,), key=("settled-before",))
         assert _observe(settled) == 1
-        call, nested_signal = _nested_calls(session, outer)[nested]
+        call, nested_signal = _nested_calls(session, outer, settled)[nested]
         before = _state(session)
         seen = _install_reentry(session, monkeypatch, stage, call, fail=fail)
         published = _observe(outer)
@@ -1884,7 +1891,9 @@ def test_a_reentrant_transaction_is_refused_without_touching_the_outer_one(
         outer_failed = stage == "committing" and fail
         assert published == (0 if outer_failed else 1)
         assert _ledger_state(session, outer) is (BlockerState.ABSENT if outer_failed else BlockerState.PUBLISHED)
-        if nested_signal is not outer:
+        if nested_signal is settled:
+            assert _ledger_state(session, settled) is BlockerState.PUBLISHED  # 完了していない
+        elif nested_signal is not outer:
             assert _ledger_state(session, nested_signal) is BlockerState.ABSENT
         assert _ledger_state(session, settled) is BlockerState.PUBLISHED
         after = _state(session)
@@ -2047,3 +2056,56 @@ def test_a_safe_counterexample_that_fails_after_its_commit_can_be_published_agai
         assert session.domain_signal_state.get("sat_safety_safe_counterexample_committed")
         assert "sat_safety_committed_transactions" not in session.domain_signal_state
     assert session.domain_signal_error_kinds == ["RuntimeError"]
+
+
+def test_a_failing_rollback_of_a_batch_attempt_is_recorded_and_ends_the_attempt():
+    """共通の取引（ABI・loop の batch）の巻き戻しの失敗は、打切りの後でも producer の誤りとして
+    記録され、取引は終わり境界は解放される。"""
+    session = _connector().begin({"phase": "pr-a", "case": "batch-rollback-failure"})
+    batch = object()
+
+    def encode():
+        raise RuntimeError("forced encoding failure")
+
+    def failing_rollback():
+        raise RuntimeError("forced rollback failure")
+
+    with pytest.raises(RuntimeError, match="forced rollback failure"):
+        session.run_signal_transaction(batch, encode, lambda _intents: None, failing_rollback)
+    assert session.domain_signal_error_kinds == ["ProducerRollbackFailed"]
+    assert not session.holds_domain_signal_transaction()
+    assert session._producer_boundary.has_live_attempt is False
+    assert session.run_signal_transaction(object(), lambda: (), lambda _i: None, lambda: None) == ()
+
+
+def test_a_committed_replay_of_a_batch_attempt_keeps_the_earlier_attempts_state(monkeypatch):
+    """既に公開した batch をもう一度通すと公開しない。その state は前の取引のもので、この取引は
+    巻き戻さない（後で失敗しても前の取引の確定を消さない）。"""
+    _patch_abi_transaction_identity(monkeypatch)
+    session, abi, batch, handoff = _abi_transaction_with_one_sat_handoff()
+    with production_signal_scope(session):
+        intents = _abi_batch_intents(session)
+        pending = session.domain_signal_state["abi_width_pending_emission_transactions"]
+        digest, _intents, payload = pending.pop(("abi-transaction",))
+
+        def encode(_session, _batch):
+            if ("abi-transaction",) not in session.domain_signal_state.get(
+                "abi_width_committed_emission_transactions", {}
+            ):
+                pending[("abi-transaction",)] = (digest, intents, payload)
+            return intents
+
+        monkeypatch.setattr(abi, "_solver_batch_intents", encode)
+        abi._emit_solver_batch_transaction(session, batch)
+        committed = dict(session.domain_signal_state["abi_width_committed_emission_transactions"])
+        events = session.recorder.event_count
+        rolled_back = []
+        real_rollback = abi.rollback_emitted_signal
+        monkeypatch.setattr(abi, "rollback_emitted_signal",
+                            lambda s_, b_: rolled_back.append(b_) or real_rollback(s_, b_))
+        abi._emit_solver_batch_transaction(session, batch)  # committed replay
+        assert rolled_back == []
+        assert session.recorder.event_count == events
+        assert session.domain_signal_state["abi_width_committed_emission_transactions"] == committed
+        assert _ledger_state(session, handoff) is BlockerState.PUBLISHED
+        assert session.domain_signal_error_kinds == []
