@@ -2182,3 +2182,13 @@ def test_a_phase7_wrapper_transaction_is_released_only_by_its_own_transaction_ob
         session._release_phase7_transaction(signal, opened, commit=False)
         assert id(signal) not in session._phase7_signal_transactions
         assert not session.holds_domain_signal_transaction()
+
+
+def test_producer_admission_is_checked_only_inside_the_boundary():
+    """受付の確認は境界の中だけ（境界の外の確認は、確認と実行の間に別の取引が入り得る）。"""
+    session = _connector().begin({"phase": "pr-a", "case": "admission-outside"})
+    signal = _observed(REPLAY, (R,), key=_A_KEY)
+    with pytest.raises(RuntimeError, match="outside the transaction boundary"):
+        session.ensure_producer_admissible(signal)
+    with session.domain_signal_transaction():
+        session.ensure_producer_admissible(signal)
