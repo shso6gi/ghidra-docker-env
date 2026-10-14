@@ -2536,7 +2536,13 @@ def _run_fixture_bound_high_bit_sat_authority(
         assert session.domain_signal_state.get(
             "abi_width_solver_execution_receipts", set()
         ) == set()
-        assert session.domain_signal_state.get("sat_safety_observed", set()) == set()
+        # 変換した SAT-safety の観測の公開は、SAT-safety の台帳の全ての key を巻き戻す。
+        from scripts.function_tracer_pcode.authority.domains.sat_safety_ledger import (
+            SAT_SAFETY_LEDGER_KEYS,
+        )
+
+        for key in SAT_SAFETY_LEDGER_KEYS:
+            assert not session.domain_signal_state.get(key), key
         return {"atomic_failure_preserved_original_frontier": True}
     assert {row.reason_id for row in lifecycle.c_active_base} == {
         "counterexample_analysis_safety_unproven",

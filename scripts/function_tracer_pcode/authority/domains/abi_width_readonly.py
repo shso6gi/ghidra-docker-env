@@ -12,6 +12,7 @@ import threading
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Optional
 
+from scripts.function_tracer_pcode.authority.domains.sat_safety_ledger import SAT_SAFETY_LEDGER_KEYS
 from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrence,
     CauseOccurrenceAuthority,
@@ -52,6 +53,18 @@ from scripts.function_tracer_pcode.authority.lifecycle.stream import (
 ABI_WIDTH_READONLY_DOMAIN_ID = "abi-return-width-readonly-v2"
 ABI_WIDTH_READONLY_REGISTRY_VERSION = 1
 
+
+
+#: commit を終えた取引の、取引の前の台帳の写し（取引の終わりまで残す）。
+_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY = "abi_width_committed_rollback_snapshots"
+
+
+def _restore_abi_transaction_snapshots(state: dict, snapshots: dict) -> None:
+    for key, (existed, snapshot) in snapshots.items():
+        if existed:
+            state[key] = snapshot
+        else:
+            state.pop(key, None)
 
 class AbiWidthReadonlyCapability(str, Enum):
     STRUCTURAL_ONLY = "STRUCTURAL_ONLY"
@@ -3441,11 +3454,18 @@ class AbiWidthReadonlyPilotEncoder:
         if tuple(intents) != expected_intents:
             raise ValueError("ABI/width emission transaction intents changed")
         state = session.domain_signal_state
+        rollbacks = state.setdefault(_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY, {})
+        if type(rollbacks) is not dict:
+            raise TypeError("ABI/width committed rollback ledger is not exact")
+        if transaction_key in rollbacks:
+            # 同じ取引の前の commit がまだ終わっていない（写しを上書きすれば戻せなくなる）。
+            raise ValueError("ABI/width transaction already owns a committed rollback")
         mutated_keys = (
             "abi_width_solver_execution_receipts",
             "abi_width_solver_decisive_conflicts",
             "abi_width_model_bound_refutation_artifacts",
-            "sat_safety_observed",
+            # 変換した SAT-safety の観測の公開は、SAT-safety の台帳の全ての key を変え得る。
+            *SAT_SAFETY_LEDGER_KEYS,
             "sat_safety_pending_emission_transactions",
             "abi_width_high_bit_sat_transformations",
             "abi_width_committed_emission_transactions",
@@ -3501,13 +3521,34 @@ class AbiWidthReadonlyPilotEncoder:
                 tuple(intents),
             )
         except Exception:
-            for key, (existed, snapshot) in snapshots.items():
-                if existed:
-                    state[key] = snapshot
-                else:
-                    state.pop(key, None)
+            _restore_abi_transaction_snapshots(state, snapshots)
             raise
+        # この commit の後で同じ取引の別の commit（Phase 7 など）が失敗すると、呼び手は
+        # ``rollback_emitted_signal`` を呼ぶ。そのとき ABI と SAT-safety の全ての台帳を
+        # 取引の前へ戻せるよう、写しをこの取引の分として取引の終わりまで残す。写しを
+        # 捨てるのはこの取引の終わり（``rollback_emitted_signal`` か
+        # ``finish_emitted_signal``）だけ。取引は session の取引の境界の中で始まって終わり、
+        # 取引が生きている間は別の取引が始まらない（producer の取引の境界）ので、写しの
+        # 時点からの変化はこの取引のものだけ。
+        rollbacks[transaction_key] = snapshots
         pending.pop(transaction_key)
+
+    def finish_emitted_signal(self, session: Any, signal: Any) -> None:
+        """この取引の公開は確定した: この取引の巻き戻し用の写しを捨てる。"""
+        if type(signal) is not AbiWidthReadonlySolverExecutionBatchSignal:
+            return
+        self._pop_committed_rollback(session, signal)
+
+    def _pop_committed_rollback(self, session: Any, signal: Any) -> Any:
+        rollbacks = session.domain_signal_state.get(_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY)
+        if rollbacks is None:
+            return None
+        if type(rollbacks) is not dict:
+            raise TypeError("ABI/width committed rollback ledger is not exact")
+        snapshots = rollbacks.pop(self._solver_batch_transaction_key(session, signal), None)
+        if not rollbacks:
+            session.domain_signal_state.pop(_ABI_COMMITTED_ROLLBACK_SNAPSHOTS_KEY, None)
+        return snapshots
 
     def rollback_emitted_signal(self, session: Any, signal: Any) -> None:
         if type(signal) is AbiWidthReadonlySolverExecutionBatchSignal:
@@ -3516,6 +3557,11 @@ class AbiWidthReadonlyPilotEncoder:
             )
             transaction_key = self._solver_batch_transaction_key(session, signal)
             pending.pop(transaction_key, None)
+            snapshots = self._pop_committed_rollback(session, signal)
+            if snapshots is not None:
+                # commit の後でこの取引が失敗した: ABI と SAT-safety の台帳を取引の前へ戻す。
+                _restore_abi_transaction_snapshots(session.domain_signal_state, snapshots)
+                return
             committed = session.domain_signal_state.get(
                 "abi_width_committed_emission_transactions", {}
             )
@@ -3936,16 +3982,7 @@ class AbiWidthReadonlyPilotEncoder:
             # boundary so Phase 7 does not require a fabricated source site,
             # while preserving the same atomic producer-state transaction as
             # ProductionDualWritePilotSession.emit_domain_signal().
-            intents = tuple(self._solver_batch_intents(session, batch))
-            try:
-                session.emit_many(
-                    intents,
-                    lambda: self.commit_emitted_signal(session, batch, intents),
-                    transaction_signal=batch,
-                )
-            except Exception:
-                self.rollback_emitted_signal(session, batch)
-                raise
+            self._emit_solver_batch_transaction(session, batch)
             handoffs = tuple(session.domain_signal_state.pop(
                 "abi_width_sat_safety_handoffs", ()
             ))
@@ -3961,6 +3998,23 @@ class AbiWidthReadonlyPilotEncoder:
                     )
                 for handoff in handoffs:
                     session.emit_domain_signal(handoff)
+
+    def _emit_solver_batch_transaction(self, session: Any, batch: Any) -> None:
+        """solver の batch を 1 つの producer の取引（attempt）として encode し公開する。
+
+        境界は session の ``run_signal_transaction``: encoding が予約した取引、commit の後で
+        同じ取引の Phase 7 の commit などが失敗したら ``rollback_emitted_signal`` が commit の
+        写しから全ての台帳を戻し、公開できたら ``finish_emitted_signal`` がこの取引の写しを
+        捨てる。例外はそのまま上げる。
+        """
+        session.run_signal_transaction(
+            batch,
+            lambda: self._solver_batch_intents(session, batch),
+            lambda intents: self.commit_emitted_signal(session, batch, intents),
+            lambda: self.rollback_emitted_signal(session, batch),
+            finish=lambda: self.finish_emitted_signal(session, batch),
+            replay_aware=True,
+        )
 
     def finalize_open_execution_history(self, session: Any) -> None:
         from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (

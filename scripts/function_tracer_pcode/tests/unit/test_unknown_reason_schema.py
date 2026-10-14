@@ -184,8 +184,9 @@ def test_plan15_recovery_plan_maps_core_reasons_to_required_proofs():
     assert [obligation.proof_kind for obligation in sat_unsafety.proof_obligations] == [
         UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION.value,
     ]
+    # sat_unsafety は解析の不安全: replay では解消しない（plan v4 PR-A、owner の表と同じ）。
     assert [obligation.required_evidence for obligation in sat_unsafety.proof_obligations] == [
-        ("counterexample_replay", "active_unsafety_discharge", "coverage_effect_safety"),
+        ("analysis_safety_proof", "coverage_effect_safety"),
     ]
 
 

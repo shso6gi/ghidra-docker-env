@@ -44,6 +44,7 @@ SNAPSHOT = pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "unknown_r
 
 
 LIVE_VALUES = "scripts.function_tracer_pcode.core.live_values"
+SAT_SAFETY_RESOLUTION = "scripts.function_tracer_pcode.proof.sat_safety_resolution"
 
 
 def _imports_only_the_standard_library(module_name):
@@ -68,9 +69,13 @@ def test_canonical_pure_module_imports_no_upper_layer():
     tree = ast.parse(inspect.getsource(proof_ur))
     mods = [n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
     mods += [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
-    assert not [m for m in mods if m.startswith("scripts.") and m != LIVE_VALUES], mods
-    # 例外は live な値を読む唯一の規則（`core.live_values`。標準 library だけに依る最下層）
-    assert _imports_only_the_standard_library(LIVE_VALUES)
+    # 許すのは、標準 library だけに依る leaf だけ: live な値を読む唯一の規則
+    # （`core.live_values`）と、SAT-safety の解消の型の owner（`proof.sat_safety_resolution`、
+    # plan v4 PR-A。旧来の `sat_unsafety` の回復計画がその要求を読む）。
+    allowed = {LIVE_VALUES, SAT_SAFETY_RESOLUTION}
+    assert not [m for m in mods if m.startswith("scripts.") and m not in allowed], mods
+    for module_name in allowed:
+        assert _imports_only_the_standard_library(module_name)
     src = inspect.getsource(proof_ur)
     for layer in ("authority", "checker", "reporting"):
         assert f"function_tracer_pcode.{layer}" not in src
@@ -119,12 +124,49 @@ def test_reason_definition_registry_matches_the_pre_split_snapshot():
     assert len(current) == 37 + len(_POST_SPLIT_REASON_ADDITIONS)
 
 
+# 分割後に意図して変えた回復計画（snapshot は移動前の module から生成したもの）。
+# 変えた理由と、変えた後の値の正本をここに明示する。
+_POST_SPLIT_PLAN_CHANGES = {
+    # plan v4 PR-A: sat_unsafety は解析の不安全で、replay では解消しない。要求は owner の表。
+    "sat_unsafety",
+}
+
+
 def test_recovery_plan_registry_matches_the_pre_split_snapshot():
     snap = _snapshot()
     current = {k: v.to_dict() for k, v in proof_ur._UNKNOWN_RECOVERY_PLAN_REGISTRY.items()}
     assert set(current) == set(snap["plans"])
-    assert json.loads(json.dumps(current, sort_keys=True, default=str)) == snap["plans"]
+    current_json = json.loads(json.dumps(current, sort_keys=True, default=str))
+    assert {k: v for k, v in current_json.items() if k not in _POST_SPLIT_PLAN_CHANGES} == {
+        k: v for k, v in snap["plans"].items() if k not in _POST_SPLIT_PLAN_CHANGES
+    }
     assert len(current) == 29
+
+
+def test_the_sat_unsafety_plan_reads_the_analysis_unsafety_requirement_of_the_owner():
+    from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
+        SAT_SAFETY_RECOVERY_REQUIREMENTS,
+        SatSafetyResolution,
+    )
+
+    required, description = SAT_SAFETY_RECOVERY_REQUIREMENTS[SatSafetyResolution.ANALYSIS_UNSAFETY]
+    plan = proof_ur.get_unknown_recovery_plan("sat_unsafety")
+    (obligation,) = plan.proof_obligations
+    assert tuple(obligation.required_evidence) == required
+    assert obligation.description == description
+    assert "counterexample_replay" not in obligation.required_evidence
+    # 変えたのは required evidence と説明だけ（proof kind・stage・regression は snapshot と同じ）。
+    before = _snapshot()["plans"]["sat_unsafety"]
+    after = json.loads(json.dumps(plan.to_dict(), sort_keys=True, default=str))
+    for key in ("reason_id", "target_regression"):
+        assert after[key] == before[key]
+    assert [
+        {k: v for k, v in o.items() if k not in {"required_evidence", "description"}}
+        for o in after["proof_obligations"]
+    ] == [
+        {k: v for k, v in o.items() if k not in {"required_evidence", "description"}}
+        for o in before["proof_obligations"]
+    ]
 
 
 # 6 / 7 / 8. normalization / build_proof_obligation_id / plan lookup の parity

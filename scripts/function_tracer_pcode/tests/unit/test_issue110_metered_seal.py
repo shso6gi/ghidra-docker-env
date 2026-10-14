@@ -145,6 +145,22 @@ def _sat_blocker(index: int):
     )
 
 
+def _replay_blocker(index: int):
+    """replay 型の blocker（counterexample の replay が完了させてよい唯一の型、plan v4 I5）。"""
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        SatSafetyBlockerProductionSignal,
+    )
+
+    return SatSafetyBlockerProductionSignal(
+        action="OBSERVED",
+        reason_id="counterexample_replay_unproven",
+        canonical_target_key=("issue110-replay-blocker", index),
+        missing_semantic_fact=("counterexample_safety_gate_unproven", "counterexample_replay_missing"),
+        evidence_refs=("counterexample_replay_missing",),
+        producer_id="sat_unsafety_reason_producer",
+    )
+
+
 def _connector():
     from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
         AnalysisLimitationBlockerSignal,
@@ -1571,18 +1587,12 @@ def test_a_completed_promise_releases_its_room(monkeypatch):
         monkeypatch, blockers=0, case_id="issue110-release", contract=contract,
     )
     for index in range(6):
-        _defer(session, _sat_blocker(index))
+        _defer(session, _replay_blocker(index))
     assert session.event_contract.deferred_unpublished == 6
-    # 完了の proof artifact は SAT-safety の test が持つ: ここでは完了が約束した occurrence を名指すことだけ作る
-    encoder = session.domain_signal_encoder
-    real_authority = encoder.authority_for_signal
-    monkeypatch.setattr(encoder, "authority_for_signal", lambda owner, signal: real_authority(
-        owner, signal.observed if isinstance(signal, SimpleNamespace) else signal,
-    ), raising=False)
     with production_signal_scope(session):
         for index in range(6):
             emit_sat_safety_completion_if_observed(
-                SimpleNamespace(action="COMPLETED", observed=_sat_blocker(index)),
+                _completed(_replay_blocker(index)),
                 producer_site_manifest_id="sat-safety-blocker-completed",
             )
     assert session.event_contract.deferred_unpublished == 0
@@ -1593,6 +1603,40 @@ def test_a_completed_promise_releases_its_room(monkeypatch):
         ]
     assert sum(published) == contract.ordinary_cause_occurrences
     assert session.event_contract.exceeded is None
+
+
+def _completed(observed):
+    """観測を言い直した完了の signal（proof artifact は SAT-safety の test が持つ）。"""
+    from dataclasses import replace
+
+    return replace(
+        observed, action="COMPLETED", producer_id="sat_unsafety_resolution_producer",
+        proof_artifact_digest="issue110-completion-proof",
+    )
+
+
+def test_a_promise_of_analysis_unsafety_is_not_completed(monkeypatch):
+    """解析の不安全の約束は完了で退かない（plan v4 I5）。完了の signal は拒否されて
+    domain signal の失敗として記録され、約束は枠を持ったまま残る。"""
+
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        emit_sat_safety_completion_if_observed,
+        production_signal_scope,
+    )
+
+    contract = AuthorityEventContract(max_cause_occurrences=16)
+    _connector_, session, _emitted, _pending = _finished_session(
+        monkeypatch, blockers=0, case_id="issue110-analysis-kept", contract=contract,
+    )
+    _defer(session, _sat_blocker(0))
+    assert session.event_contract.deferred_unpublished == 1
+    with production_signal_scope(session):
+        assert emit_sat_safety_completion_if_observed(
+            _completed(_sat_blocker(0)),
+            producer_site_manifest_id="sat-safety-blocker-completed",
+        ) == 0
+    assert session.event_contract.deferred_unpublished == 1
+    assert session.domain_signal_error_kinds == ["ValueError"]
 
 
 def test_publishing_a_promise_at_the_edge_counts_it_once(monkeypatch):

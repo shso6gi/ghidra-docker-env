@@ -18,9 +18,15 @@ from scripts.function_tracer_pcode.authority.contracts import (
     requirement_slot,
 )
 from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
-    SAT_SAFETY_TYPED_REASON_IDS,
     SafeCounterexampleProductionSignal,
     SatSafetyBlockerProductionSignal,
+)
+from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
+    SAT_SAFETY_TYPED_REASON_IDS,
+)
+from scripts.function_tracer_pcode.authority.domains.sat_safety_ledger import (
+    Disposition,
+    SatSafetyBlockerLedger,
 )
 from scripts.function_tracer_pcode.authority.registry import (
     SatisfactionBindingFactory,
@@ -66,21 +72,26 @@ SAT_SAFETY_REASON_REGISTRY = SealedReasonRegistry.build(
 SAT_SAFETY_RECOVERY_REGISTRY = SealedRecoveryRegistry.build((SAT_SAFETY_CONTRACT,))
 
 
+#: commit で台帳を遷移させた取引（signal）ごとの、遷移した occurrence の遷移の前の写し。
+#: 写しの寿命はその取引と同じで、取引の終わり（rollback か finish）がその取引の分だけ
+#: 捨てる。取引は session の取引の境界（``domain_signal_transaction``）の中で始まって
+#: 終わるので、進行中の取引の写しを別の取引が消すことも、写しの間に別の取引が同じ
+#: occurrence を変えることもない。
+_COMMITTED_TRANSACTIONS_KEY = "sat_safety_committed_transactions"
+#: safe counterexample の取引の写し（commit の前は印が未設定だった）。
+_SAFE_COUNTEREXAMPLE_UNSET = ("safe-counterexample", "unset")
+
+
 class SatSafetyPilotEncoder:
     def __init__(self) -> None:
         self._cause_factory = SemanticCauseIdentityFactory(SAT_SAFETY_REASON_REGISTRY)
         self._binding_factory = SatisfactionBindingFactory(SAT_SAFETY_RECOVERY_REGISTRY)
 
-    @staticmethod
-    def _committed_ledger(session: Any, key: str) -> set[str]:
-        ledger = session.domain_signal_state.get(key)
-        if ledger is None:
-            return set()
-        if type(ledger) is not set:
-            raise TypeError(f"SAT safety committed ledger is not an exact set: {key}")
-        return ledger
-
     def _authority(self, session: Any, signal: SatSafetyBlockerProductionSignal):
+        # identity は検証済みの blocker からしか作らない。重複判定・deferred の登録・
+        # 完了の照合はすべてこの identity を使うので、不整合な対（構築の迂回を含む）は
+        # どの経路でも identity より前に止まる（plan v4 I5）。
+        signal.blocker
         cause = self._cause_factory.create(
             reason_id=signal.reason_id,
             identity_scope=IdentityScope.RELATIONAL,
@@ -148,7 +159,12 @@ class SatSafetyPilotEncoder:
             or intents[0].event_type is not EventType.CAUSE_OBSERVED
         ):
             raise ValueError("SAT safety transformed observation is duplicated")
-        self.commit_emitted_signal(session, signal, intents)
+        try:
+            self.commit_emitted_signal(session, signal, intents)
+        finally:
+            # 他の domain の取引の中の commit: 巻き戻しはその取引の owner（ABI の写し）が
+            # 持つので、成否に依らずこの commit の写しはここで捨てる。
+            self.finish_emitted_signal(session, signal)
 
     def __call__(self, session: Any, signal: Any) -> tuple[EventIntent, ...]:
         if type(signal) is SafeCounterexampleProductionSignal:
@@ -168,25 +184,20 @@ class SatSafetyPilotEncoder:
             return ()
         authority, requirement_id = self._authority(session, signal)
         occurrence_key = authority.occurrence.occurrence_id
-        observed_occurrences = self._committed_ledger(
-            session, "sat_safety_observed"
-        )
-        completed_occurrences = self._committed_ledger(
-            session, "sat_safety_completed"
-        )
-        if signal.action == "OBSERVED":
-            if occurrence_key in observed_occurrences:
-                return ()
-            intents = (EventIntent(
-                EventType.CAUSE_OBSERVED,
-                CauseObservedEventAuthority(authority),
-            ),)
-            action = "OBSERVED"
-        elif occurrence_key not in observed_occurrences:
-            raise ValueError("SAT safety completion has no observed active occurrence")
-        elif occurrence_key in completed_occurrences:
+        # 判定は台帳の owner が記録の正本（約束か公開済みの観測）に照らして行う。
+        # 違反は ValueError で、session が状態を変えずに失敗として記録する。
+        disposition = SatSafetyBlockerLedger(session).decide(signal, occurrence_key)
+        if disposition is Disposition.DUPLICATE:
             return ()
-        else:
+        if disposition is Disposition.NOTHING:
+            raise ValueError("SAT safety completion has no observed active occurrence")
+        if not disposition.emits_event:
+            # 約束（PROMISE）と未公開の約束の完了（RETIRE_PROMISE）は event を出さない
+            # lifecycle の遷移で、``emit_sat_safety_signal`` 系の入口だけが行う。
+            raise ValueError(
+                f"SAT safety {disposition.value} goes through the lifecycle entry, not the event route"
+            )
+        if disposition is Disposition.COMPLETE:
             receipt = RequirementCompletionReceipt(
                 authority.occurrence.cause_id.value,
                 authority.occurrence.occurrence_id,
@@ -205,6 +216,12 @@ class SatSafetyPilotEncoder:
                 RequirementCompletedEventAuthority(receipt),
             ),)
             action = "COMPLETED"
+        else:
+            intents = (EventIntent(
+                EventType.CAUSE_OBSERVED,
+                CauseObservedEventAuthority(authority),
+            ),)
+            action = "OBSERVED"
         pending_key = "sat_safety_pending_emission_transactions"
         pending = session.domain_signal_state.setdefault(pending_key, {})
         if type(pending) is not dict:
@@ -224,6 +241,11 @@ class SatSafetyPilotEncoder:
                 "sat_safety_safe_counterexample_committed"
             ):
                 raise ValueError("safe counterexample was already committed")
+            committed = session.domain_signal_state.setdefault(_COMMITTED_TRANSACTIONS_KEY, {})
+            if id(signal) in committed:
+                raise ValueError("SAT safety signal already owns a committed transaction")
+            # 後段の失敗で戻せるよう、この取引の分の写し（commit の前は未設定）を残す。
+            committed[id(signal)] = _SAFE_COUNTEREXAMPLE_UNSET
             session.domain_signal_state[
                 "sat_safety_safe_counterexample_committed"
             ] = signal.proof_artifact_digest
@@ -242,33 +264,56 @@ class SatSafetyPilotEncoder:
             raise ValueError("SAT safety emission transaction is missing") from exc
         if tuple(intents) != expected_intents:
             raise ValueError("SAT safety emission transaction intents changed")
-        ledger_key = (
-            "sat_safety_observed"
-            if action == "OBSERVED"
-            else "sat_safety_completed"
-        )
-        ledger = session.domain_signal_state.setdefault(ledger_key, set())
-        if type(ledger) is not set:
-            raise TypeError("SAT safety committed ledger is not an exact set")
-        if occurrence_key in ledger:
-            raise ValueError("SAT safety transaction duplicates committed state")
-        ledger.add(occurrence_key)
+        # event の commit での遷移は台帳の owner だけが行う（公開は約束を退ける）。
+        # この後の commit（外部・Phase 7）が失敗したら session が rollback を呼ぶので、
+        # 遷移する occurrence の遷移の前の写しをこの取引（signal）の分として残す。
+        # 失敗なら ``rollback_emitted_signal`` がその occurrence だけを戻し、成功なら
+        # ``finish_emitted_signal`` が捨てる。
+        ledger = SatSafetyBlockerLedger(session)
+        committed = session.domain_signal_state.setdefault(_COMMITTED_TRANSACTIONS_KEY, {})
+        if type(committed) is not dict:
+            raise TypeError("SAT safety committed transaction ledger is not exact")
+        if id(signal) in committed:
+            # 前の取引が終わっていない（写しを上書きすれば、その取引を戻せなくなる）。
+            raise ValueError("SAT safety signal already owns a committed transaction")
+        committed[id(signal)] = ledger.snapshot_occurrence(occurrence_key)
         if action == "OBSERVED":
-            observed = session.domain_signal_state.setdefault(
-                "sat_safety_observed_signals", {}
-            )
-            if type(observed) is not dict:
-                raise TypeError("SAT safety observed signal ledger is not exact")
-            prior = observed.setdefault(occurrence_key, signal)
-            if prior != signal:
-                raise ValueError("SAT safety observed signal authority collided")
+            ledger.record_publication(occurrence_key, signal)
+        else:
+            ledger.record_completion(occurrence_key)
         pending.pop(id(signal))
         if not pending:
             session.domain_signal_state.pop(pending_key, None)
 
+    def finish_emitted_signal(self, session: Any, signal: Any) -> None:
+        """この取引の公開は確定した: 巻き戻し用の写しを捨てる。"""
+        if type(signal) not in {SatSafetyBlockerProductionSignal, SafeCounterexampleProductionSignal}:
+            return
+        committed = session.domain_signal_state.get(_COMMITTED_TRANSACTIONS_KEY)
+        if committed:
+            committed.pop(id(signal), None)
+            if not committed:
+                session.domain_signal_state.pop(_COMMITTED_TRANSACTIONS_KEY, None)
+
     def rollback_emitted_signal(self, session: Any, signal: Any) -> None:
+        if type(signal) is SafeCounterexampleProductionSignal:
+            committed = session.domain_signal_state.get(_COMMITTED_TRANSACTIONS_KEY, {})
+            if committed.pop(id(signal), None) is _SAFE_COUNTEREXAMPLE_UNSET:
+                # commit の後でこの取引が失敗した: 決め手の印を commit の前（未設定）へ戻す
+                # （残すと、再試行が重複として黙って捨てられる）。
+                session.domain_signal_state.pop("sat_safety_safe_counterexample_committed", None)
+            if not committed:
+                session.domain_signal_state.pop(_COMMITTED_TRANSACTIONS_KEY, None)
+            return
         if type(signal) is not SatSafetyBlockerProductionSignal:
             return
+        committed = session.domain_signal_state.get(_COMMITTED_TRANSACTIONS_KEY, {})
+        if id(signal) in committed:
+            # commit の遷移の後にこの取引が失敗した: 遷移した occurrence だけを遷移の前へ
+            # 戻す（他の取引が確定させた記録は消さない）。
+            SatSafetyBlockerLedger(session).restore_occurrence(committed.pop(id(signal)))
+            if not committed:
+                session.domain_signal_state.pop(_COMMITTED_TRANSACTIONS_KEY, None)
         pending_key = "sat_safety_pending_emission_transactions"
         pending = session.domain_signal_state.get(pending_key)
         if pending is None:
@@ -280,10 +325,17 @@ class SatSafetyPilotEncoder:
             session.domain_signal_state.pop(pending_key, None)
 
     def has_observed(self, session: Any, signal: Any) -> bool:
+        """台帳がこの signal を既に持っているか（重複の判定は台帳の owner の ``decide``）。
+
+        観測なら言い直しの重複のときだけ真、完了なら公開済みの cause があるとき真。
+        衝突・不整合は ``ValueError``（呼び手は失敗として記録する）。
+        """
         if type(signal) is not SatSafetyBlockerProductionSignal:
             return False
         authority, _ = self._authority(session, signal)
-        observed_occurrences = self._committed_ledger(
-            session, "sat_safety_observed"
+        disposition = SatSafetyBlockerLedger(session).decide(
+            signal, authority.occurrence.occurrence_id,
         )
-        return authority.occurrence.occurrence_id in observed_occurrences
+        if signal.action == "OBSERVED":
+            return disposition is Disposition.DUPLICATE
+        return disposition in {Disposition.COMPLETE, Disposition.DUPLICATE}

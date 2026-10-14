@@ -510,7 +510,7 @@
       "write_pair_status_public_key": {"logged": 0, "unlogged": 1}
     },
     "authority.domains.abi_width_readonly": {
-      "AbiWidthReadonlyPilotEncoder._execute_pending_solver_queries": {"logged": 0, "unlogged": 2},
+      "AbiWidthReadonlyPilotEncoder._execute_pending_solver_queries": {"logged": 0, "unlogged": 1},
       "AbiWidthReadonlyPilotEncoder.commit_emitted_signal": {"logged": 0, "unlogged": 1},
       "_sealed_void_effect_surface_fact": {"logged": 0, "unlogged": 1}
     },
@@ -535,9 +535,6 @@
       "_profiled_finish": {"logged": 0, "unlogged": 1},
       "_run_conditional_lane": {"logged": 0, "unlogged": 1},
       "run_check_from_binaries_with_v2_pilot": {"logged": 0, "unlogged": 2}
-    },
-    "authority.lifecycle.production_signals": {
-      "execute_loop_solver_rendered_query": {"logged": 0, "unlogged": 1}
     },
     "authority.process.supervisor": {
       "DurableCheckpointStore._commit_pending_active_locked": {"logged": 0, "unlogged": 1},

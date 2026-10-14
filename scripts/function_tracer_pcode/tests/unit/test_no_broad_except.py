@@ -310,11 +310,13 @@ def test_baseline_is_a_frozen_snapshot_with_stable_totals():
     entries = load_baseline()
     # Issue #22 PR-22-D: `Expression._serialize_runtime_ref` の broad except を撤去（main の値から -1）
     # Issue #215 PR #216: `structural._stable_value_key` の broad except を列挙した型に狭めた（-1）
+    # plan v4 PR-A: ABI の solver の取引の巻き戻しを try/finally にした（broad except を撤去、-1）
+    # plan v4 PR-A: loop の solver の取引を session の共通の取引の境界へ移した（-1 key / -1）
     assert baseline_totals(entries) == {
-        "keys": 585,
+        "keys": 584,
         "logged": 0,
-        "unlogged": 910,
-        "handlers": 910,
+        "unlogged": 908,
+        "handlers": 908,
     }
 
 

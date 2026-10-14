@@ -545,9 +545,10 @@ def test_pairwise_sat_unsafety_emits_object_derived_pending_proof_backlog(monkey
     )
     actions = build_unknown_recovery_actions([reason])
     assert len(actions) == 1
+    # An analysis-unsafety obligation asks for an analysis-safety proof; a
+    # counterexample replay does not discharge it (plan v4 I5).
     assert actions[0].required_evidence == (
-        "counterexample_replay",
-        "active_unsafety_discharge",
+        "analysis_safety_proof",
         "coverage_effect_safety",
     )
     assert actions[0].proof_obligation_id == reason.proof_obligation_id
