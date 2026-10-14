@@ -19,6 +19,12 @@ from enum import Enum
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 import scripts.function_tracer_pcode.core.live_values as live_values
+from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
+    SAT_SAFETY_RECOVERY_REQUIREMENTS,
+    SatSafetyResolution,
+)
+
+_ANALYSIS_UNSAFETY_RECOVERY = SAT_SAFETY_RECOVERY_REQUIREMENTS[SatSafetyResolution.ANALYSIS_UNSAFETY]
 
 
 UNKNOWN_TUPLE_MISSING = "<missing>"
@@ -934,22 +940,17 @@ def _register_default_recovery_plans() -> None:
         UnknownRecoveryPlan.create(
             UnknownReasonId.SAT_UNSAFETY,
             (
+                # sat_unsafety は解析の不安全（UNSAFE_ANALYSIS）。replay では解消しない。
+                # 要求は typed reason と同じ owner の表から読む（plan v4 I5）。
                 UnknownRecoveryProofObligation.create(
                     UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,
                     "sat_counterexample_safety",
-                    required_evidence=(
-                        "counterexample_replay",
-                        "active_unsafety_discharge",
-                        "coverage_effect_safety",
-                    ),
-                    description=(
-                        "Accept a SAT counterexample only after replay and all active "
-                        "coverage/effect unsafety blockers are discharged."
-                    ),
+                    required_evidence=_ANALYSIS_UNSAFETY_RECOVERY[0],
+                    description=_ANALYSIS_UNSAFETY_RECOVERY[1],
                 ),
             ),
             target_regression="sat_unsafety",
-            description="Recover SAT unsafety only with replay plus coverage/effect safety proof.",
+            description="Recover SAT unsafety only with an analysis-safety proof; a replay does not discharge it.",
         ),
         UnknownRecoveryPlan.create(
             UnknownReasonId.SAT_COUNTEREXAMPLE_AMBIGUOUS,

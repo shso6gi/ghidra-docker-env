@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 import copy
 from dataclasses import replace
 import json
@@ -1344,6 +1345,8 @@ def test_loop_sat_handoff_is_retained_when_encoder_returns_zero(monkeypatch):
     session = SimpleNamespace(
         domain_signal_state={"loop_sat_safety_handoffs": [handoff]},
         domain_signal_encoder=_LoopSatHandoffRoute(),
+        # 本番の session と同じ取引の境界（handoff の消費は 1 つの取引）。
+        domain_signal_transaction=nullcontext,
     )
     monkeypatch.setattr(module, "emit_sat_safety_signal", lambda *_a, **_k: 0)
     with pytest.raises(ValueError, match="neither emitted nor deduplicated"):
@@ -1358,6 +1361,8 @@ def test_loop_sat_handoff_is_retained_when_phase7_activation_fails(monkeypatch):
     session = SimpleNamespace(
         domain_signal_state={"loop_sat_safety_handoffs": [handoff]},
         domain_signal_encoder=_LoopSatHandoffRoute(),
+        # 本番の session と同じ取引の境界（handoff の消費は 1 つの取引）。
+        domain_signal_transaction=nullcontext,
     )
 
     def fail_activation(*_args, **_kwargs):
@@ -1377,6 +1382,8 @@ def test_loop_sat_handoff_consumes_only_successful_prefix(monkeypatch):
     session = SimpleNamespace(
         domain_signal_state={"loop_sat_safety_handoffs": [first, second]},
         domain_signal_encoder=_LoopSatHandoffRoute(),
+        # 本番の session と同じ取引の境界（handoff の消費は 1 つの取引）。
+        domain_signal_transaction=nullcontext,
     )
     results = iter((1, 0))
     monkeypatch.setattr(
@@ -1394,6 +1401,8 @@ def test_loop_sat_handoff_consumes_typed_duplicate_without_emit(monkeypatch):
     session = SimpleNamespace(
         domain_signal_state={"loop_sat_safety_handoffs": [handoff]},
         domain_signal_encoder=_LoopSatHandoffRoute((id(handoff),)),
+        # 本番の session と同じ取引の境界（handoff の消費は 1 つの取引）。
+        domain_signal_transaction=nullcontext,
     )
 
     def unexpected_emit(*_args, **_kwargs):
@@ -1440,7 +1449,7 @@ def test_loop_sat_handoff_append_failure_allows_reemit_but_keeps_failure_authori
     session = connector.begin({"case": "loop-sat-append-failure-retry"})
     handoff = _loop_sat_safety_handoff("real-encoder-append-failure")
     session.domain_signal_state["loop_sat_safety_handoffs"] = [handoff]
-    real_emit_many = session.emit_many
+    real_emit_many = session._emit_many_admitted
     calls = {"count": 0}
 
     def fail_first_append(
@@ -1458,7 +1467,7 @@ def test_loop_sat_handoff_append_failure_allows_reemit_but_keeps_failure_authori
             ),
         )
 
-    monkeypatch.setattr(session, "emit_many", fail_first_append)
+    monkeypatch.setattr(session, "_emit_many_admitted", fail_first_append)
     with production_signal_scope(session):
         with pytest.raises(
             ValueError, match="neither emitted nor deduplicated"
@@ -2164,13 +2173,13 @@ def test_loop_blocker_failed_first_emit_rolls_back_and_can_be_reemitted(
             runtime, "buffer_signal_intents", real_buffer
         )
     else:
-        real_emit_many = session.emit_many
+        real_emit_many = session._emit_many_admitted
 
         def fail_stream_append(*_args, **_kwargs):
             raise RuntimeError("forced loop stream append failure")
 
-        monkeypatch.setattr(session, "emit_many", fail_stream_append)
-        restore = lambda: monkeypatch.setattr(session, "emit_many", real_emit_many)
+        monkeypatch.setattr(session, "_emit_many_admitted", fail_stream_append)
+        restore = lambda: monkeypatch.setattr(session, "_emit_many_admitted", real_emit_many)
     with production_signal_scope(session):
         assert emit_loop_recurrence_signal(
             signal, producer_site_manifest_id=site_id
@@ -2210,12 +2219,12 @@ def test_recurrence_completion_state_commits_only_after_stream_append(
         case_id="recurrence-completion-transaction",
     )
     assert session.emit_domain_signal(blocker) == 1
-    real_emit_many = session.emit_many
+    real_emit_many = session._emit_many_admitted
 
     def fail_stream_append(*_args, **_kwargs):
         raise RuntimeError("forced recurrence completion append failure")
 
-    monkeypatch.setattr(session, "emit_many", fail_stream_append)
+    monkeypatch.setattr(session, "_emit_many_admitted", fail_stream_append)
     assert session.emit_domain_signal(completion) == 0
     assert session.recorder.event_count == 1
     assert "loop_recurrence_completed" not in session.domain_signal_state
@@ -2223,7 +2232,7 @@ def test_recurrence_completion_state_commits_only_after_stream_append(
     assert "loop_recurrence_pending_emission_transactions" not in (
         session.domain_signal_state
     )
-    monkeypatch.setattr(session, "emit_many", real_emit_many)
+    monkeypatch.setattr(session, "_emit_many_admitted", real_emit_many)
     assert session.emit_domain_signal(completion) == 1
     assert session.recorder.event_count == 2
     assert len(session.domain_signal_state["loop_recurrence_completed"]) == 1
@@ -2271,12 +2280,12 @@ def test_loop_exact_term_and_guard_state_commit_only_after_stream_append(
         case_id="loop-exact-completion-transaction",
     )
     assert session.emit_domain_signal(blocker) == 1
-    real_emit_many = session.emit_many
+    real_emit_many = session._emit_many_admitted
 
     def fail_stream_append(*_args, **_kwargs):
         raise RuntimeError("forced loop exact completion append failure")
 
-    monkeypatch.setattr(session, "emit_many", fail_stream_append)
+    monkeypatch.setattr(session, "_emit_many_admitted", fail_stream_append)
     assert session.emit_domain_signal(term) == 0
     assert session.recorder.event_count == 1
     assert "loop_recurrence_completed_requirements" not in (
@@ -2289,7 +2298,7 @@ def test_loop_exact_term_and_guard_state_commit_only_after_stream_append(
         session.domain_signal_state
     )
 
-    monkeypatch.setattr(session, "emit_many", real_emit_many)
+    monkeypatch.setattr(session, "_emit_many_admitted", real_emit_many)
     assert session.emit_domain_signal(term) == 1
     assert session.recorder.event_count == 2
     committed_requirements = set(
@@ -2302,7 +2311,7 @@ def test_loop_exact_term_and_guard_state_commit_only_after_stream_append(
     assert len(term_authorities) == 1
     assert type(term_authorities[0]) is LoopExactTermRelationCompletionAuthority
 
-    monkeypatch.setattr(session, "emit_many", fail_stream_append)
+    monkeypatch.setattr(session, "_emit_many_admitted", fail_stream_append)
     assert session.emit_domain_signal(guard) == 0
     assert session.recorder.event_count == 2
     assert session.domain_signal_state[
@@ -2315,7 +2324,7 @@ def test_loop_exact_term_and_guard_state_commit_only_after_stream_append(
         session.domain_signal_state
     )
 
-    monkeypatch.setattr(session, "emit_many", real_emit_many)
+    monkeypatch.setattr(session, "_emit_many_admitted", real_emit_many)
     assert session.emit_domain_signal(guard) == 1
     assert session.recorder.event_count == 3
     assert len(session.domain_signal_state[

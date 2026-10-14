@@ -36,6 +36,19 @@ from scripts.function_tracer_pcode.authority.domains.identical_function_identity
 from scripts.function_tracer_pcode.authority.domains.call_effect_sites import (
     CALL_EFFECT_PROOF_BATCH_SITE,
 )
+from scripts.function_tracer_pcode.authority.domains.sat_safety_ledger import (
+    BlockerState,
+    Disposition,
+    SatSafetyBlockerLedger,
+)
+# ``SAT_SAFETY_TYPED_REASON_IDS`` は owner（``proof.sat_safety_resolution``）の object を
+# 再輸出する（既存の import 先を保つ互換のため。語彙の公開元は owner）。
+from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
+    SAT_SAFETY_TYPED_REASON_IDS,
+    SatSafetyBlocker,
+    SatSafetyBlockerInconsistent,
+    classify_sat_safety_blocker,
+)
 from scripts.function_tracer_pcode.authority.registry import (
     SatisfactionBindingFactory,
     SealedReasonRegistry,
@@ -237,13 +250,6 @@ class OutcomePartitionProductionSignal:
         authority_digest(self._phase7_signal_authority())
 
 
-SAT_SAFETY_TYPED_REASON_IDS = frozenset({
-    "counterexample_analysis_safety_unproven",
-    "counterexample_partition_replay_ambiguous",
-    "counterexample_replay_unproven",
-})
-
-
 _SAFE_COUNTEREXAMPLE_SIGNAL_TOKEN = object()
 
 
@@ -305,6 +311,59 @@ class SatSafetyBlockerProductionSignal:
             raise TypeError("SAT safety deferral marker is invalid")
         if self.defer_until_terminal and self.action != "OBSERVED":
             raise ValueError("only SAT safety observations may be deferred")
+        # reason id と evidence ref の対は owner の分類と整合しなければ存在しない
+        # （呼び手が付けた id だけを信じない。plan v4 I5）。
+        classify_sat_safety_blocker(self.reason_id, self.evidence_refs)
+
+    @property
+    def blocker(self) -> SatSafetyBlocker:
+        """この signal の blocker（構築時に整合を確かめた対の分類）。"""
+        return classify_sat_safety_blocker(self.reason_id, self.evidence_refs)
+
+    def same_blocker_as(self, other: "SatSafetyBlockerProductionSignal") -> bool:
+        """同じ blocker を指すか（reason id・対象・欠けた事実・evidence ref が全て同じ）。
+
+        occurrence の identity は evidence ref を含まないので、完了の照合はこれで行う。
+        """
+        return (
+            type(other) is SatSafetyBlockerProductionSignal
+            and self.reason_id == other.reason_id
+            and self.canonical_target_key == other.canonical_target_key
+            and self.missing_semantic_fact == other.missing_semantic_fact
+            and self.evidence_refs == other.evidence_refs
+        )
+
+    def require_restates(self, recorded: "SatSafetyBlockerProductionSignal") -> None:
+        """同じ identity の記録済みの観測を、この観測が同じ blocker として言い直しているか。
+
+        言い直しなら重複、別の根拠なら衝突（``ValueError``）。重複判定をする全ての
+        場所（入口の検査と encoder）がこれを使う。
+        """
+        if (
+            self.action != "OBSERVED"
+            or not self.same_blocker_as(recorded)
+            or self.counterexample_binding != recorded.counterexample_binding
+        ):
+            raise ValueError("SAT safety observation collides with its recorded observation")
+
+    def require_completes(self, observed: "SatSafetyBlockerProductionSignal") -> None:
+        """この COMPLETED が、記録済みの観測 ``observed`` を完了させてよいかを確かめる。
+
+        許可は完了の signal 自身の主張ではなく、記録した観測の blocker で決める:
+        観測と同じ blocker を言い直していて、その blocker が完了可能なときだけ通す。
+        """
+        if self.action != "COMPLETED" or type(observed) is not SatSafetyBlockerProductionSignal:
+            raise ValueError("SAT safety completion must name a recorded observation")
+        if observed.action != "OBSERVED":
+            raise ValueError("SAT safety completion must name a recorded observation")
+        if not self.same_blocker_as(observed):
+            raise ValueError(
+                "SAT safety completion does not restate its recorded observation"
+            )
+        if not observed.blocker.completable:
+            raise ValueError(
+                "SAT safety completion is not admissible for an analysis-unsafety cause"
+            )
 
 
 @dataclass(frozen=True, init=False)
@@ -992,6 +1051,13 @@ class CompositeProductionSignalEncoder:
         if callable(rollback):
             rollback(session, signal)
 
+    def finish_emitted_signal(self, session: Any, signal: Any) -> None:
+        """取引の公開が確定した後の、その signal の owner の後始末（巻き戻し用の状態の破棄）。"""
+        encoder = self._routes.get(type(signal))
+        finish = getattr(encoder, "finish_emitted_signal", None)
+        if callable(finish):
+            finish(session, signal)
+
     def is_committed_signal_replay(
         self, session: Any, signal: Any, intents: tuple[EventIntent, ...] = ()
     ) -> bool:
@@ -1364,49 +1430,113 @@ def emit_sat_safety_signal(
             # phases may independently rediscover a counterexample, but must
             # not open a second Phase 7 activation for the encoder's no-op.
             return 0
-    if (
-        type(signal) is SatSafetyBlockerProductionSignal
-        and signal.action == "OBSERVED"
-    ):
-        if signal.defer_until_terminal:
-            pending = session.domain_signal_state.setdefault(
-                "sat_safety_deferred_observations", {}
-            )
-            if type(pending) is not dict:
-                raise TypeError("deferred SAT safety ledger is not exact")
-            authority_for_signal = getattr(
-                session.domain_signal_encoder, "authority_for_signal", None
-            )
-            if not callable(authority_for_signal):
-                raise TypeError("SAT safety encoder lacks occurrence authority")
-            if session.stream_truncated:
-                # Issue #110: a truncated stream takes no new promise (O(1),
-                # before the occurrence authority is built).
-                return 0
-            occurrence_id = authority_for_signal(
-                session, signal
-            ).occurrence.occurrence_id
-            # Issue #110: the promise to publish before the decision is counted
-            # against the event contract when it is made.  A refused deferral
-            # is the recorded contract limitation (the pair is decided by it),
-            # so the promise is not kept.
-            if occurrence_id not in pending and not session.defer_occurrence(occurrence_id):
-                return 0
-            prior = pending.setdefault(
-                occurrence_id, (signal, producer_site_manifest_id)
-            )
-            if prior != (signal, producer_site_manifest_id):
-                raise ValueError("deferred SAT safety authority collided")
-            return 0
-        already_observed = getattr(
-            session.domain_signal_encoder, "has_observed", None
+    if type(signal) is SatSafetyBlockerProductionSignal:
+        return _emit_sat_safety_blocker(session, signal, producer_site_manifest_id) or 0
+    if getattr(session, "phase7_runtime", None) is not None:
+        session.record_phase7_pre_emission_activation(
+            producer_site_manifest_id, signal
         )
-        if callable(already_observed) and already_observed(session, signal):
-            # Repeated legacy diagnostics are not new producer activations.  In
-            # particular, do not open a Phase-7 discovery record which would
-            # otherwise materialize the encoder's empty deduplication result as
-            # a DECISIVE activation at this ELIGIBLE-only site.
+    emit = getattr(session, "emit_domain_signal", None)
+    if not callable(emit):
+        raise TypeError("active production pilot session lacks signal authority")
+    return int(emit(signal))
+
+
+def _sat_safety_transaction(session: Any) -> Any:
+    """SAT-safety の台帳を読んで遷移させる取引の境界（session の唯一の取引の境界）。
+
+    判定（``decide``）から予約・encoding・公開・commit・巻き戻しまでを 1 つの取引に
+    する。境界を持たない session は台帳を変えられない（fail-closed）。
+    """
+    transaction = getattr(session, "domain_signal_transaction", None)
+    if not callable(transaction):
+        raise TypeError("active production pilot session lacks a transaction boundary")
+    return transaction()
+
+
+def _emit_sat_safety_blocker(
+    session: Any,
+    signal: SatSafetyBlockerProductionSignal,
+    producer_site_manifest_id: Optional[str],
+    *,
+    conditional: bool = False,
+) -> Optional[int]:
+    """SAT-safety の blocker signal の lifecycle の入口（観測・約束・公開・完了）。
+
+    判定は台帳の owner（``SatSafetyBlockerLedger.decide``）が記録の正本に照らして行い、
+    この関数は結論に従って event を出すか、event の無い遷移（約束・約束の退役）を
+    台帳に頼むだけ。違反は状態を変えずに失敗として記録し ``None`` を返す。
+    event を出す結論は generic な route（encoder）でも同じ判定を受け、成功したときだけ
+    encoder の commit が台帳を遷移させる。判定から遷移・巻き戻しまでが 1 つの取引
+    （``_sat_safety_transaction``）なので、判定と遷移の間に別の取引は入らない。
+    """
+    with _sat_safety_transaction(session):
+        return _emit_sat_safety_blocker_in_transaction(
+            session, signal, producer_site_manifest_id, conditional=conditional,
+        )
+
+
+def _emit_sat_safety_blocker_in_transaction(
+    session: Any,
+    signal: SatSafetyBlockerProductionSignal,
+    producer_site_manifest_id: Optional[str],
+    *,
+    conditional: bool,
+) -> Optional[int]:
+    if session.domain_signal_encoder is None:
+        return 0
+    if session.stream_truncated:
+        # Issue #110: a truncated stream takes no new (non-limitation) signal; it is
+        # refused in O(1) before the occurrence authority is built, as the session
+        # refuses every encoding after the truncation.  The pair is decided by the
+        # limitation, so no lifecycle judgement is made.
+        return 0
+    authority_for_signal = getattr(
+        session.domain_signal_encoder, "authority_for_signal", None
+    )
+    if not callable(authority_for_signal):
+        raise TypeError("SAT safety encoder lacks occurrence authority")
+    ledger = SatSafetyBlockerLedger(session)
+    try:
+        # 新しい取引を始められるか（別の取引の commit・公開の中、同じ signal object の
+        # 取引が進行中）を、台帳を変える前に session の境界に聞く。拒否は状態を変えずに
+        # 失敗として記録する。
+        session.ensure_producer_admissible(signal)
+        # identity の owner は検証済みの blocker からしか identity を作らない（owner の分類は
+        # ここで 1 回、identity・台帳より前）。
+        occurrence_id = authority_for_signal(session, signal).occurrence.occurrence_id
+        disposition = ledger.decide(signal, occurrence_id, producer_site_manifest_id)
+    except ValueError as exc:
+        _refuse_sat_safety_signal(session, exc)
+        return None
+    if disposition is Disposition.PROMISE:
+        # Issue #110: the promise to publish before the decision is counted against
+        # the event contract when it is made.  A refused deferral is the recorded
+        # contract limitation (the pair is decided by it), so the promise is not kept.
+        if not session.defer_occurrence(occurrence_id):
             return 0
+        ledger.record_promise(occurrence_id, signal, producer_site_manifest_id)
+        return 0
+    if disposition is Disposition.RETIRE_PROMISE:
+        ledger.retire_promise(occurrence_id)
+        return 0
+    if disposition is Disposition.NOTHING and not conditional:
+        # 直接の完了は観測を名指さなければならない（条件付きの完了は観測が無ければ何もしない）。
+        _refuse_sat_safety_signal(
+            session, ValueError("SAT safety completion has no observed active occurrence"),
+        )
+        return None
+    if not disposition.emits_event:
+        # DUPLICATE / NOTHING（条件付き）. Repeated legacy diagnostics are not new producer
+        # activations: do not open a Phase-7 discovery record which would otherwise
+        # materialize the encoder's empty deduplication result as a DECISIVE
+        # activation at an ELIGIBLE-only site.
+        return 0
+    if conditional:
+        emit_if_observed = getattr(session, "emit_domain_signal_if_observed", None)
+        if not callable(emit_if_observed):
+            raise TypeError("active production pilot session lacks conditional signal authority")
+        return int(emit_if_observed(signal, producer_site_manifest_id))
     if getattr(session, "phase7_runtime", None) is not None:
         session.record_phase7_pre_emission_activation(
             producer_site_manifest_id, signal
@@ -1426,30 +1556,16 @@ def emit_sat_safety_completion_if_observed(
     session = active_production_pilot_session()
     if session is None:
         return 0
-    pending = session.domain_signal_state.get(
-        "sat_safety_deferred_observations", {}
+    return _emit_sat_safety_blocker(
+        session, signal, producer_site_manifest_id, conditional=True,
+    ) or 0
+
+
+def _refuse_sat_safety_signal(session: Any, exc: Exception) -> None:
+    """拒否は状態を変えずに domain signal の失敗として記録する（pair は ERROR）。"""
+    session.record_domain_signal_failure(
+        type(exc).__name__, f"SatSafetyBlockerProductionSignal: {exc}"
     )
-    if type(pending) is not dict:
-        raise TypeError("deferred SAT safety ledger is not exact")
-    authority_for_signal = getattr(
-        session.domain_signal_encoder, "authority_for_signal", None
-    )
-    if callable(authority_for_signal):
-        occurrence_id = authority_for_signal(
-            session, signal
-        ).occurrence.occurrence_id
-        if occurrence_id in pending:
-            pending.pop(occurrence_id)
-            session.event_contract.release(occurrence_id)
-            if not pending:
-                session.domain_signal_state.pop(
-                    "sat_safety_deferred_observations", None
-                )
-            return 0
-    emit = getattr(session, "emit_domain_signal_if_observed", None)
-    if not callable(emit):
-        raise TypeError("active production pilot session lacks conditional signal authority")
-    return int(emit(signal, producer_site_manifest_id))
 
 
 def complete_observed_sat_safety_for_counterexample(
@@ -1464,21 +1580,45 @@ def complete_observed_sat_safety_for_counterexample(
     session = active_production_pilot_session()
     if session is None:
         return 0
-    observed = session.domain_signal_state.get("sat_safety_observed_signals", {})
-    if type(observed) is not dict:
-        raise TypeError("SAT safety observed signal ledger is not exact")
 
+    # 記録の読み出しから全ての完了の公開までを 1 つの取引の境界の中で行う
+    # （読んだ記録と完了の間に別の取引が台帳を変えない）。
+    with _sat_safety_transaction(session):
+        return _complete_observed_sat_safety_in_transaction(session, signal)
+
+
+def _complete_observed_sat_safety_in_transaction(
+    session: Any, signal: SafeCounterexampleProductionSignal,
+) -> int:
     from scripts.function_tracer_pcode.authority.domains.sat_safety_sites import (
         SAT_SAFETY_COUNTEREXAMPLE_BOUND_COMPLETED_SITE,
     )
 
     expected_binding = signal.counterexample_binding
     emitted = 0
-    for occurrence_key in sorted(observed):
-        observed_signal = observed[occurrence_key]
+    # 公開済みの cause だけを完了させる（約束はこの witness の証明の対象にしない。従来どおり）。
+    published = [
+        (occurrence_key, record)
+        for occurrence_key, state, record in list(SatSafetyBlockerLedger(session).records())
+        if state is BlockerState.PUBLISHED
+    ]
+    for occurrence_key, observed_signal in published:
         if type(observed_signal) is not SatSafetyBlockerProductionSignal:
             raise TypeError("SAT safety observed signal has an invalid type")
         if observed_signal.counterexample_binding != expected_binding:
+            continue
+        try:
+            replay_resolvable = observed_signal.blocker.replay_resolvable
+        except SatSafetyBlockerInconsistent as exc:
+            # 記録された観測が分類と整合しない（構築の迂回）。完了させず、失敗として
+            # 最終判定まで伝える。
+            session.record_domain_signal_failure(
+                type(exc).__name__, f"SatSafetyBlockerProductionSignal: {exc}"
+            )
+            continue
+        if not replay_resolvable:
+            # 検証済みの witness が示すのは、その witness の replay だけ。解析の
+            # 不安全の blocker は同じ binding でも完了させない（plan v4 I5）。
             continue
         emitted += emit_sat_safety_completion_if_observed(
             SatSafetyBlockerProductionSignal(
@@ -1512,24 +1652,29 @@ def finalize_deferred_sat_safety_observations(session: Any) -> None:
     NOT_EQ on Eq benchmarks (Issue #25), so they are always emitted and the
     decision authority decides whether they block the counterexample.
     """
-    pending = session.domain_signal_state.pop(
-        "sat_safety_deferred_observations", {}
-    )
-    if type(pending) is not dict:
-        raise TypeError("deferred SAT safety ledger is not exact")
-    if not pending:
-        return
-    for occurrence_id in sorted(pending):
-        signal, manifest_id = pending[occurrence_id]
-        terminal_signal = replace(signal, defer_until_terminal=False)
+    # 約束の一覧の読み出しから各約束の公開と決着までを 1 つの取引の境界の中で行う。
+    with _sat_safety_transaction(session):
+        _finalize_deferred_sat_safety_in_transaction(session)
+
+
+def _finalize_deferred_sat_safety_in_transaction(session: Any) -> None:
+    ledger = SatSafetyBlockerLedger(session)
+    for occurrence_id, signal, manifest_id in ledger.promises():
+        # 約束は公開の遷移で処理する（独自に台帳や予約を消さない）。公開に成功すれば
+        # encoder の commit が約束を退ける。
+        try:
+            terminal_signal = replace(signal, defer_until_terminal=False)
+        except ValueError as exc:
+            # 記録した約束が分類と整合しない（構築の迂回）。状態を変えずに記録する。
+            _refuse_sat_safety_signal(session, exc)
+            continue
         if getattr(session, "phase7_runtime", None) is not None:
             session.record_phase7_pre_emission_activation(
                 manifest_id, terminal_signal
             )
         session.emit_domain_signal(terminal_signal)
-        # The promise is kept (published) or refused by the contract: either
-        # way it no longer holds room in the contract.
-        session.event_contract.release(occurrence_id)
+        # 公開されなかった約束の決着（打切りなら退役、検証の拒否なら保持）は台帳の規則。
+        ledger.settle_unpublished_promise(occurrence_id)
 
 
 def emit_call_effect_signal(
@@ -1817,26 +1962,40 @@ def execute_loop_solver_rendered_query(
     batch = LoopSolverExecutionBatchSignal.from_issuer_results(
         blocker, query, membership, receipts, context.lifecycle_projection
     )
-    commit = getattr(session.domain_signal_encoder, "commit_emitted_signal", None)
-    rollback = getattr(session.domain_signal_encoder, "rollback_emitted_signal", None)
-    try:
-        intents = tuple(session.domain_signal_encoder(session, batch))
-        session.emit_many(
-            intents,
-            (lambda: commit(session, batch, intents)) if callable(commit) else None,
-        )
-    except Exception:
-        if callable(rollback):
-            rollback(session, batch)
-        raise
-    emitted = len(intents)
+    encoder = session.domain_signal_encoder
+    commit = getattr(encoder, "commit_emitted_signal", None)
+    rollback = getattr(encoder, "rollback_emitted_signal", None)
+    finish = getattr(encoder, "finish_emitted_signal", None)
+    # encoding から公開・commit・巻き戻し・後始末までが session の 1 つの取引（attempt）。
+    published = session.run_signal_transaction(
+        batch,
+        lambda: encoder(session, batch),
+        (lambda intents: commit(session, batch, intents)) if callable(commit) else _ignore_intents,
+        (lambda: rollback(session, batch)) if callable(rollback) else _no_op,
+        finish=(lambda: finish(session, batch)) if callable(finish) else None,
+    )
+    emitted = len(published)
     emitted += _consume_loop_sat_safety_handoffs(session)
     return emitted
+
+
+def _no_op() -> None:
+    return None
+
+
+def _ignore_intents(_intents: Any) -> None:
+    return None
 
 
 def _consume_loop_sat_safety_handoffs(session: Any) -> int:
     """Consume each handoff only after an event or typed duplicate is proven."""
 
+    # handoff の一覧の読み出しから各 handoff の判定・公開・消費までが 1 つの取引。
+    with _sat_safety_transaction(session):
+        return _consume_loop_sat_safety_handoffs_in_transaction(session)
+
+
+def _consume_loop_sat_safety_handoffs_in_transaction(session: Any) -> int:
     state = session.domain_signal_state
     key = "loop_sat_safety_handoffs"
     pending = state.get(key)
@@ -1857,7 +2016,17 @@ def _consume_loop_sat_safety_handoffs(session: Any) -> int:
         handoff = pending[0]
         if type(handoff) is not SatSafetyBlockerProductionSignal:
             raise TypeError("loop SAT handoff signal is not exact")
-        if has_observed(session, handoff):
+        # 重複の判定は identity の owner（encoder の has_observed）に聞く。owner は
+        # 不整合な対と、記録と別の根拠の再観測（衝突）を ValueError で拒否するので、
+        # それを失敗として記録して消費する（黙って捨てない・再 emit しない）。
+        try:
+            # 重複の判定は台帳の owner（約束と公開済みの両方を記録の正本として見る）。
+            duplicate = has_observed(session, handoff)
+        except ValueError as exc:
+            _refuse_sat_safety_signal(session, exc)
+            del pending[0]
+            continue
+        if duplicate:
             del pending[0]
             continue
         count = emit_sat_safety_signal(

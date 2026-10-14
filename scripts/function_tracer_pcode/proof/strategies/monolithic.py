@@ -1114,6 +1114,9 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                         try:
                             receipt_digest = str(counterexample_safety_receipt.receipt_digest)
                             unresolved = []
+                            # pairwise と同じ規則: replay の証明は replay 型の理由だけを
+                            # 解消する。解析の不安全の理由（入力対応・被覆を含む）は、
+                            # 記録も完了もされず pending のまま残る（sat_safety_resolution）。
                             for pending_reason in pending_reasons:
                                 self._record_completed_sat_counterexample_replay_proof(
                                     pending_reason,

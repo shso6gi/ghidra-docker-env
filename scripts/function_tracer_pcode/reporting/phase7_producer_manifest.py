@@ -35,8 +35,10 @@ from scripts.function_tracer_pcode.authority.process.supervisor import (
 from scripts.function_tracer_pcode.authority.domains.return_outcome import (
     OUTCOME_STAGE_REASON_MATRIX,
 )
+from scripts.function_tracer_pcode.proof.sat_safety_resolution import SAT_SAFETY_REASON_RESOLUTION
 from scripts.function_tracer_pcode.authority.domains.sat_safety_sites import (
     SAT_SAFETY_PRODUCER_SITE_SPECS,
+    SAT_SAFETY_BLOCKER_OBSERVED_SITE,
 )
 
 
@@ -302,10 +304,7 @@ _CAUSE_REASON_IDS_BY_SITE = {
         for spec in SAT_SAFETY_PRODUCER_SITE_SPECS
         if spec.reason_ids
     },
-    "pairwise-loop-sat-safety-observed": (
-        "counterexample_analysis_safety_unproven",
-        "counterexample_replay_unproven",
-    ),
+    "pairwise-loop-sat-safety-observed": SAT_SAFETY_BLOCKER_OBSERVED_SITE.reason_ids,
 }
 
 _REASON_IDENTITY_SCOPES = {
@@ -318,9 +317,7 @@ _REASON_IDENTITY_SCOPES = {
         for reason_id in OUTCOME_STAGE_REASON_MATRIX.values()
         if reason_id is not None
     },
-    "counterexample_analysis_safety_unproven": "RELATIONAL",
-    "counterexample_partition_replay_ambiguous": "RELATIONAL",
-    "counterexample_replay_unproven": "RELATIONAL",
+    **{reason_id: "RELATIONAL" for reason_id in SAT_SAFETY_REASON_RESOLUTION},
     "comparison_equivalence_closure_unproven": "RELATIONAL",
     ANALYSIS_BUDGET_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,
     EXPRESSION_SIZE_BUDGET_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,

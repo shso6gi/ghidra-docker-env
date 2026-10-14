@@ -10,6 +10,9 @@ from scripts.function_tracer_pcode.proof.recursive_abstraction import abstract_r
 from scripts.function_tracer_pcode.authority.lifecycle.production_boundary import (
     run_check_from_binaries_with_v2_pilot as run_check_from_binaries,
 )
+from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
+    SAT_SAFETY_TYPED_REASON_IDS,
+)
 from scripts.function_tracer_pcode.checker.unknown_reason import make_internal_v2_reason_diagnostic
 from scripts.function_tracer_pcode.proof.recurrence_promotion import (
     PairPromotionState,
@@ -59,12 +62,7 @@ class RecurrenceStageMixin:
         reasons = tuple(getattr(strategy_result, "unknown_reasons", ()) or ())
         if not reasons:
             return None
-        sat_reason_ids = {
-            "counterexample_analysis_safety_unproven",
-            "counterexample_replay_unproven",
-            "counterexample_partition_replay_ambiguous",
-            "sat_counterexample_ambiguous",
-        }
+        sat_reason_ids = SAT_SAFETY_TYPED_REASON_IDS | {"sat_counterexample_ambiguous"}
         if (
             int(getattr(strategy_result, "sat_pairs", 0) or 0) > 0
             or getattr(strategy_result, "counterexample_raw", None) is not None
