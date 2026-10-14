@@ -1106,7 +1106,6 @@ def test_sat_over_side_specific_fresh_arguments_is_not_decisive(monkeypatch):
         strategy, "_extract_return_cases", lambda analysis: [cases[id(analysis)]]
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda c, *_a, **_k: c)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_a, **_k: False)
     # counterexample の検証は通ったことにする。それでも fresh 由来の SAT は
     # 決め手にならない、というのがここで固定したい不変条件。
     monkeypatch.setattr(
@@ -1178,7 +1177,6 @@ def test_positive_control_same_harness_reaches_unconditional_not_eq(monkeypatch)
     }
     monkeypatch.setattr(strategy, "_extract_return_cases", lambda a: [cases[id(a)]])
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda c, *_a, **_k: c)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_a, **_k: False)
     monkeypatch.setattr(
         "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
         lambda *_a, **_k: True,

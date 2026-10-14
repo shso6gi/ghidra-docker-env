@@ -428,25 +428,6 @@ def _impl__create_aggregate_result(
     return ParallelResult(results=[solver_result])
 
 
-def _impl__cases_are_contradictory(
-    self,
-    case1: ReturnCase,
-    case2: ReturnCase,
-) -> bool:
-    combined_conditions = list(case1.conditions) + list(case2.conditions)
-    if not combined_conditions:
-        return False
-    identity_conditions = self._conditions_with_object_identity_parameter_symbols(
-        combined_conditions,
-        list(getattr(case1, "parameters", None) or [])
-        + list(getattr(case2, "parameters", None) or []),
-    )
-    solver_result = ConditionSMTOracle.conjunction_is_unsat(identity_conditions)
-    if solver_result is not None:
-        return solver_result
-    return ConditionSimplifier.object_centric_is_contradiction(identity_conditions)
-
-
 def _impl__get_expression_safety_checker(
     self,
     base_ctx: Optional[Dict[str, Any]] = None,

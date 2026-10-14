@@ -177,7 +177,6 @@ def test_validated_witness_supersedes_rejected_witnesses_of_other_pairs(monkeypa
     monkeypatch.setattr(strategy, "_extract_return_cases",
                         lambda a: cases1 if a.function_name == "left" else cases2)
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_a, **_k: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_a, **_k: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_a, **_k: False)
     monkeypatch.setattr(strategy, "_outcome_partition_covered_labels", lambda *_a, **_k: {"function1", "function2"})
     monkeypatch.setattr(strategy, "_outcome_partition_inconclusive_labels", lambda *_a, **_k: set())
@@ -264,7 +263,6 @@ def test_pairwise_sat_on_pair_with_blocked_width_observation_is_unknown(monkeypa
                        return_info=analysis2.returns[0], return_type="int", parameters=analysis2.parameters)
     monkeypatch.setattr(strategy, "_extract_return_cases", lambda a: [case1] if a.function_name == "left" else [case2])
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_a, **_k: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_a, **_k: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_a, **_k: False)
     monkeypatch.setattr(strategy, "_outcome_partition_covered_labels", lambda *_a, **_k: {"function1", "function2"})
     monkeypatch.setattr(strategy, "_outcome_partition_inconclusive_labels", lambda *_a, **_k: set())

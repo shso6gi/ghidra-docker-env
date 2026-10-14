@@ -19,6 +19,8 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     InputCorrespondenceSet,
 )
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
+    CrossSideIdentification,
+    owner_free_identity_gate,
     ConditionSMTOracle,
     ConditionSimplifier,
     ParameterInfo,
@@ -601,6 +603,10 @@ def _impl__readonly_contract_pairwise_extra_assertions(
     )
     if not decision.equivalent:
         return ()
+    # 契約 key（count の parameter index・pointer base の ``("parameter", i)``）の一致で左右を
+    # 同一視する。relation が位置どおり・全幅の等式でなければ等式を足さない（plan v4 PR-P）。
+    if not owner_free_identity_gate((left_case,), (right_case,)).passed:
+        return ()
     if decision.requires_guard_equivalence and not self._case_pair_has_runtime_guard_coverage_or_equivalence(
         left_case,
         right_case,
@@ -1093,7 +1099,7 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
             "proof_content": proof_content,
         }
     )
-    store_comparison_evidence(analysis1, records)
+    store_comparison_evidence(analysis1, records, identification=CrossSideIdentification.OWNER_FREE)
 
 
 def _impl__readonly_projection_term_contracts_match(

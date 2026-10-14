@@ -28,6 +28,8 @@ from scripts.function_tracer_pcode.smt import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.smt.parallel import run_backend_query
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
+    CrossSideIdentification,
+    owner_free_identity_gate,
     ConditionSMTOracle,
     ParameterInfo,
     QueryResult,
@@ -65,7 +67,7 @@ def _impl__merge_completed_recovery_proofs_from_solver_analyses(
             getattr(source, "completed_recovery_proof_evidence", ()) or (),
         )
         if merged is not None:
-            store_comparison_evidence(target, merged)
+            store_comparison_evidence(target, merged, identification=None)
 
 def _impl__solve_query_twostage(
     self,
@@ -167,7 +169,7 @@ def _impl__record_completed_method_b_dual_summary_solver_proof_if_safe(
         existing_ids.add(proof_id)
         changed = True
     if changed:
-        store_comparison_evidence(analysis, records)
+        store_comparison_evidence(analysis, records, identification=CrossSideIdentification.OWNER_FREE)
 
 def _impl__method_b_dual_summary_solver_proof_content(
     self,
@@ -464,6 +466,12 @@ def _impl__collect_intrinsic_parameter_specs(
     *exprs: Expression,
     semantic_parameter_sources: Sequence[ParameterInfo] = (),
 ) -> Optional[List[Dict[str, Any]]]:
+    # 左右の parameter を index（``parameter_identity_key_*``）で 1 つの ``aux_param_k`` にする。
+    # この同一視は relation を通らないので、relation が位置どおり・全幅の等式のときだけ作る
+    # （plan v4 PR-P）。作れなければ補助 query は「証明できない」。読みの幅は数えない: 記号は
+    # index ごとの全幅の値で、狭い読みは ``extract`` で描く（``_clone_auxiliary_expression_for_smt``）。
+    if not owner_free_identity_gate((), ()).passed:
+        return None
     specs: Dict[Tuple[object, ...], Dict[str, Any]] = {}
     unresolved_symbol = False
     extensions_by_index = self._auxiliary_entailed_extensions_by_index(semantic_parameter_sources)

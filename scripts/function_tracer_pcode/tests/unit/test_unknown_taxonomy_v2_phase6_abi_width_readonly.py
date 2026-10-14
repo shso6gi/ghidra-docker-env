@@ -215,7 +215,7 @@ def _slice5_fixture_projection_parts(high_bit):
 def _readonly_seed(
     *, identified=False, right_pointer_index=0,
     right_term_offset_delta=0, right_reduction_kind="memory_sum",
-    pointer_kind="parameter", owner_specific_parameter=False,
+    pointer_kind="parameter", owner_specific_parameter=False, comparison=None,
 ):
     from scripts.function_tracer_pcode.core import (
         Expression,
@@ -292,9 +292,18 @@ def _readonly_seed(
         ret = ReturnInfo(address=f"0x{1 if side == 'left' else 2}008", value=value, conditions=[])
         analyses.append(analysis)
         cases.append(ReturnCase(0, [], value, ret, program_is_big_endian=False))
-    return ReadonlyReductionObjectSetSeed.from_analyses_and_cases(
-        analyses[0], analyses[1], cases[0], cases[1]
-    )
+    # 同じ index の pointer base を共有入力とみなす契約は、位置どおり・全幅の等式の relation の
+    # 比較の中でだけ作る（plan v4 PR-P）。
+    from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import positional_comparison
+
+    scope = comparison if comparison is not None else positional_comparison((
+        {"name": "base", "index": 0, "size": 8, "data_type": "long"},
+        {"name": "count", "index": 1, "size": 4, "data_type": "int"},
+    ))
+    with scope:
+        return ReadonlyReductionObjectSetSeed.from_analyses_and_cases(
+            analyses[0], analyses[1], cases[0], cases[1]
+        )
 
 
 def _run_readonly_solver_fixture(monkeypatch, case_id, statuses):

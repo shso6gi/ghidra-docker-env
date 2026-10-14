@@ -110,6 +110,65 @@ def comparison_of(analysis1: Any, analysis2: Any, relation: Any = None, **relati
         yield binding
 
 
+@contextmanager
+def positional_comparison(parameters: Any) -> Iterator[Any]:
+    """左右が同じ parameter 表（位置どおり・同じ名前・全幅の等式の relation）の比較の範囲を開く。
+
+    owner を含まない key で左右を同一視する producer（plan v4 PR-P の gate の下）を直接呼ぶ
+    test 用。``parameters`` は両側に使う parameter descriptor の列。gate が通る relation で
+    あることを確かめてから yield する。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        comparison_scope,
+        positional_identity_gate,
+    )
+    from scripts.function_tracer_pcode.core import Expression, ReturnInfo
+    from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
+
+    def analysis(entry_point: str) -> Any:
+        # 各 parameter を全幅で読む return（読みの無い parameter は狭い幅の射影 R3 になり、
+        # 位置どおり・全幅の等式にならない）。
+        returns = [
+            ReturnInfo(
+                f"{entry_point}:{item['index']}",
+                Expression.parameter(
+                    item["name"], int(item["index"]), data_type=item.get("data_type"),
+                    size=int(item["size"]),
+                ),
+                [],
+            )
+            for item in parameters
+        ]
+        return raw_function_analysis(
+            function_name="f", entry_point=entry_point,
+            parameters=[dict(item) for item in parameters], returns=returns, return_type="long",
+        )
+
+    binding = comparison_binding_of(analysis("0x1000"), analysis("0x2000"))
+    gate = positional_identity_gate(binding.relation)
+    assert gate.passed, gate.evidence_refs
+    with comparison_scope(binding):
+        yield binding
+
+
+def open_cross_side_gate(monkeypatch: Any) -> None:
+    """owner を含まない同一視の gate（plan v4 PR-P）を常に通す。
+
+    位置どおりでない relation（幅の違う組・extension）の下の producer の仕組みそのものを確かめる
+    test 用。gate が閉じていることは別の assert で先に確かめ、ここでは「relation を通した翻訳
+    （PR-H）で回復する経路の中身」だけを見る。production では使わない。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import gate as gate_module
+
+    monkeypatch.setattr(gate_module, "positional_identity_gate", lambda _ics: gate_module.CrossSideIdentityGate.accept())
+    monkeypatch.setattr(
+        gate_module, "closure_reads_are_full",
+        lambda _ics, _left, _right: gate_module.CrossSideIdentityGate.accept(),
+    )
+
+
 def fixed_test_comparison(name: str = "f") -> Any:
     """1 引数関数どうしの、決まった比較（raw pair と最終 relation）。"""
 
@@ -139,9 +198,17 @@ def comparison_frame(comparison: Any, **fields: Any) -> Any:
     )
 
 
-def bound_to(comparison: Any, record: Any) -> Any:
-    """``record`` を ``comparison`` の中で作った比較の証拠として束縛する。"""
+def bound_to(comparison: Any, record: Any, *, identification: Any = "correspondence") -> Any:
+    """``record`` を ``comparison`` の中で作った比較の証拠として束縛する。
 
-    from scripts.function_tracer_pcode.proof.formula.input_correspondence import bind_evidence_to_comparison
+    ``identification`` は producer の申告の代役（既定は relation の premise の下の証拠。
+    ``None`` は申告なし）。左右の同一視の検査（plan v4 PR-P）を見る test だけが変える。
+    """
 
-    return bind_evidence_to_comparison(record, comparison)
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        CrossSideIdentification,
+        bind_evidence_to_comparison,
+    )
+
+    declared = None if identification is None else CrossSideIdentification(identification)
+    return bind_evidence_to_comparison(record, comparison, identification=declared)

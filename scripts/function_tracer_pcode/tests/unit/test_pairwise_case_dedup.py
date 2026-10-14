@@ -13,6 +13,9 @@ workspace_root = Path(__file__).parent.parent.parent.parent
 if str(workspace_root) not in sys.path:
     sys.path.insert(0, str(workspace_root))
 
+from scripts.function_tracer_pcode.proof.formula.input_correspondence import CrossSideIdentification
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import open_cross_side_gate
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import CROSS_SIDE_IDENTIFICATION_KEY
 from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
     _build_object_centric_condition_signature,
     build_normalized_inequality_query,
@@ -1337,9 +1340,16 @@ def test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_f
         _relation_with_left_extension(kind), left_param_size=8,
     )
 
-    # 同じ relation の比較では採用される（正当な proof）。
-    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is True
+    # producer は左右を owner を含まない key（契約 key・pointer base の index）でも同一視するので、
+    # 証拠は ``OWNER_FREE`` を申告する。relation が位置どおり・全幅の等式でない（count が
+    # EXTENSION_BOUND）比較では、採用規則が拒む（plan v4 PR-P。relation を通した翻訳で回復するのは
+    # PR-H）。拒むのはこの規則だけで、extension の検査は通っていることを、申告だけを替えて確かめる。
+    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is False
     record = analysis1.completed_recovery_proof_evidence[0]
+    assert record[CROSS_SIDE_IDENTIFICATION_KEY] == CrossSideIdentification.OWNER_FREE.value
+    record[CROSS_SIDE_IDENTIFICATION_KEY] = CrossSideIdentification.CORRESPONDENCE.value
+    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is True
+    record[CROSS_SIDE_IDENTIFICATION_KEY] = CrossSideIdentification.OWNER_FREE.value
     assert record["authority_scope"] == "comparison"
     assert record["comparison_authority"] == comparison_binding_of(analysis1, analysis2, relation).digest
     content = record["proof_content"]["parameter_extension"]
@@ -1386,7 +1396,11 @@ def test_readonly_identity_projection_proof_needs_an_extension_bound_relation():
 # から作った proof を持ち込んではならない。
 
 
-def test_readonly_projection_proof_from_a_sign_relation_is_not_reused_without_the_extension():
+def test_readonly_projection_proof_from_a_sign_relation_is_not_reused_without_the_extension(monkeypatch):
+    # Issue #167 の束縛（relation・raw pair）だけを見る。owner を含まない同一視の gate（plan v4 PR-P。
+    # この fixture の relation は EXTENSION_BOUND なので閉じる）は
+    # ``test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_final_relation`` が見る。
+    open_cross_side_gate(monkeypatch)
     strategy, reason, analysis1, analysis2, sign_relation, _cases = _record_readonly_projection_proof(
         _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
     )
@@ -1398,7 +1412,11 @@ def test_readonly_projection_proof_from_a_sign_relation_is_not_reused_without_th
     assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, no_extension) is False
 
 
-def test_readonly_projection_proof_from_a_sign_relation_is_not_reused_under_a_zero_relation():
+def test_readonly_projection_proof_from_a_sign_relation_is_not_reused_under_a_zero_relation(monkeypatch):
+    # Issue #167 の束縛（relation・raw pair）だけを見る。owner を含まない同一視の gate（plan v4 PR-P。
+    # この fixture の relation は EXTENSION_BOUND なので閉じる）は
+    # ``test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_final_relation`` が見る。
+    open_cross_side_gate(monkeypatch)
     strategy, reason, analysis1, analysis2, sign_relation, cases = _record_readonly_projection_proof(
         _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
     )
@@ -1460,8 +1478,12 @@ def test_readonly_projection_proof_relabelled_to_a_relation_without_the_extensio
     assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, no_extension) is False
 
 
-def test_readonly_identity_validator_binds_the_ledger_to_the_current_relation():
+def test_readonly_identity_validator_binds_the_ledger_to_the_current_relation(monkeypatch):
     """pair closure は ledger の relation の比較の中でだけ発行される。"""
+    # Issue #167 の束縛（relation・raw pair）だけを見る。owner を含まない同一視の gate（plan v4 PR-P。
+    # この fixture の relation は EXTENSION_BOUND なので閉じる）は
+    # ``test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_final_relation`` が見る。
+    open_cross_side_gate(monkeypatch)
 
     from scripts.function_tracer_pcode.proof.obligations.pair_closure_producers import (
         ReadonlyIdentityCandidate,
@@ -1518,8 +1540,12 @@ def _other_raw_partner(analysis):
     return dataclasses.replace(analysis, function_name="other_partner", entry_point="0x3000")
 
 
-def test_readonly_projection_proof_of_one_raw_pair_is_not_reused_by_another_raw_pair_with_the_same_relation():
+def test_readonly_projection_proof_of_one_raw_pair_is_not_reused_by_another_raw_pair_with_the_same_relation(monkeypatch):
     """同じ raw analysis を別の相手と比べる比較は、relation digest が同じでも別の比較。"""
+    # Issue #167 の束縛（relation・raw pair）だけを見る。owner を含まない同一視の gate（plan v4 PR-P。
+    # この fixture の relation は EXTENSION_BOUND なので閉じる）は
+    # ``test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_final_relation`` が見る。
+    open_cross_side_gate(monkeypatch)
 
     strategy, reason, analysis1, analysis2, sign_relation, _cases = _record_readonly_projection_proof(
         _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,

@@ -3,6 +3,7 @@
 import re
 from unittest.mock import Mock
 
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import positional_comparison
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
 from scripts.function_tracer_pcode.analysis.phi_resolver import ExpandedBranch, PhiHandler
 from scripts.function_tracer_pcode.analysis.tracer import PcodeTracer
@@ -662,7 +663,11 @@ def test_pairwise_shortcuts_counted_loop_runtime_refs_when_signedness_differs_bu
         parameters=[{"name": "count", "size": 4, "index": 0, "data_type": "uint"}],
     )
 
-    assert strategy._cases_have_equivalent_runtime_reductions(left_case, right_case) is True
+    # loop の key は count を index で左右同一視するので、位置どおり・全幅の relation の比較の中で
+    # だけ近道を使う（plan v4 PR-P）。
+    with positional_comparison(({"name": "count", "size": 4, "index": 0, "data_type": "int"},)):
+        assert strategy._cases_have_equivalent_runtime_reductions(left_case, right_case) is True
+    assert strategy._cases_have_equivalent_runtime_reductions(left_case, right_case) is False
 
 
 def test_pairwise_does_not_shortcut_counted_loop_runtime_refs_when_guards_differ():

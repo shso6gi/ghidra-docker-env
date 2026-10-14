@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_models import Retur
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.smt.parallel import ParallelSolverRunner
 from scripts.function_tracer_pcode.proof.obligations import (
+    CrossSideIdentification,
     GuardDisjointArtifact,
     GuardOverlapAttempt,
     GuardOverlapExecutionResult,
@@ -276,8 +277,7 @@ def test_ledger_seals_only_with_exact_generation_bound_closure():
     node = graph.record(_result(requirement, _UNSAT_QUERY))
     ledger.close(PairClosureEvidence.validated(
         (0, 0), PairClosureKind.GUARD_QUERY, binding,
-        GuardUnsatClosureArtifact(node.disjoint_artifact),
-    ))
+        GuardUnsatClosureArtifact(node.disjoint_artifact), identification=CrossSideIdentification.CORRESPONDENCE))
     certificate = runtime.pair_quiescence_certificate(ledger)
     ledger.seal(certificate)
     assert ledger.lifecycle == LedgerLifecycle.SEALED
@@ -292,8 +292,7 @@ def test_ledger_rejects_closure_from_prior_generation():
     node = graph.record(_result(requirement, _UNSAT_QUERY))
     stale = PairClosureEvidence.validated(
         (0, 0), PairClosureKind.GUARD_QUERY, _binding(1),
-        GuardUnsatClosureArtifact(node.disjoint_artifact),
-    )
+        GuardUnsatClosureArtifact(node.disjoint_artifact), identification=CrossSideIdentification.CORRESPONDENCE)
     with pytest.raises(ValueError, match="invalid closure"):
         ledger.close(stale)
 
@@ -336,7 +335,7 @@ def test_sat_terminal_requires_typed_counterexample_safety_receipt():
     )
     assert ledger.validates_complete_snapshot()
     snapshot = ledger.closure_snapshot()[0]
-    assert snapshot[0] == "pair_closure_snapshot_v2"
+    assert snapshot[0] == "pair_closure_snapshot_v3"
     assert "TerminalPairArtifact" in snapshot
 
 
@@ -350,8 +349,7 @@ def test_closure_snapshot_audits_binding_use_partition():
     evidence = PairClosureEvidence.validated(
         (0, 0), PairClosureKind.VALUE_QUERY, binding, artifact,
         required_binding_uses=("guard-use", "value-use"),
-        consumed_binding_uses=("value-use",),
-    )
+        consumed_binding_uses=("value-use",), identification=CrossSideIdentification.CORRESPONDENCE)
     snapshot = evidence.snapshot_key()
     import json
 
@@ -377,8 +375,7 @@ def test_duplicate_closure_is_rejected_even_when_evidence_is_identical():
         "value_query", _solver_execution_result(query, SolverStatus.UNSAT),
     )
     evidence = PairClosureEvidence.validated(
-        (0, 0), PairClosureKind.VALUE_QUERY, binding, artifact
-    )
+        (0, 0), PairClosureKind.VALUE_QUERY, binding, artifact, identification=CrossSideIdentification.CORRESPONDENCE)
     ledger = PairDispositionLedger(binding, 1)
     ledger.close(evidence)
     with pytest.raises(RuntimeError, match="duplicate pair closure"):
@@ -464,8 +461,7 @@ def test_structural_equality_uses_distinct_typed_closure_authority():
     evidence = PairClosureEvidence.validated(
         (0, 0), PairClosureKind.STRUCTURAL_EQUALITY, binding, artifact,
         required_binding_uses=(binding_id,),
-        consumed_binding_uses=consumed_bindings,
-    )
+        consumed_binding_uses=consumed_bindings, identification=CrossSideIdentification.CORRESPONDENCE)
 
     assert evidence.validates(binding)
     assert evidence.closure_kind is PairClosureKind.STRUCTURAL_EQUALITY
@@ -585,8 +581,7 @@ def test_solver_unsat_closure_rejects_wrong_premise():
     )
     with pytest.raises(ValueError, match="failed validation"):
         PairClosureEvidence.validated(
-            (0, 0), PairClosureKind.VALUE_QUERY, binding, artifact
-        )
+            (0, 0), PairClosureKind.VALUE_QUERY, binding, artifact, identification=CrossSideIdentification.CORRESPONDENCE)
 
 
 def test_directly_constructed_artifacts_have_no_closure_authority():
@@ -607,8 +602,7 @@ def test_directly_constructed_artifacts_have_no_closure_authority():
     for artifact in (forged_solver, forged_guard):
         with pytest.raises(ValueError, match="failed validation"):
             PairClosureEvidence.validated(
-                (0, 0), PairClosureKind.RECOVERY, _binding(), artifact
-            )
+                (0, 0), PairClosureKind.RECOVERY, _binding(), artifact, identification=CrossSideIdentification.CORRESPONDENCE)
 
 
 def test_producer_closure_cannot_be_issued_outside_registered_validator():

@@ -77,6 +77,10 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence.model impo
 #: 比較の外で作った comparison record の印（どの binding の digest とも一致しない）。
 OUTSIDE_COMPARISON = "outside_comparison"
 
+#: 比較の証拠が左右の値をどう同一視したか（``gate.CrossSideIdentification`` の値）。書いた
+#: producer が申告する。申告の無い record は owner を含まない同一視として扱う（plan v4 PR-P）。
+CROSS_SIDE_IDENTIFICATION_KEY = "cross_side_identification"
+
 
 def _is_digest(value: Any) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(ch in "0123456789abcdef" for ch in value)
@@ -222,26 +226,54 @@ def comparison_authority_digest() -> str:
     return OUTSIDE_COMPARISON if binding is None else binding.digest
 
 
+def _identification_value(identification: Any) -> Optional[str]:
+    if identification is None:
+        return None
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
+        CrossSideIdentification,
+    )
+
+    if type(identification) is not CrossSideIdentification:
+        raise TypeError("comparison evidence identification must be a CrossSideIdentification")
+    return identification.value
+
+
 def bind_evidence_to_comparison(
     record: MutableMapping[str, Any],
     binding: Optional[ComparisonAuthorityBinding] = None,
+    *,
+    identification: Any = None,
 ) -> MutableMapping[str, Any]:
-    """比較の中で作った証拠 ``record`` を、その比較（既定は現在の比較）に束縛する。"""
+    """比較の中で作った証拠 ``record`` を、その比較（既定は現在の比較）に束縛する。
+
+    ``identification``（``gate.CrossSideIdentification``）は record が左右の値をどう同一視
+    したかの申告。``None`` は申告なしで、採用の側は owner を含まない同一視として扱う。
+    """
 
     if record.get(AUTHORITY_SCOPE_KEY) == FUNCTION_UNARY:
         raise ValueError("a function-unary record cannot be bound to a comparison")
     binding = binding if binding is not None else current_comparison()
     record[AUTHORITY_SCOPE_KEY] = COMPARISON
     record[COMPARISON_AUTHORITY_KEY] = OUTSIDE_COMPARISON if binding is None else binding.digest
+    value = _identification_value(identification)
+    if value is None:
+        record.pop(CROSS_SIDE_IDENTIFICATION_KEY, None)
+    else:
+        record[CROSS_SIDE_IDENTIFICATION_KEY] = value
     return record
 
 
-def store_comparison_evidence(analysis: Any, records: Iterable[Any]) -> None:
+def store_comparison_evidence(analysis: Any, records: Iterable[Any], *, identification: Any) -> None:
     """比較の中で ``analysis`` の証拠列を ``records`` に置き換える（proof 層の唯一の書き込み口）。
 
     それまでの列に無かった record で authority scope を持たないものは、現在の比較に
     束縛する（producer が束縛を忘れても、比較の中で増えた証拠は必ず束縛される）。
     それまでの列にあった record（関数単体の事実や、別の比較の証拠）はそのまま残す。
+
+    ``identification`` は producer の申告（必須の引数。新しく束縛する record にだけ付く）。
+    左右の値を owner を含まない key で比べて作った証拠は ``OWNER_FREE``、片側だけの証明や
+    relation の premise の下の SMT は ``CORRESPONDENCE``。別の場所で作った record を運ぶだけの
+    呼び手は ``None``（申告なし ⇒ owner を含まない扱い）を明示する。
     """
 
     existing = tuple(getattr(analysis, "completed_recovery_proof_evidence", ()) or ())
@@ -252,7 +284,7 @@ def store_comparison_evidence(analysis: Any, records: Iterable[Any]) -> None:
             and evidence_authority_scope(record) is None
             and record not in existing
         ):
-            bind_evidence_to_comparison(record)
+            bind_evidence_to_comparison(record, identification=identification)
         stored.append(record)
     analysis.completed_recovery_proof_evidence = tuple(stored)
 
@@ -268,8 +300,29 @@ def evidence_authority_holds(record: Any) -> bool:
     if scope == FUNCTION_UNARY:
         return True
     if scope == COMPARISON:
-        return comparison_digest_is_current(record.get(COMPARISON_AUTHORITY_KEY))
+        if not comparison_digest_is_current(record.get(COMPARISON_AUTHORITY_KEY)):
+            return False
+        return _identification_is_justified(record.get(CROSS_SIDE_IDENTIFICATION_KEY))
     return False
+
+
+def _identification_is_justified(value: Any) -> bool:
+    """比較の証拠の左右の同一視が、現在の比較の relation の下で成り立つか（plan v4 PR-P）。
+
+    relation の premise の下の証拠（``CORRESPONDENCE``）はそのまま採用する。owner を含まない
+    同一視（申告なし・知らない値を含む）は、relation が位置どおり・全幅の等式のときだけ採用する。
+    証拠を読む全ての gate（blocker の解消・recovery closure の検証・replan）はこの採用規則を
+    通るので、owner を含まない証拠が入れ替わった relation の比較で EQ を支えることは無い。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
+        CrossSideIdentification,
+        positional_identity_gate,
+    )
+
+    if value == CrossSideIdentification.CORRESPONDENCE.value:
+        return True
+    return positional_identity_gate(current_relation()).passed
 
 
 def comparison_evidence(records: Iterable[Any]) -> Tuple[Mapping[str, Any], ...]:

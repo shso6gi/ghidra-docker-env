@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable
 from copy import deepcopy
 
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import owner_free_identity_gate
 from scripts.function_tracer_pcode.proof.loop_template_abstraction import prove_template_equivalence
 from scripts.function_tracer_pcode.proof.formula.returns import (
     ReturnWidthMismatchError,
@@ -56,6 +57,10 @@ class LoopTemplatePairwiseStrategy(PairwiseStrategy):
             pair_id,
         )
         if base_result.is_equivalent is not None:
+            return base_result
+        # 定数の代入と template の key は名前で左右を同一視する。relation が位置どおり・全幅の
+        # 等式でなければ使わない（plan v4 PR-P）。
+        if not owner_free_identity_gate((case1,), (case2,)).passed:
             return base_result
 
         try:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import owner_free_identity_gate
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.proof.obligations import (
@@ -231,6 +232,10 @@ def _rewritten_values_are_trivially_equal(
     ):
         return False
 
+    # 左右の値を名前（``are_structurally_equivalent``）・runtime ref の key で同一視する。relation が
+    # 位置どおり・全幅の等式でなければ自明とせず、下の SMT の不等式 query で確かめる（plan v4 PR-P）。
+    if not owner_free_identity_gate((case1,), (case2,)).passed:
+        return False
     left = case1.value_expr
     right = case2.value_expr
     if _intrinsic_values_match(strategy, case1, case2):

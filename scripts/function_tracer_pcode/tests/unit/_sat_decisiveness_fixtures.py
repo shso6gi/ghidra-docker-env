@@ -219,7 +219,6 @@ def _patch_pairwise_single_unsat_case(monkeypatch, strategy, analysis1, analysis
         lambda analysis: [case1] if analysis.function_name == analysis1.function_name else [case2],
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     strategy._solve_query_after_guard = Mock(
         return_value=_solver_bound_query_result(True)
@@ -248,7 +247,6 @@ def _patch_pairwise_single_case(monkeypatch, strategy, analysis1, analysis2):
         lambda analysis: [case1] if analysis.function_name == analysis1.function_name else [case2],
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
 
 def _return_coverage_gap_analyses():
     x = Expression.parameter("x", 0, size=4)
@@ -293,7 +291,6 @@ def _patch_pairwise_return_coverage_gap_case(monkeypatch, strategy, analysis1, a
         lambda analysis: [case1] if analysis.function_name == analysis1.function_name else [case2],
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     strategy._solve_query_after_guard = Mock(
         return_value=_solver_bound_query_result(True)
@@ -445,11 +442,12 @@ def _analysis_with_deferred_call_argument_blocker(
     return_deferred_unknown: bool = False,
     unknown_size: int = 4,
     call_argument_recovery_status: str = CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
+    parameter_names=("fp", "a", "b"),
 ) -> FunctionReturnAnalysis:
     parameters = [
-        _param("fp", index=0, size=8),
-        _param("a", index=1, size=4),
-        _param("b", index=2, size=4),
+        _param(parameter_names[0], index=0, size=8),
+        _param(parameter_names[1], index=1, size=4),
+        _param(parameter_names[2], index=2, size=4),
     ]
     target_expr = None
     if not target_expr_missing:
@@ -1463,7 +1461,6 @@ def _patch_pairwise_return_cases_from_returns(monkeypatch, strategy, analysis1, 
         lambda analysis: cases_for(analysis1) if analysis.function_name == analysis1.function_name else cases_for(analysis2),
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_unresolved_return_coverage_unknown_reasons", lambda *_args, **_kwargs: [])
 
 def _readonly_identity_target():
@@ -1670,9 +1667,16 @@ _readonly_fixture_comparison = _fixture_comparison
 def _fixture_comparison_evidence(record):
     """fixture の比較の中で作った証拠として ``record`` を束縛する。"""
 
-    from scripts.function_tracer_pcode.proof.formula.input_correspondence import bind_evidence_to_comparison
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        CrossSideIdentification,
+        bind_evidence_to_comparison,
+    )
 
-    return bind_evidence_to_comparison(record, _fixture_comparison_binding())
+    # fixture の証拠は producer の代役で、左右の同一視の検査（plan v4 PR-P）はこの fixture の
+    # 対象外: relation の premise の下の証拠として束縛する（同一視の検査は専用の test が持つ）。
+    return bind_evidence_to_comparison(
+        record, _fixture_comparison_binding(), identification=CrossSideIdentification.CORRESPONDENCE,
+    )
 
 
 def _evidence_of_this_pair(analysis1, analysis2):
@@ -1687,7 +1691,13 @@ def _evidence_of_this_pair(analysis1, analysis2):
         COMPARISON,
         COMPARISON_AUTHORITY_KEY,
     )
-    from scripts.function_tracer_pcode.proof.formula.input_correspondence import bind_evidence_to_comparison
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        CrossSideIdentification,
+        bind_evidence_to_comparison,
+    )
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+        CROSS_SIDE_IDENTIFICATION_KEY,
+    )
     from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_binding_of
 
     comparison = comparison_binding_of(analysis1, analysis2)
@@ -1697,7 +1707,11 @@ def _evidence_of_this_pair(analysis1, analysis2):
             if record.get(AUTHORITY_SCOPE_KEY) == COMPARISON:
                 record = {key: value for key, value in record.items() if key != COMPARISON_AUTHORITY_KEY}
                 record.pop(AUTHORITY_SCOPE_KEY)
-                record = bind_evidence_to_comparison(record, comparison)
+                declared = record.get(CROSS_SIDE_IDENTIFICATION_KEY)
+                record = bind_evidence_to_comparison(
+                    record, comparison,
+                    identification=None if declared is None else CrossSideIdentification(declared),
+                )
             records.append(record)
         analysis.completed_recovery_proof_evidence = tuple(records)
 

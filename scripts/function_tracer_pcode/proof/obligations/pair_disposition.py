@@ -12,6 +12,9 @@ import secrets
 from threading import Lock
 from typing import Any, ClassVar, Dict, Mapping, Optional, Tuple, Union
 
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
+    CrossSideIdentification,
+)
 from scripts.function_tracer_pcode.proof.obligations.guard_overlap import GuardDisjointArtifact
 
 
@@ -1033,6 +1036,40 @@ ValidatedClosureArtifact = Union[
 ]
 
 
+#: 構造の等価の receipt のうち、左右を同一視しないもの（void の return は値を比べない）。
+_CORRESPONDENCE_STRUCTURAL_PROOF_KINDS = frozenset({"void-return"})
+
+
+def closure_identification_floor(artifact: Any) -> CrossSideIdentification:
+    """closure の種類だけから決まる、左右の同一視の下限（呼び手の申告で弱められない）。
+
+    SMT の UNSAT（guard / value / return width）は側ごとの記号と relation の premise だけで
+    閉じるので ``CORRESPONDENCE``。query に owner を含まない等式を足したかは種類から分からない
+    ので、呼び手が ``OWNER_FREE`` を申告する。SMT を使わない closure と、名前で比べる構造の
+    等価は ``OWNER_FREE``。知らない種類は ``OWNER_FREE``（fail-closed）。
+    """
+
+    if type(artifact) in (SolverUnsatClosureArtifact, GuardUnsatClosureArtifact):
+        return CrossSideIdentification.CORRESPONDENCE
+    if (
+        type(artifact) is StructuralEqualityClosureArtifact
+        and artifact.producer_kind in _CORRESPONDENCE_STRUCTURAL_PROOF_KINDS
+    ):
+        return CrossSideIdentification.CORRESPONDENCE
+    return CrossSideIdentification.OWNER_FREE
+
+
+def _effective_identification(
+    artifact: Any, declared: Any,
+) -> CrossSideIdentification:
+    if type(declared) is not CrossSideIdentification:
+        raise TypeError("pair closure requires an exact CrossSideIdentification")
+    floor = closure_identification_floor(artifact)
+    if CrossSideIdentification.OWNER_FREE in (floor, declared):
+        return CrossSideIdentification.OWNER_FREE
+    return CrossSideIdentification.CORRESPONDENCE
+
+
 @dataclass(frozen=True)
 class PairClosureEvidence:
     pair_key: Tuple[int, int]
@@ -1044,11 +1081,15 @@ class PairClosureEvidence:
     required_binding_uses: Tuple[str, ...] = ()
     consumed_binding_uses: Tuple[str, ...] = ()
     excluded_binding_uses: Tuple[str, ...] = ()
+    #: 左右の同一視の方法。UNSAT の closure は ``validated`` が決めて digest に封印する。
+    #: 終端の記録（SAT / UNKNOWN）は閉じないので、既定の fail-closed の値のまま。
+    identification: CrossSideIdentification = CrossSideIdentification.OWNER_FREE
 
     @classmethod
     def validated(
         cls, pair_key: Tuple[int, int], closure_kind: PairClosureKind,
         binding: PairLedgerBinding, artifact: ValidatedClosureArtifact, *,
+        identification: CrossSideIdentification,
         required_binding_uses: Tuple[str, ...] = (),
         consumed_binding_uses: Tuple[str, ...] = (),
     ) -> "PairClosureEvidence":
@@ -1071,12 +1112,14 @@ class PairClosureEvidence:
         if not set(consumed).issubset(required):
             raise ValueError("consumed binding use is not required by pair")
         excluded = tuple(sorted(set(required) - set(consumed)))
+        effective = _effective_identification(artifact, identification)
         digest = hashlib.sha256(repr((
             binding.stable_key(), artifact.stable_key(), required, consumed, excluded,
+            effective.value,
         )).encode()).hexdigest()
         return cls(
             pair_key, PairDisposition.UNSAT, closure_kind, binding.stable_key(),
-            artifact, digest, required, consumed, excluded,
+            artifact, digest, required, consumed, excluded, effective,
         )
 
     def validates(self, binding: PairLedgerBinding) -> bool:
@@ -1102,17 +1145,23 @@ class PairClosureEvidence:
             ))
         ):
             return False
+        if (
+            type(self.identification) is not CrossSideIdentification
+            or _effective_identification(self.artifact, self.identification)
+            is not self.identification
+        ):
+            return False
         expected = hashlib.sha256(repr((
             binding.stable_key(), self.artifact.stable_key(),
             self.required_binding_uses, self.consumed_binding_uses,
-            self.excluded_binding_uses,
+            self.excluded_binding_uses, self.identification.value,
         )).encode()).hexdigest()
         return valid and self.evidence_digest == expected
 
     def snapshot_key(self) -> Tuple[Any, ...]:
         artifact = self.artifact
         return (
-            "pair_closure_snapshot_v2",
+            "pair_closure_snapshot_v3",
             self.pair_key,
             self.disposition.value,
             self.closure_kind.value,
@@ -1124,6 +1173,7 @@ class PairClosureEvidence:
             self.consumed_binding_uses,
             self.excluded_binding_uses,
             self.evidence_digest,
+            self.identification.value,
         )
 
 
@@ -1236,6 +1286,15 @@ class PairDispositionLedger:
                     self.binding.stable_key(), artifact, digest,
                 )
             self.provisional.clear()
+
+    def owner_free_closures(self) -> Tuple[Tuple[int, int], ...]:
+        """owner を含まない方法で左右を同一視して閉じた pair（最終の EQ gate が読む）。"""
+
+        return tuple(
+            key for key in sorted(self.closures)
+            if self.closures[key].disposition == PairDisposition.UNSAT
+            and self.closures[key].identification is not CrossSideIdentification.CORRESPONDENCE
+        )
 
     def counts(self) -> Mapping[str, int]:
         counts = {item.value: 0 for item in PairDisposition}

@@ -7,6 +7,7 @@ import hashlib
 import json
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
+    CrossSideIdentification,
     UnknownReasonId,
     UnknownReasonRecord,
     UnknownRecoveryActionStatus,
@@ -617,7 +618,7 @@ def _impl__record_completed_sat_counterexample_replay_proof(
             },
         }
     )
-    store_comparison_evidence(analysis1, records)
+    store_comparison_evidence(analysis1, records, identification=CrossSideIdentification.CORRESPONDENCE)
 
 def _impl__counterexample_model_fingerprint(
     cls,

@@ -125,7 +125,6 @@ def test_pairwise_strategy_downgrades_sat_when_analysis_retains_symbolic_post_st
         lambda analysis: [symbolic_case] if analysis.function_name == "f1" else [const_case],
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
@@ -589,7 +588,6 @@ def test_pairwise_sat_unsafety_proof_without_attempt_binding_remains_unknown(mon
         lambda analysis: [case1] if analysis.function_name == analysis1.function_name else [case2],
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
@@ -681,7 +679,6 @@ def test_pairwise_sat_promotion_requires_exact_query_execution_receipt(
         lambda analysis: [case1] if analysis is analysis1 else [case2],
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
@@ -779,7 +776,6 @@ def test_pairwise_sat_with_fixed_model_records_bound_replay_proof_and_is_decisiv
         lambda analysis: [case1] if analysis is analysis1 else [case2],
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
@@ -847,7 +843,6 @@ def test_pairwise_sat_without_model_still_requires_counterexample_replay(monkeyp
         lambda analysis: [case1] if analysis is analysis1 else [case2],
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
@@ -910,7 +905,6 @@ def test_pairwise_sat_with_unfixed_model_still_requires_counterexample_replay(mo
         lambda analysis: [case1] if analysis is analysis1 else [case2],
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",

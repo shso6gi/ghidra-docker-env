@@ -21,6 +21,9 @@ from scripts.function_tracer_pcode.analysis.condition.smt_oracle import Conditio
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
     comparison_digest_is_current,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
+    owner_free_identity_gate,
+)
 
 from scripts.function_tracer_pcode.proof.obligations.pair_disposition import (
     AggregatePartitionClosureArtifact,
@@ -439,6 +442,17 @@ def _fixed_proof_implementation(strategy: Any, method_name: str) -> Any:
     return implementation if callable(implementation) else None
 
 
+def _owner_free_identity_admitted(left_values: Tuple[Any, ...], right_values: Tuple[Any, ...]) -> bool:
+    """この種類の closure は owner を含まない key で左右を同一視する（plan v4 PR-P）。
+
+    現在の比較の relation が位置どおり・全幅の等式で、closure が比べる値の読みが全幅のときだけ
+    検証へ進む。拒否は「この closure を発行しない」で、orchestration は通常の SMT の経路か
+    型付きの UNKNOWN へ戻る。最終の EQ gate は closure の種類から同じ条件をもう一度課す。
+    """
+
+    return owner_free_identity_gate(left_values, right_values).passed
+
+
 def validate_runtime_reduction_candidate(
     strategy: Any,
     binding: PairLedgerBinding,
@@ -448,6 +462,8 @@ def validate_runtime_reduction_candidate(
     semantic_parameter_sources: Any,
 ) -> Optional[RuntimeReductionClosureArtifact]:
     if not candidate.is_current_for(binding):
+        return None
+    if not _owner_free_identity_admitted((case1,), (case2,)):
         return None
     implementation = _fixed_proof_implementation(
         strategy, "_cases_have_equivalent_runtime_reductions"
@@ -475,6 +491,8 @@ def validate_counted_loop_closed_expression_candidate(
 ) -> Optional[CountedLoopClosedExpressionArtifact]:
     if not candidate.is_current_for(binding):
         return None
+    if not _owner_free_identity_admitted((case1,), (case2,)):
+        return None
     implementation = _fixed_proof_implementation(
         strategy, "_case_pair_counted_loop_summary_matches_closed_expression"
     )
@@ -499,6 +517,8 @@ def validate_method_b_candidate(
 ) -> Optional[MethodBClosureArtifact]:
     if not candidate.is_current_for(binding):
         return None
+    if not _owner_free_identity_admitted((), ()):
+        return None
     implementation = _fixed_proof_implementation(strategy, "_method_b_closure_proof_is_complete")
     executed, valid = _execute_pinned_proof(
         implementation, reason, analysis1, analysis2
@@ -520,6 +540,8 @@ def validate_readonly_identity_candidate(
     analysis2: Any,
 ) -> Optional[ReadonlyIdentityClosureArtifact]:
     if not candidate.is_current_for(binding):
+        return None
+    if not _owner_free_identity_admitted((), ()):
         return None
     implementation = _fixed_proof_implementation(strategy, "_readonly_identity_proof_is_complete")
     executed, valid = _execute_pinned_proof(
@@ -543,6 +565,8 @@ def validate_counted_loop_value_candidate(
     semantic_parameter_sources: Any,
 ) -> Optional[CountedLoopValueRelationArtifact]:
     if not candidate.is_current_for(binding):
+        return None
+    if not _owner_free_identity_admitted((case1,), (case2,)):
         return None
     closed_values = _fixed_proof_implementation(
         strategy, "_case_pair_counted_loop_summaries_match_by_closed_values"
@@ -582,6 +606,11 @@ def validate_aggregate_partition_candidate(
     resolved_pairs: Any,
 ) -> Optional[AggregatePartitionClosureArtifact]:
     if not candidate.is_current_for(binding):
+        return None
+    if not _owner_free_identity_admitted(
+        tuple(pending.left_case for pending in pending_pairs),
+        tuple(pending.right_case for pending in pending_pairs),
+    ):
         return None
     normalized = tuple(sorted(set(tuple(pair) for pair in partition_witness)))
     implementation = _fixed_proof_implementation(

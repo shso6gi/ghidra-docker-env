@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.core.render_smt import expression_contains_un
 from scripts.function_tracer_pcode.core.structural import provenance_key_view
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     ReturnCase,
+    owner_free_identity_gate,
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
     UnknownRecoveryProofObligation,
@@ -1160,6 +1161,11 @@ def _impl__try_build_unresolved_deferred_call_lowering(
     analysis1 = base_ctx.get("analysis1")
     analysis2 = base_ctx.get("analysis2")
     if analysis1 is None or analysis2 is None:
+        return None
+    # 左右の deferred call は index に正規化した target / 引数の key で対応づける。relation が
+    # 位置どおり・全幅の等式でなければ lowering しない: unknown は未解決のまま、解析の不安全の
+    # gate を受ける（等式だけを外すと、gate を免除された unknown が左右で自由になる。plan v4 PR-P）。
+    if not owner_free_identity_gate((case1,), (case2,)).passed:
         return None
     value1 = getattr(case1, "value_expr", None)
     value2 = getattr(case2, "value_expr", None)

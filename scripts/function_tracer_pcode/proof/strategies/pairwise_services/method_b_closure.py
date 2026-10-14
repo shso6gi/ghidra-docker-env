@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core import CountedLoopSummaryRef, FunctionReturnAnalysis, ReadonlyReductionRef
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
+    CrossSideIdentification,
     ReturnCase,
     UnknownRecoveryProofKind,
     _ExactReadonlyReductionProof,
@@ -149,7 +150,7 @@ def _impl__record_completed_method_b_covering_case_proof_if_safe(
             covering=covering,
         ) or changed
     if changed:
-        store_comparison_evidence(analysis, records)
+        store_comparison_evidence(analysis, records, identification=CrossSideIdentification.OWNER_FREE)
 
 
 def _impl__append_completed_method_b_covering_case_evidence(

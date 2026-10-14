@@ -440,14 +440,39 @@ def unpublished_semantic_values(container: Any) -> Tuple[Any, ...]:
 
         PUBLISHED(value) ⇒ solver が到達する意味 closure もすべて PUBLISHED
 
-    走査は公開とまったく同じ規則を使う（`_walk_semantic_carriers` + graph の辺
-    + PHI の branch 条件 + runtime ref が抱える値）。別の走査を書くと「公開は
-    辿るのに検査は辿らない」隙間ができるので、到達規則は 1 つに保つ。
+    走査は公開とまったく同じ規則を使う（`_reach_semantic_values`）。別の走査を書くと
+    「公開は辿るのに検査は辿らない」隙間ができるので、到達規則は 1 つに保つ。
 
     状態は動かさない。未検証の値は公開されていないので、当然ここに現れる。
     """
 
-    found: Dict[int, Any] = {}
+    return tuple(
+        value for value in _reach_semantic_values(container, through_runtime_refs=True)
+        if not is_published(value)
+    )
+
+
+def reachable_semantic_values(
+    container: Any,
+    *,
+    through_runtime_refs: bool = True,
+) -> Tuple[Any, ...]:
+    """`container` から到達できる意味値（式・条件）を、初めて見た順に 1 回ずつ返す。
+
+    到達規則は公開・`unpublished_semantic_values` と同じ 1 実装（`_reach_semantic_values`）。
+    ``through_runtime_refs=False`` は graph の辺（operand・PHI の branch と条件）だけを辿り、
+    runtime ref が抱える値へ入らない（builder が式の graph から集める入力と同じ範囲）。
+    状態は動かさない。
+    """
+
+    return _reach_semantic_values(container, through_runtime_refs=through_runtime_refs)
+
+
+def _reach_semantic_values(container: Any, *, through_runtime_refs: bool) -> Tuple[Any, ...]:
+    """到達できる意味値の走査の唯一の実装（`_walk_semantic_carriers` + graph の辺 + PHI の
+    branch 条件 + runtime ref が抱える値）。"""
+
+    found: List[Any] = []
     seen: Dict[int, bool] = {}
     # 明示 stack（graph が深くても再帰上限に当たらない。module の他の走査と同じ形）
     pending: List[Any] = []
@@ -456,8 +481,7 @@ def unpublished_semantic_values(container: Any) -> Tuple[Any, ...]:
         if value is None or id(value) in seen:
             return
         seen[id(value)] = True
-        if not is_published(value):
-            found.setdefault(id(value), value)
+        found.append(value)
         pending.append(value)
 
     _walk_semantic_carriers(container, enqueue, enqueue)
@@ -470,12 +494,14 @@ def unpublished_semantic_values(container: Any) -> Tuple[Any, ...]:
             enqueue(edge.child)
         for condition in _phi_branch_conditions(value):
             enqueue(condition)
+        if not through_runtime_refs:
+            continue
         runtime_ref = value.__dict__.get("runtime_ref")
         if runtime_ref is None or id(runtime_ref) in seen:
             continue
         seen[id(runtime_ref)] = True
         _walk_semantic_carriers(runtime_ref, enqueue, enqueue)
-    return tuple(found.values())
+    return tuple(found)
 
 
 def _run_publication(stage: Any) -> None:

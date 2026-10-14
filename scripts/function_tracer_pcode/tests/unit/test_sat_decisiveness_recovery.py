@@ -128,7 +128,6 @@ def test_pairwise_unknown_result_preserves_recovery_action_status(monkeypatch):
         lambda analysis: [case1] if analysis.function_name == "f1" else [case2],
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     strategy._solve_query_after_guard = Mock(return_value=query_result)
 
@@ -271,7 +270,6 @@ def test_pairwise_equivalence_blocker_dominates_pair_local_unresolved_expression
         lambda analysis: [case1] if analysis.function_name == analysis1.function_name else [case2],
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: True)
 
     result = strategy.check(analysis1, analysis2)

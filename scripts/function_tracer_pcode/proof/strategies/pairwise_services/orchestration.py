@@ -10,7 +10,9 @@ from scripts.function_tracer_pcode.proof.cause_identity import (
 )
 from scripts.function_tracer_pcode.proof.obligations.model import FunctionProofOutcome
 from scripts.function_tracer_pcode.proof.obligations import (
+    CrossSideIdentification,
     PairClosureEvidence,
+    closure_identification_floor,
     PairClosureKind,
     PairDisposition,
     PairDispositionLedger,
@@ -56,6 +58,9 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     make_internal_v2_reason_diagnostic,
     make_unknown_reason,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
+    owner_free_identity_gate,
+)
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     LEFT as INPUT_LEFT,
     RIGHT as INPUT_RIGHT,
@@ -96,6 +101,42 @@ def normalize_analysis_semantic_width(*args, **kwargs):
 def validate_counterexample_across_cases(*args, **kwargs):
     """Preserve the documented module-level monkeypatch seam."""
     return _pairwise_facade().validate_counterexample_across_cases(*args, **kwargs)
+
+
+def record_pair_closed(
+    pair_ledger: PairDispositionLedger,
+    base_ctx: Dict[str, Any],
+    pair_key: Tuple[int, int],
+    closure_kind: PairClosureKind,
+    binding: PairLedgerBinding,
+    artifact: Any,
+    *,
+    required_binding_uses: Tuple[str, ...] = (),
+    consumed_binding_uses: Tuple[str, ...] = (),
+) -> None:
+    """pair を「閉じた」と数える唯一の入口（plan v4 PR-P の backstop の記録点）。
+
+    左右の同一視の方法（``CrossSideIdentification``）を closure に封印する。下限は closure の
+    種類が決め（SMT を使わない closure・名前で比べる構造の等価は owner を含まない）、query に
+    owner を含まない等式（readonly の契約・deferred call の lowering。
+    ``pairwise_extra_assertions_by_pair``）を足した pair はさらに owner を含まない側へ寄せる。
+    最終の EQ gate（``checker/preflight_gate``）は ledger の ``owner_free_closures`` を読む。
+    """
+
+    pair_id = f"({int(pair_key[0])},{int(pair_key[1])})"
+    extra = (base_ctx.get("pairwise_extra_assertions_by_pair") or {}).get(pair_id)
+    floor = closure_identification_floor(artifact)
+    identification = (
+        CrossSideIdentification.OWNER_FREE
+        if extra or floor is CrossSideIdentification.OWNER_FREE
+        else CrossSideIdentification.CORRESPONDENCE
+    )
+    pair_ledger.close(PairClosureEvidence.validated(
+        pair_key, closure_kind, binding, artifact,
+        identification=identification,
+        required_binding_uses=required_binding_uses,
+        consumed_binding_uses=consumed_binding_uses,
+    ))
 
 
 def _extract_cases_under_authorization(strategy, analysis, input_correspondence, side):
@@ -532,8 +573,8 @@ def _impl_check(
                 ))
                 continue
             if guard_node.disjoint_artifact is not None:
-                closure = PairClosureEvidence.validated(
-                    (i, j), PairClosureKind.GUARD_QUERY, ledger_binding,
+                record_pair_closed(
+                    pair_ledger, base_ctx, (i, j), PairClosureKind.GUARD_QUERY, ledger_binding,
                     GuardUnsatClosureArtifact(guard_node.disjoint_artifact),
                     required_binding_uses=tuple(
                         getattr(prepass_lowered, "binding_ids", ()) or ()
@@ -542,7 +583,6 @@ def _impl_check(
                         getattr(prepass_lowered, "guard_binding_ids", ()) or ()
                     ),
                 )
-                pair_ledger.close(closure)
                 unsat_count += 1
                 resolved_pairs.add((i, j))
                 continue
@@ -646,10 +686,11 @@ def _impl_check(
                 semantic_parameter_sources,
             )
             if runtime_relation_artifact is not None:
-                pair_ledger.close(PairClosureEvidence.validated(
+                record_pair_closed(
+                    pair_ledger, base_ctx,
                     (i, j), PairClosureKind.RECOVERY, ledger_binding,
                     runtime_relation_artifact,
-                ))
+                )
                 unsat_count += 1
                 resolved_pairs.add((i, j))
                 continue
@@ -670,10 +711,11 @@ def _impl_check(
                 )
             )
             if closed_expression_artifact is not None:
-                pair_ledger.close(PairClosureEvidence.validated(
+                record_pair_closed(
+                    pair_ledger, base_ctx,
                     (i, j), PairClosureKind.RECOVERY, ledger_binding,
                     closed_expression_artifact,
-                ))
+                )
                 unsat_count += 1
                 resolved_pairs.add((i, j))
                 continue
@@ -1083,10 +1125,11 @@ def _impl_check(
                         semantic_parameter_sources,
                     )
                 if semantic_artifact is not None:
-                    pair_ledger.close(PairClosureEvidence.validated(
+                    record_pair_closed(
+                        pair_ledger, base_ctx,
                         (i, j), PairClosureKind.RECOVERY, ledger_binding,
                         semantic_artifact,
-                    ))
+                    )
                     unsat_count += 1
                     resolved_pairs.add((i, j))
                     continue
@@ -1606,7 +1649,8 @@ def _impl_check(
                     continue
                 unsat_count += 1
                 resolved_pairs.add((i, j))
-                pair_ledger.close(PairClosureEvidence.validated(
+                record_pair_closed(
+                    pair_ledger, base_ctx,
                     (i, j), closure_kind, ledger_binding,
                     closure_artifact,
                     required_binding_uses=tuple(
@@ -1615,7 +1659,7 @@ def _impl_check(
                         )
                     ),
                     consumed_binding_uses=binding_ids,
-                ))
+                )
                 if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
                     self._debug_print(f"  Pair {pair_id}: UNSAT ({unsat_count}/{total_pairs})")
                 continue
@@ -1634,7 +1678,8 @@ def _impl_check(
                 if completed_bridge_result is not None and completed_bridge_result.is_equivalent is True:
                     unsat_count += 1
                     resolved_pairs.add((i, j))
-                    pair_ledger.close(PairClosureEvidence.validated(
+                    record_pair_closed(
+                        pair_ledger, base_ctx,
                         (i, j), PairClosureKind.RETURN_WIDTH, ledger_binding,
                         SolverUnsatClosureArtifact.from_validated_result(
                             str(completed_bridge_result.last_query or ""),
@@ -1651,7 +1696,7 @@ def _impl_check(
                                 pair_id, ()
                             )
                         ),
-                    ))
+                    )
                     last_formula = completed_bridge_result.last_query or last_formula
                     self._debug_print(
                         f"  Pair {pair_id}: return-width bridge proof -> UNSAT "
@@ -1729,10 +1774,11 @@ def _impl_check(
                 resolved_pairs,
             )
             if aggregate_artifact is not None:
-                pair_ledger.close(PairClosureEvidence.validated(
+                record_pair_closed(
+                    pair_ledger, base_ctx,
                     pending_pair, PairClosureKind.AGGREGATE, ledger_binding,
                     aggregate_artifact,
-                ))
+                )
                 unsat_count += 1
                 resolved_pairs.add(pending_pair)
                 continue
@@ -1991,7 +2037,9 @@ def _impl_check(
                 "function_name": getattr(analysis, "function_name", None),
                 "binary_name": getattr(analysis, "binary_id", None),
                 "binary_id": getattr(analysis, "binary_id", None),
-                "evidence": bind_evidence_to_comparison(dict(evidence)),
+                "evidence": bind_evidence_to_comparison(
+                    dict(evidence), identification=CrossSideIdentification.CORRESPONDENCE,
+                ),
             }
             for side, analysis, prepared in (
                 ("function1", solver_analysis1, prepared_widths1),
@@ -2038,7 +2086,8 @@ def _register_loop_pair_replanner(
                 analysis1,
                 analysis2,
             )
-            if not complete:
+            # 閉じた値・loop summary の比較は owner を含まない key で左右を同一視する（plan v4 PR-P）。
+            if not complete and owner_free_identity_gate((case1,), (case2,)).passed:
                 complete = (
                     strategy._case_pair_counted_loop_summaries_match_by_closed_values(
                         case1,

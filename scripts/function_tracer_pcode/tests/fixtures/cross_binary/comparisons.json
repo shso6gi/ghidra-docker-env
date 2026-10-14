@@ -1,0 +1,1426 @@
+[
+ {
+  "path": "authority/census_contract.py",
+  "qualname": "CensusManifest.__post_init__",
+  "kind": "compare",
+  "digest": "5db936401b70a015",
+  "role": "owner_bearing",
+  "why": "binary content identities"
+ },
+ {
+  "path": "authority/census_contract.py",
+  "qualname": "CensusManifest.__post_init__",
+  "kind": "compare",
+  "digest": "8c5b64cbc92c35f4",
+  "role": "owner_bearing",
+  "why": "v1/v2 census entries of the same pair: comparison domain identity"
+ },
+ {
+  "path": "authority/census_contract.py",
+  "qualname": "CensusManifest.__post_init__",
+  "kind": "compare",
+  "digest": "dc8ba3e1d42c52a7",
+  "role": "owner_bearing",
+  "why": "function identities"
+ },
+ {
+  "path": "authority/domains/abi_width_readonly.py",
+  "qualname": "AbiWidthReadonlySolverQueryAuthority.from_high_bit_theorem",
+  "kind": "compare",
+  "digest": "70d23214fe984f5f",
+  "role": "scalar_or_tag",
+  "why": "storage widths"
+ },
+ {
+  "path": "authority/domains/abi_width_readonly.py",
+  "qualname": "AbiWidthReadonlySolverQueryAuthority.from_readonly_correspondence_theorem",
+  "kind": "compare",
+  "digest": "b3613edf013e7a3c",
+  "role": "scalar_or_tag",
+  "why": "member counts"
+ },
+ {
+  "path": "authority/domains/abi_width_readonly.py",
+  "qualname": "ReadonlyCorrespondenceFactSet.from_resolved_seed",
+  "kind": "compare",
+  "digest": "10a015929f61d3c1",
+  "role": "scalar_or_tag",
+  "why": "reduction key lengths"
+ },
+ {
+  "path": "authority/domains/abi_width_readonly.py",
+  "qualname": "ReadonlyCorrespondenceFactSet.from_resolved_seed",
+  "kind": "compare",
+  "digest": "24d93ca41fedecae",
+  "role": "gated:G1",
+  "why": "reduction key [4:12] includes count_parameter_index/storage identity (owner-free) used as the count_identity premise of the v2 readonly correspondence theorem; the v2 completion only removes a blocker and cannot create EQ_CLOSURE - the legacy pair is closed only by G1 validators (readonly/counted value). Uncertain: relies on v2 needing legacy EQ"
+ },
+ {
+  "path": "authority/domains/abi_width_readonly.py",
+  "qualname": "ReadonlyCorrespondenceFactSet.from_resolved_seed",
+  "kind": "compare",
+  "digest": "4142db736b05f307",
+  "role": "scalar_or_tag",
+  "why": "reduction kind tag"
+ },
+ {
+  "path": "authority/domains/abi_width_readonly.py",
+  "qualname": "ReadonlyCorrespondenceFactSet.from_resolved_seed",
+  "kind": "compare",
+  "digest": "4fd00f20938cac42",
+  "role": "scalar_or_tag",
+  "why": "role/order/multiplicity/load-shape facts of readonly members (structural premise; value symbols stay side-local unless G9 contract)"
+ },
+ {
+  "path": "authority/domains/abi_width_readonly.py",
+  "qualname": "ReadonlyCorrespondenceFactSet.from_resolved_seed",
+  "kind": "compare",
+  "digest": "94f6910826f380d5",
+  "role": "scalar_or_tag",
+  "why": "descriptor presence"
+ },
+ {
+  "path": "authority/domains/abi_width_readonly.py",
+  "qualname": "ReadonlyCorrespondenceFactSet.from_resolved_seed",
+  "kind": "compare",
+  "digest": "b3613edf013e7a3c",
+  "role": "scalar_or_tag",
+  "why": "member counts"
+ },
+ {
+  "path": "authority/domains/abi_width_readonly.py",
+  "qualname": "ReadonlyCorrespondenceFactSet.from_resolved_seed",
+  "kind": "compare",
+  "digest": "d1af478d6737241d",
+  "role": "scalar_or_tag",
+  "why": "bias suffix of reduction keys"
+ },
+ {
+  "path": "authority/domains/abi_width_readonly.py",
+  "qualname": "ReadonlyCorrespondenceFactSet.from_resolved_seed",
+  "kind": "compare",
+  "digest": "f0617236cb223d31",
+  "role": "gated:G9",
+  "why": "storage descriptor pairing for shared parameter loads; without the G9 shared contract value_key() raises ProjectionNotFormable"
+ },
+ {
+  "path": "authority/domains/abi_width_readonly.py",
+  "qualname": "ReadonlyReductionObjectSetSeed.from_analyses_and_cases",
+  "kind": "compare",
+  "digest": "220c075eb1af96d9",
+  "role": "gated:G9",
+  "why": "pointer base ('parameter', i) index equality forming shared_input_memory_contract, now conditioned on _positional_parameter_identity_holds"
+ },
+ {
+  "path": "authority/domains/abi_width_readonly.py",
+  "qualname": "ReturnAbiCompatibilityAssessment.assess",
+  "kind": "compare",
+  "digest": "b1ca213ab77c9178",
+  "role": "scalar_or_tag",
+  "why": "effective observation surface kind tags"
+ },
+ {
+  "path": "authority/domains/abi_width_readonly.py",
+  "qualname": "ReturnObservationProjectionSeed.from_pair_seed",
+  "kind": "compare",
+  "digest": "9659c04dd6147274",
+  "role": "scalar_or_tag",
+  "why": "payload widths"
+ },
+ {
+  "path": "authority/domains/identical_function_identity.py",
+  "qualname": "IdenticalFunctionIdentityPilotEncoder._session_binding",
+  "kind": "compare",
+  "digest": "90b9de58c8080d5a",
+  "role": "owner_bearing",
+  "why": "session binary content identities"
+ },
+ {
+  "path": "authority/domains/identical_function_identity.py",
+  "qualname": "IdenticalFunctionIdentityProofArtifact.create",
+  "kind": "compare",
+  "digest": "f922604fa10f14df",
+  "role": "owner_bearing",
+  "why": "identity projections include executable SHA bound to the session"
+ },
+ {
+  "path": "checker/identical_fast_path.py",
+  "qualname": "assess_identical_function_identity",
+  "kind": "compare",
+  "digest": "1b9fd404f4d5a7d8",
+  "role": "owner_bearing",
+  "why": "identity tuples include executable SHA-256 bound to session content identity"
+ },
+ {
+  "path": "checker/identical_fast_path.py",
+  "qualname": "assess_identical_function_identity",
+  "kind": "compare",
+  "digest": "5e4dc3a07fadf359",
+  "role": "owner_bearing",
+  "why": "session binary content identities (SHA) must be equal"
+ },
+ {
+  "path": "core/runtime_refs/call_arguments.py",
+  "qualname": "fresh_call_argument_refs_are_side_distinct",
+  "kind": "compare",
+  "digest": "c26b6cc4c5d7e746",
+  "role": "owner_bearing",
+  "why": "asserts fresh refs are distinct (binary_id in stable_key)"
+ },
+ {
+  "path": "core/runtime_refs/loops.py",
+  "qualname": "compare_loop_summaries",
+  "kind": "compare",
+  "digest": "12a540004e07aa23",
+  "role": "scalar_or_tag",
+  "why": "side-effect profile shape (profile name, flags, counts)"
+ },
+ {
+  "path": "core/runtime_refs/loops.py",
+  "qualname": "compare_loop_summaries",
+  "kind": "compare",
+  "digest": "4746864a8a696fec",
+  "role": "gated:G1",
+  "why": "pairwise_semantic_key equality -> 'equivalent'; same callers/gates as the Method-B key"
+ },
+ {
+  "path": "core/runtime_refs/loops.py",
+  "qualname": "compare_loop_summaries",
+  "kind": "compare",
+  "digest": "bf9a79621cbf0bea",
+  "role": "candidate_filter",
+  "why": "case key mismatch only returns 'incompatible' (refusal); equality alone decides nothing"
+ },
+ {
+  "path": "core/runtime_refs/loops.py",
+  "qualname": "compare_loop_summaries",
+  "kind": "compare",
+  "digest": "cb911b27ace03780",
+  "role": "scalar_or_tag",
+  "why": "loop case counts"
+ },
+ {
+  "path": "core/runtime_refs/loops.py",
+  "qualname": "compare_loop_summaries",
+  "kind": "compare",
+  "digest": "fd3f903145f1210c",
+  "role": "gated:G1",
+  "why": "Method-B key equality -> 'equivalent'; callers _runtime_refs_shortcut_decision, _case_pair_loop_summaries_solver_equivalent, _counted_loop_refs_allow_value_proof - decisive uses only via G1/G2/G4/G6/G8; ungated _impl_check uses (safe-fallback/defer) are filters"
+ },
+ {
+  "path": "core/runtime_refs/loops.py",
+  "qualname": "compare_loop_summaries",
+  "kind": "compare",
+  "digest": "fdd47b8c922452c0",
+  "role": "candidate_filter",
+  "why": "effect key mismatch only returns 'incompatible'"
+ },
+ {
+  "path": "proof/call_effect/candidates.py",
+  "qualname": "build_internal_call_correspondence_candidates",
+  "kind": "compare",
+  "digest": "9566daa4f9e4b09d",
+  "role": "candidate_filter",
+  "why": "candidates.py: agreed ABI slot keys only annotate an internal-call candidate id; the pair is then proven by producer SMT stages (guard/argument/return) under the tie-only relation"
+ },
+ {
+  "path": "proof/call_effect/fresh_arguments.py",
+  "qualname": "FreshArgumentIdentityCorrespondence.is_valid",
+  "kind": "compare",
+  "digest": "f503b64ea6da334d",
+  "role": "owner_bearing",
+  "why": "asserts the two fresh refs are DISTINCT (stable_key includes binary_id) - non-collapse check"
+ },
+ {
+  "path": "proof/call_effect/fresh_arguments.py",
+  "qualname": "FreshArgumentIdentityCorrespondence.is_valid",
+  "kind": "compare",
+  "digest": "fcd3c1149a1b4187",
+  "role": "candidate_filter",
+  "why": "FreshArgumentIdentityCorrespondence.is_valid: slot correspondence key match = 'counterparts', never value equality; coupling into one symbol additionally requires a discharged RelationalEqualityProof"
+ },
+ {
+  "path": "proof/call_effect/obligations.py",
+  "qualname": "_mutually_unique_pairs",
+  "kind": "compare",
+  "digest": "24cb8a9a5f14b3cd",
+  "role": "candidate_filter",
+  "why": "_mutually_unique_pairs: mutual-uniqueness test over fact ids; only pairs call-site candidates, the producer's SMT stages decide"
+ },
+ {
+  "path": "proof/call_effect/obligations.py",
+  "qualname": "_mutually_unique_pairs",
+  "kind": "compare",
+  "digest": "f9bd911aae1aa904",
+  "role": "candidate_filter",
+  "why": "_mutually_unique_pairs: semantic_shape_key match only proposes call-site pairs; guard/argument/return relations are SMT-proven with the tie-only correspondence premise"
+ },
+ {
+  "path": "proof/call_effect/obligations.py",
+  "qualname": "_phase2_direct_call_eligibility",
+  "kind": "compare",
+  "digest": "f5546fd615c0759f",
+  "role": "scalar_or_tag",
+  "why": "argument arity count"
+ },
+ {
+  "path": "proof/call_effect/preflight.py",
+  "qualname": "lower_call_projection_for_case_pair",
+  "kind": "compare",
+  "digest": "b9ee90f6021efab0",
+  "role": "scalar_or_tag",
+  "why": "count of expected call-region expressions (>0) per side"
+ },
+ {
+  "path": "proof/call_effect/preflight.py",
+  "qualname": "lower_call_projection_for_case_pair",
+  "kind": "compare",
+  "digest": "b9ee90f6021efab0",
+  "role": "scalar_or_tag",
+  "why": "count of expected call-region expressions (>0) per side"
+ },
+ {
+  "path": "proof/call_effect/producer.py",
+  "qualname": "_event_order_relation",
+  "kind": "compare",
+  "digest": "16a2aaf1c1c96c87",
+  "role": "single_side",
+  "why": "_event_order_relation compares two events of the same side (called from _memory_partial_order_certificate)"
+ },
+ {
+  "path": "proof/call_effect/producer.py",
+  "qualname": "_event_order_relation",
+  "kind": "compare",
+  "digest": "20a865d52efa80b2",
+  "role": "single_side",
+  "why": "p-code sequence keys of two events of one side"
+ },
+ {
+  "path": "proof/call_effect/producer.py",
+  "qualname": "_event_order_relation",
+  "kind": "compare",
+  "digest": "4e8fb35f87e8af4c",
+  "role": "single_side",
+  "why": "same-callsite test between two write events of one side"
+ },
+ {
+  "path": "proof/call_effect/producer.py",
+  "qualname": "_event_order_relation",
+  "kind": "compare",
+  "digest": "cc63ad32c52ab3f3",
+  "role": "single_side",
+  "why": "call_target_ref of two events of one side"
+ },
+ {
+  "path": "proof/call_effect/producer.py",
+  "qualname": "_memory_alias_relation",
+  "kind": "compare",
+  "digest": "21b9d66c80bb77c2",
+  "role": "single_side",
+  "why": "_memory_alias_relation is only called from _memory_partial_order_certificate over event pairs of ONE side's event list"
+ },
+ {
+  "path": "proof/call_effect/producer.py",
+  "qualname": "_memory_alias_relation",
+  "kind": "compare",
+  "digest": "52a4347037b5f178",
+  "role": "single_side",
+  "why": "steps of two locations of the same side (inside _memory_alias_relation)"
+ },
+ {
+  "path": "proof/call_effect/producer.py",
+  "qualname": "_memory_alias_relation",
+  "kind": "compare",
+  "digest": "64bfe8f365a50288",
+  "role": "single_side",
+  "why": "storage ranges of two locations of the same side"
+ },
+ {
+  "path": "proof/call_effect/producer.py",
+  "qualname": "_memory_alias_relation",
+  "kind": "compare",
+  "digest": "c950124f16710588",
+  "role": "single_side",
+  "why": "same as above: alias relation between two events of the same side"
+ },
+ {
+  "path": "proof/call_effect/producer.py",
+  "qualname": "_render_argument_stage",
+  "kind": "compare",
+  "digest": "a598183db9e66cf0",
+  "role": "scalar_or_tag",
+  "why": "argument tuple length"
+ },
+ {
+  "path": "proof/call_effect/producer.py",
+  "qualname": "_render_argument_stage",
+  "kind": "compare",
+  "digest": "ad082afbccb28e63",
+  "role": "scalar_or_tag",
+  "why": "argument bit widths"
+ },
+ {
+  "path": "proof/call_effect/producer.py",
+  "qualname": "_render_final_post_state_relation",
+  "kind": "compare",
+  "digest": "394ec149a836ac58",
+  "role": "gated:G11",
+  "why": "left/right final memory locations paired by LocationBaseRef.semantic_key (\"parameter\", i); every caller of _render_final_post_state_relation first calls _require_positional_parameter_locations (G11), which refuses the memory stage unless the caller parameter tables are positional/full"
+ },
+ {
+  "path": "proof/call_effect/producer.py",
+  "qualname": "_render_return_stage",
+  "kind": "compare",
+  "digest": "049e425b713b402a",
+  "role": "scalar_or_tag",
+  "why": "caller observation bit widths"
+ },
+ {
+  "path": "proof/call_effect/producer.py",
+  "qualname": "_render_return_stage",
+  "kind": "compare",
+  "digest": "aa6af529c45bef67",
+  "role": "scalar_or_tag",
+  "why": "callee return semantic bit widths"
+ },
+ {
+  "path": "proof/call_effect/producer.py",
+  "qualname": "_render_return_stage",
+  "kind": "compare",
+  "digest": "cd3b0edfd0f7c3e0",
+  "role": "scalar_or_tag",
+  "why": "presence of return semantic width evidence"
+ },
+ {
+  "path": "proof/deferred_call_abstraction.py",
+  "qualname": "_summary_size_for_match",
+  "kind": "compare",
+  "digest": "1cb565c7e7b63c19",
+  "role": "scalar_or_tag",
+  "why": "observed value sizes for the summary width"
+ },
+ {
+  "path": "proof/deferred_call_abstraction.py",
+  "qualname": "abstract_deferred_calls",
+  "kind": "compare",
+  "digest": "7caf95f7007ba3bb",
+  "role": "scalar_or_tag",
+  "why": "count of self-recursive deferred calls per group (but see report: the group-key intersection + zip in abstract_deferred_calls pairs calls by owner-free argument key and is ungated)"
+ },
+ {
+  "path": "proof/formula/input_correspondence/gate.py",
+  "qualname": "positional_pairing_gate",
+  "kind": "compare",
+  "digest": "d60819b7720344c5",
+  "role": "correspondence",
+  "why": "inside the gate itself: (index, name, width) equality is the positional predicate"
+ },
+ {
+  "path": "proof/formula/input_correspondence/relation.py",
+  "qualname": "_extension_bound",
+  "kind": "compare",
+  "digest": "22b512a99c23af96",
+  "role": "correspondence",
+  "why": "input_correspondence/relation.py: extension bound logical bits"
+ },
+ {
+  "path": "proof/formula/input_correspondence/relation.py",
+  "qualname": "_relation_for_pair",
+  "kind": "compare",
+  "digest": "3d7d276742f7d440",
+  "role": "correspondence",
+  "why": "input_correspondence/relation.py: building the relation (bit widths)"
+ },
+ {
+  "path": "proof/formula/returns.py",
+  "qualname": "_order_return_defs_by_specificity._compare",
+  "kind": "compare",
+  "digest": "1d23d2bdd6e56612",
+  "role": "single_side",
+  "why": "condition counts of two return defs of the same analysis"
+ },
+ {
+  "path": "proof/formula/returns.py",
+  "qualname": "_readonly_refs_count_identity_compatible",
+  "kind": "compare",
+  "digest": "2f8bff6f90f9588f",
+  "role": "single_side",
+  "why": "count index identity of two readonly refs of the same analysis"
+ },
+ {
+  "path": "proof/formula/returns.py",
+  "qualname": "_readonly_refs_count_identity_compatible",
+  "kind": "compare",
+  "digest": "859d619ad378bbc4",
+  "role": "single_side",
+  "why": "count storage identity of two readonly refs of the same analysis' return defs"
+ },
+ {
+  "path": "proof/formula/returns.py",
+  "qualname": "_readonly_refs_share_surface",
+  "kind": "compare",
+  "digest": "0df1c980c756fece",
+  "role": "single_side",
+  "why": "constant bias of two refs of the same analysis"
+ },
+ {
+  "path": "proof/formula/returns.py",
+  "qualname": "_readonly_refs_share_surface",
+  "kind": "compare",
+  "digest": "46d3564d809fe82d",
+  "role": "single_side",
+  "why": "result size of two refs of the same analysis"
+ },
+ {
+  "path": "proof/formula/returns.py",
+  "qualname": "_readonly_refs_share_surface",
+  "kind": "compare",
+  "digest": "75cdd744a6d57feb",
+  "role": "single_side",
+  "why": "pointer base of two refs of the same analysis"
+ },
+ {
+  "path": "proof/formula/returns.py",
+  "qualname": "_readonly_refs_share_surface",
+  "kind": "compare",
+  "digest": "db330599ecec659c",
+  "role": "single_side",
+  "why": "signedness of two refs of the same analysis"
+ },
+ {
+  "path": "proof/formula/returns.py",
+  "qualname": "_readonly_refs_share_surface",
+  "kind": "compare",
+  "digest": "fa40c3d99f8cf8e9",
+  "role": "single_side",
+  "why": "reduction kind of two refs of the same analysis"
+ },
+ {
+  "path": "proof/formula/returns.py",
+  "qualname": "_return_defs_require_relation",
+  "kind": "compare",
+  "digest": "750e9ad1ce9319d3",
+  "role": "single_side",
+  "why": "_return_defs_require_relation compares return defs of one analysis"
+ },
+ {
+  "path": "proof/formula/returns.py",
+  "qualname": "compare_readonly_summary_values_by_priority",
+  "kind": "compare",
+  "digest": "26f71c5319826243",
+  "role": "single_side",
+  "why": "contract keys of two refs of the same analysis"
+ },
+ {
+  "path": "proof/formula/returns.py",
+  "qualname": "compare_readonly_summary_values_by_priority",
+  "kind": "compare",
+  "digest": "a3ae962b5f584713",
+  "role": "single_side",
+  "why": "compare_readonly_summary_values_by_priority orders return cases of ONE analysis (callers: _order_return_defs_by_specificity / _order_return_cases_for_effective_partition)"
+ },
+ {
+  "path": "proof/loop_template_abstraction.py",
+  "qualname": "_same_expression_key",
+  "kind": "compare",
+  "digest": "0980c2a74422aa02",
+  "role": "gated:G7",
+  "why": "_same_expression_key is only used inside prove_template_equivalence, whose only caller is LoopTemplatePairwiseStrategy._try_normalization_equivalence after the G7 owner_free_identity_gate"
+ },
+ {
+  "path": "proof/recurrence_promotion.py",
+  "qualname": "_same_expression",
+  "kind": "compare",
+  "digest": "a9eed9c9a8e6f359",
+  "role": "single_side",
+  "why": "structural_key of operand vs state within one ref"
+ },
+ {
+  "path": "proof/recurrence_promotion.py",
+  "qualname": "_same_expression",
+  "kind": "compare",
+  "digest": "f50afff06a8ade18",
+  "role": "single_side",
+  "why": "_same_expression(left, state): operand vs the state variable of one recurrence ref"
+ },
+ {
+  "path": "proof/recurrence_promotion.py",
+  "qualname": "_validate_state_transition_termination",
+  "kind": "compare",
+  "digest": "7aa906854b48ef65",
+  "role": "single_side",
+  "why": "negation flags of two case regions of one runtime_ref"
+ },
+ {
+  "path": "proof/recurrence_promotion.py",
+  "qualname": "_validate_state_transition_termination",
+  "kind": "compare",
+  "digest": "c99ec18db2d12333",
+  "role": "single_side",
+  "why": "_validate_state_transition_termination: two case regions of one runtime_ref"
+ },
+ {
+  "path": "proof/return_width/surface.py",
+  "qualname": "_validated_nontrivial_parameter_bindings",
+  "kind": "compare",
+  "digest": "ad082afbccb28e63",
+  "role": "scalar_or_tag",
+  "why": "parameter bit widths"
+ },
+ {
+  "path": "proof/return_width/surface.py",
+  "qualname": "build_call_site_return_width_receipt",
+  "kind": "compare",
+  "digest": "ad082afbccb28e63",
+  "role": "scalar_or_tag",
+  "why": "return-width receipt bit widths"
+ },
+ {
+  "path": "proof/return_width/surface.py",
+  "qualname": "build_input_correspondence_contract",
+  "kind": "compare",
+  "digest": "c3b65a0871f26254",
+  "role": "correspondence",
+  "why": "return_width surface correspondence contract (index bijection); NOTE it pairs by Ghidra parameter index independently of the final InputCorrespondence relation - worth confirming consistency"
+ },
+ {
+  "path": "proof/return_width/surface.py",
+  "qualname": "build_input_correspondence_contract",
+  "kind": "compare",
+  "digest": "d87edc87461d40bf",
+  "role": "scalar_or_tag",
+  "why": "parameter identity counts (inside return_width correspondence contract)"
+ },
+ {
+  "path": "proof/return_width/surface.py",
+  "qualname": "build_observation_view",
+  "kind": "compare",
+  "digest": "ae394e8144b862d5",
+  "role": "scalar_or_tag",
+  "why": "observation widths"
+ },
+ {
+  "path": "proof/return_width/surface.py",
+  "qualname": "build_top_level_consumer_binding_receipt",
+  "kind": "compare",
+  "digest": "71e87f105380c1a0",
+  "role": "correspondence",
+  "why": "nontriviality test: differing storage/type identity forces a proof artifact (conservative)"
+ },
+ {
+  "path": "proof/return_width/surface.py",
+  "qualname": "build_top_level_consumer_binding_receipt",
+  "kind": "compare",
+  "digest": "d2d908e371bb4577",
+  "role": "correspondence",
+  "why": "nontriviality test of the correspondence contract: differing ordinal forces a proof artifact (conservative)"
+ },
+ {
+  "path": "proof/return_width/surface.py",
+  "qualname": "build_top_level_observation_contract",
+  "kind": "compare",
+  "digest": "ab4ba6538dfbe8f0",
+  "role": "scalar_or_tag",
+  "why": "payload widths"
+ },
+ {
+  "path": "proof/return_width/surface.py",
+  "qualname": "build_top_level_observation_contract",
+  "kind": "compare",
+  "digest": "e56fa633434635a5",
+  "role": "scalar_or_tag",
+  "why": "declared observation widths"
+ },
+ {
+  "path": "proof/return_width/surface.py",
+  "qualname": "prove_object_query_input_correspondence",
+  "kind": "compare",
+  "digest": "71e87f105380c1a0",
+  "role": "correspondence",
+  "why": "same nontriviality test in prove_object_query_input_correspondence"
+ },
+ {
+  "path": "proof/return_width/surface.py",
+  "qualname": "prove_object_query_input_correspondence",
+  "kind": "compare",
+  "digest": "d2d908e371bb4577",
+  "role": "correspondence",
+  "why": "same nontriviality test in prove_object_query_input_correspondence"
+ },
+ {
+  "path": "proof/strategies/pairwise_query_builder.py",
+  "qualname": "_order_return_cases_for_effective_partition._compare",
+  "kind": "compare",
+  "digest": "1d23d2bdd6e56612",
+  "role": "single_side",
+  "why": "_order_return_cases_for_effective_partition sorts the cases of one analysis"
+ },
+ {
+  "path": "proof/strategies/pairwise_query_builder.py",
+  "qualname": "return_cases_require_relation",
+  "kind": "compare",
+  "digest": "13063f72f8202225",
+  "role": "single_side",
+  "why": "return_cases_require_relation scans the cases of one analysis"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/case_conditions.py",
+  "qualname": "_impl__case_pair_comparison_result_size",
+  "kind": "compare",
+  "digest": "fd0c92b7ac62ea88",
+  "role": "scalar_or_tag",
+  "why": "comparison bit widths"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__case_pair_counted_loop_summary_matches_closed_expression",
+  "kind": "compare",
+  "digest": "567d4bd63c2262f2",
+  "role": "scalar_or_tag",
+  "why": "bool flags (counted vs closed)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__case_pair_has_one_sided_counted_loop_summary",
+  "kind": "compare",
+  "digest": "567d4bd63c2262f2",
+  "role": "scalar_or_tag",
+  "why": "bool flags (one-sided counted summary)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__case_pair_loop_summaries_solver_equivalent",
+  "kind": "helper:compare_loop_summaries",
+  "digest": "462c479ec2a9bb7d",
+  "role": "gated:G1",
+  "why": "compare_loop_summaries (Method-B/semantic key equality) in _case_pair_loop_summaries_solver_equivalent; callers: _intrinsic_runtime_values_equivalent (G1 runtime-reduction/counted-loop-value, G6, G8 after gate) and _record_completed_method_b_dual_summary_solver_proof_if_safe (G2 evidence)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__case_pair_loop_summaries_solver_equivalent_core",
+  "kind": "compare",
+  "digest": "360eff929d6c5382",
+  "role": "scalar_or_tag",
+  "why": "constant bias integers"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__case_pair_loop_summaries_solver_equivalent_core",
+  "kind": "compare",
+  "digest": "4a9064afe4e43e72",
+  "role": "gated:G3",
+  "why": "loop term descriptor semantic key identity is decisive in the core proof, only returned True after G3 (_collect_intrinsic_parameter_specs); outer callers G1/G2/G6/G8"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__case_pair_loop_summaries_solver_equivalent_core",
+  "kind": "compare",
+  "digest": "4b593c16afd00771",
+  "role": "gated:G3",
+  "why": "non-Expression seed terms compared by value in the core proof; True only after G3"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__case_pair_loop_summaries_solver_equivalent_core",
+  "kind": "compare",
+  "digest": "645cf2a4dd46241a",
+  "role": "scalar_or_tag",
+  "why": "seed term counts"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__case_pair_loop_summaries_solver_equivalent_core",
+  "kind": "compare",
+  "digest": "6e34fdb477b0e4ed",
+  "role": "scalar_or_tag",
+  "why": "seed_term_count"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__composed_counted_state_transition_summaries_match",
+  "kind": "compare",
+  "digest": "21b9d66c80bb77c2",
+  "role": "gated:G1",
+  "why": "composed state-transition semantic key equality returns True in _case_pair_counted_loop_summaries_match_by_closed_values (after G3) whose callers are validate_counted_loop_value_candidate (G1) and the replanner (G8 after gate)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__counted_loop_refs_allow_affine_value_proof",
+  "kind": "compare",
+  "digest": "8596c9a529c10856",
+  "role": "scalar_or_tag",
+  "why": "result sizes"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__counted_loop_refs_allow_value_proof",
+  "kind": "helper:compare_loop_summaries",
+  "digest": "02c1a61c11ccd80b",
+  "role": "gated:G1",
+  "why": "compare_loop_summaries in _counted_loop_refs_allow_value_proof <- _counted_loop_values_are_provably_equivalent <- validate_counted_loop_value_candidate (G1) / replanner (G8 after gate) / _intrinsic_runtime_values_equivalent (G1/G6/G8)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__counted_loop_refs_match_ignoring_signedness",
+  "kind": "compare",
+  "digest": "17ea2691065f7576",
+  "role": "scalar_or_tag",
+  "why": "result size"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__counted_loop_refs_match_ignoring_signedness",
+  "kind": "compare",
+  "digest": "2de3dc8eec1b1b4c",
+  "role": "scalar_or_tag",
+  "why": "residue_cases ints"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__counted_loop_refs_match_ignoring_signedness",
+  "kind": "compare",
+  "digest": "5b4dd03e4a4d888d",
+  "role": "scalar_or_tag",
+  "why": "induction step"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__counted_loop_refs_match_ignoring_signedness",
+  "kind": "compare",
+  "digest": "b7edaad38ef1f73c",
+  "role": "scalar_or_tag",
+  "why": "source provenance tag string"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__counted_loop_signedness_difference_is_guarded",
+  "kind": "compare",
+  "digest": "d73c982408bd2438",
+  "role": "scalar_or_tag",
+  "why": "signed_loop flags"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__counted_loop_summary_wrapper_semantics_match",
+  "kind": "compare",
+  "digest": "17ea2691065f7576",
+  "role": "scalar_or_tag",
+  "why": "result size"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__counted_loop_summary_wrapper_semantics_match",
+  "kind": "compare",
+  "digest": "24a0e24f556cd791",
+  "role": "scalar_or_tag",
+  "why": "constant bias integers"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__counted_loop_summary_wrapper_semantics_match",
+  "kind": "compare",
+  "digest": "2de3dc8eec1b1b4c",
+  "role": "scalar_or_tag",
+  "why": "residue_cases tuples of ints"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__counted_loop_summary_wrapper_semantics_match",
+  "kind": "compare",
+  "digest": "5b4dd03e4a4d888d",
+  "role": "scalar_or_tag",
+  "why": "induction step"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__counted_loop_summary_wrapper_semantics_match",
+  "kind": "compare",
+  "digest": "5e8a4ee538604c02",
+  "role": "gated:G1",
+  "why": "residue_bias_terms may hold bias Expressions compared by value (owner-free); used in _case_pair_loop_summaries_solver_equivalent / core, reached only through G1/G2/G6/G8 (and G3 in core)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__counted_loop_summary_wrapper_semantics_match",
+  "kind": "compare",
+  "digest": "d73c982408bd2438",
+  "role": "scalar_or_tag",
+  "why": "signed_loop"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__counted_loop_values_are_provably_equivalent",
+  "kind": "compare",
+  "digest": "d73c982408bd2438",
+  "role": "scalar_or_tag",
+  "why": "signed_loop flags"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__loop_summary_contracts_match_without_guard",
+  "kind": "compare",
+  "digest": "39fc8e2b36447b78",
+  "role": "scalar_or_tag",
+  "why": "expression type tags"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__loop_summary_contracts_match_without_guard",
+  "kind": "compare",
+  "digest": "a07b7f0a894ab7b6",
+  "role": "scalar_or_tag",
+  "why": "operand counts"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__loop_summary_safe_fallback_reason_for_values",
+  "kind": "compare",
+  "digest": "39fc8e2b36447b78",
+  "role": "scalar_or_tag",
+  "why": "expression type tags"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__loop_summary_safe_fallback_reason_for_values",
+  "kind": "compare",
+  "digest": "725bef48336e8f8c",
+  "role": "scalar_or_tag",
+  "why": "intrinsic op name (tag, not a variable)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__loop_summary_safe_fallback_reason_for_values",
+  "kind": "compare",
+  "digest": "a07b7f0a894ab7b6",
+  "role": "scalar_or_tag",
+  "why": "operand counts"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__loop_summary_safe_fallback_reason_for_values",
+  "kind": "compare",
+  "digest": "a07b7f0a894ab7b6",
+  "role": "scalar_or_tag",
+  "why": "operand counts"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__loop_summary_safe_fallback_reason_for_values",
+  "kind": "compare",
+  "digest": "cc755ad61c60acd4",
+  "role": "scalar_or_tag",
+  "why": "intrinsic opcode tags"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__loop_summary_safe_fallback_reason_for_values",
+  "kind": "compare",
+  "digest": "d805af3dbc9687bc",
+  "role": "scalar_or_tag",
+  "why": "has-loop flags"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__loop_summary_surface_blocks_solver_equality",
+  "kind": "compare",
+  "digest": "6a5364be5b37eaa5",
+  "role": "scalar_or_tag",
+  "why": "loop_var_unit (size unit)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__loop_summary_surface_blocks_solver_equality",
+  "kind": "compare",
+  "digest": "bf9a79621cbf0bea",
+  "role": "gated:G3",
+  "why": "loop case stable_key equality lets the core proof skip comparing loop bodies (decisive), but _case_pair_loop_summaries_solver_equivalent_core can only return True after _collect_intrinsic_parameter_specs (G3); outer callers are also G1/G2/G6/G8"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__loop_summary_surface_blocks_solver_equality",
+  "kind": "compare",
+  "digest": "cb911b27ace03780",
+  "role": "scalar_or_tag",
+  "why": "loop case counts"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__loop_summary_surface_blocks_solver_equality",
+  "kind": "compare",
+  "digest": "f2d8991074656872",
+  "role": "gated:G3",
+  "why": "side-effect profile stable_key identity in _loop_summary_surface_blocks_solver_equality; only caller is the core proof, which returns True only after G3"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__phi_circular_opposing_condition_literals",
+  "kind": "compare",
+  "digest": "79eb4daa17f2bac2",
+  "role": "diagnostic",
+  "why": "_phi_circular_opposing_condition_literals: diagnostic tuple only"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__phi_circular_origin_shape_relation",
+  "kind": "compare",
+  "digest": "7468702a195fbe2f",
+  "role": "diagnostic",
+  "why": "_phi_circular_origin_shape_relation: diagnostic tuple only"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__phi_circular_unknown_count_relation",
+  "kind": "compare",
+  "digest": "915de71d7df69951",
+  "role": "diagnostic",
+  "why": "_phi_circular_unknown_count_relation feeds only _unresolved_expression_pair_lowering_diagnostic -> object_target_key/diagnostic evidence; pair stays UNKNOWN (PENDING_PROOF)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/loop_summary.py",
+  "qualname": "_impl__phi_circular_value_shape_relation",
+  "kind": "compare",
+  "digest": "82b11336358833e8",
+  "role": "diagnostic",
+  "why": "_phi_circular_value_shape_relation: diagnostic tuple only"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/method_b_closure.py",
+  "qualname": "_impl__count_identity_components_compatible",
+  "kind": "compare",
+  "digest": "2f8bff6f90f9588f",
+  "role": "gated:G1",
+  "why": "same helper: count parameter index ('parameter', i) equality; cross-side uses only under G1/G2/G4/G6/G8"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/method_b_closure.py",
+  "qualname": "_impl__count_identity_components_compatible",
+  "kind": "compare",
+  "digest": "859d619ad378bbc4",
+  "role": "gated:G1",
+  "why": "_count_identity_components_compatible storage identity; cross-side uses via _readonly_count_identities_compatible (shortcut: G1/G4/G6/G8) and exact-vs-summary proofs (G1/G2)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/method_b_closure.py",
+  "qualname": "_impl__count_storage_low_projection_compatible",
+  "kind": "compare",
+  "digest": "6e7d676c51874b73",
+  "role": "gated:G1",
+  "why": "_count_storage_low_projection_compatible: register base; used single-side (case params vs own proof) and cross-side (exact_case params vs the other side's accumulator proof) only via _cases_have_equivalent_runtime_reductions (G1), method-B covering recorders (G2) and summary_returns (single side)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/method_b_closure.py",
+  "qualname": "_impl__count_storage_low_projection_compatible",
+  "kind": "compare",
+  "digest": "ddb75c95cabae6d8",
+  "role": "gated:G1",
+  "why": "same helper: low bit of count storage; cross-side uses under G1/G2 only"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/pair_cases.py",
+  "qualname": "_impl__expressions_share_object_centric_structure",
+  "kind": "helper:are_structurally_equivalent",
+  "digest": "4689bb7da2d46e04",
+  "role": "gated:G1",
+  "why": "_expressions_share_object_centric_structure -> are_structurally_equivalent; callers _intrinsic_runtime_values_equivalent and _counted_loop_values_are_provably_equivalent, reached only via G1 validators / G6 / G8"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__combine_readonly_address_affine",
+  "kind": "compare",
+  "digest": "c950124f16710588",
+  "role": "single_side",
+  "why": "bases of the two operands of one INT_ADD/INT_SUB in one expression"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_contract_count_projection_compatible",
+  "kind": "compare",
+  "digest": "1f6b83eb3d772055",
+  "role": "gated:G2",
+  "why": "count index equality in _readonly_contract_count_projection_compatible (G2 recorder only)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_contract_count_projection_compatible",
+  "kind": "compare",
+  "digest": "6e7d676c51874b73",
+  "role": "gated:G2",
+  "why": "register base of count storage in _readonly_contract_count_projection_compatible; only reached from the readonly identity projection recorder (OWNER_FREE evidence -> G2)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_contract_count_projection_compatible",
+  "kind": "compare",
+  "digest": "e260b03861a7cc8c",
+  "role": "scalar_or_tag",
+  "why": "register sizes"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_contract_effective_result_size",
+  "kind": "compare",
+  "digest": "c2cacf8541178226",
+  "role": "scalar_or_tag",
+  "why": "result sizes"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_contract_limit_keys_compatible",
+  "kind": "compare",
+  "digest": "4f86f64335775cc5",
+  "role": "gated:G1",
+  "why": "limit key equality; via shortcut decision (G1/G4/G6/G8) and readonly projection recorder (G2)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_count_identities_compatible",
+  "kind": "compare",
+  "digest": "859d619ad378bbc4",
+  "role": "gated:G1",
+  "why": "count storage identity equality in _readonly_count_identities_compatible; shortcut decision (G1/G4/G6/G8) and projection recorder (G2)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_count_storage_relation_key",
+  "kind": "compare",
+  "digest": "6e7d676c51874b73",
+  "role": "gated:G2",
+  "why": "same relation key builder (register base)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_count_storage_relation_key",
+  "kind": "compare",
+  "digest": "859d619ad378bbc4",
+  "role": "gated:G2",
+  "why": "_readonly_count_storage_relation_key builds the readonly-identity object_target_key; it only matters through evidence adopted via G2 or validate_readonly_identity_candidate (G1)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_projection_parameter_extension_evidence",
+  "kind": "compare",
+  "digest": "e260b03861a7cc8c",
+  "role": "scalar_or_tag",
+  "why": "projection sizes"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_projection_semantic_witnesses_match",
+  "kind": "compare",
+  "digest": "0dff8d0ae8004787",
+  "role": "gated:G2",
+  "why": "semantic witness keys equality (G2 recorder only)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_projection_term_contracts_match",
+  "kind": "compare",
+  "digest": "029f11a38906e771",
+  "role": "scalar_or_tag",
+  "why": "key lengths"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_projection_term_contracts_match",
+  "kind": "compare",
+  "digest": "21b9d66c80bb77c2",
+  "role": "gated:G2",
+  "why": "_readonly_projection_term_contracts_match: only caller _record_completed_readonly_identity_projection_proof_if_safe (OWNER_FREE evidence, adoption G2)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_projection_term_contracts_match",
+  "kind": "compare",
+  "digest": "6aed283045ecc31e",
+  "role": "gated:G2",
+  "why": "projection term contract key prefix (G2 recorder only)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_projection_term_contracts_match",
+  "kind": "compare",
+  "digest": "8443747a30a4b187",
+  "role": "gated:G2",
+  "why": "projection term contract key suffix (G2 recorder only)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_reduction_contract_keys_compatible",
+  "kind": "compare",
+  "digest": "029f11a38906e771",
+  "role": "scalar_or_tag",
+  "why": "key tuple lengths"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_reduction_contract_keys_compatible",
+  "kind": "compare",
+  "digest": "21b9d66c80bb77c2",
+  "role": "gated:G1",
+  "why": "term-sequence contract key equality in _readonly_reduction_contract_keys_compatible; reached via _runtime_refs_shortcut_decision/_readonly_reduction_contract_shortcut_decision; decisive (equivalent=True) uses only through _intrinsic_runtime_values_equivalent <- validate_runtime_reduction_candidate/validate_counted_loop_value_candidate (G1), _intrinsic_values_match (G6, after gate), replanner produce (G8, after gate) and the G4 equality (after gate); the ungated _impl_check uses (_case_pair_loop_summary_safe_fallback_reason, _case_pair_can_defer_loop_summary_proof) only choose SMT/UNKNOWN/deferral"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_reduction_contract_keys_compatible",
+  "kind": "compare",
+  "digest": "85cd72c4ca01d8d3",
+  "role": "gated:G1",
+  "why": "contract key prefix equality; reached via _runtime_refs_shortcut_decision/_readonly_reduction_contract_shortcut_decision; decisive (equivalent=True) uses only through _intrinsic_runtime_values_equivalent <- validate_runtime_reduction_candidate/validate_counted_loop_value_candidate (G1), _intrinsic_values_match (G6, after gate), replanner produce (G8, after gate) and the G4 equality (after gate); the ungated _impl_check uses (_case_pair_loop_summary_safe_fallback_reason, _case_pair_can_defer_loop_summary_proof) only choose SMT/UNKNOWN/deferral"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_reduction_contract_keys_compatible",
+  "kind": "compare",
+  "digest": "be44a1e9f5dd48cd",
+  "role": "gated:G1",
+  "why": "contract key suffix equality; reached via _runtime_refs_shortcut_decision/_readonly_reduction_contract_shortcut_decision; decisive (equivalent=True) uses only through _intrinsic_runtime_values_equivalent <- validate_runtime_reduction_candidate/validate_counted_loop_value_candidate (G1), _intrinsic_values_match (G6, after gate), replanner produce (G8, after gate) and the G4 equality (after gate); the ungated _impl_check uses (_case_pair_loop_summary_safe_fallback_reason, _case_pair_can_defer_loop_summary_proof) only choose SMT/UNKNOWN/deferral"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_reduction_contract_shortcut_decision",
+  "kind": "compare",
+  "digest": "2179a7e69ff88bb7",
+  "role": "scalar_or_tag",
+  "why": "reduction kind tag"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_reduction_contract_shortcut_decision",
+  "kind": "compare",
+  "digest": "5612dce3ef9a5344",
+  "role": "scalar_or_tag",
+  "why": "normalized constant bias"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__readonly_shared_parameter_index",
+  "kind": "compare",
+  "digest": "652f9627d5a85480",
+  "role": "gated:G2",
+  "why": "_readonly_shared_parameter_index: count index equality (G2 recorder only; extension itself comes from the relation)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_impl__solve_reduction_count_affine_equality_between_expressions",
+  "kind": "compare",
+  "digest": "cbf9fa0bacd9e588",
+  "role": "single_side",
+  "why": "address bases of the two operands of one INT_EQUAL condition of one case"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/readonly_reduction.py",
+  "qualname": "_readonly_base_keys_agree",
+  "kind": "compare",
+  "digest": "b7dfe34eddfbdf84",
+  "role": "gated:G1",
+  "why": "_readonly_base_keys_agree: pointer base ('parameter', i) equality in the readonly contract shortcut; reached via _runtime_refs_shortcut_decision/_readonly_reduction_contract_shortcut_decision; decisive (equivalent=True) uses only through _intrinsic_runtime_values_equivalent <- validate_runtime_reduction_candidate/validate_counted_loop_value_candidate (G1), _intrinsic_values_match (G6, after gate), replanner produce (G8, after gate) and the G4 equality (after gate); the ungated _impl_check uses (_case_pair_loop_summary_safe_fallback_reason, _case_pair_can_defer_loop_summary_proof) only choose SMT/UNKNOWN/deferral"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/runtime_shortcut.py",
+  "qualname": "_impl__expressions_same_shape_ignoring_runtime",
+  "kind": "compare",
+  "digest": "76afb8a9222a9ecd",
+  "role": "single_side",
+  "why": "_expressions_same_shape_ignoring_runtime: callers compare start vs limit operand of one summary (_extract_affine_limit_trip_count_candidate) or expected_limit built from the same ref"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/runtime_shortcut.py",
+  "qualname": "_impl__intrinsic_runtime_values_equivalent",
+  "kind": "compare",
+  "digest": "647b8f9eda8b760f",
+  "role": "scalar_or_tag",
+  "why": "operand counts"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/runtime_shortcut.py",
+  "qualname": "_impl__intrinsic_runtime_values_equivalent",
+  "kind": "compare",
+  "digest": "725bef48336e8f8c",
+  "role": "scalar_or_tag",
+  "why": "intrinsic op name tag"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/runtime_shortcut.py",
+  "qualname": "_impl__intrinsic_runtime_values_equivalent",
+  "kind": "compare",
+  "digest": "cc755ad61c60acd4",
+  "role": "scalar_or_tag",
+  "why": "intrinsic opcode tags"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/runtime_shortcut.py",
+  "qualname": "_impl__runtime_refs_exact_shortcut_decision",
+  "kind": "compare",
+  "digest": "de2747e0afc45cb6",
+  "role": "gated:G1",
+  "why": "pairwise_exact_key equality; reached via _runtime_refs_shortcut_decision/_readonly_reduction_contract_shortcut_decision; decisive (equivalent=True) uses only through _intrinsic_runtime_values_equivalent <- validate_runtime_reduction_candidate/validate_counted_loop_value_candidate (G1), _intrinsic_values_match (G6, after gate), replanner produce (G8, after gate) and the G4 equality (after gate); the ungated _impl_check uses (_case_pair_loop_summary_safe_fallback_reason, _case_pair_can_defer_loop_summary_proof) only choose SMT/UNKNOWN/deferral"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/runtime_shortcut.py",
+  "qualname": "_impl__runtime_refs_semantic_shortcut_decision",
+  "kind": "compare",
+  "digest": "47abfa69f6c28f9e",
+  "role": "gated:G1",
+  "why": "pairwise_semantic_key equality in _runtime_refs_semantic_shortcut_decision; reached via _runtime_refs_shortcut_decision/_readonly_reduction_contract_shortcut_decision; decisive (equivalent=True) uses only through _intrinsic_runtime_values_equivalent <- validate_runtime_reduction_candidate/validate_counted_loop_value_candidate (G1), _intrinsic_values_match (G6, after gate), replanner produce (G8, after gate) and the G4 equality (after gate); the ungated _impl_check uses (_case_pair_loop_summary_safe_fallback_reason, _case_pair_can_defer_loop_summary_proof) only choose SMT/UNKNOWN/deferral"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/runtime_shortcut.py",
+  "qualname": "_impl__runtime_refs_shortcut_decision",
+  "kind": "helper:compare_loop_summaries",
+  "digest": "02c1a61c11ccd80b",
+  "role": "gated:G1",
+  "why": "compare_loop_summaries inside _runtime_refs_shortcut_decision; reached via _runtime_refs_shortcut_decision/_readonly_reduction_contract_shortcut_decision; decisive (equivalent=True) uses only through _intrinsic_runtime_values_equivalent <- validate_runtime_reduction_candidate/validate_counted_loop_value_candidate (G1), _intrinsic_values_match (G6, after gate), replanner produce (G8, after gate) and the G4 equality (after gate); the ungated _impl_check uses (_case_pair_loop_summary_safe_fallback_reason, _case_pair_can_defer_loop_summary_proof) only choose SMT/UNKNOWN/deferral"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/unresolved_lowering.py",
+  "qualname": "_impl__try_build_unresolved_deferred_call_lowering",
+  "kind": "compare",
+  "digest": "39fc19c8627d1931",
+  "role": "scalar_or_tag",
+  "why": "unknown counts (inside G5 lowering)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/unresolved_lowering.py",
+  "qualname": "_impl__try_build_unresolved_deferred_call_lowering",
+  "kind": "compare",
+  "digest": "ad082afbccb28e63",
+  "role": "scalar_or_tag",
+  "why": "bit widths (inside G5 lowering)"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/unresolved_lowering.py",
+  "qualname": "_impl__unresolved_expression_pair_lowering_diagnostic",
+  "kind": "compare",
+  "digest": "4a836d202bedc01f",
+  "role": "diagnostic",
+  "why": "value shape mismatch status in the diagnostic"
+ },
+ {
+  "path": "proof/strategies/pairwise_services/unresolved_lowering.py",
+  "qualname": "_impl__unresolved_expression_pair_lowering_diagnostic",
+  "kind": "compare",
+  "digest": "9ece30d33dd187f5",
+  "role": "diagnostic",
+  "why": "_unresolved_expression_pair_lowering_diagnostic: shape match only sets a diagnostic status in the object_target_key; the pair is recorded UNKNOWN"
+ },
+ {
+  "path": "proof/strategies/pairwise_solver_proven_rewrite.py",
+  "qualname": "_expression_sizes_compatible",
+  "kind": "compare",
+  "digest": "6b86c78f4618c242",
+  "role": "scalar_or_tag",
+  "why": "expression sizes"
+ },
+ {
+  "path": "proof/strategies/pairwise_solver_proven_rewrite.py",
+  "qualname": "_expression_sizes_compatible",
+  "kind": "compare",
+  "digest": "a07b7f0a894ab7b6",
+  "role": "scalar_or_tag",
+  "why": "operand counts"
+ },
+ {
+  "path": "proof/strategies/pairwise_solver_proven_rewrite.py",
+  "qualname": "_exprs_match",
+  "kind": "compare",
+  "digest": "9fd9192d4de0d4bf",
+  "role": "single_side",
+  "why": "_exprs_match compares sub-expressions of one rewritten expression (left vs dividend)"
+ },
+ {
+  "path": "proof/strategies/pairwise_solver_proven_rewrite.py",
+  "qualname": "_extract_minimal_rewrite_difference",
+  "kind": "compare",
+  "digest": "ee518a86aa40d485",
+  "role": "single_side",
+  "why": "_extract_minimal_rewrite_difference: original vs rewritten expression of the same case"
+ },
+ {
+  "path": "proof/strategies/pairwise_solver_proven_rewrite.py",
+  "qualname": "_rewritten_values_are_trivially_equal",
+  "kind": "compare",
+  "digest": "913ce6239a745cbd",
+  "role": "scalar_or_tag",
+  "why": "sign-extension flags"
+ },
+ {
+  "path": "proof/strategies/pairwise_solver_proven_rewrite.py",
+  "qualname": "_rewritten_values_are_trivially_equal",
+  "kind": "helper:are_structurally_equivalent",
+  "digest": "d37749c9f6acd057",
+  "role": "gated:G6",
+  "why": "are_structurally_equivalent in _rewritten_values_are_trivially_equal after the G6 gate"
+ },
+ {
+  "path": "proof/strategies/proof_gates/call_effect.py",
+  "qualname": "_impl__deferred_calls_semantically_match",
+  "kind": "compare",
+  "digest": "0f96d0b6f0849eb6",
+  "role": "gated:G5",
+  "why": "_deferred_calls_semantically_match target key: via _matched_deferred_call_argument_proof_content called in _try_build_unresolved_deferred_call_lowering after the G5 gate, and the call-effect recorder (G2)"
+ },
+ {
+  "path": "proof/strategies/proof_gates/call_effect.py",
+  "qualname": "_impl__deferred_calls_semantically_match",
+  "kind": "compare",
+  "digest": "e2dda1809991d517",
+  "role": "gated:G5",
+  "why": "argument keys of deferred calls: G5 lowering after gate / G2 recorder"
+ },
+ {
+  "path": "proof/strategies/proof_gates/call_effect.py",
+  "qualname": "_impl__unsupported_call_effect_compatibility_policy_evidence",
+  "kind": "compare",
+  "digest": "0cda8db5510aa84e",
+  "role": "scalar_or_tag",
+  "why": "callee identity category tag"
+ },
+ {
+  "path": "proof/strategies/proof_gates/call_effect.py",
+  "qualname": "_impl__unsupported_call_effect_compatibility_policy_evidence",
+  "kind": "compare",
+  "digest": "0f96d0b6f0849eb6",
+  "role": "gated:G2",
+  "why": "call-effect target component key equality; reached only from _record_completed_call_effect_summary_proof_if_safe (OWNER_FREE) or from validating evidence already adopted via comparison_evidence (G2)"
+ },
+ {
+  "path": "proof/strategies/proof_gates/call_effect.py",
+  "qualname": "_impl__unsupported_call_effect_compatibility_policy_evidence",
+  "kind": "compare",
+  "digest": "813b37c364a284d5",
+  "role": "gated:G2",
+  "why": "call-effect path guard key equality; same (G2)"
+ },
+ {
+  "path": "proof/strategies/proof_gates/call_effect.py",
+  "qualname": "_impl__unsupported_call_effect_compatibility_policy_evidence",
+  "kind": "compare",
+  "digest": "8c4d717b8d5be4cb",
+  "role": "gated:G2",
+  "why": "call-effect argument component key equality; same recorder/validator (G2)"
+ },
+ {
+  "path": "proof/strategies/proof_gates/call_effect.py",
+  "qualname": "_impl__unsupported_call_effect_reason_is_compatible",
+  "kind": "compare",
+  "digest": "89c9c159ff92d21f",
+  "role": "scalar_or_tag",
+  "why": "unsupported call-effect reason signature (reason tag strings)"
+ },
+ {
+  "path": "proof/strategies/proof_gates/return_coverage.py",
+  "qualname": "_prove_unary_outcome_for_analysis.same_kind_consistency",
+  "kind": "compare",
+  "digest": "ad082afbccb28e63",
+  "role": "single_side",
+  "why": "bit widths of two return regions of one analysis"
+ },
+ {
+  "path": "proof/strategies/proof_gates/return_coverage.py",
+  "qualname": "_prove_unary_outcome_for_analysis.same_kind_consistency",
+  "kind": "compare",
+  "digest": "ed0018b1898ef845",
+  "role": "single_side",
+  "why": "same_kind_consistency inside _prove_unary_outcome_for_analysis: two termination regions of one analysis"
+ }
+]

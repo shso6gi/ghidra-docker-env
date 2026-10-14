@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
+    CrossSideIdentification,
     UnknownReasonRecord,
     UnknownRecoveryProofKind,
     build_proof_obligation_id,
@@ -119,7 +120,7 @@ def _impl__record_completed_call_effect_summary_proof_if_safe(
             "proof_content": proof_content,
         }
     )
-    store_comparison_evidence(analysis, records)
+    store_comparison_evidence(analysis, records, identification=CrossSideIdentification.OWNER_FREE)
 
 
 def _impl__iter_call_effect_blocker_candidates(

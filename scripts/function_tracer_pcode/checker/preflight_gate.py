@@ -281,6 +281,9 @@ class PreflightGateMixin:
         if receipt_valid and getattr(strategy_result, "is_equivalent", None) is False and not decisive_not_eq_receipt:
             blockers.append("decisive_counterexample_receipt_incomplete")
 
+        if getattr(strategy_result, "is_equivalent", None) is True:
+            self._veto_unproven_cross_side_identity(strategy_result, frame)
+
         if blockers:
             if getattr(strategy_result, "is_equivalent", None) in {True, False}:
                 strategy_result.is_equivalent = None
@@ -300,6 +303,46 @@ class PreflightGateMixin:
                         detail=f"Call/effect preflight veto: {blocker}",
                     )
                 )
+
+    def _veto_unproven_cross_side_identity(
+        self,
+        strategy_result: Any,
+        frame: PreparedDispatchFrame,
+    ) -> None:
+        """最終の EQ gate の backstop（plan v4 PR-P）。
+
+        EQ の根拠に owner を含まない方法で左右を同一視した部分（ledger の
+        ``owner_free_closures``）があれば、比較の最終 relation が位置どおり・全幅の等式のときだけ
+        EQ を残す。残せなければ UNKNOWN（``comparison_equivalence_closure_unproven``、evidence は
+        ``cross_side_identity:*``）。site の gate を漏らした closure もここで止まる。
+        """
+
+        from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
+            final_equivalence_identity_gate,
+        )
+
+        ledger = frame.pair_disposition_ledger
+        sources = tuple(
+            f"pair{key}"
+            for key in (ledger.owner_free_closures() if ledger is not None else ())
+        )
+        verdict = final_equivalence_identity_gate(
+            sources, frame.prepared.input_correspondence,
+        )
+        if verdict.passed:
+            return
+        strategy_result.is_equivalent = None
+        strategy_result.unknown_reasons.append(
+            make_internal_v2_reason_diagnostic(
+                "comparison_equivalence_closure_unproven",
+                stage="S_PAIRWISE",
+                evidence_refs=verdict.evidence_refs,
+                detail=(
+                    "EQ closure identified left and right values by an owner-free key "
+                    "that the final input correspondence does not justify"
+                ),
+            )
+        )
 
     def _call_effect_shadow_manifest(
         self,
