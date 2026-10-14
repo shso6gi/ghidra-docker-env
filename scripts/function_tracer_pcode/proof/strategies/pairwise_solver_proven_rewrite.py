@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
+from scripts.function_tracer_pcode.core.live_values import UndecidableComparison
 from scripts.function_tracer_pcode.proof.obligations import (
     SolverQueryExecutionReceipt,
     issue_structural_equality_receipt,
@@ -277,6 +278,9 @@ def _intrinsic_values_match(strategy, case1: ReturnCase, case2: ReturnCase) -> b
                 right_case=case2,
             )
         )
+    except UndecidableComparison:
+        # 組み込みの code だけでは比べられない値（Issue #242）: 引数を減らして比べ直さない（判定不能を一致の根拠にしない）
+        return False
     except TypeError:
         return bool(intrinsic_equivalent(case1.value_expr, case2.value_expr))
 

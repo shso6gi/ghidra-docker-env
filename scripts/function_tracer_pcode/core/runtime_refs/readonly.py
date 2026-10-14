@@ -613,12 +613,19 @@ class ReductionAccumulatorProof:
                 )
                 for index in range(exact_count)
             )
-            if _decided_equal(_term_keys(terms[:exact_count]), tuple(
+            # 判定できない比較は、次の witness へ進む根拠にも返す根拠にもしない: その場で見つからない（Issue #242）
+            decision = _decided_equal(_term_keys(terms[:exact_count]), tuple(
                 term.stable_key() for term in expected_witness
-            )) is not True:
+            ))
+            if decision is None:
+                return None
+            if decision is False:
                 continue
             candidate = tuple(terms[:count_value])
-            if _decided_equal(_term_keys(candidate), expected_prefix_key) is True:
+            decision = _decided_equal(_term_keys(candidate), expected_prefix_key)
+            if decision is None:
+                return None
+            if decision is True:
                 return candidate
         return None
 
@@ -819,9 +826,12 @@ class ReductionAccumulatorProof:
                 )
                 for index in range(count_value)
             )
-            if _decided_equal(_term_keys(terms), tuple(
+            decision = _decided_equal(_term_keys(terms), tuple(
                 term.stable_key() for term in expected_terms
-            )) is True:
+            ))
+            if decision is None:
+                return self  # 判定できない witness を「一致しない」として残りで書き換えない（Issue #242）
+            if decision is True:
                 matching_counts.append(int(count_value))
         if not matching_counts:
             return self

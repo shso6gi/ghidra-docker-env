@@ -6,8 +6,9 @@
 
 - 比べる側の契約（`live_values.equal` / `unequal` / `contains` / `less` / `sorted_trees`）: 葉の外の object の比較の戻り値が
   `__bool__` を偽る scalar の subclass でも、結果は双子と同じで、偽る型の code を呼ばない（直接・容器の中・入れ子・
-  identity・dict の値・`__ne__`）。組み込みの code だけでは忠実に比べられない値（不活性でない key の dict・要素の
-  set）は `UndecidableComparison`（等しい / 違うと推測しない）。
+  identity・dict の値・`__ne__`）。組み込みの code だけでは忠実に比べられない値（外の object を key に持つ dict・要素に
+  持つ set）は `UndecidableComparison`（等しい / 違うと推測しない）。状態で答えが変わる callback・容器を変える
+  callback・hash の衝突は `test_issue242_comparison_invariants.py`（第 7 回）。
 - ref の層: どの ref の class のどの field に `Callback`（外の object）を置いても、構築・key・`==`・hash が双子と同じ。
 - 例外: field の種類（`__slots__`・組み込みの C の field・getset・`__dict__`）× 状態（無い / 明示的な `None` / 値）×
   traceback の有無で、`exception_text` が双子の `str()` と同じ（NULL と `None` を決められないときだけ `<unprintable>`）。

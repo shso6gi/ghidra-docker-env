@@ -7,9 +7,9 @@ from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, bounded_repr, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
 from scripts.function_tracer_pcode.core.live_values import (
-    UndecidableComparison, as_bool, as_int, attribute, attribute_of, builtin_items, contains, equal, exact_scalar, exact_tree,
-    inert_key, is_kind, method_of, scalar_bool, scalar_int, scalar_int_or, scalar_text, size, sorted_trees, type_module,
-    type_name, unequal,
+    UndecidableComparison, as_bool, as_int, attribute, attribute_of, builtin_items, contains, deciding, equal, exact_scalar,
+    exact_tree, inert_key, is_kind, method_of, scalar_bool, scalar_int, scalar_int_or, scalar_text, size, sorted_trees,
+    type_module, type_name, undecided_is_absent, unequal,
 )
 from scripts.function_tracer_pcode.core.runtime_refs._reading import (
     decided_equal as _decided_equal,
@@ -159,6 +159,8 @@ def _loop_variable_binding_context_from_values(
                 stable_key = inert_key(ref.stable_key())
                 binder_key = inert_key(ref.binder_key())
             except UndecidableComparison:
+                if not undecided_is_absent():
+                    raise  # 比べる側（`compare_loop_summaries` の `deciding`）は「判定できない」と「key が無い」を区別する
                 return False
             if stable_key is None:
                 return False
@@ -1363,6 +1365,13 @@ class LoopSummaryComparisonResult:
         return materialize(self)
 
 
+def _undecided_loop_comparison() -> LoopSummaryComparisonResult:
+    """比較の gate の 1 つが判定できない（`decided_equal` が `None`）ときの結果。後の gate の一致・不一致を、判定できない
+    gate を通ったものとして使わない（双子なら先の gate で別の結果に決まっていたかもしれない）: その場で unknown。"""
+
+    return LoopSummaryComparisonResult("unknown", "loop summary keys are not comparable by builtin code")
+
+
 @runtime_ref_entry
 def compare_loop_summaries(
     left: Optional[LoopSummaryRef],
@@ -1379,10 +1388,46 @@ def compare_loop_summaries(
 
     if left is None or right is None:
         return LoopSummaryComparisonResult("unknown", "missing loop summary")
-    left_method_b_key = loop_summary_method_b_key(left)
-    right_method_b_key = loop_summary_method_b_key(right)
+    # key の gate は判定する側の scope の中: key の組み立ての判定不能は「key が無い」でなく unknown（Issue #242）。
+    # key を読む他の消費者（記号の identity・注記）は scope の外で、従来どおり `None`（共有しない側）
+    try:
+        with deciding():
+            decided = _loop_key_gates(left, right)
+    except UndecidableComparison:
+        decided = _undecided_loop_comparison()
+    if decided is not None:
+        return decided
+    obligation = LoopSummaryProofObligation.case_aware_solver_equality(
+        left,
+        right,
+        reason="loop summary comparator requires case-aware solver proof",
+    )
+    if solver_prover is not None:
+        try:
+            proven = solver_prover(obligation)
+        except (AttributeError, TypeError, ValueError, RecursionError):
+            proven = None
+        if is_kind(proven, LoopSummaryComparisonResult):
+            if contains({"equivalent", "different", "incompatible"}, proven.status):
+                return proven
+    return LoopSummaryComparisonResult(
+        "unknown",
+        "loop summary comparator requires case-aware solver proof",
+        proof_obligation=obligation,
+    )
+
+
+def _loop_key_gates(left: LoopSummaryRef, right: LoopSummaryRef) -> Optional[LoopSummaryComparisonResult]:
+    """`compare_loop_summaries` の key の gate（決まれば結果、決まらなければ `None`）。key の組み立て・比較の判定不能は
+    `UndecidableComparison`（`deciding` の中: 呼ぶ側が unknown にする）。"""
+
+    left_method_b_key = _decided_method_b_key(left)
+    right_method_b_key = _decided_method_b_key(right)
     if left_method_b_key is not None and right_method_b_key is not None:
-        if _decided_equal(left_method_b_key, right_method_b_key) is True:
+        decision = _decided_equal(left_method_b_key, right_method_b_key)
+        if decision is None:
+            return _undecided_loop_comparison()
+        if decision is True:
             return LoopSummaryComparisonResult("equivalent", "loop summaries match by semantic seed compensation")
     left_profile = attribute_of(left, "side_effect_profile", None)
     right_profile = attribute_of(right, "side_effect_profile", None)
@@ -1407,12 +1452,19 @@ def compare_loop_summaries(
             scalar_int(attribute_of(right_profile, "effect_count")),
             scalar_int(attribute_of(right_profile, "guard_count")),
         )
-        if _decided_equal(left_shape, right_shape) is False:
+        decision = _decided_equal(left_shape, right_shape)
+        if decision is None:
+            return _undecided_loop_comparison()
+        if decision is False:
             return LoopSummaryComparisonResult("incompatible", "loop side-effect profiles differ")
         left_effect_key = exact_tree(method_of(left_profile, "stable_key")())
         right_effect_key = exact_tree(method_of(right_profile, "stable_key")())
-        if left_effect_key is not None and right_effect_key is not None and _decided_equal(left_effect_key, right_effect_key) is False:
-            return LoopSummaryComparisonResult("incompatible", "loop body effects differ")
+        if left_effect_key is not None and right_effect_key is not None:
+            decision = _decided_equal(left_effect_key, right_effect_key)
+            if decision is None:
+                return _undecided_loop_comparison()
+            if decision is False:
+                return LoopSummaryComparisonResult("incompatible", "loop body effects differ")
     left_cases = _optional_items(attribute_of(left, "cases", ()))
     right_cases = _optional_items(attribute_of(right, "cases", ()))
     if len(left_cases) != len(right_cases):
@@ -1422,31 +1474,20 @@ def compare_loop_summaries(
         right_case_keys = tuple(exact_tree(method_of(case, "stable_key")()) for case in right_cases)
         if any(case_key is None for case_key in left_case_keys + right_case_keys):
             return LoopSummaryComparisonResult("incompatible", "loop cases are unkeyable")
-        if _decided_equal(left_case_keys, right_case_keys) is False:
+        decision = _decided_equal(left_case_keys, right_case_keys)
+        if decision is None:
+            return _undecided_loop_comparison()
+        if decision is False:
             return LoopSummaryComparisonResult("incompatible", "loop cases differ")
-    left_semantic_key = exact_tree(left.pairwise_semantic_key())
-    right_semantic_key = exact_tree(right.pairwise_semantic_key())
+    left_semantic_key = exact_tree(method_of(left, "pairwise_semantic_key")())
+    right_semantic_key = exact_tree(method_of(right, "pairwise_semantic_key")())
     if left_semantic_key is not None and right_semantic_key is not None:
-        if _decided_equal(left_semantic_key, right_semantic_key) is True:
+        decision = _decided_equal(left_semantic_key, right_semantic_key)
+        if decision is None:
+            return _undecided_loop_comparison()
+        if decision is True:
             return LoopSummaryComparisonResult("equivalent", "loop summaries match by semantic key")
-    obligation = LoopSummaryProofObligation.case_aware_solver_equality(
-        left,
-        right,
-        reason="loop summary comparator requires case-aware solver proof",
-    )
-    if solver_prover is not None:
-        try:
-            proven = solver_prover(obligation)
-        except (AttributeError, TypeError, ValueError, RecursionError):
-            proven = None
-        if is_kind(proven, LoopSummaryComparisonResult):
-            if contains({"equivalent", "different", "incompatible"}, proven.status):
-                return proven
-    return LoopSummaryComparisonResult(
-        "unknown",
-        "loop summary comparator requires case-aware solver proof",
-        proof_obligation=obligation,
-    )
+    return None
 
 
 @runtime_ref_key(proven=True)
@@ -1458,7 +1499,21 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
     omitted prefix back to the earliest represented start.  This is not a broad
     semantic proof; it is a deterministic object-centric identity for the
     current pure, path-insensitive loop-summary subset.
+
+    正規化の途中の比較が組み込みの code だけでは判定できなければ key を作らない（`None`。Issue #242）。
     """
+
+    try:
+        return _decided_method_b_key(summary)
+    except UndecidableComparison:
+        if not undecided_is_absent():
+            raise
+        return None
+
+
+def _decided_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tuple[Any, ...]]:
+    """`loop_summary_method_b_key` の本体。正規化の比較が判定できなければ `UndecidableComparison`（「key が無い」と
+    区別する: 比べる側は判定できない key を、無い key として次の gate へ進まない）。"""
 
     if summary is None:
         return None
@@ -1534,7 +1589,13 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
             break
         expected_key = _loop_object_semantic_key(expected_term, binding_context)
         actual_key = _loop_object_semantic_key(remaining_seed_terms[-1], binding_context)
-        if expected_key is None or actual_key is None or _decided_equal(expected_key, actual_key) is not True:
+        if expected_key is None or actual_key is None:
+            break
+        decision = _decided_equal(expected_key, actual_key)
+        if decision is None:
+            # 判定できない比較で止めた key は双子の key と違い得る: key を作らない（Issue #242）
+            raise UndecidableComparison("a Method-B seed term is not comparable by builtin code")
+        if decision is False:
             break
         remaining_seed_terms.pop()
         canonical_start = previous_index

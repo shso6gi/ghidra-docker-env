@@ -372,10 +372,8 @@ LIVE_VALUES_WORK_OWNERS = {
     "exception_text": _A,
     "_exception_fields": _A,
     # 例外の状態（組み込みの例外の field・instance の `__dict__`・中の例外）: 写す値は `exact_tree` が上限の中で読む
-    "_exception_copy": _A,
     # MRO の長さを `SCAN_LIMIT` と比べてから辿る
     "_new_exception": _B,
-    "_exception_state_values": _A,
     "_exception_instance_dict": _A,
     # 辿る数を `SCAN_LIMIT` と比べる（超えれば `TypeError`: 文字列化できない印）
     "_nested_exceptions": _B,
@@ -387,18 +385,37 @@ LIVE_VALUES_WORK_OWNERS = {
     # Issue #242 第 6 回: 比べる側の契約（辿る数・容器の長さを `SCAN_LIMIT` と比べる。超えれば判定しない:
     # `UndecidableComparison`）
     "inert": _B,
-    "_equal_trees": _B,
-    "contains": _B,
-    "less": _B,
     "sorted_trees": _B,
     "_exact_elements": _B_CALLER,
-    # Python の frame の数（再帰の上限まで: 固定の数）だけ
-    "_comparison_depth_limit": _A,
+    # Issue #242 第 7 回: 比較は組み込みの演算に任せる（写しと包み・写しの有効性の確かめ。辿る数・容器の数を
+    # `SCAN_LIMIT` と比べる）
+    "_covered": _B,
+    "_comparison_shape": _B,
+    "_resolved_dunder": _B,
+    "_require_same_comparison": _A,
+    "_trusted_tree": _B,
+    "_plain_operands": _B,
+    "_CopyFrame._read": _B,
+    "_leaf_trust": _B,
+    # 登録した比較・自己完結の組み込みの型（書いた数の組）だけ
+    "_classify_dunder": _A,
+    # 比べる 2 つの値だけ
+    "_leaf_operands": _A,
+    "_plain_tree": _B,
+    "_CopyFrame.__init__": _B,
+    "_checked": _B,
+    # 登録した比較の実装（package の関数: 書いた数）だけ
+    # 例外の状態の木（例外の数を `SCAN_LIMIT` と比べる。値は `exact_tree` が 1 回の読みで写す）
+    "_exception_graph": _B,
+    "_graph_values": _B,
+    "_copy_graph": _B,
     # 例外の状態（型が決める field の数・型の traverse が辿る参照の数）だけ
     "_none_referents": _A,
     # 割り当ての候補は `_ASSIGNMENT_LIMIT`（固定の数）まで: 型が決める field の数
     "_none_assignments": _A,
     "_exception_state_matches": _A,
+    # 例外の状態の (元, 写し) の木を辿る（`_StorageRead` で辿る数を確かめる）
+    "_identity_kept": _B,
 }
 
 #: `core/read_limits`（作業量を受け取らない読みの固定の上限の owner）の入力に比例する関数

@@ -1077,28 +1077,33 @@ def exception_text(error: Any) -> str:
       （`gc.get_referents`: NULL でない field だけ）の `None` の数から決める。決まらなければ判定しない。
     写した後に、写しの状態（無い / `None` / 値の別と参照の `None` の数）が元と同じことを確かめる。
 
-    返す値の保証: 組み込みの `str` そのもの。忠実に写せない例外（`__new__` を自分で持つ型・閉路・型の検査に通らない
-    状態・NULL と `None` を決められない C の field・写しの状態が元と違う）は判定しない: CPython が文字列化できない
+    状態の値は全部を 1 回の読みで写す（field 間・容器の中の共有は写しでも共有。写した後に identity の関係も確かめる）。
+    例外の閉路（`__context__` の環・自分を持つ slot）は 2 段で写す（先に全部の例外を作り、次に field を置く）。
+
+    返す値の保証: 組み込みの `str` そのもの。忠実に写せない例外（`__new__` を自分で持つ型・状態の中の容器の閉路・型の
+    検査に通らない状態・NULL と `None` を決められない C の field・写しの状態が元と違う）は判定しない: CPython が文字列化できない
     例外に使う `<unprintable ... object>`（推測した文を返さない。写しの途中の例外で元の例外を置き換えない）。写しの
     `__str__` が投げる例外は双子の `__str__` と同じ（そのまま）。型の class の属性（自前の `__str__` が読む class の
-    値）は型の code と data（外の code）で、写さない。
+    値）は型の code と data（外の code）で、写さない。範囲の外: 例外 object 自身の identity を観測する `__str__`
+    （例: `self in registry`。写しは別の object）。
     """
 
     kind = type(error)
     if not issubclass(kind, BaseException):
         return scalar_text(error)
-    try:
-        holds = holds_scalar_subclass(tuple(_exception_state_values(error, set())))
-    except (TypeError, RecursionError):
-        return f"<unprintable {type_name(kind)} object>"  # 状態を読めない（閉路・写せない値・辿れない view）
-    if not holds:
-        return scalar_text(error)
     unprintable = f"<unprintable {type_name(kind)} object>"
     try:
-        candidates = _none_assignments(error, _exception_fields(error, kind))
+        graph = _exception_graph(error)
+        holds = holds_scalar_subclass(tuple(_graph_values(graph)))
+    except (TypeError, RecursionError):
+        return unprintable  # 状態を読めない（閉路・写せない値・辿れない view）
+    if not holds:
+        return scalar_text(error)
+    try:
+        candidates = _none_assignments(error, graph[-1][1])
         if len(candidates) > 1 and not _builtin_str(kind):
             return unprintable  # 型の Python の `__str__` が何を観測するか決められない: 判定しない
-        clones = [_exception_copy(error, {}, chosen) for chosen in candidates]
+        clones = [_copy_graph(graph, chosen) for chosen in candidates]
     except (TypeError, ValueError, AttributeError, RecursionError):
         return unprintable
     if not clones:
@@ -1116,21 +1121,184 @@ def exception_text(error: Any) -> str:
     return texts.pop() if len(texts) == 1 else unprintable
 
 
-def _exception_state_values(error: Any, seen: set) -> List[Any]:
-    """例外の文字列化が読み得る状態の値（field と instance の `__dict__`。中の例外は再帰で 1 度ずつ。閉路は写すとき
-    （`_exception_copy`）に見つかる）。"""
+#: 1 つの例外の状態: (例外, field の (descriptor, 値 | `_UNSET`) の列, instance の `__dict__` の (名前, 値) の列)
+_ExceptionState = Tuple[Any, List[Tuple[Any, Any]], List[Tuple[Any, Any]]]
 
-    if id(error) in seen:
-        return []
-    seen.add(id(error))
-    values = [value for _descriptor, value in _exception_fields(error, type(error)) if value is not _UNSET]
-    for name, value in _exception_instance_dict(error):
-        values.append(name)
-        values.append(value)
-    for value in list(values):
-        for nested in _nested_exceptions(exact_tree(value)):
-            values.extend(_exception_state_values(nested, seen))
+
+def _exception_graph(error: Any) -> List[_ExceptionState]:
+    """例外とその状態から辿れる例外の状態の列（中の例外が先: 後順。閉路の戻る辺は辿らない: 写しは 2 段で作る）。"""
+
+    order: List[_ExceptionState] = []
+    state: Dict[int, int] = {}  # id(例外) → 0: 辿っている途中 / 1: 済み
+    alive: List[Any] = [error]
+    stack: List[Tuple[Any, bool]] = [(error, False)]
+    while stack:
+        node, leaving = stack.pop()
+        if leaving:
+            state[id(node)] = 1
+            order.append((node, _exception_fields(node, type(node)), _exception_instance_dict(node)))
+            continue
+        mark = state.get(id(node))
+        if mark is not None:
+            continue  # 済み、または辿っている途中（閉路: 写しは全部作ってから field を置く）
+        state[id(node)] = 0
+        alive.append(node)
+        if not _within_scan(len(alive)):
+            raise TypeError("an exception state beyond the scan limit is not copied")
+        stack.append((node, True))
+        values = [value for _descriptor, value in _exception_fields(node, type(node)) if value is not _UNSET]
+        for name, value in _exception_instance_dict(node):
+            values.append(name)
+            values.append(value)
+        for value in values:
+            for nested in _nested_exceptions(exact_tree(value)):
+                if state.get(id(nested)) is None:
+                    stack.append((nested, False))
+    return order
+
+
+def _graph_values(graph: List[_ExceptionState]) -> List[Any]:
+    """例外の状態の値を全部、決まった順に（field の値、`__dict__` の名前と値）。"""
+
+    values: List[Any] = []
+    _require_scan(len(graph), "an exception state")
+    for _error, fields, items in graph:
+        values.extend(value for _descriptor, value in fields if value is not _UNSET)
+        for name, value in items:
+            values.append(name)
+            values.append(value)
     return values
+
+
+def _copy_graph(graph: List[_ExceptionState], explicit: Tuple[Any, ...]) -> Any:
+    """例外の状態の木を写す（最後が元の例外）。状態の値は全部を **1 回の読み** で写す（共有された葉・容器は写しでも共有:
+    field 間の identity を保つ）。中の例外は同じ規則で写した例外に置き換える（共有された容器は 1 度だけ）。写しは 2 段:
+    先に全部の例外を（`__new__` だけが置ける field とともに）作り、次に field を置く（閉路の状態も写せる）。元の例外の
+    `None` と読める C の field の割り当ては `explicit`、中の例外は観測と矛盾しない割り当てが 1 つのときだけ写す。
+    写せなければ `TypeError`。"""
+
+    _require_scan(len(graph), "an exception state")
+    raw = _graph_values(graph)
+    read = exact_tree(tuple(raw))
+    copies: Dict[int, Any] = {}  # id(元の例外) → 写し
+    replaced: Dict[int, Any] = {}  # id(読んだ容器) → 中の例外を置き換えた容器（共有を保つ）
+    alive: List[Any] = [read]
+    plans: List[Tuple[Any, List[Tuple[Any, Any]], List[Tuple[Any, Any]], Tuple[Any, ...], int]] = []
+    position = 0
+    for index, (error, fields, items) in enumerate(graph):
+        kind = type(error)
+        owner = _defining_class(kind, "__new__")
+        if type(owner) is not type or _TYPE_MODULE.__get__(owner) != "builtins" or not issubclass(owner, BaseException):
+            raise TypeError("an exception type with its own __new__ is not copied")
+        chosen = explicit if index == len(graph) - 1 else None
+        if chosen is None:
+            candidates = _none_assignments(error, fields)
+            if len(candidates) != 1:
+                raise TypeError("whether a builtin exception field holds None or nothing is not decided")
+            chosen = candidates[0]
+        plans.append((error, fields, items, chosen, position))
+        start = position
+        position += sum(1 for _descriptor, value in fields if value is not _UNSET) + 2 * len(items)
+        # 1 段目: `__new__` だけが置ける field（`BaseExceptionGroup` の `message` / `exceptions`）と写しを作る
+        readonly = []
+        cursor = start
+        for descriptor, value in fields:
+            if value is _UNSET:
+                continue
+            if _is_readonly_member(descriptor):
+                readonly.append(_replace_exceptions(read[cursor], copies, replaced, alive))
+            cursor += 1
+        copies[id(error)] = _new_exception(kind, readonly)
+    clone = None
+    for error, fields, items, chosen, start in plans:
+        kind = type(error)
+        clone = copies[id(error)]
+        copied: List[Tuple[Any, Any]] = []
+        cursor = start
+        for descriptor, value in fields:
+            if value is _UNSET:
+                copied.append((descriptor, _UNSET))
+                continue
+            copied.append((descriptor, _replace_exceptions(read[cursor], copies, replaced, alive)))
+            cursor += 1
+        state_items: List[Tuple[Any, Any]] = []
+        for _name, _value in items:
+            state_items.append((read[cursor], _replace_exceptions(read[cursor + 1], copies, replaced, alive)))
+            cursor += 2
+        # getset の setter は他の field も書く（`__cause__` の setter は `__suppress_context__` を真にする）: getset を先に、
+        # C の field・slot を後に置き、最後に field ごとに元と同じか確かめる
+        ordered = [item for item in copied if type(item[0]) is _FIELD_DESCRIPTORS[1]]
+        ordered += [item for item in copied if type(item[0]) is not _FIELD_DESCRIPTORS[1]]
+        for descriptor, value in ordered:
+            if _is_readonly_member(descriptor):
+                if value is not _UNSET and not equal(exact_tree(descriptor.__get__(clone, kind)), value):
+                    raise TypeError("a read-only exception field differs after rebuilding")
+                continue
+            if value is _UNSET:
+                continue  # 無い field: 写しでも置かない（確かめは下）
+            if value is None:
+                if type(descriptor) is _FIELD_DESCRIPTORS[1]:
+                    continue  # getset: setter が `None` を「無い」に写す（読めば `None`）
+                if _builtin_member(descriptor) and not any(item is descriptor for item in chosen):
+                    continue  # 組み込みの C の field の NULL（読めば `None`）
+            descriptor.__set__(clone, value)
+        if state_items:
+            target = _OBJECT_GETATTRIBUTE(clone, "__dict__")
+            for name, value in state_items:
+                dict.__setitem__(target, name, value)
+        if not _exception_state_matches(error, clone, fields, kind, copied, items, state_items):
+            raise TypeError("the copied exception state differs from the original")
+    return clone
+
+
+def _replace_exceptions(node: Any, copies: Dict[int, Any], replaced: Dict[int, Any], alive: List[Any]) -> Any:
+    """読んだ木の葉の例外を、写した例外に置き換えた木（共有された容器は 1 度だけ置き換え、置き換えも共有する）。"""
+
+    kind = type(node)
+    if issubclass(kind, BaseException):
+        if id(node) not in copies:
+            raise TypeError("a nested exception is not copied before its container")
+        return copies[id(node)]
+    if not (kind is tuple or kind is list or kind is set or kind is frozenset or kind is dict):
+        return node
+    if not _nested_exceptions(node):
+        return node
+    done = replaced
+    stack: List[Tuple[Any, bool]] = [(node, False)]
+    count = 0
+    while stack:
+        current, leaving = stack.pop()
+        holder = type(current)
+        if leaving:
+            children = list(dict.items(current)) if holder is dict else list(holder.__iter__(current))
+
+            def swap(item: Any) -> Any:
+                if issubclass(type(item), BaseException):
+                    return copies[id(item)]
+                return done.get(id(item), item)
+
+            if holder is dict:
+                done[id(current)] = {swap(k): swap(v) for k, v in children}
+            else:
+                done[id(current)] = holder(swap(item) for item in children)
+            alive.append(current)
+            continue
+        if id(current) in done:
+            continue
+        count += 1
+        if count > SCAN_LIMIT:
+            raise TypeError("an exception state beyond the scan limit is not copied")
+        if not (holder is tuple or holder is list or holder is set or holder is frozenset or holder is dict):
+            continue
+        stack.append((current, True))
+        children = [k for pair in dict.items(current) for k in pair] if holder is dict else list(holder.__iter__(current))
+        for child in children:
+            if issubclass(type(child), BaseException) and id(child) not in copies:
+                raise TypeError("a nested exception is not copied before its container")
+            child_kind = type(child)
+            if child_kind is tuple or child_kind is list or child_kind is set or child_kind is frozenset or child_kind is dict:
+                stack.append((child, False))
+    return done[id(node)]
 
 
 def _nested_exceptions(tree: Any) -> List[Any]:
@@ -1167,62 +1335,6 @@ def _exception_instance_dict(error: Any) -> List[Tuple[Any, Any]]:
     if not issubclass(type(state), dict):
         raise TypeError("an exception __dict__ that is not a dict is not read")
     return list(dict.items(state))
-
-
-def _exception_copy(error: Any, copies: Dict[int, Any], explicit: Optional[Tuple[Any, ...]] = None) -> Any:
-    """同じ型の例外を、状態を基底型の値（中の例外も写す）にして作る。`__new__` は組み込みのものだけ（`__init__` は
-    呼ばない）。読みだけの field（`BaseExceptionGroup` の `message` / `exceptions`）は、その値を `__new__` に渡して作り、
-    作った例外の値が同じことを確かめる。field の「無い」「明示的な `None`」「値」の別を写し、写した後に元と同じことを
-    確かめる（`_exception_state_matches`）。忠実に写せなければ `TypeError`。"""
-
-    if id(error) in copies:
-        if copies[id(error)] is None:
-            raise TypeError("a cyclic exception state is not copied")  # 写している途中の例外へ戻る: 閉路
-        return copies[id(error)]  # 共有された例外（`args` と field の両方など）: 同じ写し
-    copies[id(error)] = None
-    kind = type(error)
-    owner = _defining_class(kind, "__new__")
-    if type(owner) is not type or _TYPE_MODULE.__get__(owner) != "builtins" or not issubclass(owner, BaseException):
-        raise TypeError("an exception type with its own __new__ is not copied")
-    fields = _exception_fields(error, kind)
-    if explicit is None:
-        # 中の例外（と割り当てを渡されない例外）: 観測と矛盾しない割り当てが 1 つだけのときだけ写す
-        candidates = _none_assignments(error, fields)
-        if len(candidates) != 1:
-            raise TypeError("whether a builtin exception field holds None or nothing is not decided")
-        explicit = candidates[0]
-    copied = [
-        (descriptor, value if value is _UNSET or value is None else _exception_value(value, copies))
-        for descriptor, value in fields
-    ]
-    readonly = [(d, v) for d, v in copied if _is_readonly_member(d)]
-    clone = _new_exception(kind, [value for _descriptor, value in readonly])
-    # getset の setter は他の field も書く（`__cause__` の setter は `__suppress_context__` を真にする）: getset を先に、
-    # C の field・slot を後に置き、最後に field ごとに元と同じ値か確かめる
-    ordered = [item for item in copied if type(item[0]) is _FIELD_DESCRIPTORS[1]]
-    ordered += [item for item in copied if type(item[0]) is not _FIELD_DESCRIPTORS[1]]
-    for descriptor, value in ordered:
-        if _is_readonly_member(descriptor):
-            if value is not _UNSET and not equal(exact_tree(descriptor.__get__(clone, kind)), value):
-                raise TypeError("a read-only exception field differs after rebuilding")
-            continue
-        if value is _UNSET:
-            continue  # 無い field: 写しでも置かない（確かめは下）
-        if value is None:
-            if type(descriptor) is _FIELD_DESCRIPTORS[1]:
-                continue  # getset: setter が `None` を「無い」に写す（読めば `None`）
-            if _builtin_member(descriptor) and not any(chosen is descriptor for chosen in explicit):
-                continue  # 組み込みの C の field の NULL（読めば `None`）
-        descriptor.__set__(clone, value)
-    state = _exception_instance_dict(error)
-    if state:
-        target = _OBJECT_GETATTRIBUTE(clone, "__dict__")
-        for name, value in state:
-            dict.__setitem__(target, exact_tree(name), _exception_value(value, copies))
-    if not _exception_state_matches(error, clone, fields, kind, copied):
-        raise TypeError("the copied exception state differs from the original")
-    copies[id(error)] = clone
-    return clone
 
 
 #: 例外の field に値が無い印（読むと `AttributeError`: `__slots__` の field・`OSError.characters_written` など）
@@ -1298,32 +1410,6 @@ def _builtin_str(kind: type) -> bool:
     return type(_TYPE_DICT.__get__(owner)["__str__"]) is types.WrapperDescriptorType
 
 
-def _exception_state_matches(
-    error: Any, clone: Any, fields: List[Tuple[Any, Any]], kind: type, intended: List[Tuple[Any, Any]],
-) -> bool:
-    """写しの field の状態（無い / `None` / 値の別）と値（置いた写しそのもの）と参照の `None` の数が元と同じか
-    （`None` を残す getset の差だけ許す）。"""
-
-    copied = _exception_fields(clone, kind)
-    if len(copied) != len(fields) or len(intended) != len(fields):
-        return False
-    traceback_none = False
-    for (descriptor, value), (other, copy), (_same, wanted) in zip(fields, copied, intended):
-        if descriptor is not other:
-            return False
-        if (value is _UNSET) != (copy is _UNSET) or (value is None) != (copy is None):
-            return False
-        if (
-            wanted is not _UNSET and wanted is not None and not _is_readonly_member(descriptor)
-            and not (copy is wanted or (_exact_leaf(copy) and equal(copy, wanted)))
-        ):
-            return False  # 置いた値が残っていない（他の field の setter が書き換えた）
-        if value is None and type(descriptor) is _FIELD_DESCRIPTORS[1] and descriptor.__name__ == "__traceback__":
-            traceback_none = True
-    difference = _none_referents(error) - _none_referents(clone)
-    return difference == 0 or (difference == 1 and traceback_none and _TRACEBACK_KEEPS_NONE)
-
-
 def _new_exception(kind: type, args: List[Any]) -> Any:
     """`kind` の例外を組み込みの `__new__` で作る（`__init__` は呼ばない）。組み込みの基底を複数持つ型は、instance の
     形が合う組み込みの class の `__new__` を MRO の順に試す（`LookupError.__new__(X)` は形が違えば `TypeError`）。"""
@@ -1353,31 +1439,6 @@ def _is_readonly_member(descriptor: Any) -> bool:
     )
 
 
-def _exception_value(value: Any, copies: Dict[int, Any]) -> Any:
-    """例外の状態の値の写し: 組み込みの木（`exact_tree`）で、葉の例外は同じ規則で写した例外。"""
-
-    tree = exact_tree(value)
-    if not _nested_exceptions(tree):
-        return tree
-    return _replace_exceptions(tree, copies, [0])
-
-
-def _replace_exceptions(node: Any, copies: Dict[int, Any], count: List[int]) -> Any:
-    count[0] += 1
-    if count[0] > SCAN_LIMIT:
-        raise TypeError("an exception state beyond the scan limit is not copied")
-    kind = type(node)
-    if kind is tuple or kind is list or kind is set or kind is frozenset:
-        return kind(_replace_exceptions(item, copies, count) for item in kind.__iter__(node))
-    if kind is dict:
-        return {
-            _replace_exceptions(k, copies, count): _replace_exceptions(v, copies, count) for k, v in dict.items(node)
-        }
-    if issubclass(kind, BaseException):
-        return _exception_copy(node, copies)
-    return node
-
-
 _OBJECT_GETATTRIBUTE = object.__getattribute__
 _BASE_EXCEPTION_GROUP = getattr(__import__("builtins"), "BaseExceptionGroup", None)
 
@@ -1394,26 +1455,98 @@ def _defining_class(kind: type, name: str) -> type:
     return object
 
 
-#: 例外の状態の dunder の field（組み込みの `__str__` は読まないが、自前の `__str__` が読み得る状態）
-_CHAIN_FIELDS = frozenset({"__cause__", "__context__", "__suppress_context__", "__traceback__"})
+def _exception_state_matches(
+    error: Any, clone: Any, fields: List[Tuple[Any, Any]], kind: type, intended: List[Tuple[Any, Any]],
+    items: List[Tuple[Any, Any]], state_items: List[Tuple[Any, Any]],
+) -> bool:
+    """写しの状態が元と同じか: field ごとの無い / `None` / 値の別と置いた値、field 間・`__dict__` の値の identity の関係
+    （元で同じ object の値は、写しでも同じ object）、参照の `None` の数（`None` を残す getset の差だけ許す）。"""
+
+    copied = _exception_fields(clone, kind)
+    if len(copied) != len(fields) or len(intended) != len(fields):
+        return False
+    traceback_none = False
+    for (descriptor, value), (other, copy), (_same, wanted) in zip(fields, copied, intended):
+        if descriptor is not other:
+            return False
+        if (value is _UNSET) != (copy is _UNSET) or (value is None) != (copy is None):
+            return False
+        if (
+            wanted is not _UNSET and wanted is not None and not _is_readonly_member(descriptor)
+            and not (copy is wanted or (_exact_leaf(copy) and equal(copy, wanted)))
+        ):
+            return False  # 置いた値が残っていない（他の field の setter が書き換えた）
+        if value is None and type(descriptor) is _FIELD_DESCRIPTORS[1] and descriptor.__name__ == "__traceback__":
+            traceback_none = True
+    # identity の関係（元で同じ object の値は写しでも同じ object）
+    originals = [value for _d, value in fields] + [value for _n, value in items]
+    copies = [value for _d, value in copied] + [value for _n, value in state_items]
+    if not _within_scan(len(originals)):
+        return False
+    if not _identity_kept(list(zip(originals, copies))):
+        return False
+    difference = _none_referents(error) - _none_referents(clone)
+    return difference == 0 or (difference == 1 and traceback_none and _TRACEBACK_KEEPS_NONE)
+
+
+def _identity_kept(pairs: List[Tuple[Any, Any]]) -> bool:
+    """(元, 写し) の組から辿れる node の identity の関係が写しで保たれているか: 元で同じ object の node は、写しでも
+    同じ object（field の値どうしと、tuple / list / dict の中の共有）。順序の無い set の中は辿らない。"""
+
+    read = _StorageRead(_COMPARISON_NODES, traversal=True)
+    partner: Dict[int, Any] = {}
+    alive: List[Any] = []
+    pending = list(pairs)
+    while pending:
+        original, copy = pending.pop()
+        if original is _UNSET or original is None:
+            continue
+        found = partner.get(id(original), _MISSING_DUNDER)
+        if found is not _MISSING_DUNDER:
+            if found is not copy:
+                return False
+            continue
+        partner[id(original)] = copy
+        alive.append(original)
+        base = _subclass_tree_kind(type(original))
+        if base is tuple or base is list:
+            if type(copy) is not base or base.__len__(original) != base.__len__(copy):
+                return False
+            read.admit(base.__len__(original))
+            pending.extend(zip(base.__iter__(original), base.__iter__(copy)))
+        elif base is dict:
+            if type(copy) is not dict or dict.__len__(original) != dict.__len__(copy):
+                return False
+            read.admit(2 * dict.__len__(original))
+            pending.extend(zip(itertools.chain.from_iterable(dict.items(original)), itertools.chain.from_iterable(dict.items(copy))))
+    return True
+
+
 #: 組み込みの例外の C の field の descriptor の型
 _FIELD_DESCRIPTORS = (types.MemberDescriptorType, types.GetSetDescriptorType)
+#: 状態の dunder の getset（組み込みの `__str__` は読まないが、自前の `__str__` が読み得る状態）
+_STATE_GETSETS = frozenset({"__cause__", "__context__", "__traceback__"})
 
 
 def _exception_fields(error: Any, owner: type) -> List[Tuple[Any, Any]]:
     """`owner`（例外の型）の MRO の名前空間の field の descriptor と、その値（descriptor の slot で読む）。
 
-    `__` で始まる名前は状態の dunder（`_CHAIN_FIELDS`）だけ（`__dict__` / `__weakref__` は除く: `__dict__` は別に読む）。
-    読むと `AttributeError` の field は `_UNSET`（無い）。明示的な `None` は `None`。
+    member の descriptor（組み込みの C の field・`__slots__` の field: 名前を問わない。`__payload__` のような dunder の
+    名前の slot も状態）は全部。getset は `args` などの dunder でない名前と、状態の dunder（`_STATE_GETSETS`）だけ
+    （`__dict__` / `__weakref__` は除く: `__dict__` は別に読む）。読むと `AttributeError` の field は `_UNSET`（無い）。
+    明示的な `None` は `None`。
     """
 
     fields: List[Tuple[Any, Any]] = []
     for klass in _TYPE_MRO.__get__(owner):
         for name, descriptor in _TYPE_DICT.__get__(klass).items():
             holder = type(descriptor)
-            if type(name) is not str or (name.startswith("__") and name not in _CHAIN_FIELDS):
+            if type(name) is not str:
                 continue
-            if holder is not _FIELD_DESCRIPTORS[0] and holder is not _FIELD_DESCRIPTORS[1]:
+            if holder is _FIELD_DESCRIPTORS[1]:
+                if name.startswith("__") and name not in _STATE_GETSETS:
+                    continue
+            elif holder is not _FIELD_DESCRIPTORS[0]:
                 continue
             try:
                 fields.append((descriptor, descriptor.__get__(error, type(error))))
@@ -1846,46 +1979,572 @@ def _exact_tree_read(value: Any, memo: Any = _ACTIVE) -> Tuple[Any, bool]:
 
 
 # ---------------------------------------------------------------------------
-# 比較・所属・順序（Issue #242: 暗黙の callback が返す値を読む）
+# 比較・所属・順序・hash（Issue #242: 暗黙の callback が返す値を読む）
 # ---------------------------------------------------------------------------
 #
 # `exact_tree` の保証は「木の正規化」（容器は組み込みの型そのもの、scalar の葉は組み込みの型そのもの）で、葉の外の
-# object は外の code のまま残る。その木を `==` / `in` / 順序 / dict の key / set の要素に使うと、組み込みの code が
-# 葉の型の `__eq__` / `__lt__` / `__contains__` を呼び、その戻り値（scalar の subclass かもしれない値）の真偽を C で
-# 読む（`__bool__` の hook）。読んだ値の保証と、その後の暗黙の callback が返す値の保証は別のもの。
+# object は外の code のまま残る。その木を比べる・`in` で探す・並べる・hash で置くと、組み込みの code が葉の型の
+# `__eq__` / `__lt__` などを呼び、その戻り値（scalar の subclass かもしれない値）の真偽を C で読む（`__bool__` の hook）。
 #
-# この節が比べる側の契約の owner:
-# - 不活性な値（`inert`）: 容器が組み込みの型そのもので、葉が `None` と exact な組み込みの scalar だけ。`==`・hash・順序・
-#   dict の key・set の要素は組み込みの code だけで決まる（値の型の code も callback も呼ばない）。
-# - それ以外の値を比べるときは `equal` / `contains` / `less` / `sorted_trees`: Python の比較の規則（容器の要素は
-#   identity を先に見る・左から順に・最初に違う要素で止まる・hash が等しい要素だけを比べる）をなぞり、葉の比較の
-#   戻り値は `truth` で読む（基底型の値の真偽）。結果は、callback が基底型の値を返す双子と同じ。
-# - 組み込みの code だけでは忠実になぞれない比較（不活性でない key の dict・不活性でない要素の set）は判定しない:
-#   `UndecidableComparison`（`TypeError`。呼ぶ側の「読めない値」の扱い（fail-closed）に入る）。
+# この節が比べる側の契約の owner。比較そのもの（要素を読む時点・長さ・identity・hash の衝突の探索の順・再帰の上限）は
+# **Python の組み込みの処理に任せ**、再実装しない。外の code に渡るのは元の値で、渡る順も双子と同じ:
+# - 読み: 比べる値を 1 回の `exact_tree` で読む（scalar の subclass の葉は基底型の値、共有は保つ）。
+# - 信頼する葉: exact な scalar と `None`、比較の dunder が全部 `object` / 組み込みの型の実装か、登録した実装（ref の
+#   `__eq__`）の object。比較の dunder は組み込みの code か package の code（ref の `__eq__` は field をこの契約で比べる:
+#   中の外の code はこの節の包みを通り、写しの確かめを受ける）。
+# - 信頼しない葉（比較の dunder を自分で持つ外の object）は `_Comparand` で包む: 組み込みの比較が包みの dunder を
+#   呼ぶと、包みは元の値どうしで比べ（反射を含む Python の手順）、戻り値を `truth` で読んだ組み込みの `bool` を返す。
+# - 写しの有効性: 包むために容器（list・dict の値）を写す。組み込みの比較が読む写しは、元の容器が変わらない間は元と
+#   同じ（読む時点の違いが結果に出ない）。外の code（包みの dunder が呼ぶ比較・`__bool__`・`__hash__`）が呼ばれる
+#   たびに、比較している値（入れ子の比較を含む）の変わる容器を全部確かめ、どれかが変わっていれば判定不能。
+# - 外の code に渡る相手: 包みは元の値、写した容器は写す前の容器（`origins`）。`exact_tree` が写した容器（scalar の
+#   subclass の葉を読んだ）は双子の容器と別の object なので、外の code に渡す前に判定しない（`_READ_COPY`）。
+# - 登録した比較（`@trusted_comparison`）は包みを元の値に戻して比べ、相手が自分の型の subclass の包みなら
+#   `NotImplemented`（Python の subclass 優先の規則を包みの反射で保つ）。
+#
+# 保証する入力の範囲と判定不能（`UndecidableComparison`、`TypeError` の subclass。等しい・違うの根拠にしない。判定
+# 不能を投げるのは、双子に無い外の code の呼び出しの前: それまでの呼び出しは双子の呼び出しの先頭）:
+# - 外の code が比較の途中で、比べている値の変わる容器（写した list / dict / set の元）を変えた（`_CopyFrame`）。
+# - 外の葉・不透明な葉が hash で置く位置（set / frozenset の要素・dict の key）にある（写すと外の `__hash__` を双子に
+#   無い時点で呼ぶ）。dict の key が不活性でないのに値を包む必要がある（同じ）。
+# - 閉路の容器（写しが元へ戻り、包まない葉を組み込みの比較が読む）。
+# - 比べ方が読む基底型と違う容器（比較・hash・`in` の dunder を変えた subclass・`deque`・dict の view・`OrderedDict`
+#   など: `_comparison_shape`）。
+# - 不透明な葉（interpreter と標準 library の C の比較が持っている値を比べる型: `slice`・`mappingproxy`・
+#   `SimpleNamespace` など）の比較が実際に走るとき（identity の近道は双子と同じに通す: `_Opaque`）。
+# - `exact_tree` が写した容器を外の code に渡すとき（上）、`exact_tree` が読めない値（作り直せない key・要素）。
+# 範囲の外（契約が扱わない）: 外の object 自身の code が中で読む値（外の code の振る舞い）。
+# 費用: 写した変わる容器の確かめは外の code の呼び出しごとに写した量に比例（C の反復で読む。1 回は `SCAN_LIMIT` の
+# 読みの上限の中）。外の葉を持つ大きな list どうしの比較は呼び出しの数 × 量になる（production の key は tuple）。
 
 
 class UndecidableComparison(TypeError):
     """比べる値に、組み込みの code だけでは忠実に比べられない部分がある（判定しない。推測で等しい / 違うとしない）。"""
 
 
-def _comparison_depth_limit() -> int:
-    """入れ子の比較の深さの上限: 組み込みの比較なら Python の再帰の上限（`RecursionError`）に当たり得る深さ。
+#: 真の間、判定不能を「値が無い」（`None` / 偽）に変える読み手が、変えずに投げる（`deciding`）
+_DECIDING: "contextvars.ContextVar[bool]" = contextvars.ContextVar("live_values_deciding", default=False)
 
-    組み込みの比較は入れ子の 1 段ごとに C の再帰を 1 つ使い、今の Python の frame の深さと合わせて再帰の上限を超えると
-    `RecursionError`。その境は版と呼び出しの深さで決まるので、余裕を引いた深さより深い比較は判定しない
-    （`UndecidableComparison`: 双子が投げるかもしれない比較に値を答えない）。
-    """
 
-    depth = 0
-    frame = sys._getframe()
-    while frame is not None and depth <= sys.getrecursionlimit():
-        depth += 1
-        frame = frame.f_back
-    return max(0, sys.getrecursionlimit() - depth - 64)
+class deciding:
+    """判定する側の scope（`with deciding():`）。中では、判定不能を「key が無い」「束縛の文脈が無い」に変える読み手
+    （`undecided_is_absent()` が偽）が投げ直す: 判定する側は判定不能を、無い値として次の gate へ進む根拠にしない。"""
+
+    __slots__ = ("token",)
+
+    def __enter__(self) -> "deciding":
+        self.token = _DECIDING.set(True)
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        _DECIDING.reset(self.token)
+
+
+def undecided_is_absent() -> bool:
+    """判定不能を「値が無い」として扱ってよいか（判定する側の scope の外だけ真）。"""
+
+    return not _DECIDING.get()
 
 
 #: 比べる側の契約が読む木の node の量の名前（`exact_tree` と同じ反復の確かめ: 量の owner の無い文脈では上限なし）
 _COMPARISON_NODES = "a comparison's tree nodes"
+
+#: 比較の dunder（信頼する葉はこの全部が `object` / 組み込みの型 / 登録した実装）
+_COMPARISON_DUNDERS = ("__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__")
+
+#: 信頼する比較の実装（package の関数: 組み込みの `bool` か `NotImplemented` を返し、外の code の戻り値を reader で読む）
+_TRUSTED_COMPARISONS: List[Any] = []
+
+
+def trusted_comparison(function: Any) -> Any:
+    """比べてよい `__eq__` などの実装として登録する（ref の owner の `__eq__`・ref の class の自前の `__eq__`）。
+
+    登録した実装を持つ値は「信頼する葉」: 組み込みの比較がその実装を呼んでも、戻り値は組み込みの `bool` で、外の
+    code の戻り値は実装の中で reader が読む（構築の guard が本体を検査する package の code に限る）。返す関数は包みを
+    元の値に戻して実装を呼び、相手が自分の型の subclass の包みなら `NotImplemented`（Python の subclass 優先の規則を
+    包みの反射で保つ）。
+    """
+
+    if type(function) is not types.FunctionType or not package_code(function.__code__):
+        raise TypeError("a trusted comparison is a package function")
+
+    def comparison(self: Any, other: Any) -> Any:
+        if type(other) is _Comparand or type(other) is _Opaque:
+            value = other.value
+            kind = type(value)
+            if kind is not type(self) and issubclass(kind, type(self)):
+                # Python は右が左の型の subclass なら右の反射を先に呼ぶ（包みの型ではその規則が働かない）: 包みの反射へ
+                # 渡し、元の値どうしの比較（`value == self`）で同じ順にする
+                return NotImplemented
+            other = value  # 包みでなく元の値と比べる（双子と同じ相手）
+        return function(self, other)
+
+    comparison.__name__ = function.__name__
+    comparison.__qualname__ = function.__qualname__
+    comparison.__module__ = function.__module__
+    comparison.__doc__ = function.__doc__
+    comparison.__wrapped__ = function  # type: ignore[attr-defined]
+    _TRUSTED_COMPARISONS.append(comparison)
+    return comparison
+
+
+#: 比較の C の実装が、持っている値の比較（外の code）を呼ばない組み込みの型（`object` の identity・数・bytes・range）
+_SELF_CONTAINED = frozenset({object, type, int, str, float, bool, complex, bytes, bytearray, range, type(None)})
+#: 標準 library の module の名前（`sys.stdlib_module_names`、python 3.10 以降）
+_STDLIB_MODULES = frozenset(getattr(sys, "stdlib_module_names", ()))
+#: 葉の比較の分類
+_TRUSTED, _FOREIGN, _OPAQUE = "trusted", "foreign", "opaque"
+
+
+#: `_dunder_trust` の結果の memo（`id(実装)` → (実装, 分類)。実装の object を生かす: `id` を再利用させない）。実装の
+#: 分類は実装の object だけで決まる（型の名前空間の変化は `_leaf_trust` が毎回引き直す。登録は新しい関数を作るので、
+#: 分類済みの object の分類は変わらない）
+_DUNDER_TRUST: Dict[int, Tuple[Any, str]] = {}
+
+
+def _dunder_trust(implementation: Any) -> str:
+    """比較の dunder の実装の分類: 信頼する（`object` / 自己完結の組み込み / 登録した実装）・外の code（Python の関数・
+    外の拡張の C）・不透明（持っている値を C の中で比べる組み込みの型: `slice`・`mappingproxy` など。中の比較の戻り値を
+    C が真偽で読むが、包めない）。"""
+
+    found = _DUNDER_TRUST.get(id(implementation))
+    if found is not None:
+        return found[1]  # memo が実装を生かしているので、同じ `id` は同じ object
+    trust = _classify_dunder(implementation)
+    if len(_DUNDER_TRUST) >= SCAN_LIMIT:
+        _DUNDER_TRUST.clear()
+    _DUNDER_TRUST[id(implementation)] = (implementation, trust)
+    return trust
+
+
+def _classify_dunder(implementation: Any) -> str:
+    if any(implementation is trusted for trusted in _TRUSTED_COMPARISONS):
+        return _TRUSTED
+    holder = type(implementation)
+    if holder is types.WrapperDescriptorType or holder is types.MethodDescriptorType:
+        owner = implementation.__objclass__
+        if any(owner is kind for kind in _SELF_CONTAINED):
+            return _TRUSTED
+        module = _TYPE_MODULE.__get__(owner)
+        top = module.split(".", 1)[0] if type(module) is str else ""
+        # interpreter と標準 library の C の比較（`slice`・`mappingproxy`・`SimpleNamespace`・`GenericAlias` など）は、
+        # 持っている Python の値を C の中で比べる。外の拡張の C の比較（JPype の Java の `equals` など）は外の code
+        return _OPAQUE if top == "builtins" or top in _STDLIB_MODULES else _FOREIGN
+    return _FOREIGN
+
+
+def _trusted_leaf(value: Any) -> bool:
+    """包まずに組み込みの比較へ渡してよい葉か（exact な scalar・`None`・比較の dunder が全部信頼する実装の object）。
+
+    信頼する実装は戻り値が組み込みの `bool` / `NotImplemented` で、中で外の code を呼ぶなら（ref の field の比較）この
+    節の包みを通る（戻り値を `truth` で読み、写しの確かめを受ける）。
+
+    比較の dunder は値の型の MRO の名前空間から読む（metaclass の hook を通らない。使うたびに読む: 後から型に足した
+    実装も見る）。scalar の subclass は信頼しない（読みで基底型の値にしてから比べる）。
+    """
+
+    kind = type(value)
+    if value is None or kind is int or kind is str or kind is bool or kind is float:
+        return True
+    if issubclass(kind, _SCALAR_BASES) and not issubclass(kind, Enum):
+        return False
+    return _leaf_trust(value) == _TRUSTED
+
+
+def _leaf_trust(value: Any) -> str:
+    """葉の比較の分類（`_dunder_trust` の最も弱いもの: 不透明 > 外の code > 信頼する）。"""
+
+    kind = type(value)
+    if value is None or kind is int or kind is str or kind is bool or kind is float:
+        return _TRUSTED
+    if issubclass(kind, _SCALAR_BASES) and not issubclass(kind, Enum):
+        return _FOREIGN
+    mro = _TYPE_MRO.__get__(kind)
+    if not _within_scan(len(mro)):
+        return _OPAQUE
+    # MRO を 1 回辿り、比較の dunder を最初に定義する class の実装を分類する（`object` の実装は信頼する: そこで止める）
+    trust = _TRUSTED
+    pending = _COMPARISON_DUNDERS
+    for klass in mro:
+        if klass is object:
+            break
+        namespace = _TYPE_DICT.__get__(klass)
+        unresolved = []
+        for name in pending:
+            implementation = namespace.get(name, _MISSING_DUNDER)
+            if implementation is _MISSING_DUNDER:
+                unresolved.append(name)
+                continue
+            found = _dunder_trust(implementation)
+            if found == _OPAQUE:
+                return _OPAQUE
+            if found == _FOREIGN:
+                trust = _FOREIGN
+        if not unresolved:
+            break
+        pending = tuple(unresolved)
+    return trust
+
+
+class _Comparand:
+    """信頼しない葉の包み: 組み込みの比較がこの dunder を呼ぶと、元の値どうしで比べた戻り値を `truth` で読む。
+
+    包みどうし・包みと信頼する値の比較は、元の値の Python の比較の手順（反射を含む）そのもの。組み込みの比較が包みの
+    dunder を反射で呼ぶのは、左の値（信頼する葉）の実装が `NotImplemented` を返したときだけで、そのとき元の値の比較
+    （`右 op 左` の反射）が呼ぶ外の code は双子と同じ。hash は元の値の hash（戻り値は C が基底型の値で読む）。
+    外の code の後は、比較している値の変わる容器が変わっていないことを確かめる（`_check_copies`）。
+    """
+
+    __slots__ = ("value", "origins")
+
+    def __init__(self, value: Any, origins: Dict[int, Tuple[Any, Any]]) -> None:
+        self.value = value
+        self.origins = origins
+
+    def _other(self, other: Any) -> Any:
+        """相手の元の値（包みは元の値、この比較が作った写しの容器は写す前の容器: 外の code に写しを渡さない）。"""
+
+        if type(other) is _Comparand:
+            return other.value
+        found = self.origins.get(id(other))
+        if found is None or found[0] is not other:
+            return other
+        if found[1] is _READ_COPY:
+            # `exact_tree` が写した容器（scalar の subclass の葉を読んだ）: 双子の容器と別の object を外の code に渡す
+            # ことになる。呼ぶ前に判定しない（ここまでの外の code の呼び出しは双子の先頭）
+            raise UndecidableComparison("a foreign callback would receive a read copy instead of the twin's container")
+        return found[1]
+
+    def __eq__(self, other: Any) -> bool:
+        return _checked(truth(self.value == self._other(other)))
+
+    def __ne__(self, other: Any) -> bool:
+        return _checked(truth(self.value != self._other(other)))
+
+    def __lt__(self, other: Any) -> bool:
+        return _checked(truth(self.value < self._other(other)))
+
+    def __le__(self, other: Any) -> bool:
+        return _checked(truth(self.value <= self._other(other)))
+
+    def __gt__(self, other: Any) -> bool:
+        return _checked(truth(self.value > self._other(other)))
+
+    def __ge__(self, other: Any) -> bool:
+        return _checked(truth(self.value >= self._other(other)))
+
+    def __hash__(self) -> int:
+        return _checked(hash(self.value))
+
+
+class _CopyFrame:
+    """1 つの比較が確かめる変わる容器（list / dict / set とその subclass）と、確かめ始めたときの中身の identity。
+
+    確かめは容器の種類ごとに C の反復で中身の `id` の列と長さの列を作って比べる（外の code の呼び出しごとに走るので、
+    Python の 1 要素ずつの反復にしない）。長さの列が要るのは、容器の間で要素が移っても `id` の連結が変わらないため。
+    """
+
+    __slots__ = ("lists", "dicts", "sets", "snapshot", "held")
+
+    def __init__(self, containers: List[Any]) -> None:
+        _admit_storage(len(containers), _COMPARISON_NODES, traversal=True)
+        self.lists = [c for c in containers if issubclass(type(c), list)]
+        self.dicts = [c for c in containers if issubclass(type(c), dict)]
+        self.sets = [c for c in containers if issubclass(type(c), set)]
+        self.snapshot = self._read()
+        # 確かめ始めたときの中身を生かす: 外の code が要素を外して捨てても、その `id` を別の object が再利用しない
+        self.held = (
+            list(itertools.chain.from_iterable(map(list.__iter__, self.lists))),
+            list(itertools.chain.from_iterable(itertools.chain.from_iterable(map(dict.items, self.dicts)))),
+            list(itertools.chain.from_iterable(map(set.__iter__, self.sets))),
+        )
+
+    def _read(self) -> Tuple[Any, ...]:
+        lengths = (
+            tuple(map(list.__len__, self.lists)), tuple(map(dict.__len__, self.dicts)), tuple(map(set.__len__, self.sets))
+        )
+        _admit_storage(sum(lengths[0]) + 2 * sum(lengths[1]) + sum(lengths[2]), _COMPARISON_NODES, traversal=True)
+        return lengths + (
+            tuple(map(id, itertools.chain.from_iterable(map(list.__iter__, self.lists)))),
+            tuple(map(id, itertools.chain.from_iterable(itertools.chain.from_iterable(map(dict.items, self.dicts))))),
+            tuple(map(id, itertools.chain.from_iterable(map(set.__iter__, self.sets)))),
+        )
+
+    def unchanged(self) -> bool:
+        return self._read() == self.snapshot
+
+
+class _CopyFrames(threading.local):
+    """thread ごとの、進行中の比較の `_CopyFrame` の stack（入れ子の比較: ref の `__eq__` の中の比較）。"""
+
+    def __init__(self) -> None:
+        self.stack: List[_CopyFrame] = []
+
+
+_COPY_FRAMES = _CopyFrames()
+
+
+def _checked(result: Any) -> Any:
+    """外の code の直後: 進行中の比較（入れ子を含む全部）の元の容器が変わっていれば判定不能。変わっていなければ
+    `result`。外の code の呼び出しの中だけの変化（呼び出しが返る前に戻した変化）は組み込みの比較から見えない（双子も同じ）。"""
+
+    stack = _COPY_FRAMES.stack
+    _admit_storage(len(stack), _COMPARISON_NODES, traversal=True)  # 入れ子の比較の数（Python の再帰の上限まで）
+    if stack and not all([frame.unchanged() for frame in stack]):
+        raise UndecidableComparison("a foreign callback changed a compared container")
+    return result
+
+
+def _guarded(frame: Optional[_CopyFrame], operation: Any) -> Any:
+    """`operation()` を `frame` を進行中にして行い、終わりで元の容器が変わっていないことを確かめる。"""
+
+    if frame is None:
+        return operation()
+    stack = _COPY_FRAMES.stack
+    stack.append(frame)
+    try:
+        result = operation()
+    finally:
+        stack.pop()
+    if not frame.unchanged():
+        raise UndecidableComparison("a foreign callback changed a compared container")
+    return result
+
+
+def _covered(values: Tuple[Any, ...]) -> Tuple[Tuple[Any, ...], Optional[_CopyFrame], Tuple[Any, ...]]:
+    """比べる値（の組）を 1 回の読みで写し、信頼しない葉を `_Comparand` で包んだ木と、写しの有効性を確かめる frame
+    （元に変わる容器が無ければ `None`）。
+
+    共有された葉・容器は 1 度だけ写して包む（identity の規則が双子と同じ）。list・dict の値の中の包みは容器を写す
+    （dict は key が不活性なときだけ: key の hash・比較が組み込みの code）。写しは写す前の容器を覚え（`origins`）、包みが
+    外の code を呼ぶときは写す前の容器を渡す。`UndecidableComparison`: 外の object が set / frozenset の要素・dict の
+    key にある、閉路、不透明な葉（`_leaf_trust`）、比べ方が読む基底型と違う容器（`_comparison_shape`）。辿る量は
+    `exact_tree` と同じ反復の確かめ。`exact_tree` が写した容器（scalar の subclass の葉を読んだ）を外の code に渡す
+    ときも判定しない（`_Comparand._other`: 外の code が双子の容器でなく写しを受け取る）。返すのは (包んだ木, 確かめの
+    frame, 読んだ木)。
+    """
+
+    root = _compared_tree(values)
+    shape: List[Any] = []
+    original_ids: set = set()
+    if root is not values:
+        shape, original_ids = _comparison_shape(values)
+    read = _StorageRead(_COMPARISON_NODES, traversal=True)
+    origins: Dict[int, Tuple[Any, Any]] = {}  # id(写し) → (写し, 写す前の容器)
+    done: Dict[int, Any] = {}
+    entered: set = set()  # 辿っている途中の容器（閉路の検出）
+    alive: List[Any] = [root]
+    mutable: List[Any] = []
+    stack: List[Tuple[Any, bool]] = [(root, False)]
+    while stack:
+        node, leaving = stack.pop()
+        kind = type(node)
+        if leaving:
+            entered.discard(id(node))
+            if kind is dict:
+                pairs = list(dict.items(node))
+                if any(done.get(id(value), value) is not value for _key, value in pairs):
+                    copy: Any = {key: done.get(id(value), value) for key, value in pairs}
+                    done[id(node)] = copy
+                    origins[id(copy)] = (copy, _source(origins, node))
+                continue
+            items = list(kind.__iter__(node))
+            rebuilt = [done.get(id(item), item) for item in items]
+            if any(new is not old for new, old in zip(rebuilt, items)):
+                copy = tuple(rebuilt) if kind is tuple else rebuilt
+                done[id(node)] = copy
+                origins[id(copy)] = (copy, _source(origins, node))
+            continue
+        if id(node) in entered:
+            # 閉路の容器: 写しが元へ戻る（包まない葉を組み込みの比較が読む）。双子も再帰の上限まで比べる: 判定しない
+            raise UndecidableComparison("a cyclic container is not compared")
+        if id(node) in done:
+            continue
+        if node is None or kind is int or kind is str or kind is bool or kind is float:
+            continue
+        if kind is tuple or kind is list:
+            done[id(node)] = node  # 入った印
+            entered.add(id(node))
+            alive.append(node)
+            if node is not root and id(node) not in original_ids and original_ids:
+                origins[id(node)] = (node, _READ_COPY)
+            if kind is list:
+                mutable.append(node)
+            read.admit(kind.__len__(node))
+            stack.append((node, True))
+            stack.extend((item, False) for item in kind.__iter__(node))
+            continue
+        if kind is dict:
+            done[id(node)] = node
+            alive.append(node)
+            if original_ids and id(node) not in original_ids:
+                origins[id(node)] = (node, _READ_COPY)
+            mutable.append(node)
+            keys = list(dict.keys(node))
+            read.admit(len(keys))
+            if not all(inert(key) for key in keys):
+                # key を写し直すと key の hash・比較（外の code かもしれない）を双子に無い時点で呼ぶ: 写さない
+                if not all(_trusted_tree(child) for child in keys + list(dict.values(node))):
+                    raise UndecidableComparison("a foreign comparison inside a dict with keys that are not inert is not decided")
+                continue
+            entered.add(id(node))
+            stack.append((node, True))
+            stack.extend((value, False) for value in dict.values(node))
+            continue
+        if kind is set or kind is frozenset:
+            done[id(node)] = node
+            alive.append(node)
+            if original_ids and id(node) not in original_ids:
+                origins[id(node)] = (node, _READ_COPY)
+            if kind is set:
+                mutable.append(node)
+            children = list(kind.__iter__(node))
+            read.admit(len(children))
+            if not all(_trusted_tree(child) for child in children):
+                raise UndecidableComparison(f"a foreign comparison inside a {type_name(kind)} is not decided")
+            continue
+        trust = _leaf_trust(node)
+        if trust == _OPAQUE:
+            # 比較が実際に走るときだけ判定しない（組み込みの容器の比較の identity の近道は双子と同じに通す）
+            done[id(node)] = _Opaque(node, origins)
+            alive.append(node)
+        elif trust == _FOREIGN:
+            done[id(node)] = _Comparand(node, origins)
+            alive.append(node)
+    covered = done.get(id(root), root)
+    # 確かめる容器: 写した変わる容器の元（写さなかった容器は組み込みの比較が元を読む: 双子と同じ時点）。`exact_tree`
+    # が写した木（scalar の subclass の葉・subclass の容器）は、元から辿れる変わる容器を全部と、外の code に渡り得る
+    # 読んだ木の変わる容器（元の写し）を全部
+    if root is values:
+        guarded = [node for node in mutable if done.get(id(node)) is not node]
+    else:
+        guarded = shape  # 読んだ木の写しは外の code に渡らない（`_READ_COPY`）: 元の変わる容器だけを確かめる
+    alive.append(origins)
+    return covered, (_CopyFrame(guarded) if guarded else None), root
+
+
+#: `exact_tree` が写した容器の印（`_Comparand._other` が外の code に渡さない）
+_READ_COPY = object()
+
+
+class _Opaque(_Comparand):
+    """不透明な葉（持っている値を C の中で比べる組み込みの型）の包み: 比較の dunder が呼ばれたら判定しない（中の比較の
+    戻り値を C が真偽で読むが、包めない）。hash は元の値の hash（戻り値は C が基底型の値で読む）。`_Comparand` の
+    subclass なので、包みどうしの比較では Python の subclass 優先の規則でこちらの dunder が先に呼ばれる（外の葉の包みが
+    この包みを外の code に渡すことはない）。"""
+
+    __slots__ = ()
+
+    def _refuse(self, other: Any) -> bool:
+        raise UndecidableComparison(f"{type_name(type(self.value))} compares what it holds inside builtin code")
+
+    __eq__ = __ne__ = __lt__ = __le__ = __gt__ = __ge__ = _refuse
+    __hash__ = _Comparand.__hash__
+
+
+def _source(origins: Dict[int, Tuple[Any, Any]], node: Any) -> Any:
+    """写す前の容器（読んだ木の容器が `exact_tree` の写しなら `_READ_COPY`）。"""
+
+    found = origins.get(id(node))
+    return _READ_COPY if found is not None and found[0] is node and found[1] is _READ_COPY else node
+
+
+#: 容器の比べ方・hash の dunder（subclass がこれを変えると、基底型として読んだ木の比較は双子の比較と違う）
+_CONTAINER_DUNDERS = _COMPARISON_DUNDERS + ("__hash__", "__contains__")
+
+
+def _comparison_shape(value: Any) -> Tuple[List[Any], set]:
+    """値（読む前の木）から辿れる変わる容器（list / dict / set とその subclass。基底型の slot で辿る）と、辿った容器の
+    `id` の集合（値が生きている間だけ意味を持つ: 呼ぶ側が値を持つ）。
+
+    `exact_tree` は容器を基底型へ読む。比べ方がその基底型と違う容器（比較・hash・`in` の dunder を変えた subclass、
+    `deque`、dict の view、`OrderedDict` などの別の比べ方の型）は、読んだ木の比較が双子の比較と違う:
+    `UndecidableComparison`。
+    """
+
+    read = _StorageRead(_COMPARISON_NODES, traversal=True)
+    found: List[Any] = []
+    seen: set = set()
+    alive: List[Any] = []
+    pending = [value]
+    while pending:
+        node = pending.pop()
+        kind = type(node)
+        if node is None or kind is int or kind is str or kind is bool or kind is float:
+            continue
+        if kind is _DICT_VIEWS[0] or kind is _DICT_VIEWS[1] or kind is _DICT_VIEWS[2]:
+            raise UndecidableComparison("a dict view does not compare like the sequence it is read as")
+        base = _subclass_tree_kind(kind)
+        if base is None:
+            continue
+        if base is collections.deque:
+            raise UndecidableComparison("a deque does not compare like the list it is read as")
+        if kind is not base:
+            _require_same_comparison(kind, base)
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        alive.append(node)
+        if base is dict:
+            children = [item for pair in dict.items(node) for item in pair]
+        else:
+            children = list(base.__iter__(node))
+        if base is dict or base is list or base is set:
+            found.append(node)
+        read.admit(len(children))
+        pending.extend(children)
+    return found, seen
+
+
+def _require_same_comparison(kind: type, base: type) -> None:
+    """容器の subclass の比べ方・hash・`in` が基底型と同じか（MRO の名前空間で引いた実装の identity）。違えば
+    `UndecidableComparison`。"""
+
+    for name in _CONTAINER_DUNDERS:
+        if _resolved_dunder(kind, name) is not _resolved_dunder(base, name):
+            raise UndecidableComparison(f"{type_name(kind)} compares differently from {type_name(base)}")
+
+
+def _resolved_dunder(kind: type, name: str) -> Any:
+    """型の MRO の名前空間で最初に見つかる `name` の実装（metaclass の hook を通らない。無ければ `_MISSING_DUNDER`）。"""
+
+    mro = _TYPE_MRO.__get__(kind)
+    if not _within_scan(len(mro)):
+        raise UndecidableComparison("a container type with a long MRO is not compared")
+    for klass in mro:
+        namespace = _TYPE_DICT.__get__(klass)
+        if name in namespace:
+            return namespace[name]
+    return _MISSING_DUNDER
+
+
+_MISSING_DUNDER = object()
+
+
+def _trusted_tree(value: Any) -> bool:
+    """値（組み込みの木）の葉が全部信頼する葉か（比べても hash しても外の code の比較を呼ばない）。"""
+
+    read = _StorageRead(_COMPARISON_NODES, traversal=True)
+    pending = [value]
+    seen: set = set()
+    alive: List[Any] = []
+    while pending:
+        node = pending.pop()
+        kind = type(node)
+        if node is None or kind is int or kind is str or kind is bool or kind is float:
+            continue
+        if kind is tuple or kind is list or kind is set or kind is frozenset or kind is dict:
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            alive.append(node)
+            children = list(dict.keys(node)) + list(dict.values(node)) if kind is dict else list(kind.__iter__(node))
+            read.admit(len(children))
+            pending.extend(children)
+            continue
+        if not _trusted_leaf(node):
+            return False
+    return True
 
 
 def inert(value: Any) -> bool:
@@ -1945,12 +2604,19 @@ def truth(value: Any) -> bool:
 
 
 def _exact_elements(container: Any) -> bool:
-    """組み込みの tuple / list / set / frozenset の要素が全部 exact な scalar か（呼ぶ側が長さを数えてから呼ぶ）。"""
+    """組み込みの tuple / list / set / frozenset の要素が全部 exact な scalar か、exact な scalar だけの tuple か（呼ぶ側が
+    長さを数えてから呼ぶ。入れ子の tuple の長さはここで上限と比べる）。"""
 
     for element in type(container).__iter__(container):
         kind = type(element)
         if not (element is None or kind is int or kind is str or kind is bool or kind is float):
-            return False
+            # 入れ子の 1 段だけ: 要素が exact な scalar だけの tuple（ref の比べる値の tuple によくある形）
+            if kind is not tuple or not _within_scan(tuple.__len__(element)):
+                return False
+            for item in tuple.__iter__(element):
+                item_kind = type(item)
+                if not (item is None or item_kind is int or item_kind is str or item_kind is bool or item_kind is float):
+                    return False
     return True
 
 
@@ -1960,52 +2626,123 @@ def _exact_leaf(value: Any) -> bool:
     return value is None or kind is int or kind is str or kind is bool or kind is float
 
 
+def _plain_operands(*values: Any) -> bool:
+    """値が全部、そのまま組み込みの比較に渡してよい木か（読んでも変わらない: scalar の subclass の葉・subclass の容器が
+    無く、葉が全部信頼する葉）。最も多い形の速い経路。"""
+
+    for value in values:
+        if _exact_leaf(value):
+            continue
+        kind = type(value)
+        if kind is tuple or kind is list or kind is set or kind is frozenset:
+            _admit_storage(kind.__len__(value), _COMPARISON_NODES, traversal=True)
+            if _exact_elements(value):
+                continue
+        if not _plain_tree(value):
+            return False
+    return True
+
+
+def _plain_tree(value: Any) -> bool:
+    """値が、写さずに組み込みの比較へ渡してよい木か（1 回の走査）: 容器は組み込みの型そのもの、葉は信頼する葉だけ。
+
+    scalar の subclass・容器の subclass・`deque`・dict の view は信頼する葉でない（`_leaf_trust`: 外の code / 不透明）
+    ので、真なら `exact_tree` も写さない（読んでも変わらない木）。閉路の容器は 1 度だけ辿る（比較は組み込みの再帰の
+    上限まで: 双子と同じ）。"""
+
+    read = _StorageRead(_COMPARISON_NODES, traversal=True)
+    pending = [value]
+    seen: set = set()
+    alive: List[Any] = []
+    while pending:
+        node = pending.pop()
+        kind = type(node)
+        if node is None or kind is int or kind is str or kind is bool or kind is float:
+            continue
+        if kind is tuple or kind is list or kind is set or kind is frozenset or kind is dict:
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            alive.append(node)
+            if kind is dict:
+                read.admit(2 * dict.__len__(node))
+                children: Any = itertools.chain(dict.keys(node), dict.values(node))
+            else:
+                read.admit(kind.__len__(node))
+                children = kind.__iter__(node)
+            for child in children:
+                child_kind = type(child)
+                if not (child is None or child_kind is int or child_kind is str or child_kind is bool or child_kind is float):
+                    pending.append(child)  # exact な scalar の葉は積まない（よくある形）
+            continue
+        if _leaf_trust(node) != _TRUSTED:
+            return False
+    return True
+
+
+def _compared_tree(value: Any) -> Any:
+    """比べる値の読み（`exact_tree`）。読めない値（不活性でない key の dict・要素の set を作り直す必要がある、など）は
+    `UndecidableComparison`（比べる側の契約が許す唯一の逸脱: `decided_equal` などが判定しないとして扱う）。"""
+
+    try:
+        return exact_tree(value)
+    except UndecidableComparison:
+        raise
+    except TypeError as error:
+        raise UndecidableComparison(f"the compared value is not read: {error}") from error
+
+
 def equal(left: Any, right: Any) -> bool:
-    """`bool(left == right)`（条件で読む `==`）と同じ真偽。暗黙の callback の戻り値は `truth` で読む。
+    """`bool(left == right)`（条件で読む `==`）と同じ真偽。比較は組み込みの `==` が行い、信頼しない葉の比較の戻り値は
+    `truth` で読む（`_Comparand`）。返す値の保証: 組み込みの `bool`。判定不能は `UndecidableComparison`。"""
 
-    読み方: 両方を `exact_tree` で読み（scalar の subclass の葉は基底型の値）、組み込みの比較の規則をなぞる。
-    - exact な scalar どうし: 組み込みの `==`。
-    - 同じ型の tuple / list: 長さを比べ、要素を左から（identity を先に見て）比べ、最初に違う要素で止まる。
-    - dict どうし: 長さ、key（不活性な key だけ: 組み込みの hash と比較で引く）、値を `left` の順に比べる。
-    - set / frozenset どうし: 要素が不活性なら組み込みの `==`。
-    - それ以外の組（葉の外の object・型の違う容器）: Python の `==` の手順（反射を含む）で比べ、戻り値を `truth` で読む。
-    返す値の保証: 組み込みの `bool`。不活性でない key の dict・要素の set は `UndecidableComparison`。葉の型の `__eq__`
-    が投げた例外はそのまま（双子と同じ）。
-    """
-
-    if _exact_leaf(left) and _exact_leaf(right):
+    leaves = _leaf_operands(left, right)
+    if leaves is not None:
+        return _checked(truth(leaves[0] == leaves[1]))
+    if _plain_operands(left, right):
         return left == right
-    kind = type(left)
-    if kind is tuple and type(right) is tuple:
-        _admit_storage(tuple.__len__(left) + tuple.__len__(right), _COMPARISON_NODES, traversal=True)
-        if _exact_elements(left) and _exact_elements(right):
-            return left == right  # 葉が exact な scalar だけの平らな tuple: 組み込みの比較は組み込みの code だけ
-    # 組み込みの木どうし（よくある形）: 読みの写しを作らずに同じ手順で比べる。組み込みでない葉・容器に出会えば、
-    # 外の code を呼ぶ前に止まり（それまでの比較は組み込みの code だけ）、読みから比べ直す
-    decided = _equal_trees(left, right, False, strict=True)
-    if decided is not None:
-        return decided
-    # 2 つを 1 回の読みで写す（共有された葉・容器の identity が写しでも共有される: 要素の identity の規則が双子と同じ）
-    x, y = exact_tree((left, right))
-    return _equal_trees(x, y, False)
+    (x, y), frame, _read = _covered((left, right))
+    return _guarded(frame, lambda: truth(x == y))
+
+
+def _leaf_operands(left: Any, right: Any) -> Optional[Tuple[Any, Any]]:
+    """比べる 2 つの値が両方とも容器でない葉なら、読んだ葉の組（scalar の subclass は基底型の値）。容器なら `None`。
+
+    葉どうしの比較は写しも確かめも要らない: 組み込みの演算（反射を含む Python の手順）が元の値どうしを比べ、戻り値を
+    `truth` で読めば `bool(双子の左 op 双子の右)` と同じ（外の code は双子と同じ相手を受け取る）。不透明な葉（中の比較の
+    戻り値を C が読む）は `UndecidableComparison`。外の code の後は、進行中の比較の写しを確かめる（`_checked`）。"""
+
+    out = []
+    for value in (left, right):
+        kind = type(value)
+        if value is None or kind is int or kind is str or kind is bool or kind is float:
+            out.append(value)
+            continue
+        if (
+            kind is _DICT_VIEWS[0] or kind is _DICT_VIEWS[1] or kind is _DICT_VIEWS[2]
+            or kind is _ODICT_VIEWS[0] or kind is _ODICT_VIEWS[1] or kind is _ODICT_VIEWS[2]
+            or _kind_entry(kind)[1] is not None
+        ):
+            return None  # 容器（subclass・view を含む）: 木の読みへ
+        if issubclass(kind, _SCALAR_BASES) and not issubclass(kind, Enum):
+            out.append(exact_scalar(value))
+            continue
+        if _leaf_trust(value) == _OPAQUE:
+            raise UndecidableComparison(f"{type_name(kind)} compares what it holds inside builtin code")
+        out.append(value)
+    return out[0], out[1]
 
 
 def unequal(left: Any, right: Any) -> bool:
-    """`bool(left != right)` と同じ真偽。葉は Python の `!=` の手順（`__ne__`、反射を含む）で比べ、戻り値を `truth` で
-    読む。同じ型の容器どうし（tuple / list・dict・set / frozenset）は Python と同じく要素を `==` で比べる（`not equal`）。
-    返す値の保証: 組み込みの `bool`（不活性でない key の dict などは `UndecidableComparison`）。"""
+    """`bool(left != right)` と同じ真偽（`equal` と同じ読みで、組み込みの `!=` が比べる）。"""
 
-    if _exact_leaf(left) and _exact_leaf(right):
+    leaves = _leaf_operands(left, right)
+    if leaves is not None:
+        return _checked(truth(leaves[0] != leaves[1]))
+    if _plain_operands(left, right):
         return left != right
-    x, y = exact_tree((left, right))
-    kx, ky = type(x), type(y)
-    if (
-        (kx is ky and (kx is tuple or kx is list or kx is dict))
-        or ((kx is set or kx is frozenset) and (ky is set or ky is frozenset))
-        or (_exact_leaf(x) and _exact_leaf(y))
-    ):
-        return not _equal_trees(x, y, False)
-    return truth(x != y)
+    (x, y), frame, _read = _covered((left, right))
+    return _guarded(frame, lambda: truth(x != y))
 
 
 def same(left: Any, right: Any) -> bool:
@@ -2014,195 +2751,68 @@ def same(left: Any, right: Any) -> bool:
     return left is right or equal(left, right)
 
 
-def _equal_trees(left: Any, right: Any, element: bool, strict: bool = False) -> Optional[bool]:
-    # 明示の stack（入れ子が深くても再帰の上限に当たらない）。要素は左から順に、前の要素を比べ終えてから次へ:
-    # 要素の組を逆順に積む。tuple は共通の長さの要素を比べてから長さ（CPython の tuple の比較）、list / dict は長さを
-    # 先に比べる。dict の値は key で引く手順（`("key", ...)`）を値の比較の直前に置く。比べている途中の容器の組に
-    # 戻れば閉路（Python と同じ `RecursionError`）。辿る量は `exact_tree` と同じ反復の確かめ。`strict` なら、exact な
-    # scalar と組み込みの容器のほか（外の object・scalar の subclass・subclass の容器）に出会うと `None`（外の code を
-    # 呼ぶ前に止まる: 呼ぶ側が読みから比べ直す）
-    read = _StorageRead(_COMPARISON_NODES, traversal=True)
-    active: set = set()
-    pending: List[Tuple[Any, ...]] = [("pair", left, right, element)]
-    while pending:
-        item = pending.pop()
-        tag = item[0]
-        if tag == "exit":
-            active.discard(item[1])
-            continue
-        if tag == "length":
-            if item[1] != item[2]:
-                return False
-            continue
-        if tag == "key":
-            _tag, key, value, other = item
-            found = dict.get(other, key, _MISSING)
-            if found is _MISSING:
-                return False
-            pending.append(("pair", value, found, True))
-            continue
-        _tag, x, y, is_element = item
-        if is_element and x is y:
-            continue
-        kx, ky = type(x), type(y)
-        if _exact_leaf(x) and _exact_leaf(y):
-            if not x == y:
-                return False
-            continue
-        if kx is ky and (kx is tuple or kx is list or kx is dict):
-            size = kx.__len__(x)
-            other_size = kx.__len__(y)
-            if kx is not tuple and size != other_size:
-                return False
-            pair = (id(x), id(y))
-            if pair in active:
-                raise RecursionError("maximum recursion depth exceeded in comparison")
-            if len(active) >= 64 and len(active) >= _comparison_depth_limit():
-                raise UndecidableComparison("a comparison deeper than the recursion limit allows is not decided")
-            if kx is dict and not (inert(tuple(dict.keys(x))) and inert(tuple(dict.keys(y)))):
-                if strict:
-                    return None
-                raise UndecidableComparison("a dict whose keys are not inert is not compared")
-            active.add(pair)
-            pending.append(("exit", pair))
-            common = min(size, other_size)
-            read.admit(common)
-            if kx is dict:
-                for key, value in reversed(list(dict.items(x))):
-                    pending.append(("key", key, value, y))
-                continue
-            if kx is tuple:
-                pending.append(("length", size, other_size))
-            for index in range(common - 1, -1, -1):
-                pending.append(("pair", x[index], y[index], True))
-            continue
-        if (kx is set or kx is frozenset) and (ky is set or ky is frozenset):
-            if not (inert(x) and inert(y)):
-                if strict:
-                    return None
-                raise UndecidableComparison("a set whose elements are not inert is not compared")
-            if not x == y:
-                return False
-            continue
-        if strict:
-            return None
-        if not truth(x == y):
-            return False
-    return True
-
-
 def contains(container: Any, item: Any) -> bool:
-    """`item in container` と同じ真偽（容器は組み込みの tuple / list / dict / set / frozenset。2 つを 1 回の `exact_tree` で読む）。
+    """`item in container` と同じ真偽（容器は組み込みの tuple / list / dict / set / frozenset）。探索（要素を読む時点・
+    hash の衝突の探索の順・set を frozenset で引き直す規則）は組み込みの `in` が行う。返す値の保証: 組み込みの `bool`。
+    組み込みでない容器・判定不能は `UndecidableComparison`。"""
 
-    要素の比べ方は Python と同じ（要素を左に置いた `==`、identity を先に見る。set / dict は hash が等しい要素だけ。set /
-    frozenset を set で引くときは frozenset で引き直す）。比較の戻り値は `truth` で読む。不活性でない要素の set / key の
-    dict、組み込みでない容器は `UndecidableComparison`。返す値の保証: 組み込みの `bool`。
-    """
-
-    kind = type(container)
-    if _exact_leaf(item) and (kind is tuple or kind is list or kind is set or kind is frozenset):
-        size = kind.__len__(container)
-        if size > SCAN_LIMIT:
-            _admit_storage(size, _COMPARISON_NODES, traversal=True)
-        if _exact_elements(container):
-            return item in container  # 要素も引く値も exact な scalar: 組み込みの code だけ（最も多い形）
-    container, item = exact_tree((container, item))
-    kind = type(container)
-    if kind is tuple or kind is list:
-        _admit_storage(kind.__len__(container), _COMPARISON_NODES, traversal=True)
-        for element in kind.__iter__(container):
-            if element is item or _equal_trees(element, item, False):
-                return True
-        return False
-    if kind is set or kind is frozenset or kind is dict:
-        keys = tuple(dict.keys(container)) if kind is dict else container
-        if not inert(keys):
-            raise UndecidableComparison("a container whose keys are not inert is not searched")
-        if type(item) is set and kind is not dict:
-            # set / frozenset の `__contains__` は set の値を frozenset で引き直す（要素が不活性なときだけ同じ手順を写せる）
-            if not inert(item):
-                raise UndecidableComparison("a set whose elements are not inert is not searched for")
-            item = frozenset(item)
-        if inert(item):
-            return item in (dict.keys(container) if kind is dict else container)
-        # 不活性な要素を不活性でない値で引く: hash が等しい要素だけを、要素を左に置いて比べる（set / dict の引き方）
-        target = hash(item)
-        _admit_storage(len(keys), _COMPARISON_NODES, traversal=True)
-        for element in keys:
-            if element is item or (hash(element) == target and _equal_trees(element, item, False)):
-                return True
-        return False
-    raise UndecidableComparison(f"{type_name(kind)} is not a builtin container")
+    if _plain_operands(container, item):
+        kind = type(container)
+        if kind is tuple or kind is list or kind is set or kind is frozenset or kind is dict:
+            return item in container
+        raise UndecidableComparison(f"{type_name(kind)} is not a builtin container")
+    (box, wanted), frame, _read = _covered((container, item))
+    kind = type(box)
+    if not (kind is tuple or kind is list or kind is set or kind is frozenset or kind is dict):
+        raise UndecidableComparison(f"{type_name(kind)} is not a builtin container")
+    return _guarded(frame, lambda: truth(wanted in box))
 
 
 def less(left: Any, right: Any) -> bool:
-    """`bool(left < right)` と同じ真偽（並べる比較）。暗黙の callback の戻り値は `truth` で読む。
+    """`bool(left < right)` と同じ真偽（並べる比較。`equal` と同じ読みで、組み込みの `<` が比べる）。"""
 
-    2 つを 1 回の `exact_tree` で読む。同じ型の tuple / list は、最初に違う要素（`same` の規則で比べる）の `<`、無ければ
-    長さ（Python の順序の規則）。set の包含は要素が不活性なときだけ（それ以外は `UndecidableComparison`）。それ以外は
-    Python の `<` の手順で、戻り値を `truth` で読む（比べられない型の組は Python と同じ `TypeError`）。返す値の保証:
-    組み込みの `bool`。
-    """
-
-    x, y = exact_tree((left, right))
-    read = _StorageRead(_COMPARISON_NODES, traversal=True)
-    visited: set = set()
-    while True:
-        if _exact_leaf(x) and _exact_leaf(y):
-            return x < y
-        kx, ky = type(x), type(y)
-        if kx is ky and (kx is tuple or kx is list):
-            pair = (id(x), id(y))
-            if pair in visited:
-                raise RecursionError("maximum recursion depth exceeded in comparison")
-            if len(visited) >= 64 and len(visited) >= _comparison_depth_limit():
-                raise UndecidableComparison("an ordering deeper than the recursion limit allows is not decided")
-            visited.add(pair)
-            size_x, size_y = kx.__len__(x), kx.__len__(y)
-            read.admit(min(size_x, size_y))
-            for index in range(min(size_x, size_y)):
-                a, b = x[index], y[index]
-                if not (a is b or _equal_trees(a, b, False)):
-                    x, y = a, b
-                    break
-            else:
-                return size_x < size_y
-            continue
-        if (kx is set or kx is frozenset) and (ky is set or ky is frozenset):
-            if not (inert(x) and inert(y)):
-                raise UndecidableComparison("a set whose elements are not inert is not ordered")
-            return x < y
-        return truth(x < y)
-
-
-def _tree_order(left: Any, right: Any) -> int:
-    return -1 if less(left, right) else 0
-
-
-#: `sorted_trees` の key（`list.sort` は `<` だけを使う: 比べる組と順は素の `sort` と同じ）
-_TREE_ORDER = __import__("functools").cmp_to_key(_tree_order)
+    leaves = _leaf_operands(left, right)
+    if leaves is not None:
+        return _checked(truth(leaves[0] < leaves[1]))
+    if _plain_operands(left, right):
+        return truth(left < right)
+    (x, y), frame, _read = _covered((left, right))
+    return _guarded(frame, lambda: truth(x < y))
 
 
 def sorted_trees(items: Any) -> List[Any]:
-    """`sorted(items)` と同じ順の list（`items` は組み込みの list / tuple。要素を `exact_tree` で読み、比較は `less`:
-    比べる組と順は素の `sorted` と同じ）。"""
+    """`sorted(items)` と同じ順の list（`items` は組み込みの list / tuple）。要素を 1 回の読みで写し、組み込みの `sorted`
+    が比べる（比べる組と順は素の `sorted` と同じ。信頼しない葉の比較の戻り値は `truth` で読む）。返す要素は写した木。"""
 
     kind = type(items)
     if kind is not list and kind is not tuple:
         raise TypeError("sorted_trees reads a builtin list or tuple")
-    # 全部を 1 回の読みで写す（要素どうしの共有された葉の identity が写しでも共有される）
-    trees = list(exact_tree(tuple(kind.__iter__(items))))
-    _admit_storage(len(trees), _COMPARISON_NODES, traversal=True)
-    if inert(trees):
-        return sorted(trees)
-    return sorted(trees, key=_TREE_ORDER)
+    originals = tuple(kind.__iter__(items))
+    _admit_storage(len(originals), _COMPARISON_NODES, traversal=True)
+    if _plain_operands(*originals):
+        return sorted(originals)  # 読んでも変わらない木（写しが無い）
+    keys, frame, read = _covered(originals)  # 元の値を読む: 元の変わる容器を確かめる
+    trees = list(read)
+    order = _guarded(frame, lambda: sorted(range(len(trees)), key=keys.__getitem__))
+    return [trees[index] for index in order]
+
+
+def hash_tree(value: Any) -> int:
+    """`hash(value)` と同じ規則の hash（`equal` と同じ読み: scalar の subclass の葉は基底型の値、信頼しない葉は元の値の
+    hash）。`equal` が等しいとする値は同じ hash になる（ref の owner の `__hash__` が使う）。hash できない値は
+    `TypeError`（組み込みの `hash` と同じ）、判定不能は `UndecidableComparison`。"""
+
+    if _plain_operands(value):
+        return hash(value)
+    (covered,), frame, _read = _covered((value,))
+    return _guarded(frame, lambda: hash(covered))
 
 
 def inert_key(value: Any) -> Any:
     """dict の key・set の要素に置く値（`exact_tree` で読んだ不活性な木）。不活性でなければ `UndecidableComparison`
     （hash が等しい key どうしの `==` を組み込みの code が葉の型の code で読む: 判定しない）。"""
 
-    tree = exact_tree(value)
+    tree = _compared_tree(value)
     if not inert(tree):
         raise UndecidableComparison("a value that is not inert is not used as a key")
     return tree

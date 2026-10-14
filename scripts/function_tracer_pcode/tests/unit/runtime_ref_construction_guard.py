@@ -163,7 +163,8 @@ READERS = frozenset({
     "builtin_str", "builtin_sequence", "size", "scalar_int_or", "is_json_record", "type_name", "type_module",
     "is_kind", "materialize", "defined_attribute", "holds_scalar_subclass", "scalar_repr", "exception_text",
     # 比べる側の契約（`live_values` の比較・所属・順序）: 暗黙の callback の戻り値を基底型の値の真偽で読む
-    "equal", "unequal", "same", "contains", "less", "truth", "inert", "inert_key",
+    "equal", "unequal", "same", "contains", "less", "truth", "inert", "inert_key", "hash_tree", "deciding",
+    "undecided_is_absent",
 })
 #: 比べた結果の並びを返す reader（要素は組み込みの木: 葉の外の object は読んでいない）
 TREE_SEQUENCE_READERS = frozenset({"sorted_trees"})

@@ -83,8 +83,8 @@ import typing
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.live_values import (
-    NOT_PLAIN, equal, exact_scalar, exact_tree, exact_tree_in, int_value, scalar_repr, type_name,
-    verified_tree_holder as _holder,
+    NOT_PLAIN, equal, exact_scalar, exact_tree, exact_tree_in, hash_tree, int_value, scalar_repr, trusted_comparison,
+    type_name, verified_tree_holder as _holder,
 )
 
 #: class → 写す field の (名前, 分類) の列。最初の構築で決める。
@@ -615,55 +615,48 @@ class _tuple_reader:
         return self._getter(instance)
 
 
-_OBJECT_EQUALITY = object.__eq__
+def _exact_value(value: Any) -> bool:
+    kind = type(value)
+    return value is None or kind is int or kind is str or kind is bool or kind is float
 
 
-def _class_equality(kind: type) -> Any:
-    """型の `==` の実装（MRO で `__eq__` を最初に持つ class の名前空間の値。metaclass の hook を通らない読み。使うたびに
-    読む: 後から型に `__eq__` を足しても古い判断を使わない）。"""
-
-    for base in _TYPE_MRO(kind):
-        namespace = _TYPE_NAMESPACE(base)
-        if "__eq__" in namespace:
-            return namespace["__eq__"]
-    return object.__eq__
-
-
+@trusted_comparison
 def _ref_equal(self: Any, other: Any) -> Any:
     """ref の `==`（owner が置く。dataclass の生成した `__eq__` と同じ値の比べ方: 同じ型なら比べる field の値の tuple）。
 
-    比べる値の tuple は `live_values.equal` で比べる: field の値の型の `__eq__` が返す値（暗黙の callback の戻り値）は
-    基底型の値の真偽で読み、組み込みの tuple の比較が葉の比較の戻り値の `__bool__` を呼ばない（Issue #242）。型は
-    identity で比べる（`__class__` を読まない）。返す値は組み込みの `bool` か `NotImplemented`。
+    比べる値の tuple は `live_values.equal` で比べる（比較は組み込みの tuple の `==`。field の値の型の `__eq__` が返す値は
+    基底型の値の真偽で読む: Issue #242）。型は identity で比べる（`__class__` を読まない）。返す値は組み込みの `bool` か
+    `NotImplemented`。組み込みの code だけでは忠実に比べられない field（変わる容器の中の外の object）は
+    `UndecidableComparison`。
     """
 
     if other is self:
         return True
     if type(other) is not type(self):
         return NotImplemented
-    left, right = _compare_values(self), _compare_values(other)
-    # tuple の比較の規則（要素を左から、identity を先に見て、最初に違う要素で止まる）をなぞる速い経路: exact な scalar
-    # どうしは組み込みの `==`、同じ型の ref どうしは owner の `__eq__`（組み込みの `bool`）。それ以外の最初の要素から先は
-    # `live_values.equal`（前の要素の比較を繰り返さない: 同じ長さの tuple の残りを比べる）
-    for index in range(len(left)):
-        x, y = left[index], right[index]
-        if x is y:
+    # 比べる値の tuple は owner が作った変わらない tuple で、同じ型なら長さも同じ: 組み込みの tuple の `==` は要素を
+    # 順に identity の近道つきで比べ、最初に等しくない要素で止める。その手順を要素ごとに行い、要素の比較だけを比べる
+    # 側の契約に渡す（exact な scalar どうしは組み込みの `==`: 外の code を呼ばない）
+    for left, right in zip(_compare_values(self), _compare_values(other)):
+        if left is right:
             continue
-        kx = type(x)
-        if (x is None or kx is int or kx is str or kx is bool or kx is float) and _exact(y):
-            if not x == y:
-                return False
-            continue
-        if kx is type(y):
-            implementation = _class_equality(kx)
-            if implementation is _ref_equal:
-                if not _ref_equal(x, y):
-                    return False
+        if _exact_value(left) and _exact_value(right):
+            if left == right:
                 continue
-            if implementation is _OBJECT_EQUALITY:
-                return False  # 同じ型で `==` が identity（`object.__eq__`: 式など）の別の object: 等しくない
-        return equal(left[index:], right[index:])
+            return False
+        if not equal(left, right):
+            return False
     return True
+
+
+def _ref_hash(self: Any) -> int:
+    """ref の `hash`（owner が置く。dataclass の生成した `__hash__` と同じ値: 比べる field の値の tuple の hash）。
+
+    `live_values.hash_tree` で読む（`equal` と同じ読み: scalar の subclass の葉は基底型の値の hash、外の object は元の値の
+    hash）。`==` が等しいとする ref は同じ hash になる（dict / set でも同じ値として扱われる: Issue #242）。
+    """
+
+    return hash_tree(_compare_values(self))
 
 
 #: 文字列にしている途中の (`id(ref)`, thread)（dataclass の生成した `__repr__` と同じく、入れ子の自分自身は `...`）
@@ -704,8 +697,10 @@ def runtime_ref_record(cls: type) -> type:
 
     if "__dataclass_fields__" in cls.__dict__:
         raise TypeError(f"@runtime_ref_record must be applied below @dataclass ({cls.__qualname__})")
-    if "__eq__" not in cls.__dict__:
+    if "__eq__" not in cls.__dict__ and "__hash__" not in cls.__dict__:
+        # `==` と `hash` は同じ読み（等しい ref は同じ hash）。dataclass は class が持つ `__eq__` / `__hash__` を作り直さない
         cls.__eq__ = _ref_equal  # type: ignore[assignment]
+        cls.__hash__ = _ref_hash  # type: ignore[assignment]
     if "__repr__" not in cls.__dict__:
         cls.__repr__ = _ref_repr  # type: ignore[assignment]
     custom_init = cls.__dict__.get("__init__")

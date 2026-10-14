@@ -7,7 +7,8 @@ from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 from scripts.function_tracer_pcode.core.live_values import (
-    as_bool, as_int, contains, equal, exact_scalar, exact_tree, is_kind, method_of, scalar_int, scalar_text, str_value, unequal,
+    as_bool, as_int, contains, equal, exact_scalar, exact_tree, hash_tree, is_kind, method_of, scalar_int, scalar_text,
+    str_value, trusted_comparison, unequal,
 )
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
@@ -269,8 +270,14 @@ class LocationBaseRef:
         return scalar_text(self.storage_identity_key[1])
 
     def __hash__(self) -> int:
-        return hash(self.stable_key())
+        # `__eq__` が比べる成分だけ（等しい ref は同じ hash。Issue #242）。storage の位置は名前（`storage_space`）を
+        # 比べない: `stable_key` の名前を除く。読みは `__eq__` と同じ（`hash_tree`: scalar の subclass は基底型の値）
+        key = self.stable_key()
+        if equal(key[0], "storage"):
+            key = (key[0], key[1], key[3], key[4])  # ("storage", space_id, space_name, offset, size) から名前を除く
+        return hash_tree(key)
 
+    @trusted_comparison  # 本体は構築の guard が検査する（比較は `live_values` の契約で読み、組み込みの `bool` を返す）
     def __eq__(self, other: object) -> bool:
         if not is_kind(other, LocationBaseRef):
             return False
