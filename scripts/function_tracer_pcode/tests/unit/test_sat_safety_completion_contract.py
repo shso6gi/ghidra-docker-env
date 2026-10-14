@@ -1681,7 +1681,7 @@ def test_an_unfinished_transactions_rollback_state_cannot_be_overwritten():
 
 
 def test_the_ledger_refuses_an_entry_transition_inside_another_transactions_commit(monkeypatch):
-    """約束と約束の退役（event の無い入口の遷移）は、別の取引の commit window の中で台帳を変えない。"""
+    """約束と約束の退役（event の無い入口の遷移）は、別の producer の取引が生きている間（その commit の中を含む）台帳を変えない。"""
     from scripts.function_tracer_pcode.authority.domains.sat_safety_ledger import SatSafetyBlockerLedger
 
     session = _connector().begin({"phase": "pr-a", "case": "ledger-window"})

@@ -171,34 +171,6 @@ def test_the_owner_offers_no_reason_id_only_admission():
             assert "evidence_refs" in params, name
 
 
-def test_every_copy_of_the_sat_reason_vocabulary_is_derived_from_the_table():
-    from scripts.function_tracer_pcode.authority.domains.sat_safety import (
-        SAT_SAFETY_REASON_REGISTRY,
-    )
-    from scripts.function_tracer_pcode.authority.domains.sat_safety_sites import (
-        SAT_SAFETY_AMBIGUITY_OBSERVED_SITE,
-        SAT_SAFETY_BLOCKER_OBSERVED_SITE,
-    )
-    from scripts.function_tracer_pcode.authority.lifecycle.pilot import PILOT_TYPED_CAUSE_KINDS
-    from scripts.function_tracer_pcode.reporting import phase7_producer_manifest as manifest
-
-    assert {item.reason_id for item in SAT_SAFETY_REASON_REGISTRY.snapshot()} == set(
-        SAT_SAFETY_REASON_RESOLUTION
-    )
-    assert SAT_SAFETY_BLOCKER_OBSERVED_SITE.reason_ids == (
-        "counterexample_analysis_safety_unproven",
-        "counterexample_replay_unproven",
-    )
-    assert SAT_SAFETY_AMBIGUITY_OBSERVED_SITE.reason_ids == (
-        "counterexample_partition_replay_ambiguous",
-    )
-    assert set(SAT_SAFETY_REASON_RESOLUTION) <= PILOT_TYPED_CAUSE_KINDS
-    assert {
-        reason_id: manifest._REASON_IDENTITY_SCOPES[reason_id]
-        for reason_id in SAT_SAFETY_REASON_RESOLUTION
-    } == dict.fromkeys(SAT_SAFETY_REASON_RESOLUTION, "RELATIONAL")
-
-
 def test_replay_producers_use_the_owner_vocabulary():
     from scripts.function_tracer_pcode.proof.conditional_lane import COUNTEREXAMPLE_REPLAY_MISSING
 
@@ -473,3 +445,21 @@ def test_every_consumer_of_the_sat_safety_reason_vocabulary_is_derived_from_the_
         if kind is SatSafetyResolution.PARTITION_AMBIGUITY
     }
     assert all(manifest._REASON_IDENTITY_SCOPES[rid] == "RELATIONAL" for rid in ids)
+
+
+def test_a_resolution_type_without_a_rule_is_never_consistent(monkeypatch):
+    """規則を持たない解消の型の id は、どの根拠でも整合しない（partition の規則へ落ちない）。"""
+    from enum import Enum
+    from types import MappingProxyType
+
+    from scripts.function_tracer_pcode.proof import sat_safety_resolution as owner
+
+    class _Future(str, Enum):
+        UNRULED = "unruled"
+
+    monkeypatch.setattr(owner, "SAT_SAFETY_REASON_RESOLUTION", MappingProxyType({
+        **owner.SAT_SAFETY_REASON_RESOLUTION, "hypothetical_unruled_reason": _Future.UNRULED,
+    }))
+    for refs in [("pairwise",), ("counterexample_replay_missing",), ("x:y",), ()]:
+        with pytest.raises(owner.SatSafetyBlockerInconsistent):
+            owner.classify_sat_safety_blocker("hypothetical_unruled_reason", refs)

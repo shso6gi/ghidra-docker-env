@@ -19,13 +19,21 @@ counterexample の replay は、SAT の model が宣言した記号へ与えた�
   replay 型と partition の曖昧さだけ）。整合しない対はどちらも偽。
 * 回復の要求: ``SAT_SAFETY_RECOVERY_REQUIREMENTS``（型ごとの required evidence と説明）。
 
-reason の追加: ``SAT_SAFETY_REASON_RESOLUTION`` に (id, 解消の型) を 1 行足す。整合の規則は
-解消の型ごとに決まり（``_refs_fit_resolution``）、authority の sealed reason registry・
-pilot の typed cause の集合・Phase 7 の producer site の契約・producer manifest の identity
-scope はこの表から導く。足した後に変えるのは、(1) その id を出す producer（既定の id は
-``sat_safety_reason_id_for_refs`` が選ぶので、別の id は producer が直接使う）、(2) 生成器で
-再生成する producer manifest（sealed な digest が変わる）だけ。新しい解消の型を足すときは、
-型の規則・``completable``・``SAT_SAFETY_RECOVERY_REQUIREMENTS`` も決める（表だけでは足りない）。
+reason の追加（既存の解消の型の新しい id）で変える場所:
+
+1. ``SAT_SAFETY_REASON_RESOLUTION`` に (id, 解消の型) を 1 行足す。分類（整合の規則は解消の型
+   ごとで、``_refs_fit_resolution``）・authority の sealed reason registry・pilot の typed cause
+   の集合・Phase 7 の producer site の契約・producer manifest の identity scope・回復の要求は
+   この表から導くので、ここは他に写さない。
+2. その id を出す producer。proof の gate の観測と完了（``_emit_v2_sat_safety_blockers_observed`` /
+   ``_emit_v2_sat_safety_blockers_completed_if_observed``）は既定の id を
+   ``sat_safety_reason_id_for_refs`` で選ぶ。新しい id を使う経路は、観測と完了の**両方**で
+   その id を名指す（完了は観測を同じ blocker として言い直す必要がある）。片方だけだと完了は
+   拒否され、blocker は UNKNOWN のまま残る（fail-closed）。
+3. producer manifest を生成器で再生成する（sealed な digest が変わる）。
+
+新しい解消の型を足すときは、さらに型の規則（``_refs_fit_resolution``）・``completable``・
+``SAT_SAFETY_RECOVERY_REQUIREMENTS`` を決める。規則の無い型は整合しない（fail-closed）。
 
 pairwise と monolithic、stage runner の gate、authority の観測・完了・deferred の
 破棄はすべてここを読む。authority は完了の signal 自身の主張ではなく、観測済み
@@ -167,7 +175,10 @@ def _refs_fit_resolution(resolution: SatSafetyResolution, refs: tuple[str, ...])
         return all_replay
     if resolution is SatSafetyResolution.ANALYSIS_UNSAFETY:
         return not all_replay
-    return bool(refs) and COUNTEREXAMPLE_REPLAY_MISSING_REF not in refs
+    if resolution is SatSafetyResolution.PARTITION_AMBIGUITY:
+        return bool(refs) and COUNTEREXAMPLE_REPLAY_MISSING_REF not in refs
+    # 規則の無い型は整合しない（fail-closed）。新しい型は規則を足してから表に載せる。
+    return False
 
 
 def classify_sat_safety_blocker(reason_id: object, evidence_refs: Iterable[object]) -> SatSafetyBlocker:
@@ -178,13 +189,7 @@ def classify_sat_safety_blocker(reason_id: object, evidence_refs: Iterable[objec
     * 整合は表がその id に与える解消の型の規則（``_refs_fit_resolution``）で決まる。新しい
       reason は表に 1 行足せば、その型の規則で分類される。
     """
-    return _classify_with_table(reason_id, evidence_refs, SAT_SAFETY_REASON_RESOLUTION)
-
-
-def _classify_with_table(
-    reason_id: object, evidence_refs: Iterable[object],
-    table: Mapping[str, SatSafetyResolution],
-) -> SatSafetyBlocker:
+    table = SAT_SAFETY_REASON_RESOLUTION
     if type(reason_id) is not str or reason_id not in table:
         raise SatSafetyBlockerInconsistent(f"unknown SAT-safety reason id: {reason_id!r}")
     refs = tuple(evidence_refs)

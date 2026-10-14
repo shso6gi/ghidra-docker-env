@@ -41,6 +41,8 @@ from scripts.function_tracer_pcode.authority.domains.sat_safety_ledger import (
     Disposition,
     SatSafetyBlockerLedger,
 )
+# ``SAT_SAFETY_TYPED_REASON_IDS`` は owner（``proof.sat_safety_resolution``）の object を
+# 再輸出する（既存の import 先を保つ互換のため。語彙の公開元は owner）。
 from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
     SAT_SAFETY_TYPED_REASON_IDS,
     SatSafetyBlocker,
@@ -246,10 +248,6 @@ class OutcomePartitionProductionSignal:
         # Validate the complete public projection at construction time.  Private
         # factory tokens never enter this projection or its digest.
         authority_digest(self._phase7_signal_authority())
-
-
-#: ``SAT_SAFETY_TYPED_REASON_IDS`` は ``proof.sat_safety_resolution`` の object を再輸出する
-#: （既存の import 先を保つ互換のため。語彙の公開元は owner）。
 
 
 _SAFE_COUNTEREXAMPLE_SIGNAL_TOKEN = object()
