@@ -393,3 +393,83 @@ def test_supersede_completes_only_replay_type_rejected_witness_blockers(monkeypa
         reason_record=reason, decisive_binding=decisive,
     ) is True
     assert completed == [replay_refs]
+
+
+# ---- reason の追加: 表に 1 行足せば、その解消の型の規則で分類され、全ての消費者に届く ----
+
+
+@pytest.mark.parametrize(("resolution", "consistent", "inconsistent"), [
+    ("REPLAY", [("counterexample_replay_missing",)],
+     [(), ("function1:incomplete_control_flow",), ("counterexample_replay_missing", "x:y")]),
+    ("ANALYSIS_UNSAFETY", [(), ("function1:incomplete_control_flow",), ("counterexample_replay_missing", "x:y")],
+     [("counterexample_replay_missing",)]),
+    ("PARTITION_AMBIGUITY", [("pairwise",)], [(), ("counterexample_replay_missing",)]),
+])
+def test_a_new_reason_added_to_the_table_is_classified_by_its_resolution_rule(
+    resolution, consistent, inconsistent, monkeypatch,
+):
+    """表に足した新しい id は、既存の id と同じ型の規則で分類される（id ごとの特例は無い）。"""
+    from types import MappingProxyType
+
+    from scripts.function_tracer_pcode.proof import sat_safety_resolution as owner
+
+    kind = owner.SatSafetyResolution[resolution]
+    original = dict(owner.SAT_SAFETY_REASON_RESOLUTION)
+    with pytest.raises(owner.SatSafetyBlockerInconsistent):
+        owner.classify_sat_safety_blocker("hypothetical_new_reason", consistent[0])
+    # 表に 1 行だけ足す（他は何も変えない）。
+    monkeypatch.setattr(owner, "SAT_SAFETY_REASON_RESOLUTION", MappingProxyType({
+        **original, "hypothetical_new_reason": kind,
+    }))
+    for refs in consistent:
+        blocker = owner.classify_sat_safety_blocker("hypothetical_new_reason", refs)
+        assert blocker.resolution is kind
+        assert blocker.replay_resolvable is (kind is owner.SatSafetyResolution.REPLAY)
+        # 解析の不安全は、新しい id でも決して完了しない。
+        assert blocker.completable is (kind is not owner.SatSafetyResolution.ANALYSIS_UNSAFETY)
+        # 同じ型の既存の id と同じ判定（整合は型の規則だけで決まる）。
+        same_type = next(rid for rid, k in owner.SAT_SAFETY_REASON_RESOLUTION.items() if k is kind)
+        assert owner.classify_sat_safety_blocker(same_type, refs).resolution is kind
+    for refs in inconsistent:
+        with pytest.raises(owner.SatSafetyBlockerInconsistent):
+            owner.classify_sat_safety_blocker("hypothetical_new_reason", refs)
+    # 既存の id の判定は変わらない。
+    for reason_id, existing_kind in original.items():
+        for refs in consistent:
+            fits = existing_kind is kind
+            if fits:
+                assert owner.classify_sat_safety_blocker(reason_id, refs).resolution is kind
+
+
+def test_every_consumer_of_the_sat_safety_reason_vocabulary_is_derived_from_the_table():
+    """reason の集合を写す場所が無い: authority の sealed registry・pilot の typed cause・Phase 7 の
+    site の契約・manifest の identity scope は全て表から導かれる（表に 1 行足せば全てに届く）。"""
+    from scripts.function_tracer_pcode.authority.domains.sat_safety import SAT_SAFETY_REASON_REGISTRY
+    from scripts.function_tracer_pcode.authority.domains.sat_safety_sites import (
+        SAT_SAFETY_AMBIGUITY_OBSERVED_SITE,
+        SAT_SAFETY_BLOCKER_OBSERVED_SITE,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import PILOT_TYPED_CAUSE_KINDS
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        SAT_SAFETY_TYPED_REASON_IDS as AUTHORITY_IDS,
+    )
+    from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
+        SAT_SAFETY_REASON_RESOLUTION,
+        SAT_SAFETY_TYPED_REASON_IDS,
+        SatSafetyResolution,
+    )
+    from scripts.function_tracer_pcode.reporting import phase7_producer_manifest as manifest
+
+    ids = set(SAT_SAFETY_REASON_RESOLUTION)
+    assert set(SAT_SAFETY_TYPED_REASON_IDS) == ids and AUTHORITY_IDS is SAT_SAFETY_TYPED_REASON_IDS
+    assert {definition.reason_id for definition in SAT_SAFETY_REASON_REGISTRY.snapshot()} == ids
+    assert ids <= PILOT_TYPED_CAUSE_KINDS
+    assert set(SAT_SAFETY_BLOCKER_OBSERVED_SITE.reason_ids) == {
+        rid for rid, kind in SAT_SAFETY_REASON_RESOLUTION.items()
+        if kind in {SatSafetyResolution.REPLAY, SatSafetyResolution.ANALYSIS_UNSAFETY}
+    }
+    assert set(SAT_SAFETY_AMBIGUITY_OBSERVED_SITE.reason_ids) == {
+        rid for rid, kind in SAT_SAFETY_REASON_RESOLUTION.items()
+        if kind is SatSafetyResolution.PARTITION_AMBIGUITY
+    }
+    assert all(manifest._REASON_IDENTITY_SCOPES[rid] == "RELATIONAL" for rid in ids)

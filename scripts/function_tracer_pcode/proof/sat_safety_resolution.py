@@ -19,6 +19,14 @@ counterexample の replay は、SAT の model が宣言した記号へ与えた�
   replay 型と partition の曖昧さだけ）。整合しない対はどちらも偽。
 * 回復の要求: ``SAT_SAFETY_RECOVERY_REQUIREMENTS``（型ごとの required evidence と説明）。
 
+reason の追加: ``SAT_SAFETY_REASON_RESOLUTION`` に (id, 解消の型) を 1 行足す。整合の規則は
+解消の型ごとに決まり（``_refs_fit_resolution``）、authority の sealed reason registry・
+pilot の typed cause の集合・Phase 7 の producer site の契約・producer manifest の identity
+scope はこの表から導く。足した後に変えるのは、(1) その id を出す producer（既定の id は
+``sat_safety_reason_id_for_refs`` が選ぶので、別の id は producer が直接使う）、(2) 生成器で
+再生成する producer manifest（sealed な digest が変わる）だけ。新しい解消の型を足すときは、
+型の規則・``completable``・``SAT_SAFETY_RECOVERY_REQUIREMENTS`` も決める（表だけでは足りない）。
+
 pairwise と monolithic、stage runner の gate、authority の観測・完了・deferred の
 破棄はすべてここを読む。authority は完了の signal 自身の主張ではなく、観測済み
 （または deferred）として記録した blocker をここで分類して許可を決める。
@@ -97,10 +105,12 @@ def sat_safety_ref_resolution(ref: object) -> SatSafetyResolution:
 
 
 def sat_safety_reason_id_for_refs(refs: Iterable[object]) -> str:
-    """SAT unsafety の evidence ref の組から、その blocker の reason id を選ぶ（producer 用）。
+    """SAT unsafety の evidence ref の組から、producer が使う既定の reason id を選ぶ。
 
     全ての ref が replay 型のときだけ ``counterexample_replay_unproven``。1 つでも
     解析の不安全の ref が混ざれば（空の組も）``counterexample_analysis_safety_unproven``。
+    既定の id を選ぶだけで、整合の判定（``classify_sat_safety_blocker``）は読まない。
+    同じ型の別の id を出す producer は、その id を直接使う。
     """
     refs = tuple(refs)
     if refs and all(
@@ -142,26 +152,46 @@ class SatSafetyBlocker:
         }
 
 
+def _refs_fit_resolution(resolution: SatSafetyResolution, refs: tuple[str, ...]) -> bool:
+    """evidence ref の組がその解消の型の blocker を表すか（型ごとの規則。id には依らない）。
+
+    * replay 型: ref が 1 つ以上で、全てが replay の ref。
+    * 解析の不安全: replay 型でない組（空・混在・未知の ref を含む。fail-closed）。
+    * partition の曖昧さ: ref が 1 つ以上で、replay の ref を含まない（replay の型と取り違え
+      ない条件だけを課す。id は ref から導けない独立の経路）。
+    """
+    all_replay = bool(refs) and all(
+        sat_safety_ref_resolution(ref) is SatSafetyResolution.REPLAY for ref in refs
+    )
+    if resolution is SatSafetyResolution.REPLAY:
+        return all_replay
+    if resolution is SatSafetyResolution.ANALYSIS_UNSAFETY:
+        return not all_replay
+    return bool(refs) and COUNTEREXAMPLE_REPLAY_MISSING_REF not in refs
+
+
 def classify_sat_safety_blocker(reason_id: object, evidence_refs: Iterable[object]) -> SatSafetyBlocker:
     """(reason id, evidence ref の組) を分類する。整合しなければ ``SatSafetyBlockerInconsistent``。
 
-    * reason id は表にある exact な str。ref は空でない exact な str。
-    * replay 型: ref が 1 つ以上で、全てが replay の ref。
-    * 解析の不安全: ref から選ぶ id が解析の不安全であること（空・混在・未知の ref を含む）。
-    * partition の曖昧さ: ref が 1 つ以上で、replay の ref を含まない（id は ref から導けない
-      独立の経路なので、replay の型と取り違えない条件だけを課す）。
+    * reason id は表（``SAT_SAFETY_REASON_RESOLUTION``）にある exact な str。ref は空でない
+      exact な str。
+    * 整合は表がその id に与える解消の型の規則（``_refs_fit_resolution``）で決まる。新しい
+      reason は表に 1 行足せば、その型の規則で分類される。
     """
-    if type(reason_id) is not str or reason_id not in SAT_SAFETY_REASON_RESOLUTION:
+    return _classify_with_table(reason_id, evidence_refs, SAT_SAFETY_REASON_RESOLUTION)
+
+
+def _classify_with_table(
+    reason_id: object, evidence_refs: Iterable[object],
+    table: Mapping[str, SatSafetyResolution],
+) -> SatSafetyBlocker:
+    if type(reason_id) is not str or reason_id not in table:
         raise SatSafetyBlockerInconsistent(f"unknown SAT-safety reason id: {reason_id!r}")
     refs = tuple(evidence_refs)
     if any(type(ref) is not str or not ref for ref in refs):
         raise SatSafetyBlockerInconsistent("SAT-safety evidence refs must be non-empty exact strings")
-    resolution = SAT_SAFETY_REASON_RESOLUTION[reason_id]
-    if resolution is SatSafetyResolution.PARTITION_AMBIGUITY:
-        consistent = bool(refs) and COUNTEREXAMPLE_REPLAY_MISSING_REF not in refs
-    else:
-        consistent = sat_safety_reason_id_for_refs(refs) == reason_id
-    if not consistent:
+    resolution = table[reason_id]
+    if not _refs_fit_resolution(resolution, refs):
         raise SatSafetyBlockerInconsistent(
             f"SAT-safety reason id {reason_id!r} does not match its evidence refs {refs!r}"
         )
