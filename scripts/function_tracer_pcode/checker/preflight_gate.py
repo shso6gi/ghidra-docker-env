@@ -313,10 +313,18 @@ class PreflightGateMixin:
 
         EQ の根拠に owner を含まない方法で左右を同一視した部分（ledger の
         ``owner_free_closures``）があれば、比較の最終 relation が位置どおり・全幅の等式のときだけ
-        EQ を残す。残せなければ UNKNOWN（``comparison_equivalence_closure_unproven``、evidence は
-        ``cross_side_identity:*``）。site の gate を漏らした closure もここで止まる。
+        EQ を残す。残せなければ UNKNOWN（``cross_side_identity_unproven``、evidence は
+        ``cross_side_identity:*``）にし、その cause を authority へ出す（``blocks_equivalence``）。
+        site の gate を漏らした closure もここで止まる。
         """
 
+        from scripts.function_tracer_pcode.authority.domains.cross_side_identity import (
+            CROSS_SIDE_IDENTITY_REASON_ID,
+            CrossSideIdentityBlockerSignal,
+        )
+        from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+            emit_cross_side_identity_signal,
+        )
         from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
             final_equivalence_identity_gate,
         )
@@ -326,15 +334,14 @@ class PreflightGateMixin:
             f"pair{key}"
             for key in (ledger.owner_free_closures() if ledger is not None else ())
         )
-        verdict = final_equivalence_identity_gate(
-            sources, frame.prepared.input_correspondence,
-        )
+        relation = frame.prepared.input_correspondence
+        verdict = final_equivalence_identity_gate(sources, relation)
         if verdict.passed:
             return
         strategy_result.is_equivalent = None
         strategy_result.unknown_reasons.append(
             make_internal_v2_reason_diagnostic(
-                "comparison_equivalence_closure_unproven",
+                CROSS_SIDE_IDENTITY_REASON_ID,
                 stage="S_PAIRWISE",
                 evidence_refs=verdict.evidence_refs,
                 detail=(
@@ -342,6 +349,17 @@ class PreflightGateMixin:
                     "that the final input correspondence does not justify"
                 ),
             )
+        )
+        emit_cross_side_identity_signal(
+            CrossSideIdentityBlockerSignal(
+                comparison_session_id=frame.comparison_session_id,
+                branch_id=frame.branch_id,
+                generation=frame.generation,
+                input_correspondence_digest=str(getattr(relation, "digest", "") or "unavailable"),
+                owner_free_sources=sources,
+                evidence_refs=verdict.evidence_refs,
+            ),
+            producer_site_manifest_id="preflight-cross-side-identity-veto",
         )
 
     def _call_effect_shadow_manifest(

@@ -1288,6 +1288,16 @@ def test_nested_zero_extend_uses_rendered_operand_width_without_double_extension
     assert smt == "(bvmul (_ bv2 64) ((_ zero_extend 32) (bvadd param_1 (_ bv7 32))))"
 
 
+@pytest.fixture
+def cross_side_gate_open(monkeypatch):
+    """Issue #167 の束縛（relation・raw pair）だけを見る test 用に、owner を含まない同一視の gate
+    （plan v4 PR-P）を開ける。この fixture の relation は count が EXTENSION_BOUND なので、gate は
+    閉じる。閉じることは ``test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_final_relation``
+    が見る。"""
+
+    open_cross_side_gate(monkeypatch)
+
+
 def _record_readonly_projection_proof(input_correspondence, **fixture):
     """producer を、渡した relation の比較の中で実行する（production と同じ）。"""
 
@@ -1331,7 +1341,7 @@ def _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation, com
 @pytest.mark.parametrize(("kind", "extension"), [
     (ExtensionKind.SIGN, "sign_extend"), (ExtensionKind.ZERO, "zero_extend"),
 ])
-def test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_final_relation(kind, extension):
+def test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_final_relation(kind, extension, monkeypatch):
     """Issue #167: wide 側 count が narrow 側 count の extension であることは、最終
     InputCorrespondence が EXTENSION_BOUND でその仮定を含意したときだけ言える。
     """
@@ -1340,16 +1350,19 @@ def test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_f
         _relation_with_left_extension(kind), left_param_size=8,
     )
 
-    # producer は左右を owner を含まない key（契約 key・pointer base の index）でも同一視するので、
-    # 証拠は ``OWNER_FREE`` を申告する。relation が位置どおり・全幅の等式でない（count が
-    # EXTENSION_BOUND）比較では、採用規則が拒む（plan v4 PR-P。relation を通した翻訳で回復するのは
-    # PR-H）。拒むのはこの規則だけで、extension の検査は通っていることを、申告だけを替えて確かめる。
+    # producer は左右を owner を含まない key（契約 key・pointer base の index）でも同一視する。relation が
+    # 位置どおり・全幅の等式でない（count が EXTENSION_BOUND）比較では、証拠を作らない（plan v4 PR-P。
+    # relation を通した翻訳で回復するのは PR-H）。
+    assert analysis1.completed_recovery_proof_evidence == ()
     assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is False
+    # 止めるのはこの規則だけで、extension の検査そのものは通ることを、gate を開けて確かめる。
+    open_cross_side_gate(monkeypatch)
+    strategy, reason, analysis1, analysis2, relation, _cases = _record_readonly_projection_proof(
+        _relation_with_left_extension(kind), left_param_size=8,
+    )
+    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is True
     record = analysis1.completed_recovery_proof_evidence[0]
     assert record[CROSS_SIDE_IDENTIFICATION_KEY] == CrossSideIdentification.OWNER_FREE.value
-    record[CROSS_SIDE_IDENTIFICATION_KEY] = CrossSideIdentification.CORRESPONDENCE.value
-    assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is True
-    record[CROSS_SIDE_IDENTIFICATION_KEY] = CrossSideIdentification.OWNER_FREE.value
     assert record["authority_scope"] == "comparison"
     assert record["comparison_authority"] == comparison_binding_of(analysis1, analysis2, relation).digest
     content = record["proof_content"]["parameter_extension"]
@@ -1361,6 +1374,7 @@ def test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_f
     assert strategy._readonly_identity_proof_is_complete(reason, analysis1, analysis2) is False
 
 
+@pytest.mark.usefixtures("cross_side_gate_open")
 def test_readonly_identity_projection_proof_is_not_issued_from_an_inferred_narrow_type():
     """Ghidra が wide storage 上に narrow 型（``int 4`` on a 64-bit register）を推論した
     だけでは extension の証拠にならない（旧実装はこれを proven として記録した）。
@@ -1374,6 +1388,7 @@ def test_readonly_identity_projection_proof_is_not_issued_from_an_inferred_narro
     assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is False
 
 
+@pytest.mark.usefixtures("cross_side_gate_open")
 def test_readonly_identity_projection_proof_needs_an_extension_bound_relation():
     """wide 側が 64 bit でも IEE が無ければ relation は WIDTH_OVERLAP で、仮定は含意されない。"""
 
@@ -1396,11 +1411,8 @@ def test_readonly_identity_projection_proof_needs_an_extension_bound_relation():
 # から作った proof を持ち込んではならない。
 
 
-def test_readonly_projection_proof_from_a_sign_relation_is_not_reused_without_the_extension(monkeypatch):
-    # Issue #167 の束縛（relation・raw pair）だけを見る。owner を含まない同一視の gate（plan v4 PR-P。
-    # この fixture の relation は EXTENSION_BOUND なので閉じる）は
-    # ``test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_final_relation`` が見る。
-    open_cross_side_gate(monkeypatch)
+@pytest.mark.usefixtures("cross_side_gate_open")
+def test_readonly_projection_proof_from_a_sign_relation_is_not_reused_without_the_extension():
     strategy, reason, analysis1, analysis2, sign_relation, _cases = _record_readonly_projection_proof(
         _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
     )
@@ -1412,11 +1424,8 @@ def test_readonly_projection_proof_from_a_sign_relation_is_not_reused_without_th
     assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, no_extension) is False
 
 
-def test_readonly_projection_proof_from_a_sign_relation_is_not_reused_under_a_zero_relation(monkeypatch):
-    # Issue #167 の束縛（relation・raw pair）だけを見る。owner を含まない同一視の gate（plan v4 PR-P。
-    # この fixture の relation は EXTENSION_BOUND なので閉じる）は
-    # ``test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_final_relation`` が見る。
-    open_cross_side_gate(monkeypatch)
+@pytest.mark.usefixtures("cross_side_gate_open")
+def test_readonly_projection_proof_from_a_sign_relation_is_not_reused_under_a_zero_relation():
     strategy, reason, analysis1, analysis2, sign_relation, cases = _record_readonly_projection_proof(
         _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
     )
@@ -1436,6 +1445,7 @@ def test_readonly_projection_proof_from_a_sign_relation_is_not_reused_under_a_ze
     assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, sign_relation) is True
 
 
+@pytest.mark.usefixtures("cross_side_gate_open")
 @pytest.mark.parametrize("forged_digest", ["f" * 64, hashlib.sha256(b"another relation").hexdigest()])
 def test_readonly_projection_proof_with_a_forged_relation_digest_is_rejected(forged_digest):
     strategy, reason, analysis1, analysis2, relation, _cases = _record_readonly_projection_proof(
@@ -1458,6 +1468,7 @@ def test_readonly_projection_proof_with_a_forged_relation_digest_is_rejected(for
         assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is False
 
 
+@pytest.mark.usefixtures("cross_side_gate_open")
 def test_readonly_projection_proof_relabelled_to_a_relation_without_the_extension_is_rejected():
     """digest を現在の relation に書き換えても、その relation が仮定を含意しなければ拒否する。"""
 
@@ -1478,12 +1489,9 @@ def test_readonly_projection_proof_relabelled_to_a_relation_without_the_extensio
     assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, no_extension) is False
 
 
-def test_readonly_identity_validator_binds_the_ledger_to_the_current_relation(monkeypatch):
+@pytest.mark.usefixtures("cross_side_gate_open")
+def test_readonly_identity_validator_binds_the_ledger_to_the_current_relation():
     """pair closure は ledger の relation の比較の中でだけ発行される。"""
-    # Issue #167 の束縛（relation・raw pair）だけを見る。owner を含まない同一視の gate（plan v4 PR-P。
-    # この fixture の relation は EXTENSION_BOUND なので閉じる）は
-    # ``test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_final_relation`` が見る。
-    open_cross_side_gate(monkeypatch)
 
     from scripts.function_tracer_pcode.proof.obligations.pair_closure_producers import (
         ReadonlyIdentityCandidate,
@@ -1491,7 +1499,7 @@ def test_readonly_identity_validator_binds_the_ledger_to_the_current_relation(mo
     )
     from scripts.function_tracer_pcode.proof.obligations.pair_disposition import PairLedgerBinding
 
-    strategy, reason, analysis1, analysis2, sign_relation, _cases = _record_readonly_projection_proof(
+    strategy, reason, analysis1, analysis2, sign_relation, cases = _record_readonly_projection_proof(
         _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
     )
     zero_relation = _relation_with_left_extension(ExtensionKind.ZERO)(analysis1, analysis2)
@@ -1517,7 +1525,7 @@ def test_readonly_identity_validator_binds_the_ledger_to_the_current_relation(mo
         )
         with comparison_scope(current_comparison):
             return validate_readonly_identity_candidate(
-                strategy, ledger, candidate, reason, analysis1, analysis2,
+                strategy, ledger, candidate, reason, analysis1, analysis2, *cases,
             )
 
     sign, zero = comparison(sign_relation), comparison(zero_relation)
@@ -1540,12 +1548,9 @@ def _other_raw_partner(analysis):
     return dataclasses.replace(analysis, function_name="other_partner", entry_point="0x3000")
 
 
-def test_readonly_projection_proof_of_one_raw_pair_is_not_reused_by_another_raw_pair_with_the_same_relation(monkeypatch):
+@pytest.mark.usefixtures("cross_side_gate_open")
+def test_readonly_projection_proof_of_one_raw_pair_is_not_reused_by_another_raw_pair_with_the_same_relation():
     """同じ raw analysis を別の相手と比べる比較は、relation digest が同じでも別の比較。"""
-    # Issue #167 の束縛（relation・raw pair）だけを見る。owner を含まない同一視の gate（plan v4 PR-P。
-    # この fixture の relation は EXTENSION_BOUND なので閉じる）は
-    # ``test_readonly_identity_projection_proof_uses_the_entailed_extension_of_the_final_relation`` が見る。
-    open_cross_side_gate(monkeypatch)
 
     strategy, reason, analysis1, analysis2, sign_relation, _cases = _record_readonly_projection_proof(
         _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
@@ -1566,6 +1571,7 @@ def test_readonly_projection_proof_of_one_raw_pair_is_not_reused_by_another_raw_
     ) is False
 
 
+@pytest.mark.usefixtures("cross_side_gate_open")
 @pytest.mark.parametrize("proof_source", ["declared_parameter_narrow_type_on_wide_storage", "param_semantic_hint"])
 def test_readonly_identity_gate_rejects_extension_proofs_from_inferred_types_or_hints(proof_source):
     strategy, reason, analysis1, analysis2, relation, _cases = _record_readonly_projection_proof(
@@ -1579,6 +1585,7 @@ def test_readonly_identity_gate_rejects_extension_proofs_from_inferred_types_or_
     assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is False
 
 
+@pytest.mark.usefixtures("cross_side_gate_open")
 def test_readonly_identity_gate_rejects_an_assumption_that_disagrees_with_the_content():
     strategy, reason, analysis1, analysis2, relation, _cases = _record_readonly_projection_proof(
         _relation_with_left_extension(ExtensionKind.SIGN), left_param_size=8,
@@ -1594,6 +1601,7 @@ def test_readonly_identity_gate_rejects_an_assumption_that_disagrees_with_the_co
     assert _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation) is False
 
 
+@pytest.mark.usefixtures("cross_side_gate_open")
 def test_readonly_identity_projection_producer_rejects_term_contract_mismatch():
     wide_storage = _storage("a1", 0, 64)
     narrow_storage = _storage("a1_lo", 32, 32)

@@ -363,16 +363,15 @@ def test_record_pair_closed_seals_owner_free_when_the_query_carries_owner_free_a
 
     binding = _binding()
     artifact = _producer_artifact(binding, monkeypatch)
-    ledger = PairDispositionLedger(binding, 2)
+    ledger = PairDispositionLedger(binding, 3)
     record_pair_closed(ledger, {}, (0, 0), PairClosureKind.RECOVERY, binding, artifact)
     assert ledger.closures[(0, 0)].identification is CrossSideIdentification.OWNER_FREE
 
-    # SMT の closure でも、readonly の契約・deferred call の lowering の等式を足した pair は owner を含まない。
+    # SMT の closure でも、readonly の契約・deferred call の lowering の等式を足した pair は owner を含まない
+    # （下限が CORRESPONDENCE の種類として扱い、申告だけが OWNER_FREE にすることを見る）。
     monkeypatch.setattr(ledger_module, "closure_identification_floor", lambda _artifact: CrossSideIdentification.CORRESPONDENCE)
-    monkeypatch.setattr(
-        "scripts.function_tracer_pcode.proof.strategies.pairwise_services.orchestration.closure_identification_floor",
-        lambda _artifact: CrossSideIdentification.CORRESPONDENCE,
-    )
+    record_pair_closed(ledger, {}, (1, 0), PairClosureKind.RECOVERY, binding, artifact)
+    assert ledger.closures[(1, 0)].identification is CrossSideIdentification.CORRESPONDENCE
     record_pair_closed(
         ledger, {"pairwise_extra_assertions_by_pair": {"(0,1)": ("(assert (= l r))",)}},
         (0, 1), PairClosureKind.RECOVERY, binding, artifact,
@@ -521,13 +520,14 @@ def test_the_preflight_final_gate_vetoes_an_owner_free_eq_under_a_swapped_relati
     ):
         frame = SimpleNamespace(
             pair_disposition_ledger=ledger, prepared=SimpleNamespace(input_correspondence=relation),
+            comparison_session_id="session", branch_id="S_PAIRWISE", generation=1,
         )
         result = SimpleNamespace(is_equivalent=True, unknown_reasons=[])
         PreflightGateMixin._veto_unproven_cross_side_identity(None, result, frame)
         assert result.is_equivalent is expected
         if expected is None:
             (reason,) = result.unknown_reasons
-            assert reason.reason_id == "comparison_equivalence_closure_unproven"
+            assert reason.reason_id == "cross_side_identity_unproven"
             assert reason.evidence_refs[0].startswith("cross_side_identity:owner_free_source:")
 
 
@@ -576,23 +576,14 @@ def test_a04_the_final_gate_stops_the_false_eq_when_every_site_gate_is_open(monk
     monkeypatch.setattr(pair_closure_producers, "_owner_free_identity_admitted", lambda *_args: True)
     swapped = _production("prp-a04-sites-open", *_a04_cases()["swapped_noneq"])
     assert swapped["final_outcome"] == "UNKNOWN"
-    assert "comparison_equivalence_closure_unproven" in {
+    # 止めたのは最終の EQ gate（この reason を出すのはそこだけ）
+    assert "cross_side_identity_unproven" in {
         reason.get("reason_id") for reason in swapped.get("unknown_reasons") or () if isinstance(reason, dict)
     }
 
     monkeypatch.setattr(PreflightGateMixin, "_veto_unproven_cross_side_identity", lambda *_args: None)
     unguarded = _production("prp-a04-all-open", *_a04_cases()["swapped_noneq"])
     assert unguarded["final_outcome"] == "EQUIVALENT"
-
-
-def test_abstracted_pairs_stay_unknown_through_the_gate():
-    """抽象化した pair（synthetic な ``summary_rec_N`` の行）は relation が不十分なので gate の条件 1 で止まる。
-    既存の契約 test をこの gate の回帰 test としても参照する。"""
-
-    from scripts.function_tracer_pcode.tests.unit import test_issue185_type_hypothesis_domain as t185
-
-    names = [name for name in dir(t185) if name.startswith(("test_t11c", "test_t11d"))]
-    assert names, "the abstraction contract tests t11c / t11d must exist"
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +628,7 @@ def _lowering_check(monkeypatch, right_names):
 
 def test_deferred_call_lowering_does_not_pair_calls_by_index_under_a_swapped_relation(monkeypatch):
     result, base_ctx = _lowering_check(monkeypatch, ("fp", "b", "a"))
-    assert result.is_equivalent is not True
+    assert result.is_equivalent is None
     assert "(0,0)" not in (base_ctx.get("pairwise_extra_assertions_by_pair") or {})
 
 
@@ -797,3 +788,88 @@ def test_the_memory_stage_pairs_parameter_locations_only_under_a_positional_para
             SimpleNamespace(left_parameters=(_d("p", 0),), right_parameters=(_d("p", 0, size=4),)),
             failure_prefix="caller_memory_effect",
         )
+
+
+# ---------------------------------------------------------------------------
+# Method-B / readonly identity の closure と、その証拠を作る recorder（読みの幅も見る）
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("validator_name", ["validate_method_b_candidate", "validate_readonly_identity_candidate"])
+def test_evidence_backed_closures_refuse_a_narrow_read_inside_a_ref_under_an_identity_relation(monkeypatch, validator_name):
+    """index だけの key（``('loop_limit_parameter', 0)``）は読みの幅を持たない。証拠で閉じる closure も、
+    比べる case の読み（runtime ref の中を含む）が全幅のときだけ発行する。"""
+
+    from scripts.function_tracer_pcode.proof.obligations import pair_closure_producers as producers
+
+    executed = []
+    monkeypatch.setattr(producers, "_fixed_proof_implementation", lambda *_a: object())
+    monkeypatch.setattr(producers, "_execute_pinned_proof", lambda *_a, **_k: executed.append(1) or (True, True))
+    left = _raw("f", [_d("n", 0)], _loop_value(_p("n", 0)))
+    right_full = _raw("g", [_d("n", 0)], _loop_value(_p("n", 0)))
+    right_narrow = _raw("g", [_d("n", 0)], _loop_value(_p("n", 0, size=4)))
+    validator = getattr(producers, validator_name)
+    candidate_type = (
+        producers.MethodBClosureCandidate if validator_name == "validate_method_b_candidate"
+        else producers.ReadonlyIdentityCandidate
+    )
+    with positional_comparison((_d("n", 0),)) as comparison:
+        binding = replace(_binding(), comparison_authority_digest=comparison.digest)
+        candidate = candidate_type.create(binding, "(0,0)", ("target",), ())
+        assert validator(None, binding, candidate, None, left, right_full, _case(left), _case(right_narrow)) is None
+        assert executed == []
+        assert validator(None, binding, candidate, None, left, right_full, _case(left), _case(right_full)) is not None
+        assert executed == [1]
+
+
+@pytest.mark.parametrize(("module_name", "recorder", "arguments"), [
+    ("auxiliary_smt", "_impl__record_completed_method_b_dual_summary_solver_proof_if_safe", 2),
+    ("method_b_closure", "_impl__record_completed_method_b_covering_case_proof_if_safe", 2),
+    ("readonly_reduction", "_impl__record_completed_readonly_identity_projection_proof_if_safe", 3),
+])
+def test_owner_free_recorders_check_the_cases_before_recording(monkeypatch, module_name, recorder, arguments):
+    import importlib
+
+    module = importlib.import_module(
+        "scripts.function_tracer_pcode.proof.strategies.pairwise_services." + module_name
+    )
+    seen = []
+
+    def refuse(left, right, **_kwargs):
+        seen.append((left, right))
+        from scripts.function_tracer_pcode.proof.formula.input_correspondence import CrossSideIdentityGate
+
+        return CrossSideIdentityGate.refuse(("probe",))
+
+    monkeypatch.setattr(module, "owner_free_identity_gate", refuse)
+    strategy = SimpleNamespace(enable_completed_recovery_proofs=True)
+    case1, case2 = object(), object()
+    analysis = SimpleNamespace(completed_recovery_proof_evidence=())
+    leading = (SimpleNamespace(reason_id="x"),) + (analysis,) * (arguments - 1)
+    kwargs = {"input_correspondence": None} if module_name == "readonly_reduction" else {}
+    assert getattr(module, recorder)(strategy, *leading, case1, case2, **kwargs) is None
+    assert seen == [((case1,), (case2,))]
+    assert analysis.completed_recovery_proof_evidence == ()
+
+
+def test_the_cross_side_identity_reason_blocks_only_equivalence_and_needs_a_source():
+    from scripts.function_tracer_pcode.authority.domains.cross_side_identity import (
+        CROSS_SIDE_IDENTITY_REASON_ID,
+        CrossSideIdentityBlockerSignal,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import PILOT_TYPED_CAUSE_KINDS
+    from scripts.function_tracer_pcode.authority.process.supervisor import PROCESS_DURABLE_REASON_REGISTRY
+
+    definition = PROCESS_DURABLE_REASON_REGISTRY.get(CROSS_SIDE_IDENTITY_REASON_ID)
+    assert definition.decision_effect == "blocks_equivalence"
+    assert CROSS_SIDE_IDENTITY_REASON_ID in PILOT_TYPED_CAUSE_KINDS
+    fields = dict(
+        comparison_session_id="s", branch_id="S_PAIRWISE", generation=1, input_correspondence_digest="d" * 64,
+    )
+    with pytest.raises(ValueError):
+        CrossSideIdentityBlockerSignal(owner_free_sources=(), **fields)
+    with pytest.raises(TypeError):
+        CrossSideIdentityBlockerSignal(owner_free_sources=("pair(0, 0)",), **{**fields, "generation": True})
+    first = CrossSideIdentityBlockerSignal(owner_free_sources=("pair(0, 0)",), **fields)
+    other = CrossSideIdentityBlockerSignal(owner_free_sources=("pair(0, 0)",), **{**fields, "generation": 2})
+    assert first.cause_target() != other.cause_target()

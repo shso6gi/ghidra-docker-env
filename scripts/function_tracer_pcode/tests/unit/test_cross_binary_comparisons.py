@@ -3,10 +3,11 @@
 
 * **棚卸し**（U4）: ``_cross_binary_scan`` が見つける左右の比較の node を、baseline
   （``tests/fixtures/cross_binary/comparisons.json``）と完全に一致させる。新しい node も、消えた
-  entry も不合格（baseline は走査で作り直し、手で足さない）。entry ごとに role を持ち、owner を
-  含まない同一視で判定に効くもの（``gated:*``）は、その role が名指す関所（``CHOKEPOINTS``）を
-  通ってしか判定へ届かない。関所の関数が gate を呼んでいることもここで確かめる。``UNGATED`` は
-  置かない（見つけたら gate の下へ移す）。
+  entry も不合格（baseline は走査で作り直し、手で足さない）。entry ごとに role を持つ。role は
+  呼び手を読んで決めた分類（理由は entry の ``why``）で、到達可能性そのものはこの test では
+  確かめない。この test が機械的に確かめるのは、role が名指す関所（``CHOKEPOINTS``）が存在して
+  gate を呼ぶこと、closure の validator が全て関所を通ること。``UNGATED`` の role は置かない
+  （見つけたら gate の下へ移す）。新しい比較の node は分類なしには入らない。
 * **closure の経路**（U14）: pair を「閉じた」と数えるのは ledger の closure だけで、closure を
   作るのは ``record_pair_closed`` だけ（最終の EQ gate はそこで封印した左右の同一視を読む）。
 
@@ -142,6 +143,10 @@ def _enclosing(tree):
     return owners
 
 
+def _terminal_name(node):
+    return getattr(node, "id", None) or getattr(node, "attr", None) or ""
+
+
 def test_only_record_pair_closed_creates_and_records_a_pair_closure():
     offenders = []
     for path, tree in _production_modules():
@@ -150,8 +155,8 @@ def test_only_record_pair_closed_creates_and_records_a_pair_closure():
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                 continue
             receiver = node.func.value
-            is_validated = node.func.attr == "validated" and getattr(receiver, "id", "") == "PairClosureEvidence"
-            is_close = node.func.attr == "close" and "ledger" in getattr(receiver, "id", "")
+            is_validated = node.func.attr == "validated" and _terminal_name(receiver) == "PairClosureEvidence"
+            is_close = node.func.attr == "close" and "ledger" in _terminal_name(receiver)
             if (is_validated or is_close) and owners.get(id(node)) != "record_pair_closed":
                 offenders.append((path, node.lineno, owners.get(id(node))))
     assert not offenders, offenders
@@ -169,6 +174,12 @@ def test_closure_evidence_is_constructed_and_stored_only_by_the_ledger():
             for target in targets:
                 if isinstance(target, ast.Subscript) and getattr(target.value, "attr", "") == "closures":
                     offenders.append((path, node.lineno, "store"))
+            if (
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and getattr(node.func.value, "attr", "") == "closures"
+                and node.func.attr in {"update", "setdefault", "__setitem__", "pop", "clear"}
+            ):
+                offenders.append((path, node.lineno, "mutate"))
     assert not offenders, offenders
 
 

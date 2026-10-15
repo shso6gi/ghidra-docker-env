@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import positional_comparison
 from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_of, echo_input_correspondence
 from unittest.mock import Mock
 from scripts.function_tracer_pcode.smt import ParallelSolverRunner
@@ -1404,12 +1405,15 @@ def test_method_b_covering_case_producer_records_only_covering_evidence():
     )
     reason = _typed_method_b_reason(target)
 
-    strategy._record_completed_method_b_covering_case_proof_if_safe(
-        reason,
-        analysis1,
-        exact_case,
-        summary_case,
-    )
+    # 左右を owner を含まない key で比べる recorder は、位置どおり・全幅の relation の比較の中でだけ
+    # 証拠を作る（plan v4 PR-P）。
+    with positional_comparison(parameters):
+        strategy._record_completed_method_b_covering_case_proof_if_safe(
+            reason,
+            analysis1,
+            exact_case,
+            summary_case,
+        )
 
     evidence = tuple(analysis1.completed_recovery_proof_evidence)
     assert len(evidence) == 1
@@ -1620,12 +1624,15 @@ def test_method_b_guard_partition_producer_rejects_open_count_range():
     )
     reason = _typed_method_b_reason(target)
 
-    strategy._record_completed_method_b_covering_case_proof_if_safe(
-        reason,
-        analysis1,
-        exact_case,
-        summary_case,
-    )
+    # 左右を owner を含まない key で比べる recorder は、位置どおり・全幅の relation の比較の中でだけ
+    # 証拠を作る（plan v4 PR-P）。
+    with positional_comparison(parameters):
+        strategy._record_completed_method_b_covering_case_proof_if_safe(
+            reason,
+            analysis1,
+            exact_case,
+            summary_case,
+        )
 
     evidence = tuple(analysis1.completed_recovery_proof_evidence)
     assert [item["proof_stage"] for item in evidence] == ["method_b_covering_case"]
@@ -1675,12 +1682,14 @@ def test_method_b_covering_case_producer_rejects_term_sequence_mismatch():
     )
     reason = _typed_method_b_reason(target)
 
-    strategy._record_completed_method_b_covering_case_proof_if_safe(
-        reason,
-        analysis1,
-        exact_case,
-        summary_case,
-    )
+    # gate を通る比較の中で呼ぶ（拒否が term の不一致から来ることを見る。plan v4 PR-P）。
+    with positional_comparison(parameters):
+        strategy._record_completed_method_b_covering_case_proof_if_safe(
+            reason,
+            analysis1,
+            exact_case,
+            summary_case,
+        )
 
     assert analysis1.completed_recovery_proof_evidence == ()
 

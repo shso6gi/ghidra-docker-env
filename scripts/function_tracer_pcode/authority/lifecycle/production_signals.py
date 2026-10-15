@@ -27,6 +27,9 @@ from scripts.function_tracer_pcode.authority.lifecycle.production_context import
 from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
     AnalysisLimitationBlockerSignal,
 )
+from scripts.function_tracer_pcode.authority.domains.cross_side_identity import (
+    CrossSideIdentityBlockerSignal,
+)
 from scripts.function_tracer_pcode.authority.domains.comparison_closure import (
     ComparisonClosureProductionSignal,
 )
@@ -1349,6 +1352,31 @@ def emit_comparison_closure_signal(
     signal: ComparisonClosureProductionSignal,
     *, producer_site_manifest_id: Optional[str] = None,
 ) -> int:
+    session = active_production_pilot_session()
+    if session is None:
+        return 0
+    if getattr(session, "phase7_runtime", None) is not None:
+        session.record_phase7_pre_emission_activation(
+            producer_site_manifest_id, signal
+        )
+    emit = getattr(session, "emit_domain_signal", None)
+    if not callable(emit):
+        raise TypeError("active production pilot session lacks signal authority")
+    return int(emit(signal))
+
+
+def emit_cross_side_identity_signal(
+    signal: CrossSideIdentityBlockerSignal,
+    *, producer_site_manifest_id: Optional[str] = None,
+) -> int:
+    """plan v4 PR-P: 最終の EQ gate が止めた owner を含まない同一視を cause として 1 つ出す。
+
+    pilot が無効なら厳密に no-op（0）。``emit_comparison_closure_signal`` と同型で、判定は置かない
+    （拒否は ``checker/preflight_gate`` が ``final_equivalence_identity_gate`` で決める）。
+    """
+
+    if type(signal) is not CrossSideIdentityBlockerSignal:
+        raise TypeError("cross-side identity emission requires an exact signal")
     session = active_production_pilot_session()
     if session is None:
         return 0

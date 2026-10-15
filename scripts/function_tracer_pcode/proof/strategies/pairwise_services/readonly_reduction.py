@@ -1011,6 +1011,11 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
 ) -> None:
     if not self.enable_completed_recovery_proofs:
         return
+    # 左右を owner を含まない key で比べて作る証拠。比べる値の読み（runtime ref の中を含む）が全幅で、
+    # relation が位置どおり・全幅の等式のときだけ作る（plan v4 PR-P。採用の規則は pair 全体の述語を
+    # もう一度課す）。
+    if not owner_free_identity_gate((case1,), (case2,)).passed:
+        return
     if reason_record.reason_id != UnknownReasonId.READONLY_IDENTITY_MISSING.value:
         return
     object_target_key = self._normalize_nested_tuple(reason_record.object_target_key)

@@ -23,8 +23,18 @@
   比較の外では通さない（fail-closed）。
 
 拒否は「証明できない」であって、反証ではない。site は計算をせず、保守的な答え（closure を
-発行しない、併合しない、lowering しない）へ戻る。最終の EQ gate は、owner を含まない方法で
-閉じた比較にこの gate を課す（``proof/obligations/pair_disposition.CrossSideIdentification``）。
+発行しない、併合しない、lowering しない）へ戻る。
+
+この規則が判定に効く面は 3 つで、どれもここの関数を読む:
+
+* pair の closure: ledger が closure ごとに ``CrossSideIdentification`` を封印し、最終の EQ gate
+  （``checker/preflight_gate``）が owner を含まない closure を含む比較に ``final_equivalence_identity_gate``
+  を課す（site の gate を漏らした closure の backstop）。
+* 比較の証拠（completed recovery proof）: producer が申告し、採用の規則（``binding.evidence_authority_holds``）
+  が owner を含まない証拠を位置どおりの relation の下でだけ採用する。blocker の解消（gate の producer・
+  ``DecisionAggregator``・replan）は証拠を通してしか起きないので、この採用の規則がそれらの関所になる。
+* site の gate: 計算そのものを始めない（無駄を避け、拒否したときの保守的な答えを決める）。
+
 PR-H は、この gate を relation を通した翻訳（``CorrespondenceScope``）に置き換える。
 """
 

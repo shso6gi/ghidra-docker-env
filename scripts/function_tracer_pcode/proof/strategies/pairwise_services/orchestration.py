@@ -12,7 +12,6 @@ from scripts.function_tracer_pcode.proof.obligations.model import FunctionProofO
 from scripts.function_tracer_pcode.proof.obligations import (
     CrossSideIdentification,
     PairClosureEvidence,
-    closure_identification_floor,
     PairClosureKind,
     PairDisposition,
     PairDispositionLedger,
@@ -125,11 +124,9 @@ def record_pair_closed(
 
     pair_id = f"({int(pair_key[0])},{int(pair_key[1])})"
     extra = (base_ctx.get("pairwise_extra_assertions_by_pair") or {}).get(pair_id)
-    floor = closure_identification_floor(artifact)
+    # 申告は query に足した等式だけから決める。closure の種類の下限は ledger が課す。
     identification = (
-        CrossSideIdentification.OWNER_FREE
-        if extra or floor is CrossSideIdentification.OWNER_FREE
-        else CrossSideIdentification.CORRESPONDENCE
+        CrossSideIdentification.OWNER_FREE if extra else CrossSideIdentification.CORRESPONDENCE
     )
     pair_ledger.close(PairClosureEvidence.validated(
         pair_key, closure_kind, binding, artifact,
@@ -1085,6 +1082,8 @@ def _impl_check(
                         reason_record,
                         analysis1,
                         analysis2,
+                        case1,
+                        case2,
                     )
                 elif reason_id == UnknownReasonId.READONLY_IDENTITY_MISSING:
                     self._record_completed_readonly_identity_projection_proof_if_safe(
@@ -1107,6 +1106,8 @@ def _impl_check(
                         reason_record,
                         analysis1,
                         analysis2,
+                        case1,
+                        case2,
                     )
                 if semantic_artifact is None:
                     candidate = CountedLoopValueRelationCandidate.create(

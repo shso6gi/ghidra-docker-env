@@ -97,6 +97,11 @@ def _impl__record_completed_method_b_dual_summary_solver_proof_if_safe(
 ) -> None:
     if not self.enable_completed_recovery_proofs:
         return
+    # 左右を owner を含まない key で比べて作る証拠。比べる値の読み（runtime ref の中を含む）が全幅で、
+    # relation が位置どおり・全幅の等式のときだけ作る（plan v4 PR-P。採用の規則は pair 全体の述語を
+    # もう一度課す）。
+    if not owner_free_identity_gate((case1,), (case2,)).passed:
+        return
     from scripts.function_tracer_pcode.authority.domains.loop_recurrence import LOOP_REASON_SPECS
 
     if reason_record.reason_id not in LOOP_REASON_SPECS:

@@ -514,10 +514,12 @@ def validate_method_b_candidate(
     reason: Any,
     analysis1: Any,
     analysis2: Any,
+    case1: Any,
+    case2: Any,
 ) -> Optional[MethodBClosureArtifact]:
     if not candidate.is_current_for(binding):
         return None
-    if not _owner_free_identity_admitted((), ()):
+    if not _owner_free_identity_admitted((case1,), (case2,)):
         return None
     implementation = _fixed_proof_implementation(strategy, "_method_b_closure_proof_is_complete")
     executed, valid = _execute_pinned_proof(
@@ -538,10 +540,12 @@ def validate_readonly_identity_candidate(
     reason: Any,
     analysis1: Any,
     analysis2: Any,
+    case1: Any,
+    case2: Any,
 ) -> Optional[ReadonlyIdentityClosureArtifact]:
     if not candidate.is_current_for(binding):
         return None
-    if not _owner_free_identity_admitted((), ()):
+    if not _owner_free_identity_admitted((case1,), (case2,)):
         return None
     implementation = _fixed_proof_implementation(strategy, "_readonly_identity_proof_is_complete")
     executed, valid = _execute_pinned_proof(
