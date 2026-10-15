@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "ff832cfef1d2ec485967c5a9c20be47f011514ab24f990aec7ca09a4a9579877",
+  "manifest_digest": "fe0de77053d369470067671667e0c81c9a34886b96fd835b7547d442b029200a",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 33,
   "sites": [
@@ -146,7 +146,7 @@
       "line": 405,
       "path": "scripts/function_tracer_pcode/checker/preflight_gate.py",
       "producer_site_manifest_id": "checker-call-effect-proof-batch",
-      "source_sha256": "90d1a7ba91c824559e2b2e76252d81884447b6db8f79bcfca3c9e2c8c1c1f242"
+      "source_sha256": "44a243d75f0c89d7833fd340040f42282d2d55172521823c9b434f1844e2c1df"
     },
     {
       "allowed_dispositions": [
@@ -479,10 +479,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 248,
+      "line": 250,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-cross-side-identity-veto",
-      "source_sha256": "fdda4a08951bed62792a718cddbef6864927280c9cd17162fe0a5bc663bba2d4"
+      "source_sha256": "8bc17c91ea26f9578a094b32416275597e16928a70c5d5b318834d1f899bcaae"
     },
     {
       "allowed_dispositions": [
@@ -538,10 +538,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 995,
+      "line": 997,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-loop-fallback-blocker",
-      "source_sha256": "fdda4a08951bed62792a718cddbef6864927280c9cd17162fe0a5bc663bba2d4"
+      "source_sha256": "8bc17c91ea26f9578a094b32416275597e16928a70c5d5b318834d1f899bcaae"
     },
     {
       "allowed_dispositions": [
@@ -672,10 +672,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1919,
+      "line": 1921,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-pending-loop-blocker",
-      "source_sha256": "fdda4a08951bed62792a718cddbef6864927280c9cd17162fe0a5bc663bba2d4"
+      "source_sha256": "8bc17c91ea26f9578a094b32416275597e16928a70c5d5b318834d1f899bcaae"
     },
     {
       "allowed_dispositions": [
@@ -701,10 +701,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1065,
+      "line": 1067,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-readonly-correspondence-member",
-      "source_sha256": "fdda4a08951bed62792a718cddbef6864927280c9cd17162fe0a5bc663bba2d4"
+      "source_sha256": "8bc17c91ea26f9578a094b32416275597e16928a70c5d5b318834d1f899bcaae"
     },
     {
       "allowed_dispositions": [
@@ -730,10 +730,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1042,
+      "line": 1044,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-readonly-identity-blocker",
-      "source_sha256": "fdda4a08951bed62792a718cddbef6864927280c9cd17162fe0a5bc663bba2d4"
+      "source_sha256": "8bc17c91ea26f9578a094b32416275597e16928a70c5d5b318834d1f899bcaae"
     },
     {
       "allowed_dispositions": [

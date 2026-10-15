@@ -2158,6 +2158,8 @@ def test_the_typed_call_promotion_keeps_the_cross_side_identity_veto(monkeypatch
         assert result.call_effect_shadow_manifest["phase2_discharge_gate"]["failure_cause"] == (
             "cross_side_identity_unproven"
         )
+        # 昇格しなかったので、昇格が消すはずだった call の reason も残る。
+        assert len({getattr(reason, "reason_id", None) for reason in result.unknown_reasons}) > 1
 
 
 def test_default_preflight_mode_does_not_enter_legacy_post_pairwise_gate(monkeypatch):

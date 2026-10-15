@@ -648,15 +648,18 @@ class PreflightGateMixin:
         ):
             gate["failure_cause"] = "caller_relational_return_proof_incomplete"
             return
+        discharged_reasons = list(getattr(strategy_result, "unknown_reasons", ()) or ())
         strategy_result.is_equivalent = True
         strategy_result.unknown_reasons = []
         # 昇格は pair の数だけを見るので、pairwise の最終 gate が止めた EQ（owner を含まない同一視を
         # 最終 relation が正当化しない）もここへ来る。同じ backstop をもう一度課す（plan v4 PR-P）。
+        # 止めたときは昇格しなかったので、昇格が消すはずだった reason も残す。
         from scripts.function_tracer_pcode.proof.strategies.pairwise_services.orchestration import (
             reapply_cross_side_identity_veto,
         )
 
         if reapply_cross_side_identity_veto(strategy_result):
+            strategy_result.unknown_reasons = discharged_reasons + list(strategy_result.unknown_reasons)
             gate["failure_cause"] = "cross_side_identity_unproven"
             return
         coupling = manifest.get("coupling")

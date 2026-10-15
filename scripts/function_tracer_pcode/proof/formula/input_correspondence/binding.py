@@ -78,7 +78,7 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence.model impo
 OUTSIDE_COMPARISON = "outside_comparison"
 
 #: 比較の証拠が左右の値をどう同一視したか（``gate.CrossSideIdentification`` の値）。書いた
-#: producer が申告する。申告の無い record は owner を含まない同一視として扱う（plan v4 PR-P）。
+#: producer が申告する。申告の無い record・知らない値の record は採用しない（plan v4 PR-P）。
 CROSS_SIDE_IDENTIFICATION_KEY = "cross_side_identification"
 #: owner を含まない証拠が持つ、検査の証明書（``gate.CrossSideIdentityCertificate``）の id。
 CROSS_SIDE_IDENTITY_CERTIFICATE_KEY = "cross_side_identity_certificate"

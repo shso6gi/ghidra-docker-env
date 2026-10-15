@@ -123,8 +123,8 @@ def record_pair_closed(
     証明書を closure に封印する。証明書の出所は 2 つだけ: owner を含まない種類の closure（producer の
     closure・名前で比べる構造の等価）は artifact が持つ証明書、query に owner を含まない等式（readonly の
     契約・deferred call の lowering）を足した SMT の closure は等式と一緒に登録した証明書。ledger は
-    証明書がこの比較のこの pair を検査したものか照合し、最終の EQ gate（``checker/preflight_gate``・
-    ``final_equivalence_identity_gate_for_result``）がもう一度照合する。
+    証明書がこの比較のこの pair を検査したものか照合し、最終の EQ gate（``veto_unproven_cross_side_identity``
+    の ``final_equivalence_identity_gate``）がもう一度照合する。
     """
 
     pair_id = f"({int(pair_key[0])},{int(pair_key[1])})"
@@ -209,8 +209,10 @@ def veto_unproven_cross_side_identity(
     あれば、比較の最終 relation が位置どおり・全幅の等式で、各 closure の証明書が発行済みで同じ
     relation の下で発行されたときだけ EQ を残す。残せなければ UNKNOWN（``cross_side_identity_unproven``、
     evidence は ``cross_side_identity:*``）にし、その cause を authority へ出す（``blocks_equivalence``）。
-    呼ぶのは dispatch frame の最終 gate（``checker/preflight_gate``）と、frame を持たない互換・legacy の
-    pairwise の最終判定だけ。
+    呼ぶのは dispatch frame の最終 gate（``checker/preflight_gate``）、frame を持たない互換・legacy の
+    pairwise の最終判定、pairwise の後の EQ への昇格（``reapply_cross_side_identity_veto``）だけ。
+    実装が proof 層にあるのは、frame を持たない経路（``_impl_check``）が proof 層で終わるため（checker から
+    呼ぶ 2 つの経路も同じ実装を使う。authority への signal は既存の proof → authority の辺）。
     """
 
     from scripts.function_tracer_pcode.authority.domains.cross_side_identity import (
