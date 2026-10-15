@@ -873,3 +873,47 @@ def test_the_cross_side_identity_reason_blocks_only_equivalence_and_needs_a_sour
     first = CrossSideIdentityBlockerSignal(owner_free_sources=("pair(0, 0)",), **fields)
     other = CrossSideIdentityBlockerSignal(owner_free_sources=("pair(0, 0)",), **{**fields, "generation": 2})
     assert first.cause_target() != other.cause_target()
+
+
+def test_the_cross_side_identity_encoder_observes_one_cause_per_vetoed_comparison():
+    from scripts.function_tracer_pcode.authority.domains.cross_side_identity import (
+        CROSS_SIDE_IDENTITY_REASON_ID,
+        CrossSideIdentityBlockerSignal,
+        CrossSideIdentityPilotEncoder,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import EventType
+
+    session = SimpleNamespace(
+        identity=SimpleNamespace(
+            result_occurrence_id="result-a", source_snapshot_fingerprint="source-a",
+            execution_identity_digest="execution-a",
+        ),
+        domain_signal_state={},
+    )
+    fields = dict(
+        comparison_session_id="s", branch_id="S_PAIRWISE", input_correspondence_digest="d" * 64,
+        owner_free_sources=("pair(0, 0)",), evidence_refs=("cross_side_identity:not_positional:param[0,1]:n~n",),
+    )
+    encoder = CrossSideIdentityPilotEncoder()
+    first = CrossSideIdentityBlockerSignal(generation=1, **fields)
+    (intent,) = encoder(session, first)
+    assert intent.event_type is EventType.CAUSE_OBSERVED
+    occurrence = encoder.authority_for_signal(session, first).occurrence
+    assert occurrence.reason_id == CROSS_SIDE_IDENTITY_REASON_ID
+    assert not encoder.has_observed(session, first)
+    encoder.commit_emitted_signal(session, first, (intent,))
+    # 同じ比較の拒否の繰り返しは 1 つの cause（reducer は同じ occurrence を 2 度受け付けない）。
+    assert encoder.has_observed(session, first)
+    assert encoder(session, CrossSideIdentityBlockerSignal(generation=1, **fields)) == ()
+    # 別の generation（replan の後の比較）は別の cause。
+    second = CrossSideIdentityBlockerSignal(generation=2, **fields)
+    assert encoder.authority_for_signal(session, second).occurrence.occurrence_id != occurrence.occurrence_id
+    assert len(encoder(session, second)) == 1
+    # 別の比較の結果（result occurrence）では別の occurrence。
+    other = SimpleNamespace(identity=SimpleNamespace(
+        result_occurrence_id="result-b", source_snapshot_fingerprint="source-a",
+        execution_identity_digest="execution-a",
+    ), domain_signal_state={})
+    assert encoder.authority_for_signal(other, first).occurrence.occurrence_id != occurrence.occurrence_id
+    with pytest.raises(TypeError):
+        encoder(session, object())
