@@ -40,6 +40,8 @@ from scripts.function_tracer_pcode.core import live_values
 # pair の実行制御の owner は、作業量を受け取らない値の storage の読みの量の意味の owner
 # （`core/read_limits`: 上限の外を型つきの限界として台帳へ記録する）が登録済みであることを保証する
 from scripts.function_tracer_pcode.core import read_limits  # noqa: F401
+# 比べる側の契約の判定不能の owner（`live_values.undecidable` が pair の台帳へ記録する: import が登録）
+from scripts.function_tracer_pcode.core import comparison_limits  # noqa: F401
 from scripts.function_tracer_pcode.core.json_encoding import value_token
 # Issue #106 PR-106-A: failure を結果へ変えるのは確定処理（期限で止めない）。変換の唯一の
 # owner がこの module なので、区間を張るのもここ（呼び出し側の数だけ張らない）。

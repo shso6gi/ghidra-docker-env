@@ -47,11 +47,34 @@ IDENTITY_SCOPE_VALUES = frozenset({"UNARY", "RELATIONAL"})
 STACK_LINE_LIMIT = 64
 
 
+def _kind_is(value: Any, kind: type) -> bool:
+    """`isinstance(value, kind)` の代わり（値の型そのもので判定する）。`isinstance` は型が違うと値の `__class__`（外の
+    code が property にできる）を読む: 台帳の分類・限界の判定は値の code を呼ばずに行う（Issue #242 第 8 回）。"""
+
+    return issubclass(type(value), kind)
+
+
+def _same_identity(left: Any, right: Any) -> bool:
+    """pair / session の identity が同じか（`None`・組み込みの `bool` / `int` / `float` / `str` と、それらの組み込みの
+    `tuple` だけを値で比べ、ほかは同じ object のときだけ）。値の code を呼ばない。"""
+
+    if left is right:
+        return True
+    kind = type(left)
+    if kind is not type(right):
+        return False
+    if kind is tuple:
+        return tuple.__len__(left) == tuple.__len__(right) and all(map(_same_identity, left, right))
+    if kind is str or kind is int or kind is bool or kind is float:
+        return kind.__eq__(left, right) is True
+    return False
+
+
 def _exact_tuple(value: Any) -> tuple:
     """tuple / list は tuple 化し、単独値は 1 要素 tuple にする（str は単独値）。"""
-    if isinstance(value, tuple):
+    if _kind_is(value, tuple):
         return value
-    if isinstance(value, list):
+    if _kind_is(value, list):
         return tuple(value)
     if value is None:
         return ()
@@ -156,7 +179,7 @@ class InternalError(AnalysisFailureError):
     """内部エラー（壊れた）。`__cause__` に元の例外を保持する。"""
 
     def __init__(self, cause: BaseException, *, site: str) -> None:
-        if not isinstance(cause, BaseException):
+        if not _kind_is(cause, BaseException):
             raise TypeError("internal error requires the original exception")
         if type(site) is not str or not site:
             raise ValueError("internal error needs an exact observation site")
@@ -330,7 +353,7 @@ def _represented_exception_ids(exc: BaseException) -> set:
     扱えるように両方の id を返す。
     """
     ids = {id(exc)}
-    if isinstance(exc, InternalError) and exc.__cause__ is not None:
+    if _kind_is(exc, InternalError) and exc.__cause__ is not None:
         ids.add(id(exc.__cause__))
     return ids
 
@@ -435,7 +458,7 @@ class _PairFailureRecord:
         """
         if self.kind is not PairFailureKind.INTERNAL_BUG:
             return self.exception
-        if isinstance(self.exception, InternalError):
+        if _kind_is(self.exception, InternalError):
             return self.exception
         return InternalError(self.exception, site=self.site)
 
@@ -455,7 +478,7 @@ def _default_stop_state(kind: PairFailureKind, exc: BaseException) -> PairStopSt
     時間予算だけが deadline で、派生型も deadline として扱う。それ以外は種別の
     既定（`_STOP_STATES_BY_KIND` の先頭）。
     """
-    if kind is PairFailureKind.LIMITATION and isinstance(exc, DeadlineExceeded):
+    if kind is PairFailureKind.LIMITATION and _kind_is(exc, DeadlineExceeded):
         return PairStopState.PAIR_TERMINAL_DEADLINE
     return _STOP_STATES_BY_KIND[kind][0]
 
@@ -509,9 +532,9 @@ def classify_failure_kind(exc: BaseException) -> Optional[PairFailureKind]:
     内部バグ。gate の catch 族（`AnalysisFailureError`）と producer の受理範囲は
     この 1 関数で一致する。新しい failure class は族を継承するだけでここに乗る。
     """
-    if isinstance(exc, AnalysisLimitation):
+    if _kind_is(exc, AnalysisLimitation):
         return PairFailureKind.LIMITATION
-    if isinstance(exc, AnalysisFailureError):
+    if _kind_is(exc, AnalysisFailureError):
         return PairFailureKind.INTERNAL_BUG
     return None
 
@@ -532,7 +555,7 @@ def classify_typed_failure(exc: BaseException) -> Optional[_PairFailureRecord]:
         return _limitation_record(exc, _default_stop_state(kind, exc))
     if kind is PairFailureKind.INTERNAL_BUG:
         site = (
-            exc.site if isinstance(exc, InternalError)
+            exc.site if _kind_is(exc, InternalError)
             else _site_of_unrecorded(exc)
         )
         return _internal_bug_record(exc, site)
@@ -594,9 +617,10 @@ class PairFailureLedger(PairExecutionControl):
     # -- identity ----------------------------------------------------------
 
     def matches(self, pair_identity: Any, session_identity: Any) -> bool:
-        return (
-            self.pair_identity == pair_identity
-            and self.session_identity == session_identity
+        # identity は組み込みの値の構造で比べる（値の `__eq__` の戻り値の真偽を C に読ませない: 偽る値が別の pair を同じに
+        # 見せない）。組み込みの scalar と tuple でない値は同じ object のときだけ同じ（違うと読めば新しい台帳: 安全な側）
+        return _same_identity(self.pair_identity, pair_identity) and _same_identity(
+            self.session_identity, session_identity
         )
 
     # -- 記録 --------------------------------------------------------------
@@ -604,7 +628,7 @@ class PairFailureLedger(PairExecutionControl):
     def record_limitation(
         self, exc: "AnalysisLimitation", *, stop: Optional[PairStopState] = None,
     ) -> None:
-        if not isinstance(exc, AnalysisLimitation):
+        if not _kind_is(exc, AnalysisLimitation):
             raise TypeError("pair ledger records exact analysis limitations")
         kind = PairFailureKind.LIMITATION
         stop_state = _checked_stop_state(
@@ -732,13 +756,18 @@ def pair_failure_scope(
     """
     with _PAIR_LEDGER_LOCK:
         active = _PAIR_LEDGERS[-1] if _PAIR_LEDGERS else None
-        reentrant = active is not None and active.matches(
-            pair_identity, session_identity
-        )
-        if reentrant:
-            ledger = active
-        else:
-            ledger = PairFailureLedger(pair_identity, session_identity)
+    # identity の比較（`==`）は lock の外で行う: 比較が値の code を呼び、その code が台帳を読む
+    # （`current_pair_ledger` / `record_limitation`: 比べる側の契約の判定不能は作るときに台帳へ記録する）と、
+    # 再入しない lock を同じ thread が待ち続ける。同期的な入れ子実行の前提では、読んでから積むまでの間に
+    # 他の scope は開かない
+    reentrant = active is not None and active.matches(
+        pair_identity, session_identity
+    )
+    if reentrant:
+        ledger = active
+    else:
+        ledger = PairFailureLedger(pair_identity, session_identity)
+        with _PAIR_LEDGER_LOCK:
             _PAIR_LEDGERS.append(ledger)
     try:
         yield ledger
@@ -797,7 +826,7 @@ def raise_limitation(
     先に記録するのは、途中の `except Exception` が例外を握り潰しても
     「限界があった」事実を pair 境界が読めるようにするため。
     """
-    if not isinstance(exc, AnalysisLimitation):
+    if not _kind_is(exc, AnalysisLimitation):
         raise TypeError("raise_limitation needs an exact analysis limitation")
     record_limitation(exc, stop=stop)
     raise exc
@@ -812,7 +841,7 @@ def record_limitation(
     ある所で、限界の事実だけを先に残し、raise を次の境界へ任せるときに使う
     （Issue #106 PR-106-A: `core.deadline` の settle）。
     """
-    if not isinstance(exc, AnalysisLimitation):
+    if not _kind_is(exc, AnalysisLimitation):
         raise TypeError("record_limitation needs an exact analysis limitation")
     ledger = current_pair_ledger()
     if ledger is not None:

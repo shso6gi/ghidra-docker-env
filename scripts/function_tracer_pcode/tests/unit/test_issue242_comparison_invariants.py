@@ -1111,7 +1111,7 @@ def _undecidable_binding_summary(**changes):
 
 def test_an_undecidable_binding_ends_the_loop_comparison_in_unknown():
     """束縛の文脈の key が判定できない summary（`varnode_key` に外の object）: 比べる側は「key が無い」として後の gate
-    （side effect の profile の違い → incompatible）へ進まず unknown。key を読む他の消費者には従来どおり `None`。"""
+    （side effect の profile の違い → incompatible）へ進まず unknown。key を読む他の消費者にも判定不能のまま。"""
 
     from scripts.function_tracer_pcode.core.runtime_refs import loops
     from scripts.function_tracer_pcode.core.runtime_refs.loops import LoopSideEffectProfileRef
@@ -1124,7 +1124,9 @@ def test_an_undecidable_binding_ends_the_loop_comparison_in_unknown():
     result = loops.compare_loop_summaries(left, right)
     assert result.status == "unknown"
     assert result.reason == "loop summary keys are not comparable by builtin code"
-    assert loops.loop_summary_method_b_key(left) is None
+    # key を読む他の消費者にも判定不能のまま（「key が無い」に変えない: 第 8 回）
+    with pytest.raises(UndecidableComparison):
+        loops.loop_summary_method_b_key(left)
     assert dict(HOOK_CALLS) == {}
 
 

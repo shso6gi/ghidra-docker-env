@@ -148,7 +148,8 @@ def test_undecidable_containers_are_not_guessed():
         live_values.contains({key}, 1)
     with pytest.raises(UndecidableComparison):
         live_values.inert_key((key,))
-    assert issubclass(UndecidableComparison, TypeError)
+    # 第 8 回: 判定不能は「回復できる」普通の例外の派生ではない（helper の `except TypeError` に吸収されない）
+    assert not issubclass(UndecidableComparison, TypeError)
 
 
 def test_membership_in_inert_sets_reads_the_callback_result():

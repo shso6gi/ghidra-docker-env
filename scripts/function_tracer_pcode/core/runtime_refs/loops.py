@@ -7,9 +7,9 @@ from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, bounded_repr, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
 from scripts.function_tracer_pcode.core.live_values import (
-    UndecidableComparison, as_bool, as_int, attribute, attribute_of, builtin_items, contains, deciding, equal, exact_scalar,
+    UndecidableComparison, as_bool, as_int, attribute, attribute_of, builtin_items, contains, equal, exact_scalar,
     exact_tree, inert_key, is_kind, method_of, scalar_bool, scalar_int, scalar_int_or, scalar_text, size, sorted_trees,
-    type_module, type_name, undecided_is_absent, unequal,
+    type_module, type_name, undecidable, unequal,
 )
 from scripts.function_tracer_pcode.core.runtime_refs._reading import (
     decided_equal as _decided_equal,
@@ -154,14 +154,9 @@ def _loop_variable_binding_context_from_values(
         ref = item if is_kind(item, LoopVariableIdentityRef) else attribute_of(item, "runtime_ref", None)
         if is_kind(ref, LoopVariableIdentityRef):
             # 束縛の表の key: 不活性な木だけ（dict が hash の等しい key どうしを `==` で比べ、その戻り値を C が読む）。
-            # 不活性でない key は判定しない: 束縛の文脈を作らない（Issue #242）
-            try:
-                stable_key = inert_key(ref.stable_key())
-                binder_key = inert_key(ref.binder_key())
-            except UndecidableComparison:
-                if not undecided_is_absent():
-                    raise  # 比べる側（`compare_loop_summaries` の `deciding`）は「判定できない」と「key が無い」を区別する
-                return False
+            # 不活性でない key は判定不能（`inert_key` が上げる: 「束縛の文脈が無い」に変えない。Issue #242）
+            stable_key = inert_key(ref.stable_key())
+            binder_key = inert_key(ref.binder_key())
             if stable_key is None:
                 return False
             existing_stable = binder_to_stable.get(binder_key)
@@ -1388,20 +1383,23 @@ def compare_loop_summaries(
 
     if left is None or right is None:
         return LoopSummaryComparisonResult("unknown", "missing loop summary")
-    # key の gate は判定する側の scope の中: key の組み立ての判定不能は「key が無い」でなく unknown（Issue #242）。
-    # key を読む他の消費者（記号の identity・注記）は scope の外で、従来どおり `None`（共有しない側）
+    # key の組み立て・比較の判定不能は「key が無い」でなく unknown（Issue #242）。判定不能は pair の台帳にも
+    # 記録済み（`core/comparison_limits`）: ここで unknown にしても、pair は確定判定に進まない
     try:
-        with deciding():
-            decided = _loop_key_gates(left, right)
+        decided = _loop_key_gates(left, right)
     except UndecidableComparison:
         decided = _undecided_loop_comparison()
     if decided is not None:
         return decided
-    obligation = LoopSummaryProofObligation.case_aware_solver_equality(
-        left,
-        right,
-        reason="loop summary comparator requires case-aware solver proof",
-    )
+    try:
+        obligation = LoopSummaryProofObligation.case_aware_solver_equality(
+            left,
+            right,
+            reason="loop summary comparator requires case-aware solver proof",
+        )
+    except UndecidableComparison:
+        # 証明の義務の key の組み立ても判定不能: 義務を渡さずに unknown（判定不能は pair の台帳に記録済み）
+        return _undecided_loop_comparison()
     if solver_prover is not None:
         try:
             proven = solver_prover(obligation)
@@ -1419,7 +1417,7 @@ def compare_loop_summaries(
 
 def _loop_key_gates(left: LoopSummaryRef, right: LoopSummaryRef) -> Optional[LoopSummaryComparisonResult]:
     """`compare_loop_summaries` の key の gate（決まれば結果、決まらなければ `None`）。key の組み立て・比較の判定不能は
-    `UndecidableComparison`（`deciding` の中: 呼ぶ側が unknown にする）。"""
+    `UndecidableComparison`（呼ぶ側が unknown にする）。"""
 
     left_method_b_key = _decided_method_b_key(left)
     right_method_b_key = _decided_method_b_key(right)
@@ -1500,15 +1498,11 @@ def loop_summary_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tup
     semantic proof; it is a deterministic object-centric identity for the
     current pure, path-insensitive loop-summary subset.
 
-    正規化の途中の比較が組み込みの code だけでは判定できなければ key を作らない（`None`。Issue #242）。
+    正規化の途中の比較が組み込みの code だけでは判定できなければ判定不能（`UndecidableComparison`。「key が無い」
+    （`None`）に変えない: 無い key は呼ぶ側で別の意味を持つ。Issue #242）。
     """
 
-    try:
-        return _decided_method_b_key(summary)
-    except UndecidableComparison:
-        if not undecided_is_absent():
-            raise
-        return None
+    return _decided_method_b_key(summary)
 
 
 def _decided_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tuple[Any, ...]]:
@@ -1594,7 +1588,7 @@ def _decided_method_b_key(summary: Optional[LoopSummaryRef]) -> Optional[Tuple[A
         decision = _decided_equal(expected_key, actual_key)
         if decision is None:
             # 判定できない比較で止めた key は双子の key と違い得る: key を作らない（Issue #242）
-            raise UndecidableComparison("a Method-B seed term is not comparable by builtin code")
+            raise undecidable("a Method-B seed term is not comparable by builtin code")
         if decision is False:
             break
         remaining_seed_terms.pop()

@@ -284,7 +284,7 @@ def test_class_chains_are_checked_once_per_class():
 
 
 def test_non_str_namespaces_are_bounded_across_the_whole_mro():
-    """組み込みの `str` でない key の namespace を key で探すときは、MRO 全体の和で上限と比べる。"""
+    """組み込みの `str` でない key の namespace は key を辿らない（当たった class で TypeError: 量は class の数だけ）。"""
 
     kinds = [object]
     for index in range(40):
@@ -292,7 +292,7 @@ def test_non_str_namespaces_are_bounded_across_the_whole_mro():
         namespace[1] = "not a str key"
         kinds.append(type(f"Odd{index}", (kinds[-1],), namespace))
     outcome = _quick(live_values.type_attribute, kinds[-1], "missing", seconds=0.5)
-    assert isinstance(outcome, TypeError) and "non-str namespaces" in str(outcome)
+    assert isinstance(outcome, TypeError) and "not a builtin str" in str(outcome)
 
 
 def test_nested_type_references_stop_at_the_nesting_limit():
@@ -329,7 +329,6 @@ LIVE_VALUES_WORK_OWNERS = {
     "_trusted_class_body_values": _B,
     "_type_lookup": _B,
     "_exact_str_raw": _B_CALLER,
-    "_str_key_value": _B_CALLER,
     "_builtin_hashed_type": _A,
     "_one_of": _A,
     "_in_mro": _B,
@@ -393,7 +392,6 @@ LIVE_VALUES_WORK_OWNERS = {
     "_comparison_shape": _B,
     "_resolved_dunder": _B,
     "_require_same_comparison": _A,
-    "_trusted_tree": _B,
     "_plain_operands": _B,
     "_CopyFrame._read": _B,
     "_leaf_trust": _B,
@@ -405,6 +403,44 @@ LIVE_VALUES_WORK_OWNERS = {
     "_CopyFrame.__init__": _B,
     "_checked": _B,
     # 登録した比較の実装（package の関数: 書いた数）だけ
+    # Issue #242 第 8 回: 型の事実の表（引くたびに型の状態を確かめる）と名前空間の読み（key の hook を呼ばない）
+    "_TypeFactTable._key": _A,
+    "_TypeFactTable.get": _A,
+    "_class_snapshot": _B,
+    "_namespace_part": _B,
+    # 記録した snapshot だけを辿る（snapshot を作るときに上限と比べた）
+    "_snapshot_holds": _B,
+    "_part_holds": _B,
+    "_dataclass_table_state": _B,
+    # 依存の class の列は `record` が上限と比べてから持つ（`_state` はその列だけを辿る）
+    "_TypeFactTable.record": _B,
+    # dataclass の field の表（長さを上限と比べてから読む）と `Field` の slot（書いた 3 つの名前）
+    "dataclass_field_specs": _B,
+    "_field_slots": _A,
+    # 比べる 2 つの葉だけ・型の MRO（長さを上限と比べてから辿る）
+    "_require_explicit_ne": _A,
+    "_resolved_comparison": _B,
+    # 条件つきの自己完結の実装（`Enum.__hash__`）: 型の MRO（長さを上限と比べてから辿る）と書いた 3 つの名前
+    "_self_contained_for": _B,
+    # 名前の引きだけで決まる型の事実の表: 計算が引いた名前の記録（計算の引きの数: 型の MRO の上限の中）を確かめる
+    "_LookupFactTable.get": _B_CALLER,
+    "_witnessed": _B,
+    # 基底型の書いた数の名前だけ・型の MRO（長さを上限と比べてから辿る）
+    "_same_behaviour": _A,
+    "plain_attribute_lookup": _B,
+    "class_defines": _A,
+    # 比較の分類（使う時点の分類・hash で置く位置の値・作り直しの規則）と hash の読み（NaN の印）
+    "_strongest_trust": _B,
+    "_hashed_members": _B,
+    "_rebuild_container": _B,
+    "_rebuildable": _B,
+    "_nan_free": _B,
+    "_flat_exact_without_nan": _B,
+    "_CopyFrame.unchanged": _B,
+    # 例外の読みだけの field（型が決める field の数）だけ
+    "_readonly_positions": _A,
+    "_readonly_exceptions": _A,
+    "_readonly_values": _A,
     # 例外の状態の木（例外の数を `SCAN_LIMIT` と比べる。値は `exact_tree` が 1 回の読みで写す）
     "_exception_graph": _B,
     "_graph_values": _B,

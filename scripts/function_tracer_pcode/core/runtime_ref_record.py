@@ -82,13 +82,18 @@ import types
 import typing
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+# 比べる側の契約の判定不能の owner を登録する（ref を作る・比べる経路は必ずここを通る）
+from scripts.function_tracer_pcode.core import comparison_limits  # noqa: F401
 from scripts.function_tracer_pcode.core.live_values import (
+    class_defines, class_namespace_value, plain_attribute_lookup, dataclass_field_specs, type_attribute, undecidable,
     NOT_PLAIN, equal, exact_scalar, exact_tree, exact_tree_in, hash_tree, int_value, scalar_repr, trusted_comparison,
-    type_name, verified_tree_holder as _holder,
+    trusted_hash, type_name, verified_tree_holder as _holder,
 )
 
-#: class → 写す field の (名前, 分類) の列。最初の構築で決める。
-_FIELD_KINDS: Dict[type, Tuple[Tuple[str, str], ...]] = {}
+#: `id(class)` → (class, field の表の読み（`dataclass_field_specs`）, 写す field の (名前, 分類) の列)。注釈は最初の構築で
+#: 解決し、表の読みが記録と違えば解決し直す（外の code は field の表を書き換えられる）。型を dict の key にしない（型の
+#: metaclass の `__hash__` / `__eq__` を呼ばない）。entry が型を持つので `id` は再利用されない
+_FIELD_KINDS: Dict[int, Tuple[type, Any, Tuple[Tuple[str, str], ...]]] = {}
 
 #: この decorator が置いた `__post_init__` / `__init__` → 包んだ元の関数（無ければ `None`）。
 #: ref の class がこの owner を通ることを確かめる読み口（`is_runtime_ref_record`）が使う。
@@ -135,33 +140,87 @@ def _field_hints(cls: type) -> Dict[str, Any]:
     型でないとして拒む。field でない注釈（`InitVar` / `ClassVar`）は解決しない。
     """
 
-    names = {item.name for item in dataclasses.fields(cls)}
+    names = {name for name, _compare, _repr in _field_specs(cls)}
     hints: Dict[str, Any] = {}
-    for klass in reversed(cls.__mro__):
-        own = {
-            name: annotation
-            for name, annotation in klass.__dict__.get("__annotations__", {}).items()
-            if name in names
-        }
+    # 型の MRO・名前空間・名前は `type` の descriptor と名前空間の読みで（metaclass の hook を呼ばない）
+    for klass in reversed(_TYPE_MRO(cls)):
+        annotations = class_namespace_value(klass, "__annotations__", None)
+        if type(annotations) is not dict:
+            continue
+        own = {name: annotation for name, annotation in dict.items(annotations) if type(name) is str and name in names}
         if own:
-            holder = type(klass.__name__, (), {"__annotations__": own, "__module__": klass.__module__})
+            module = class_namespace_value(klass, "__module__", None)
+            holder = type(type_name(klass), (), {"__annotations__": own, "__module__": module})
             hints.update(typing.get_type_hints(holder, include_extras=True))
     return hints
+
+
+#: `id(field の表)` → (表, 固定した `(名前, compare, repr)`, 比べる field の値の tuple の reader)。表（`__dataclass_fields__`
+#: の dict）は class を作るときに dataclass が置き、自分の表を持たない subclass は同じ表を使う: 固定も表ごとに 1 つ
+#: （親と subclass が別の時点の表で比べない）。entry が表を生かす（`id` を再利用させない）
+_FIELD_TABLES: Dict[int, Tuple[Any, Tuple[Tuple[str, bool, bool], ...], "_tuple_reader"]] = {}
+#: `id(class)` → (class, 固定した表の entry)。class ごとの最初の使用で固定し、後で class の表を差し替えても変わらない
+#: （型を dict の key にしない: metaclass の hook を呼ばない。entry が class を生かす）
+_CLASS_TABLES: Dict[int, Tuple[type, Any]] = {}
+
+
+def _field_table(cls: type, *, comparing: bool = False) -> Tuple[Any, Tuple[Tuple[str, bool, bool], ...], "_tuple_reader"]:
+    """`cls` の field の表（**表ごとに最初の使用で固定する**: 普通は最初の構築）。
+
+    dataclass の生成した `__eq__` が class を作るときの表で固定されるのと同じく、owner の比べ方・hash・写し方は固定した
+    表で決まり、後で外の code が `Field.compare` / `repr` を書き換えても変わらない: 同じ ref の比べ方と hash は使う間
+    （dict に置いている間）変わらず、同じ表を使う class（subclass を含む）の ref はどれも同じ表で比べる。表を差し替えた
+    class の固定は変わらない（class ごとに最初の使用で固定する）。固定の前（その表を使う instance が 1 つも無い間）の書き換えは class の
+    定義と同じ扱い（その前に比べた値は無い）。表は hook を呼ばずに読む（`live_values.dataclass_field_specs`）。読めない
+    表は決めない（比べる・hash する側は `UndecidableComparison`、作る側は `TypeError`）。
+    """
+
+    fixed = _CLASS_TABLES.get(id(cls))
+    if fixed is not None and fixed[0] is cls:
+        return fixed[1]  # この class は固定済み（後で表を差し替えても変わらない）
+    try:
+        table = type_attribute(cls, "__dataclass_fields__")
+    except TypeError:
+        table = None
+    entry = _FIELD_TABLES.get(id(table)) if table is not None else None
+    if entry is not None and entry[0] is table:
+        _CLASS_TABLES[id(cls)] = (cls, entry)
+        return entry
+    specs = dataclass_field_specs(cls)
+    if specs is None or table is None:
+        detail = f"{type_name(cls)} has a dataclass field table that builtin code cannot read"
+        raise undecidable(detail) if comparing else TypeError(detail)
+    reader = _tuple_reader(tuple(name for name, compared, _repr in specs if compared))
+    entry = (table, specs, reader)
+    # 上限で捨てない（捨てると、書き換えた表を後で読み直して同じ ref の比べ方・hash が変わる）: entry は dataclass の表の数だけ
+    _FIELD_TABLES[id(table)] = entry  # 並行に作っても同じ値（同じ表を読む）
+    _CLASS_TABLES[id(cls)] = (cls, entry)
+    return entry
+
+
+def _field_specs(cls: type) -> Tuple[Tuple[str, bool, bool], ...]:
+    """`cls` の固定した field の `(名前, compare, repr)`（`_field_table`）。"""
+
+    return _field_table(cls)[1]
 
 
 def field_kinds(cls: type) -> Tuple[Tuple[str, str], ...]:
     """`cls` の写す field の (名前, 分類)。class ごとに 1 度だけ注釈を解決する。"""
 
-    known = _FIELD_KINDS.get(cls)
-    if known is None:
-        hints = _field_hints(cls)
-        known = tuple(
-            (item.name, kind)
-            for item in dataclasses.fields(cls)
-            for kind in (_kind_of(hints[item.name]),)
-            if kind != "object"
-        )
-        _FIELD_KINDS[cls] = known
+    specs = _field_specs(cls)
+    entry = _FIELD_KINDS.get(id(cls))
+    if entry is not None and entry[0] is cls and entry[1] is specs:
+        return entry[2]
+    hints = _field_hints(cls)
+    known = tuple(
+        (name, kind)
+        for name, _compare, _repr in specs
+        for kind in (_kind_of(hints[name]),)
+        if kind != "object"
+    )
+    if len(_FIELD_KINDS) >= _FIELD_READERS_LIMIT:
+        _FIELD_KINDS.clear()
+    _FIELD_KINDS[id(cls)] = (cls, specs, known)  # 並行に作っても同じ値
     return known
 
 
@@ -176,18 +235,14 @@ _EXACT_TYPE_IDS = frozenset(map(id, (type(None), int, str, bool, float)))
 
 #: 型の MRO と名前空間の読み（metaclass の `__getattribute__` を通らない、`type` の descriptor）
 _TYPE_MRO = type.__dict__["__mro__"].__get__
-_TYPE_NAMESPACE = type.__dict__["__dict__"].__get__
 
 
 def _plain_attribute_lookup(cls: type) -> bool:
     """型の MRO が属性の読みを上書きしないか（`__getattribute__` / `__getattr__` が `object` のもの）。そのときの
-    `getattr` は `object.__getattribute__` と同じ読み。MRO と名前空間は `type` の descriptor で読む。"""
+    `getattr` は `object.__getattribute__` と同じ読み。使うたびに今の名前空間を hook を呼ばずに読む
+    （`live_values.plain_attribute_lookup`: 後から足した hook も見る）。"""
 
-    for base in _TYPE_MRO(cls):
-        namespace = _TYPE_NAMESPACE(base)
-        if "__getattribute__" in namespace or "__getattr__" in namespace:
-            return base is object
-    return True
+    return plain_attribute_lookup(cls)
 
 
 def _field_reader(cls: type, kinds: Tuple[Tuple[str, str], ...]) -> Optional[Callable[[Any], Tuple[Any, ...]]]:
@@ -577,29 +632,20 @@ def is_runtime_ref_entry(function: Any) -> bool:
     return type(inner) is types.FunctionType and inner in _ENTRY_WRAPPERS
 
 
-#: `id(型)` → (型, 比べる field（dataclass の `compare=True`）の値の tuple を読む関数)。entry が型を持つので `id` は再利用
-#: されない
-_COMPARE_READERS: Dict[int, Tuple[type, Callable[[Any], Tuple[Any, ...]]]] = {}
-
-
 def _compare_values(instance: Any) -> Tuple[Any, ...]:
-    """dataclass の生成した `__eq__` が比べる値の tuple（`compare=True` の field の値を宣言の順に）。
+    """dataclass の生成した `__eq__` が比べる値の tuple（`compare=True` の field の値を宣言の順に）。field は class ごとに
+    固定した表（`_field_table`）のもの。
 
     field は `object.__getattribute__` と同じ読み（型の MRO が属性の読みを上書きしないときだけ C の 1 回の読み）。
     """
 
     cls = type(instance)
-    entry = _COMPARE_READERS.get(id(cls))
-    if entry is None or entry[0] is not cls:
-        names = tuple(item.name for item in dataclasses.fields(cls) if item.compare)
-        if len(_COMPARE_READERS) >= _FIELD_READERS_LIMIT:
-            _COMPARE_READERS.clear()
-        entry = (cls, _tuple_reader(names))
-        _COMPARE_READERS[id(cls)] = entry  # 並行に作っても同じ値
-    if len(entry[1].names) >= 2 and _plain_attribute_lookup(cls):
-        return entry[1](instance)
+    reader = _field_table(cls, comparing=True)[2]
+    names = reader.names
+    if len(names) >= 2 and _plain_attribute_lookup(cls):
+        return reader(instance)
     read = object.__getattribute__
-    return tuple(read(instance, name) for name in entry[1].names)
+    return tuple(read(instance, name) for name in names)
 
 
 class _tuple_reader:
@@ -649,6 +695,7 @@ def _ref_equal(self: Any, other: Any) -> Any:
     return True
 
 
+@trusted_hash
 def _ref_hash(self: Any) -> int:
     """ref の `hash`（owner が置く。dataclass の生成した `__hash__` と同じ値: 比べる field の値の tuple の hash）。
 
@@ -677,9 +724,13 @@ def _ref_repr(self: Any) -> str:
     _REPR_RUNNING.add(key)
     try:
         cls = type(self)
+        try:
+            specs = _field_specs(cls)
+        except TypeError:
+            return type_name(cls) + "(...)"  # field の表を組み込みの code だけで読めない・最初の表と違う
         parts = [
-            item.name + "=" + scalar_repr(object.__getattribute__(self, item.name))
-            for item in dataclasses.fields(cls) if item.repr
+            name + "=" + scalar_repr(object.__getattribute__(self, name))
+            for name, _compare, shown in specs if shown
         ]
         return type_name(cls) + "(" + ", ".join(parts) + ")"
     finally:
@@ -689,10 +740,14 @@ def _ref_repr(self: Any) -> str:
 def runtime_ref_record(cls: type) -> type:
     """runtime ref の class に scalar の正規化を付ける（`@dataclass(...)` の **下** に置く）。
 
-    class が自分の `__eq__` / `__repr__` を持たなければ、owner のもの（`_ref_equal` / `_ref_repr`: dataclass の生成するものと
-    同じ値で、field の値の callback の戻り値を reader で読む）を置く。dataclass は class が持つ `__eq__` / `__repr__` を
-    作り直さず、frozen の `__hash__`（比べる field の値の tuple の hash: 戻り値は C が基底型の値で読む）は今までどおり
-    作る。自分の `__eq__` を持つ class（`LocationBaseRef`）の比較は、その本体を構築の guard が検査する。
+    class が自分の `__eq__` も `__hash__` も持たなければ、owner の `__eq__` / `__hash__`（`_ref_equal` / `_ref_hash`）を
+    置く: どちらも比べる field の値の tuple を比べる側の契約で同じに読む（`live_values.equal` / `hash_tree`）ので、等しい
+    ref は同じ hash で、同じ ref の hash は使う間変わらない（`hash_tree` は読みが作った object の identity に依らない）。
+    dataclass は class が持つ `__eq__` / `__hash__` / `__repr__` を作り直さない。自分の `__repr__` を持たなければ owner の
+    `_ref_repr` を置く。自分の `__eq__` を持つ class（`LocationBaseRef`）は自分の `__hash__` も持ち、`__eq__` が比べる
+    成分だけを `hash_tree` で hash する（比較の本体は構築の guard が検査する）。
+
+    属性の読みを上書きしないかは使うたびに読む（後から class に `__getattribute__` を足しても古い判断を使わない）。
     """
 
     if "__dataclass_fields__" in cls.__dict__:

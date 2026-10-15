@@ -2663,7 +2663,7 @@ class _Walk:
                     effort.charge(1)
                     add(reducer, element, work=effort)
             except PRODUCER_FAILURES as exc:
-                self.reject(f"producer failed ({exception_text(exc)})")
+                self.producer_failed(exc)
             except JsonBudgetExhausted:
                 # 集計を途中で止めた値は別の値: この walk の予算の超過として扱う
                 self.budget.exceeded()
@@ -2674,7 +2674,7 @@ class _Walk:
                 self.budget.exceeded()
                 raise
             except PRODUCER_FAILURES as exc:
-                self.reject(f"producer failed ({exception_text(exc)})")
+                self.producer_failed(exc)
             self.enter(produced, parent, key, build)
         else:  # pragma: no cover - 文法の追加漏れ
             self.reject(f"unknown source {type_name(kind)}")
@@ -2780,6 +2780,17 @@ class _Walk:
             _ACTIVE_WORK.reset(active)
         return holder[0]
 
+    def producer_failed(self, exc: BaseException) -> None:
+        """producer の失敗（`PRODUCER_FAILURES`）: その値は JSON にならない（`reject`）。
+
+        `RecursionError` は値の不備でなく Python の stack の上限: 落ちた場所（producer の中か walker の中か）で
+        結果を変えない。producer の中でも呼ぶ側へそのまま伝える（walker の中で起きたときと同じ）。
+        """
+
+        if issubclass(type(exc), RecursionError):  # 値の `__class__` を読まない
+            raise exc
+        self.reject(f"producer failed ({exception_text(exc)})")
+
     def drain_to(self, depth: int) -> None:
         stack = self.stack
         while len(stack) > depth:
@@ -2789,7 +2800,7 @@ class _Walk:
             except PRODUCER_FAILURES as exc:
                 # producer（`json_items` とその helper）の失敗は、その値が JSON にならないこと
                 # （field の規則どおり: 診断は marker、準備する意味の値は内部エラー）
-                self.reject(f"producer failed ({exception_text(exc)})")
+                self.producer_failed(exc)
             except JsonBudgetExhausted:
                 # producer が引き出しの中で作業量（reducer・`count_into`）を使い切った: この walk の予算の超過
                 self.budget.exceeded()
@@ -2842,7 +2853,7 @@ class _Walk:
                 try:
                     converted = fn(target)
                 except PRODUCER_FAILURES as exc:
-                    self.reject(f"producer failed ({exception_text(exc)})")
+                    self.producer_failed(exc)
                 self.enter(converted, parent, out_key, frame.build)
 
 

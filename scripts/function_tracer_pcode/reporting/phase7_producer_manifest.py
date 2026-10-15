@@ -15,6 +15,7 @@ from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
 )
 from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
     ANALYSIS_BUDGET_REASON_ID,
+    COMPARISON_UNDECIDABLE_REASON_ID,
     EXPRESSION_SIZE_BUDGET_REASON_ID,
     ANALYSIS_LIMITATION_IDENTITY_SCOPE,
     ANALYSIS_LIMITATION_OBSERVED_SITE,
@@ -321,6 +322,7 @@ _REASON_IDENTITY_SCOPES = {
     "comparison_equivalence_closure_unproven": "RELATIONAL",
     ANALYSIS_BUDGET_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,
     EXPRESSION_SIZE_BUDGET_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,
+    COMPARISON_UNDECIDABLE_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,
 }
 
 

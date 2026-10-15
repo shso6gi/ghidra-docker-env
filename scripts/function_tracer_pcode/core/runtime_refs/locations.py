@@ -7,8 +7,9 @@ from typing import Any, Dict, Optional, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 from scripts.function_tracer_pcode.core.live_values import (
+    UndecidableComparison,
     as_bool, as_int, contains, equal, exact_scalar, exact_tree, hash_tree, is_kind, method_of, scalar_int, scalar_text,
-    str_value, trusted_comparison, unequal,
+    str_value, trusted_comparison, trusted_hash, unequal,
 )
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
@@ -269,6 +270,7 @@ class LocationBaseRef:
             return None
         return scalar_text(self.storage_identity_key[1])
 
+    @trusted_hash  # `__eq__` と同じ読み（`hash_tree`）: 登録した hash（hash で置く位置に包まずに置ける）
     def __hash__(self) -> int:
         # `__eq__` が比べる成分だけ（等しい ref は同じ hash。Issue #242）。storage の位置は名前（`storage_space`）を
         # 比べない: `stable_key` の名前を除く。読みは `__eq__` と同じ（`hash_tree`: scalar の subclass は基底型の値）
@@ -398,6 +400,8 @@ class LocationBaseRef:
                         and equal(method_of(param, "get")("owner_entry_offset"), self.owner_entry_offset)
                     )
                 return scalar_int(param_index) == int(self.parameter_index)
+        except UndecidableComparison:
+            raise  # 判定不能は「一致しない」にしない（比べる側の契約: 確定判定にしない）
         except Exception:
             pass
         return False
