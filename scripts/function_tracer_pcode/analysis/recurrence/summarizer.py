@@ -474,6 +474,7 @@ class StructuralRecurrenceSummarizer:
     _is_constant_expression = _svc_proof_utils._impl__is_constant_expression
     _iter_expression_nodes = _svc_proof_utils._impl__iter_expression_nodes
     _loop_variable_expression = _svc_proof_utils._impl__loop_variable_expression
+    _synthesized_loop_state_placeholder = _svc_proof_utils._impl__synthesized_loop_state_placeholder
     _normalize_counter_parameter_expression = _svc_proof_utils._impl__normalize_counter_parameter_expression
     _parameter_expression = _svc_proof_utils._impl__parameter_expression
     _parameter_expression_candidates = _svc_proof_utils._impl__parameter_expression_candidates

@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "a5b691ec92288b148962261dee35b4de40297bd9eb5d72401b86537abef34695",
+  "manifest_digest": "ff832cfef1d2ec485967c5a9c20be47f011514ab24f990aec7ca09a4a9579877",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 33,
   "sites": [
@@ -146,7 +146,7 @@
       "line": 405,
       "path": "scripts/function_tracer_pcode/checker/preflight_gate.py",
       "producer_site_manifest_id": "checker-call-effect-proof-batch",
-      "source_sha256": "6c8bc98f6a4833d629fb4c81629a58f6dbec69cf3514004d2ec3cfa3cde25040"
+      "source_sha256": "90d1a7ba91c824559e2b2e76252d81884447b6db8f79bcfca3c9e2c8c1c1f242"
     },
     {
       "allowed_dispositions": [
@@ -479,10 +479,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 212,
+      "line": 248,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-cross-side-identity-veto",
-      "source_sha256": "919890390042d2077e10ecaa84fd1960f07d5a36094df19124235c6faca40eb0"
+      "source_sha256": "fdda4a08951bed62792a718cddbef6864927280c9cd17162fe0a5bc663bba2d4"
     },
     {
       "allowed_dispositions": [
@@ -538,10 +538,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 959,
+      "line": 995,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-loop-fallback-blocker",
-      "source_sha256": "919890390042d2077e10ecaa84fd1960f07d5a36094df19124235c6faca40eb0"
+      "source_sha256": "fdda4a08951bed62792a718cddbef6864927280c9cd17162fe0a5bc663bba2d4"
     },
     {
       "allowed_dispositions": [
@@ -598,7 +598,7 @@
       "line": 2060,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "pairwise-loop-sat-safety-observed",
-      "source_sha256": "b868aa63c583b47194d0f6a9b4ca26212f43827a44e2530883266b9156edcf0c"
+      "source_sha256": "f3bc9063ba9eb5645d088bc0f41ddfe36164361e0d2a600c47b42f7d493f349c"
     },
     {
       "allowed_dispositions": [
@@ -672,10 +672,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1883,
+      "line": 1919,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-pending-loop-blocker",
-      "source_sha256": "919890390042d2077e10ecaa84fd1960f07d5a36094df19124235c6faca40eb0"
+      "source_sha256": "fdda4a08951bed62792a718cddbef6864927280c9cd17162fe0a5bc663bba2d4"
     },
     {
       "allowed_dispositions": [
@@ -701,10 +701,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1029,
+      "line": 1065,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-readonly-correspondence-member",
-      "source_sha256": "919890390042d2077e10ecaa84fd1960f07d5a36094df19124235c6faca40eb0"
+      "source_sha256": "fdda4a08951bed62792a718cddbef6864927280c9cd17162fe0a5bc663bba2d4"
     },
     {
       "allowed_dispositions": [
@@ -730,10 +730,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1006,
+      "line": 1042,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-readonly-identity-blocker",
-      "source_sha256": "919890390042d2077e10ecaa84fd1960f07d5a36094df19124235c6faca40eb0"
+      "source_sha256": "fdda4a08951bed62792a718cddbef6864927280c9cd17162fe0a5bc663bba2d4"
     },
     {
       "allowed_dispositions": [
@@ -1286,7 +1286,7 @@
       "line": 1651,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "sat-safety-counterexample-bound-completed",
-      "source_sha256": "b868aa63c583b47194d0f6a9b4ca26212f43827a44e2530883266b9156edcf0c"
+      "source_sha256": "f3bc9063ba9eb5645d088bc0f41ddfe36164361e0d2a600c47b42f7d493f349c"
     }
   ]
 }

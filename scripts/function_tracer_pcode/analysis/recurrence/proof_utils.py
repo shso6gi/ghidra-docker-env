@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.render_smt import collect_intrinsic_smt_declarations, collect_unknown_smt_declarations, expression_smt_bit_width
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+from scripts.function_tracer_pcode.core.runtime_refs import LoopVariableIdentityRef
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
@@ -1076,6 +1077,28 @@ def _impl__loop_variable_expression(
             role,
             varnode,
             binder_ordinal=self._loop_variable_binder_ordinal(scope, role, varnode),
+        ),
+    )
+
+def _impl__synthesized_loop_state_placeholder(self, source: str, size: object) -> Expression:
+    """varnode を持たない（summarizer が式から合成した）loop の状態の placeholder。
+
+    placeholder は summary の ref が束縛する変数で、関数の入力ではない。varnode 由来の placeholder
+    （``_loop_variable_expression``）と同じく ``LoopVariableIdentityRef`` で束縛を表す（名前の
+    ``__loop_state`` は束縛の証拠にしない）。key は合成した場所（``source``）で、ref の中の
+    alpha-renaming（binder key）は varnode 由来のものと同じ規則に従う。
+    """
+
+    try:
+        normalized_size = max(1, int(size or 4))
+    except (TypeError, ValueError):
+        normalized_size = 4
+    return Expression.variable(
+        "__loop_state",
+        size=normalized_size,
+        runtime_ref=LoopVariableIdentityRef(
+            role="state",
+            varnode_key=("synthesized_loop_state", str(source)),
         ),
     )
 

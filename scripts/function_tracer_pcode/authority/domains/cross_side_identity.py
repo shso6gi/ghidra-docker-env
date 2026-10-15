@@ -4,8 +4,9 @@ values by an owner-free key the final input correspondence does not justify (pla
 
 owner を含まない key（parameter の index・名前、Method-B key など）で左右を同一視した closure は、
 最終 ``InputCorrespondence`` が位置どおり・同じ名前・全幅の等式のときだけ EQ の根拠になる
-（規則の owner は ``proof/formula/input_correspondence/gate.py``）。最終の EQ gate（``checker/
-preflight_gate``）がその条件を満たさない EQ を止めたとき、この domain の cause を 1 つ観測する。
+（規則の owner は ``proof/formula/input_correspondence/gate.py``）。最終の EQ gate（``orchestration.
+veto_unproven_cross_side_identity``。``checker/preflight_gate``・frame の無い互換・legacy の経路・
+pairwise の後の昇格が呼ぶ）がその条件を満たさない EQ を止めたとき、この domain の cause を 1 つ観測する。
 
 * reason は 1 つ（``cross_side_identity_unproven``）。site の gate の拒否（closure を作らない・等式を
   足さない）は cause を作らない: 拒否された pair は、本当に欠けている証明（loop の関係など）の reason

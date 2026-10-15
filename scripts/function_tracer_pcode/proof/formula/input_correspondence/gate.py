@@ -18,22 +18,31 @@
   全て表の行の幅で読み、名前と index が同じ行を指す。index だけの key は読みの幅を持たないので、
   狭い読み・広い読みがあれば拒否する。自由な入力 VARIABLE（束縛された loop 変数以外。graph でも
   runtime ref の中でも）があれば拒否する（名前の一致は対応の証明でない。#248 で scope へ移す）。
-* :func:`owner_free_identity_gate` — 上の 2 つの組。owner を含まない同一視をする site はこれだけを
-  呼ぶ。relation を渡さなければ現在の比較の relation（``binding.current_relation``）を読み、
-  比較の外では通さない（fail-closed）。
+* :func:`owner_free_identity_gate` — 上の 2 つの組（pair 全体の述語が先）。relation を渡さなければ
+  現在の比較の relation（``binding.current_relation``）を読み、比較の外では通さない（fail-closed）。
+* :func:`certify_owner_free_identity` — owner を含まない同一視を **発行する** site が呼ぶ唯一の入口。
+  現在の比較の relation で ``owner_free_identity_gate`` を検査し、通れば発行物の対象（pair・証拠の
+  target）・比較・relation に束縛した証明書（:class:`CrossSideIdentityCertificate`）を出す。証明書は
+  この関数だけが作れ（private token）、発行台帳に載ったものだけが有効（作り直した値は通らない）。
+
+束縛された loop 変数（summary の placeholder）は名前でなく型で区別する: runtime ref の中で届く
+VARIABLE に ``LoopVariableIdentityRef`` が付いていれば入力でない。それ以外の VARIABLE は自由な入力。
 
 拒否は「証明できない」であって、反証ではない。site は計算をせず、保守的な答え（closure を
 発行しない、併合しない、lowering しない）へ戻る。
 
-この規則が判定に効く面は 3 つで、どれもここの関数を読む:
+この規則が判定に効く面は 3 つで、どれも証明書を要求する（呼び手の注意に頼らない）:
 
-* pair の closure: ledger が closure ごとに ``CrossSideIdentification`` を封印し、最終の EQ gate
-  （``checker/preflight_gate``）が owner を含まない closure を含む比較に ``final_equivalence_identity_gate``
-  を課す（site の gate を漏らした closure の backstop）。
-* 比較の証拠（completed recovery proof）: producer が申告し、採用の規則（``binding.evidence_authority_holds``）
-  が owner を含まない証拠を位置どおりの relation の下でだけ採用する。blocker の解消（gate の producer・
-  ``DecisionAggregator``・replan）は証拠を通してしか起きないので、この採用の規則がそれらの関所になる。
-* site の gate: 計算そのものを始めない（無駄を避け、拒否したときの保守的な答えを決める）。
+* pair の closure: producer の closure・名前で比べる構造の等価・owner を含まない query の等式は、
+  その pair の証明書なしに発行・登録できない。ledger（``PairClosureEvidence``）が証明書を封印・照合し、
+  最終の EQ gate（``orchestration.veto_unproven_cross_side_identity``。dispatch frame の
+  ``checker/preflight_gate`` と frame の無い互換・legacy の経路、pairwise の後の昇格が呼ぶ）が
+  ``final_equivalence_identity_gate`` で relation と証明書をもう一度照合する。
+* 比較の証拠（completed recovery proof）: owner を含まない証拠は対象の証明書と一緒にだけ束縛でき、
+  採用の規則（``binding.evidence_authority_holds``）は発行済みで対象・比較・relation を覆う証明書を
+  要求する。blocker の解消（gate の producer・``DecisionAggregator``・replan）は証拠を通してしか
+  起きないので、この採用の規則がそれらの関所になる。
+* site の検査: 計算そのものを始めない（無駄を避け、拒否したときの保守的な答えを決める）。
 
 PR-H は、この gate を relation を通した翻訳（``CorrespondenceScope``）に置き換える。
 """

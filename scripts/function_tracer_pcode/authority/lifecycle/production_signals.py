@@ -1372,7 +1372,7 @@ def emit_cross_side_identity_signal(
     """plan v4 PR-P: 最終の EQ gate が止めた owner を含まない同一視を cause として 1 つ出す。
 
     pilot が無効なら厳密に no-op（0）。``emit_comparison_closure_signal`` と同型で、判定は置かない
-    （拒否は ``checker/preflight_gate`` が ``final_equivalence_identity_gate`` で決める）。
+    （拒否は ``orchestration.veto_unproven_cross_side_identity`` が ``final_equivalence_identity_gate`` で決める）。
     """
 
     if type(signal) is not CrossSideIdentityBlockerSignal:

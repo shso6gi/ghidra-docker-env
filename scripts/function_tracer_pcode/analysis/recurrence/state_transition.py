@@ -217,7 +217,9 @@ def _impl__recover_proved_multiplicative_state_transition_base(
         loop_base_expr,
         preferred=multiplier,
     ):
-        state_placeholder = Expression.variable("__loop_state", size=result_size)
+        state_placeholder = self._synthesized_loop_state_placeholder(
+            "proved_multiplicative_state_transition_base", result_size,
+        )
         transition_expr = Expression.binary_op(
             "INT_MULT",
             state_placeholder,

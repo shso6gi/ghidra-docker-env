@@ -277,7 +277,7 @@ def _impl__build_direct_multiplicative_state_value(
     result_size = max(1, int(result_size or getattr(count_expr, "size", 0) or 4))
     count_size = max(1, int(getattr(count_expr, "size", 0) or result_size or 4))
     one = Expression.constant(1, size=count_size)
-    state_placeholder = Expression.variable("__loop_state", size=result_size)
+    state_placeholder = self._synthesized_loop_state_placeholder("direct_multiplicative_state", result_size)
     transition = Expression.binary_op(
         "INT_MULT",
         state_placeholder,
@@ -413,7 +413,7 @@ def _impl__build_multiplicative_state_then_triangular_sum_value(
     one = Expression.constant(1, size=count_size)
     limit = Expression.binary_op("INT_ADD", count_expr, one)
     limit.size = count_size
-    state_placeholder = Expression.variable("__loop_state", size=result_size)
+    state_placeholder = self._synthesized_loop_state_placeholder("multiplicative_state_then_triangular_sum", result_size)
     transition = Expression.binary_op(
         "INT_MULT",
         state_placeholder,

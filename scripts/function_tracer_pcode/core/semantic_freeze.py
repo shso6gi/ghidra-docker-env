@@ -447,26 +447,8 @@ def unpublished_semantic_values(container: Any) -> Tuple[Any, ...]:
     """
 
     return tuple(
-        value for value, _inside in _reach_semantic_values(container, through_runtime_refs=True)
+        value for value, _inside in _reach_semantic_values(container)
         if not is_published(value)
-    )
-
-
-def reachable_semantic_values(
-    container: Any,
-    *,
-    through_runtime_refs: bool = True,
-) -> Tuple[Any, ...]:
-    """`container` から到達できる意味値（式・条件）を、初めて見た順に 1 回ずつ返す。
-
-    到達規則は公開・`unpublished_semantic_values` と同じ 1 実装（`_reach_semantic_values`）。
-    ``through_runtime_refs=False`` は graph の辺（operand・PHI の branch と条件）だけを辿り、
-    runtime ref が抱える値へ入らない（builder が式の graph から集める入力と同じ範囲）。
-    状態は動かさない。
-    """
-
-    return tuple(
-        value for value, _inside in _reach_semantic_values(container, through_runtime_refs=through_runtime_refs)
     )
 
 
@@ -477,10 +459,10 @@ def reachable_semantic_values_by_origin(container: Any) -> Tuple[Tuple[Any, bool
     graph の辺で届く値は ref の中からも届いても ``False``（式の graph に現れる値）になる。
     """
 
-    return _reach_semantic_values(container, through_runtime_refs=True)
+    return _reach_semantic_values(container)
 
 
-def _reach_semantic_values(container: Any, *, through_runtime_refs: bool) -> Tuple[Tuple[Any, bool], ...]:
+def _reach_semantic_values(container: Any) -> Tuple[Tuple[Any, bool], ...]:
     """到達できる意味値の走査の唯一の実装（`_walk_semantic_carriers` + graph の辺 + PHI の
     branch 条件 + runtime ref が抱える値）。
 
@@ -507,7 +489,7 @@ def _reach_semantic_values(container: Any, *, through_runtime_refs: bool) -> Tup
     while True:
         pending = graph_pending if graph_pending else ref_pending
         if not pending:
-            if not through_runtime_refs or not deferred_refs:
+            if not deferred_refs:
                 break
             inside = True
             runtime_ref = deferred_refs.pop()

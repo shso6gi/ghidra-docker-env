@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementContract,
@@ -146,7 +147,7 @@ def record_pair_closed(
             certificate = extra_certificate
     identification = (
         CrossSideIdentification.OWNER_FREE
-        if extra or certificate is not None
+        if certificate is not None
         else CrossSideIdentification.CORRESPONDENCE
     )
     pair_ledger.close(PairClosureEvidence.validated(
@@ -156,6 +157,41 @@ def record_pair_closed(
         required_binding_uses=required_binding_uses,
         consumed_binding_uses=consumed_binding_uses,
     ))
+
+
+@dataclass(frozen=True)
+class CrossSideIdentityBackstop:
+    """pairwise の結果に付く、最終の EQ gate の入力（ledger・最終 relation・比較の identity）。
+
+    pairwise の後で EQ に昇格させる経路（legacy の phase 2 の call の relational discharge など）は、
+    昇格の後で ``reapply_cross_side_identity_veto`` を呼び、同じ 1 つの実装で検査し直す。
+    """
+
+    pair_ledger: Optional[PairDispositionLedger]
+    relation: Any
+    comparison_session_id: str
+    branch_id: str
+    generation: int
+
+    def veto(self, strategy_result: Any) -> bool:
+        return veto_unproven_cross_side_identity(
+            strategy_result, self.pair_ledger, self.relation,
+            comparison_session_id=self.comparison_session_id,
+            branch_id=self.branch_id,
+            generation=self.generation,
+        )
+
+
+def reapply_cross_side_identity_veto(strategy_result: Any) -> bool:
+    """pairwise の後で EQ に昇格させた結果に、pairwise が付けた backstop をもう一度課す。
+
+    backstop の無い結果（pairwise 以外の strategy）は ledger の closure を持たないので何もしない。
+    """
+
+    backstop = getattr(strategy_result, "cross_side_identity_backstop", None)
+    if type(backstop) is not CrossSideIdentityBackstop:
+        return False
+    return backstop.veto(strategy_result)
 
 
 def veto_unproven_cross_side_identity(
@@ -2137,17 +2173,18 @@ def _impl_check(
             for evidence in prepared.completion_evidence
         ]
         final_result.comparison_execution_receipt = comparison_receipt
+        final_result.cross_side_identity_backstop = CrossSideIdentityBackstop(
+            pair_ledger,
+            input_correspondence,
+            ledger_binding.comparison_session_id,
+            ledger_binding.branch_id,
+            ledger_binding.frame_generation,
+        )
         if dispatch_frame is None:
             # dispatch frame を持たない実行（互換の直接呼び出し・``LEGACY_POST_PAIRWISE``）は preflight の
-            # 最終 gate を通らないので、同じ backstop をここで課す（plan v4 PR-P）。
-            veto_unproven_cross_side_identity(
-                final_result,
-                pair_ledger,
-                input_correspondence,
-                comparison_session_id=ledger_binding.comparison_session_id,
-                branch_id=ledger_binding.branch_id,
-                generation=ledger_binding.frame_generation,
-            )
+            # 最終 gate を通らないので、同じ backstop をここで課す（plan v4 PR-P）。後で EQ に昇格させる
+            # 経路は ``reapply_cross_side_identity_veto`` でもう一度課す。
+            final_result.cross_side_identity_backstop.veto(final_result)
         return final_result
     finally:
         self._active_safety_checker = None

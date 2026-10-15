@@ -455,10 +455,9 @@ def _owner_free_identity_certificate(
     最終の EQ gate がもう一度照合する。
     """
 
-    verdict = certify_owner_free_identity(
+    return certify_owner_free_identity(
         left_values, right_values, subject=pair_identity_subject(candidate.pair_id),
-    )
-    return verdict.certificate if verdict.passed else None
+    ).certificate
 
 
 def validate_runtime_reduction_candidate(
