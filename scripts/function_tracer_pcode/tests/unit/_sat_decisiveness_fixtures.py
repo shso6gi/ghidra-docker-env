@@ -443,6 +443,7 @@ def _analysis_with_deferred_call_argument_blocker(
     unknown_size: int = 4,
     call_argument_recovery_status: str = CallArgumentEvidence.RECOVERY_INCONCLUSIVE,
     parameter_names=("fp", "a", "b"),
+    argument_sizes=None,
 ) -> FunctionReturnAnalysis:
     parameters = [
         _param(parameter_names[0], index=0, size=8),
@@ -460,7 +461,7 @@ def _analysis_with_deferred_call_argument_blocker(
         Expression.parameter(
             parameters[index]["name"],
             index,
-            size=parameters[index]["size"],
+            size=(argument_sizes or {}).get(index, parameters[index]["size"]),
         )
         for index in argument_indices
     ]

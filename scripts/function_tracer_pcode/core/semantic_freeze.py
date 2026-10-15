@@ -447,7 +447,7 @@ def unpublished_semantic_values(container: Any) -> Tuple[Any, ...]:
     """
 
     return tuple(
-        value for value in _reach_semantic_values(container, through_runtime_refs=True)
+        value for value, _inside in _reach_semantic_values(container, through_runtime_refs=True)
         if not is_published(value)
     )
 
@@ -465,27 +465,54 @@ def reachable_semantic_values(
     状態は動かさない。
     """
 
-    return _reach_semantic_values(container, through_runtime_refs=through_runtime_refs)
+    return tuple(
+        value for value, _inside in _reach_semantic_values(container, through_runtime_refs=through_runtime_refs)
+    )
 
 
-def _reach_semantic_values(container: Any, *, through_runtime_refs: bool) -> Tuple[Any, ...]:
+def reachable_semantic_values_by_origin(container: Any) -> Tuple[Tuple[Any, bool], ...]:
+    """到達できる意味値と、それが runtime ref の中で**だけ**到達できるか（``True``）の組。
+
+    1 回の走査で、先に graph の辺だけで届く値を全て数え、その後で runtime ref が抱える値へ入る。
+    graph の辺で届く値は ref の中からも届いても ``False``（式の graph に現れる値）になる。
+    """
+
+    return _reach_semantic_values(container, through_runtime_refs=True)
+
+
+def _reach_semantic_values(container: Any, *, through_runtime_refs: bool) -> Tuple[Tuple[Any, bool], ...]:
     """到達できる意味値の走査の唯一の実装（`_walk_semantic_carriers` + graph の辺 + PHI の
-    branch 条件 + runtime ref が抱える値）。"""
+    branch 条件 + runtime ref が抱える値）。
 
-    found: List[Any] = []
+    graph の辺の frontier を先に空にしてから runtime ref の中へ入る（ref の中で初めて届いた値と、
+    そこから graph の辺で届く値に ``inside_runtime_ref=True`` が付く）。
+    """
+
+    found: List[Tuple[Any, bool]] = []
     seen: Dict[int, bool] = {}
     # 明示 stack（graph が深くても再帰上限に当たらない。module の他の走査と同じ形）
-    pending: List[Any] = []
+    graph_pending: List[Any] = []
+    ref_pending: List[Any] = []
+    deferred_refs: List[Any] = []
+    inside = False
 
     def enqueue(value: Any) -> None:
         if value is None or id(value) in seen:
             return
         seen[id(value)] = True
-        found.append(value)
-        pending.append(value)
+        found.append((value, inside))
+        (ref_pending if inside else graph_pending).append(value)
 
     _walk_semantic_carriers(container, enqueue, enqueue)
-    while pending:
+    while True:
+        pending = graph_pending if graph_pending else ref_pending
+        if not pending:
+            if not through_runtime_refs or not deferred_refs:
+                break
+            inside = True
+            runtime_ref = deferred_refs.pop()
+            _walk_semantic_carriers(runtime_ref, enqueue, enqueue)
+            continue
         value = pending.pop()
         if isinstance(value, Condition):
             enqueue(value.expression)
@@ -494,13 +521,11 @@ def _reach_semantic_values(container: Any, *, through_runtime_refs: bool) -> Tup
             enqueue(edge.child)
         for condition in _phi_branch_conditions(value):
             enqueue(condition)
-        if not through_runtime_refs:
-            continue
         runtime_ref = value.__dict__.get("runtime_ref")
         if runtime_ref is None or id(runtime_ref) in seen:
             continue
         seen[id(runtime_ref)] = True
-        _walk_semantic_carriers(runtime_ref, enqueue, enqueue)
+        deferred_refs.append(runtime_ref)
     return tuple(found)
 
 

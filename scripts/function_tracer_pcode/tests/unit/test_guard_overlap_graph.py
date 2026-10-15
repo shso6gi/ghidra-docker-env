@@ -617,6 +617,7 @@ def test_producer_closure_cannot_be_issued_outside_registered_validator():
             _binding(),
             ("candidate",),
             ("evidence",),
+            identity_certificate=None,
         )
 
 

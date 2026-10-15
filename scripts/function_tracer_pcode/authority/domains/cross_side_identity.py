@@ -54,7 +54,7 @@ CROSS_SIDE_IDENTITY_CONTRACT_ID = "cross-side-identity-recovery"
 CROSS_SIDE_IDENTITY_TARGET_KIND = "pair_comparison_identification"
 CROSS_SIDE_IDENTITY_PRODUCER_ID = "cross-side-identity-final-gate-v1"
 #: producer site（Phase 7 manifest の site id。``emit_cross_side_identity_signal`` の呼び手は 1 つ）。
-CROSS_SIDE_IDENTITY_SITE_ID = "preflight-cross-side-identity-veto"
+CROSS_SIDE_IDENTITY_SITE_ID = "pairwise-cross-side-identity-veto"
 CROSS_SIDE_IDENTITY_IDENTITY_SCOPE = IdentityScope.RELATIONAL
 #: session ごとに「どの比較の拒否を **これまでに一度でも** 観測したか」の履歴（reducer の重複
 #: occurrence 拒否を避けるためだけの key。cause が active かは lifecycle projection が正本）。

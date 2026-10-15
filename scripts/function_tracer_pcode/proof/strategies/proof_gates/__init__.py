@@ -210,6 +210,7 @@ def implementations() -> dict[str, Callable[..., Any]]:
         "_readonly_storage_relation_is_specific": _target_specificity._impl__readonly_storage_relation_is_specific,
         "_readonly_term_contract_is_specific": _target_specificity._impl__readonly_term_contract_is_specific,
         "_record_completed_call_effect_summary_proof_if_safe": _call_effect._impl__record_completed_call_effect_summary_proof_if_safe,
+        "_call_effect_comparison_surface": _call_effect._impl__call_effect_comparison_surface,
         "_record_completed_return_coverage_proof": _return_coverage._impl__record_completed_return_coverage_proof,
         "_record_completed_sat_counterexample_replay_proof": _sat_safety._impl__record_completed_sat_counterexample_replay_proof,
         "_record_pairwise_counterexample_replay_proof": _sat_safety._impl__record_pairwise_counterexample_replay_proof,

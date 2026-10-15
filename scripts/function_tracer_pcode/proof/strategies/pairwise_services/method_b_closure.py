@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core import CountedLoopSummaryRef, FunctionReturnAnalysis, ReadonlyReductionRef
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import comparison_evidence_subject
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     CrossSideIdentification,
-    owner_free_identity_gate,
+    certify_owner_free_identity,
     ReturnCase,
     UnknownRecoveryProofKind,
     _ExactReadonlyReductionProof,
@@ -49,9 +50,13 @@ def _impl__record_completed_method_b_covering_case_proof_if_safe(
     if not self.enable_completed_recovery_proofs:
         return
     # 左右を owner を含まない key で比べて作る証拠。比べる値の読み（runtime ref の中を含む）が全幅で、
-    # relation が位置どおり・全幅の等式のときだけ作る（plan v4 PR-P。採用の規則は pair 全体の述語を
-    # もう一度課す）。
-    if not owner_free_identity_gate((case1,), (case2,)).passed:
+    # relation が位置どおり・全幅の等式のときだけ作り、その検査の証明書と一緒に記録する（plan v4
+    # PR-P。採用の規則は証明書を照合する）。
+    certification = certify_owner_free_identity(
+        (case1,), (case2,),
+        subject=comparison_evidence_subject(self._normalize_nested_tuple(reason_record.object_target_key)),
+    )
+    if not certification.passed:
         return
     from scripts.function_tracer_pcode.authority.domains.loop_recurrence import LOOP_REASON_SPECS
 
@@ -156,7 +161,10 @@ def _impl__record_completed_method_b_covering_case_proof_if_safe(
             covering=covering,
         ) or changed
     if changed:
-        store_comparison_evidence(analysis, records, identification=CrossSideIdentification.OWNER_FREE)
+        store_comparison_evidence(
+            analysis, records, identification=CrossSideIdentification.OWNER_FREE,
+            certificate=certification.certificate,
+        )
 
 
 def _impl__append_completed_method_b_covering_case_evidence(

@@ -35,15 +35,21 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     InputRelationKind,
     bind_evidence_to_comparison,
     build_input_correspondence_set,
+    certify_owner_free_identity,
     closure_reads_are_full,
     comparison_evidence,
+    issued_certificate,
     comparison_scope,
+    current_relation,
     final_equivalence_identity_gate,
     owner_free_identity_gate,
     positional_identity_gate,
     positional_parameter_identity_gate,
 )
-from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import CROSS_SIDE_IDENTIFICATION_KEY
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    CROSS_SIDE_IDENTIFICATION_KEY,
+    CROSS_SIDE_IDENTITY_CERTIFICATE_KEY,
+)
 from scripts.function_tracer_pcode.proof.obligations import (
     PairClosureEvidence,
     PairClosureKind,
@@ -259,24 +265,38 @@ def test_owner_free_gate_reads_the_current_comparison_and_refuses_outside_it():
 
 
 # ---------------------------------------------------------------------------
-# ledger: closure の左右の同一視の封印（record_pair_closed / 最終 gate が読む値）
+# 検査の証明書: owner を含まない closure・証拠・query の等式は、gate が発行した証明書なしに作れない
 # ---------------------------------------------------------------------------
 
 
-def _binding():
+def _positional_comparison_binding():
+    return comparison_binding_of(*_identity_pair())
+
+
+def _binding(comparison=None):
+    comparison = comparison or _positional_comparison_binding()
     return PairLedgerBinding(
         comparison_session_id="s", branch_id="b", prepared_surface_digest="d" * 64,
         projection_id="p", frame_generation=1, derived_view_id=("v",), premise_digest="premise",
-        graph_generation=1, comparison_authority_digest="c" * 64,
+        graph_generation=1, comparison_authority_digest=comparison.digest,
     )
 
 
-def _producer_artifact(binding, monkeypatch):
+def _certificate(subject, comparison=None, values=None):
+    comparison = comparison or _positional_comparison_binding()
+    with comparison_scope(comparison):
+        verdict = certify_owner_free_identity(values or (), values or (), subject=subject)
+    assert verdict.passed, verdict.evidence_refs
+    return verdict.certificate
+
+
+def _producer_artifact(binding, monkeypatch, certificate):
     """登録した validator の代わりに、この test の関数を issuer として runtime reduction の artifact を作る。"""
 
     def issue():
         return ledger_module.issue_producer_validated_closure(
             ledger_module.RuntimeReductionClosureArtifact, binding, ("pair", "p"), ("evidence",),
+            identity_certificate=certificate,
         )
 
     monkeypatch.setitem(
@@ -287,52 +307,87 @@ def _producer_artifact(binding, monkeypatch):
     return issue()
 
 
-def test_owner_free_closure_kinds_cannot_be_declared_as_correspondence(monkeypatch):
-    binding = _binding()
-    artifact = _producer_artifact(binding, monkeypatch)
+def test_certificates_are_issued_only_by_the_gate_and_only_inside_a_comparison():
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import CrossSideIdentityCertificate
+
+    with pytest.raises(TypeError):
+        CrossSideIdentityCertificate("id", "c" * 64, "r" * 64, ("pair", "(0,0)"))
+    # 比較の外・入れ替えた relation では発行しない。
+    assert certify_owner_free_identity((), (), subject=("pair", "(0,0)")).certificate is None
+    with comparison_scope(comparison_binding_of(*_swapped_pair())):
+        assert certify_owner_free_identity((), (), subject=("pair", "(0,0)")).certificate is None
+    comparison = _positional_comparison_binding()
+    certificate = _certificate(("pair", "(0,0)"), comparison)
+    assert certificate.covers(("pair", "(0,0)"), comparison_digest=comparison.digest)
+    assert not certificate.covers(("pair", "(0,1)"), comparison_digest=comparison.digest)
+    assert not certificate.covers(("pair", "(0,0)"), comparison_digest="0" * 64)
+    # 同じ値で作り直した証明書（発行台帳に無いもの）は通らない。
+    forged = CrossSideIdentityCertificate(
+        certificate.certificate_id, certificate.comparison_digest, certificate.relation_digest,
+        certificate.subject, _token=certificate._token,
+    )
+    assert not forged.covers(("pair", "(0,0)"), comparison_digest=comparison.digest)
+    assert issued_certificate(certificate.certificate_id) is certificate
+
+
+def test_an_owner_free_closure_requires_the_certificate_of_its_pair_and_comparison(monkeypatch):
+    comparison = _positional_comparison_binding()
+    binding = _binding(comparison)
+    certificate = _certificate(("pair", "(0,0)"), comparison)
+    artifact = _producer_artifact(binding, monkeypatch, certificate)
     assert closure_identification_floor(artifact) is CrossSideIdentification.OWNER_FREE
+    for missing in (None, _certificate(("pair", "(0,1)"), comparison), _certificate(("pair", "(0,0)"))):
+        if missing is not None and missing.covers(("pair", "(0,0)"), comparison_digest=binding.comparison_authority_digest):
+            continue
+        with pytest.raises(ValueError):
+            PairClosureEvidence.validated(
+                (0, 0), PairClosureKind.RECOVERY, binding, artifact,
+                identification=CrossSideIdentification.OWNER_FREE, identity_certificate=missing,
+            )
     closure = PairClosureEvidence.validated(
         (0, 0), PairClosureKind.RECOVERY, binding, artifact,
-        identification=CrossSideIdentification.CORRESPONDENCE,
+        identification=CrossSideIdentification.CORRESPONDENCE, identity_certificate=certificate,
     )
+    # 種類の下限で owner を含まない（申告では下げられない）。
     assert closure.identification is CrossSideIdentification.OWNER_FREE
     assert closure.validates(binding)
-    # 封印した後で申告を書き換えると検証を通らない（digest と下限の両方）。
-    forged = replace(closure, identification=CrossSideIdentification.CORRESPONDENCE)
-    assert not forged.validates(binding)
+    # 封印した後で申告・証明書を書き換えると検証を通らない。
+    assert not replace(closure, identification=CrossSideIdentification.CORRESPONDENCE).validates(binding)
+    assert not replace(closure, identity_certificate=None).validates(binding)
+    other = _certificate(("pair", "(0,0)"), comparison)
+    assert not replace(closure, identity_certificate=other).validates(binding)
     ledger = PairDispositionLedger(binding, 1)
-    with pytest.raises(ValueError):
-        ledger.close(forged)
     ledger.close(closure)
-    assert ledger.owner_free_closures() == ((0, 0),)
+    assert ledger.owner_free_closures() == (((0, 0), certificate),)
 
 
-def test_a_closure_with_a_consistent_digest_still_cannot_go_below_its_floor(monkeypatch):
-    import hashlib
-
-    binding = _binding()
-    artifact = _producer_artifact(binding, monkeypatch)
-    closure = PairClosureEvidence.validated(
-        (0, 0), PairClosureKind.RECOVERY, binding, artifact, identification=CrossSideIdentification.OWNER_FREE,
-    )
-    # digest も申告に合わせて作り直した偽造（下限の検査だけが止める）。
-    digest = hashlib.sha256(repr((
-        binding.stable_key(), artifact.stable_key(), (), (), (), CrossSideIdentification.CORRESPONDENCE.value,
-    )).encode()).hexdigest()
-    forged = replace(closure, identification=CrossSideIdentification.CORRESPONDENCE, evidence_digest=digest)
-    assert not forged.validates(binding)
+def test_a_producer_closure_cannot_be_issued_without_a_certificate_of_its_comparison(monkeypatch):
+    comparison = _positional_comparison_binding()
+    binding = _binding(comparison)
+    with pytest.raises(ValueError):
+        _producer_artifact(binding, monkeypatch, None)
+    other_comparison = comparison_binding_of(*_identity_pair(lambda: _p("m", 1)))
+    with pytest.raises(ValueError):
+        _producer_artifact(binding, monkeypatch, _certificate(("pair", "(0,0)"), other_comparison))
 
 
-def test_the_closure_digest_seals_the_identification(monkeypatch):
-    binding = _binding()
-    artifact = _producer_artifact(binding, monkeypatch)
-    # 下限が CORRESPONDENCE の種類として扱う（申告の書き換えを digest だけが止める）。
+def test_a_correspondence_closure_does_not_carry_a_certificate(monkeypatch):
+    comparison = _positional_comparison_binding()
+    binding = _binding(comparison)
+    artifact = _producer_artifact(binding, monkeypatch, _certificate(("pair", "(0,0)"), comparison))
     monkeypatch.setattr(ledger_module, "closure_identification_floor", lambda _artifact: CrossSideIdentification.CORRESPONDENCE)
+    with pytest.raises(ValueError):
+        PairClosureEvidence.validated(
+            (0, 0), PairClosureKind.RECOVERY, binding, artifact,
+            identification=CrossSideIdentification.CORRESPONDENCE,
+            identity_certificate=_certificate(("pair", "(0,0)"), comparison),
+        )
     closure = PairClosureEvidence.validated(
-        (0, 0), PairClosureKind.RECOVERY, binding, artifact, identification=CrossSideIdentification.OWNER_FREE,
+        (0, 0), PairClosureKind.RECOVERY, binding, artifact, identification=CrossSideIdentification.CORRESPONDENCE,
     )
     assert closure.validates(binding)
-    assert not replace(closure, identification=CrossSideIdentification.CORRESPONDENCE).validates(binding)
+    # 申告の書き換えは digest が止める。
+    assert not replace(closure, identification=CrossSideIdentification.OWNER_FREE).validates(binding)
 
 
 def test_structural_equality_by_name_has_an_owner_free_floor_and_void_return_does_not():
@@ -347,9 +402,39 @@ def test_structural_equality_by_name_has_an_owner_free_floor_and_void_return_doe
     assert closure_identification_floor(object()) is CrossSideIdentification.OWNER_FREE
 
 
+def test_a_name_based_structural_receipt_requires_the_certificate_of_its_pair():
+    # issuer は登録した producer の code object に pin されるので、ここでは receipt の検査そのものを
+    # 直接呼ぶ: 登録表の code を一時的にこの関数の code にして呼ぶ。
+    comparison = _positional_comparison_binding()
+
+    def issue(certificate, kind):
+        return ledger_module.issue_structural_equality_receipt(
+            query_label="(0,0)", proof_kind=kind, evidence=(kind,), identity_certificate=certificate,
+        )
+
+    table = ledger_module._TRUSTED_STRUCTURAL_EQUALITY_PRODUCER_CODES
+    saved = dict(table)
+    try:
+        for kind in ("rewrite-structural", "loop-template", "void-return"):
+            table[kind] = issue.__code__
+        for kind in ("rewrite-structural", "loop-template"):
+            for wrong in (None, _certificate(("pair", "(0,1)"), comparison)):
+                with pytest.raises(ValueError):
+                    issue(wrong, kind)
+            receipt = issue(_certificate(("pair", "(0,0)"), comparison), kind)
+            assert receipt.identity_certificate is not None and receipt.validates_authority()
+        with pytest.raises(ValueError):
+            issue(_certificate(("pair", "(0,0)"), comparison), "void-return")
+        assert issue(None, "void-return").identity_certificate is None
+    finally:
+        table.clear()
+        table.update(saved)
+
+
 def test_a_closure_requires_an_exact_identification(monkeypatch):
-    binding = _binding()
-    artifact = _producer_artifact(binding, monkeypatch)
+    comparison = _positional_comparison_binding()
+    binding = _binding(comparison)
+    artifact = _producer_artifact(binding, monkeypatch, _certificate(("pair", "(0,0)"), comparison))
     with pytest.raises(TypeError):
         PairClosureEvidence.validated((0, 0), PairClosureKind.RECOVERY, binding, artifact)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
@@ -358,25 +443,81 @@ def test_a_closure_requires_an_exact_identification(monkeypatch):
         )
 
 
-def test_record_pair_closed_seals_owner_free_when_the_query_carries_owner_free_assertions(monkeypatch):
+def test_record_pair_closed_takes_the_certificate_from_the_artifact_or_the_query_assertions(monkeypatch):
     from scripts.function_tracer_pcode.proof.strategies.pairwise_services.orchestration import record_pair_closed
 
-    binding = _binding()
-    artifact = _producer_artifact(binding, monkeypatch)
+    comparison = _positional_comparison_binding()
+    binding = _binding(comparison)
+    certificate = _certificate(("pair", "(0,0)"), comparison)
+    artifact = _producer_artifact(binding, monkeypatch, certificate)
     ledger = PairDispositionLedger(binding, 3)
     record_pair_closed(ledger, {}, (0, 0), PairClosureKind.RECOVERY, binding, artifact)
-    assert ledger.closures[(0, 0)].identification is CrossSideIdentification.OWNER_FREE
+    assert ledger.closures[(0, 0)].identity_certificate is certificate
 
-    # SMT の closure でも、readonly の契約・deferred call の lowering の等式を足した pair は owner を含まない
-    # （下限が CORRESPONDENCE の種類として扱い、申告だけが OWNER_FREE にすることを見る）。
+    # SMT の closure でも、owner を含まない等式を足した pair は owner を含まず、等式と一緒に登録した
+    # 証明書を ledger へ渡す（下限が CORRESPONDENCE の種類として扱い、等式の側の経路だけを見る）。
+    class _SolverUnsat:
+        """relation の premise の下の SMT の closure（下限が CORRESPONDENCE の種類）の代わり。"""
+
+        def validates(self, *_args):
+            return True
+
+        def stable_key(self):
+            return ("solver-unsat-stub",)
+
+    plain = _SolverUnsat()
+    assert closure_identification_floor(plain) is CrossSideIdentification.OWNER_FREE
     monkeypatch.setattr(ledger_module, "closure_identification_floor", lambda _artifact: CrossSideIdentification.CORRESPONDENCE)
-    record_pair_closed(ledger, {}, (1, 0), PairClosureKind.RECOVERY, binding, artifact)
+    record_pair_closed(ledger, {}, (1, 0), PairClosureKind.RECOVERY, binding, plain)
     assert ledger.closures[(1, 0)].identification is CrossSideIdentification.CORRESPONDENCE
+    with pytest.raises(ValueError):
+        # 等式はあるが証明書が無い（登録の経路を迂回した等式）。
+        record_pair_closed(
+            ledger, {"pairwise_extra_assertions_by_pair": {"(0,1)": ("(assert (= l r))",)}},
+            (0, 1), PairClosureKind.RECOVERY, binding, plain,
+        )
+    pair_certificate = _certificate(("pair", "(0,1)"), comparison)
     record_pair_closed(
-        ledger, {"pairwise_extra_assertions_by_pair": {"(0,1)": ("(assert (= l r))",)}},
-        (0, 1), PairClosureKind.RECOVERY, binding, artifact,
+        ledger, {
+            "pairwise_extra_assertions_by_pair": {"(0,1)": ("(assert (= l r))",)},
+            "pairwise_extra_assertion_certificates_by_pair": {"(0,1)": pair_certificate},
+        },
+        (0, 1), PairClosureKind.RECOVERY, binding, plain,
     )
     assert ledger.closures[(0, 1)].identification is CrossSideIdentification.OWNER_FREE
+    assert ledger.closures[(0, 1)].identity_certificate is pair_certificate
+
+
+def test_owner_free_query_assertions_are_registered_only_with_the_certificate_of_their_pair():
+    from unittest.mock import Mock
+
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import OwnerFreePairAssertions
+
+    strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    comparison = _positional_comparison_binding()
+    base_ctx = {}
+    with comparison_scope(comparison):
+        with pytest.raises(TypeError):
+            strategy._register_pairwise_extra_assertions(base_ctx, "(0,0)", ("(assert (= l r))",))
+        for wrong in (None, _certificate(("pair", "(0,1)"), comparison)):
+            with pytest.raises(ValueError):
+                strategy._register_pairwise_extra_assertions(
+                    base_ctx, "(0,0)", OwnerFreePairAssertions(("(assert (= l r))",), wrong),
+                )
+        certificate = _certificate(("pair", "(0,0)"), comparison)
+        strategy._register_pairwise_extra_assertions(
+            base_ctx, "(0,0)", OwnerFreePairAssertions(("(assert (= l r))",), certificate),
+        )
+    assert base_ctx["pairwise_extra_assertion_certificates_by_pair"]["(0,0)"] is certificate
+    with comparison_scope(comparison_binding_of(*_identity_pair(lambda: _p("m", 1)))):
+        with pytest.raises(ValueError):
+            # 別の比較の証明書
+            strategy._register_pairwise_extra_assertions(
+                base_ctx, "(0,0)", OwnerFreePairAssertions(("(assert (= l r))",), certificate),
+            )
+    strategy._clear_pairwise_extra_assertions(base_ctx, "(0,0)")
+    assert "(0,0)" not in base_ctx["pairwise_extra_assertion_certificates_by_pair"]
 
 
 # ---------------------------------------------------------------------------
@@ -384,15 +525,50 @@ def test_record_pair_closed_seals_owner_free_when_the_query_carries_owner_free_a
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("declared", [CrossSideIdentification.OWNER_FREE, None])
-def test_owner_free_evidence_is_adopted_only_under_a_positional_relation(declared):
-    swapped = comparison_binding_of(*_swapped_pair())
-    identity = comparison_binding_of(*_identity_pair())
-    for binding, adopted in ((identity, True), (swapped, False)):
-        record = bind_evidence_to_comparison({"proof_obligation_id": ("p",)}, binding, identification=declared)
-        assert (CROSS_SIDE_IDENTIFICATION_KEY in record) is (declared is not None)
-        with comparison_scope(binding):
-            assert (comparison_evidence((record,)) == (record,)) is adopted
+def _owner_free_record(comparison, target=("target",)):
+    certificate = _certificate(("comparison_evidence", target), comparison)
+    return bind_evidence_to_comparison(
+        {"proof_obligation_id": ("p",), "object_target_key": target}, comparison,
+        identification=CrossSideIdentification.OWNER_FREE, certificate=certificate,
+    ), certificate
+
+
+def test_owner_free_evidence_is_adopted_only_with_the_certificate_of_its_subject_and_comparison():
+    comparison = _positional_comparison_binding()
+    record, certificate = _owner_free_record(comparison)
+    assert record[CROSS_SIDE_IDENTITY_CERTIFICATE_KEY] == certificate.certificate_id
+    with comparison_scope(comparison):
+        assert comparison_evidence((record,)) == (record,)
+    # 申告だけ（証明書の id が無い・発行されていない・別の対象）は採用しない。
+    for mutate in (
+        lambda r: r.pop(CROSS_SIDE_IDENTITY_CERTIFICATE_KEY),
+        lambda r: r.__setitem__(CROSS_SIDE_IDENTITY_CERTIFICATE_KEY, "0" * 64),
+        lambda r: r.__setitem__("object_target_key", ("other",)),
+    ):
+        forged = dict(record)
+        mutate(forged)
+        with comparison_scope(comparison):
+            assert comparison_evidence((forged,)) == ()
+    undeclared = dict(record)
+    undeclared.pop(CROSS_SIDE_IDENTIFICATION_KEY)
+    with comparison_scope(comparison):
+        assert comparison_evidence((undeclared,)) == ()
+
+
+def test_owner_free_evidence_cannot_be_bound_without_the_certificate_of_its_subject():
+    comparison = _positional_comparison_binding()
+    for certificate in (None, _certificate(("comparison_evidence", ("other",)), comparison)):
+        with pytest.raises(ValueError):
+            bind_evidence_to_comparison(
+                {"object_target_key": ("target",)}, comparison,
+                identification=CrossSideIdentification.OWNER_FREE, certificate=certificate,
+            )
+    with pytest.raises(ValueError):
+        bind_evidence_to_comparison(
+            {"object_target_key": ("target",)}, comparison,
+            identification=CrossSideIdentification.CORRESPONDENCE,
+            certificate=_certificate(("comparison_evidence", ("target",)), comparison),
+        )
 
 
 def test_correspondence_evidence_is_adopted_under_any_relation_of_its_comparison():
@@ -402,7 +578,7 @@ def test_correspondence_evidence_is_adopted_under_any_relation_of_its_comparison
     )
     with comparison_scope(swapped):
         assert comparison_evidence((record,)) == (record,)
-    # 申告に知らない値を書いても owner を含まない扱い（fail-closed）。
+    # 申告に知らない値を書いても採用しない（fail-closed）。
     record[CROSS_SIDE_IDENTIFICATION_KEY] = "something_else"
     with comparison_scope(swapped):
         assert comparison_evidence((record,)) == ()
@@ -416,6 +592,10 @@ def test_the_evidence_writer_requires_a_declaration():
         store_comparison_evidence(analysis, [{"proof_obligation_id": ("p",)}])  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         store_comparison_evidence(analysis, [{"proof_obligation_id": ("p",)}], identification="owner_free")
+    with comparison_scope(_positional_comparison_binding()), pytest.raises(ValueError):
+        store_comparison_evidence(
+            analysis, [{"object_target_key": ("t",)}], identification=CrossSideIdentification.OWNER_FREE,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -445,31 +625,33 @@ def test_auxiliary_symbols_are_not_shared_by_index_under_a_swapped_relation():
         assert (specs is not None) is shared
 
 
-def test_structural_equality_by_name_is_not_trivial_without_a_positional_relation():
+def test_structural_equality_by_name_is_certified_only_under_a_positional_relation():
+    """自明な一致（名前・runtime ref の key で左右を同一視）は、``certify_owner_free_identity`` が
+    pair の証明書を出したときだけ使う（``try_solver_proven_rewrite_equivalence`` がその順に呼ぶ）。"""
+
     from scripts.function_tracer_pcode.proof.strategies import pairwise_solver_proven_rewrite as rewrite
 
     strategy = SimpleNamespace(debug=False)
     ctx = {"return_size1": 64, "return_size2": 64}
-    left, right = _swapped_pair()
+    subject = ("pair", "(0,0)")
     same_name_left = _raw("f", [_d("n", 0), _d("m", 1)], _p("n", 0))
     same_name_right = _raw("g", [_d("m", 0), _d("n", 1)], _p("n", 1))
     with comparison_scope(comparison_binding_of(same_name_left, same_name_right)):
-        assert not rewrite._rewritten_values_are_trivially_equal(
+        # 名前だけを見る自明な一致は成り立つ（だから証明書が要る）。
+        assert rewrite._rewritten_values_are_trivially_equal(
             strategy, ctx, _case(same_name_left), _case(same_name_right),
         )
+        assert not certify_owner_free_identity(
+            (_case(same_name_left),), (_case(same_name_right),), subject=subject,
+        ).passed
     identity_left, identity_right = _raw("f", [_d("n", 0)], _p("n", 0)), _raw("g", [_d("n", 0)], _p("n", 0))
     with comparison_scope(comparison_binding_of(identity_left, identity_right)):
-        assert rewrite._rewritten_values_are_trivially_equal(
-            strategy, ctx, _case(identity_left), _case(identity_right),
-        )
-    # 名前の同じ入力 VARIABLE だけで閉じる構造の等価は、位置どおりの relation でも作らない。
+        assert certify_owner_free_identity((_case(identity_left),), (_case(identity_right),), subject=subject).passed
+    # 名前の同じ入力 VARIABLE だけで閉じる構造の等価は、位置どおりの relation でも証明書を出さない。
     var_left = _raw("f", [_d("n", 0)], Expression.variable("in_stack_00000028", size=8))
     var_right = _raw("g", [_d("n", 0)], Expression.variable("in_stack_00000028", size=8))
     with comparison_scope(comparison_binding_of(var_left, var_right)):
-        assert not rewrite._rewritten_values_are_trivially_equal(
-            strategy, ctx, _case(var_left), _case(var_right),
-        )
-    del left, right
+        assert not certify_owner_free_identity((_case(var_left),), (_case(var_right),), subject=subject).passed
 
 
 def test_the_runtime_reduction_producer_refuses_a_narrow_limit_read_under_an_identity_relation():
@@ -494,28 +676,46 @@ def test_the_runtime_reduction_producer_refuses_a_narrow_limit_read_under_an_ide
 # ---------------------------------------------------------------------------
 
 
-def test_final_gate_refuses_owner_free_sources_only_without_a_positional_relation():
+def test_final_gate_refuses_owner_free_sources_without_a_positional_relation_or_a_certificate():
+    comparison = _positional_comparison_binding()
+    identity = comparison.relation
     swapped = build_input_correspondence_set(*_swapped_pair())
-    identity = build_input_correspondence_set(*_identity_pair())
+    certificate = _certificate(("pair", "(0,0)"), comparison)
     assert final_equivalence_identity_gate((), swapped).passed
-    assert final_equivalence_identity_gate(("pair(0, 0)",), identity).passed
-    refused = final_equivalence_identity_gate(("pair(0, 0)",), swapped)
+    assert final_equivalence_identity_gate((("pair(0, 0)", certificate),), identity).passed
+    refused = final_equivalence_identity_gate((("pair(0, 0)", certificate),), swapped)
     assert not refused.passed
     assert refused.evidence_refs[0] == "cross_side_identity:owner_free_source:pair(0, 0)"
+    # 位置どおりの relation でも、証明書の無い・別の relation の証明書の source は止める。
+    other = _certificate(("pair", "(0,0)"), comparison_binding_of(
+        _raw("f", [_d("n", 0)], _p("n", 0)), _raw("g", [_d("n", 0)], _p("n", 0)),
+    ))
+    assert other.relation_digest != identity.digest
+    for missing in (None, "forged", other):
+        verdict = final_equivalence_identity_gate((("pair(0, 0)", missing),), identity)
+        assert not verdict.passed
+        assert "cross_side_identity:certificate_missing:pair(0, 0)" in verdict.evidence_refs
+
+
+def _ledger_with_owner_free_closure(monkeypatch):
+    comparison = _positional_comparison_binding()
+    binding = _binding(comparison)
+    certificate = _certificate(("pair", "(0,0)"), comparison)
+    artifact = _producer_artifact(binding, monkeypatch, certificate)
+    ledger = PairDispositionLedger(binding, 1)
+    ledger.close(PairClosureEvidence.validated(
+        (0, 0), PairClosureKind.RECOVERY, binding, artifact,
+        identification=CrossSideIdentification.OWNER_FREE, identity_certificate=certificate,
+    ))
+    return comparison, ledger
 
 
 def test_the_preflight_final_gate_vetoes_an_owner_free_eq_under_a_swapped_relation(monkeypatch):
     from scripts.function_tracer_pcode.checker.preflight_gate import PreflightGateMixin
 
-    binding = _binding()
-    artifact = _producer_artifact(binding, monkeypatch)
-    ledger = PairDispositionLedger(binding, 1)
-    ledger.close(PairClosureEvidence.validated(
-        (0, 0), PairClosureKind.RECOVERY, binding, artifact,
-        identification=CrossSideIdentification.OWNER_FREE,
-    ))
+    comparison, ledger = _ledger_with_owner_free_closure(monkeypatch)
     for relation, expected in (
-        (build_input_correspondence_set(*_identity_pair()), True),
+        (comparison.relation, True),
         (build_input_correspondence_set(*_swapped_pair()), None),
     ):
         frame = SimpleNamespace(
@@ -529,6 +729,34 @@ def test_the_preflight_final_gate_vetoes_an_owner_free_eq_under_a_swapped_relati
             (reason,) = result.unknown_reasons
             assert reason.reason_id == "cross_side_identity_unproven"
             assert reason.evidence_refs[0].startswith("cross_side_identity:owner_free_source:")
+
+
+def test_the_compat_and_legacy_pairwise_path_applies_the_same_veto(monkeypatch):
+    """dispatch frame を持たない pairwise（互換・``LEGACY_POST_PAIRWISE``）も同じ実装で止める。"""
+
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services import orchestration
+
+    comparison, ledger = _ledger_with_owner_free_closure(monkeypatch)
+    emitted = []
+    monkeypatch.setattr(
+        "scripts.function_tracer_pcode.authority.lifecycle.production_signals.emit_cross_side_identity_signal",
+        lambda signal, **kwargs: emitted.append((signal, kwargs)),
+    )
+    result = SimpleNamespace(is_equivalent=True, unknown_reasons=[])
+    assert orchestration.veto_unproven_cross_side_identity(
+        result, ledger, build_input_correspondence_set(*_swapped_pair()),
+        comparison_session_id="s", branch_id="S_PAIRWISE", generation=1,
+    ) is True
+    assert result.is_equivalent is None
+    assert result.unknown_reasons[0].reason_id == "cross_side_identity_unproven"
+    ((signal, kwargs),) = emitted
+    assert kwargs["producer_site_manifest_id"] == "pairwise-cross-side-identity-veto"
+    assert signal.owner_free_sources == ("pair(0, 0)",)
+    kept = SimpleNamespace(is_equivalent=True, unknown_reasons=[])
+    assert orchestration.veto_unproven_cross_side_identity(
+        kept, ledger, comparison.relation, comparison_session_id="s", branch_id="S_PAIRWISE", generation=1,
+    ) is False
+    assert kept.is_equivalent is True
 
 
 # ---------------------------------------------------------------------------
@@ -571,9 +799,12 @@ def test_a04_the_final_gate_stops_the_false_eq_when_every_site_gate_is_open(monk
     （= この反例は検査を外すと落ちる、本物の反例である）。"""
 
     from scripts.function_tracer_pcode.checker.preflight_gate import PreflightGateMixin
-    from scripts.function_tracer_pcode.proof.obligations import pair_closure_producers
 
-    monkeypatch.setattr(pair_closure_producers, "_owner_free_identity_admitted", lambda *_args: True)
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import gate as gate_module
+
+    # 証明書の発行で読む検査だけを開ける（証明書は relation の digest を持つので、最終 gate は比較の
+    # relation を見て止める）。
+    monkeypatch.setattr(gate_module, "owner_free_identity_gate", lambda *_args, **_kwargs: gate_module.CrossSideIdentityGate.accept())
     swapped = _production("prp-a04-sites-open", *_a04_cases()["swapped_noneq"])
     assert swapped["final_outcome"] == "UNKNOWN"
     # 止めたのは最終の EQ gate（この reason を出すのはそこだけ）
@@ -676,11 +907,16 @@ def test_the_readonly_contract_equality_is_added_only_under_a_positional_relatio
 
     positional, swapped = _scopes()
     with comparison_scope(positional):
-        assert strategy._readonly_contract_pairwise_extra_assertions(case("l"), case("r"), None, None)[-1] == (
-            "(assert (= l r))"
+        assertions = strategy._readonly_contract_pairwise_extra_assertions(
+            case("l"), case("r"), None, None, pair_id="(0,0)",
         )
+        assert assertions.lines[-1] == "(assert (= l r))"
+        # 等式は pair の証明書と一緒にだけ渡る（登録が証明書を検査する）。
+        assert assertions.identity_certificate.covers(("pair", "(0,0)"), comparison_digest=positional.digest)
     with comparison_scope(swapped):
-        assert strategy._readonly_contract_pairwise_extra_assertions(case("l"), case("r"), None, None) == ()
+        assert strategy._readonly_contract_pairwise_extra_assertions(
+            case("l"), case("r"), None, None, pair_id="(0,0)",
+        ) is None
 
 
 def test_the_loop_template_proof_is_not_tried_without_a_positional_relation(monkeypatch):
@@ -753,7 +989,7 @@ def test_the_evidence_writer_records_the_declaration_of_what_it_binds():
     from scripts.function_tracer_pcode.proof.formula.input_correspondence import store_comparison_evidence
 
     positional, _swapped = _scopes()
-    for declared in CrossSideIdentification:
+    for declared in (CrossSideIdentification.CORRESPONDENCE,):
         analysis = SimpleNamespace(completed_recovery_proof_evidence=())
         with comparison_scope(positional):
             store_comparison_evidence(analysis, [{"proof_obligation_id": ("p",)}], identification=declared)
@@ -841,11 +1077,11 @@ def test_owner_free_recorders_check_the_cases_before_recording(monkeypatch, modu
 
         return CrossSideIdentityGate.refuse(("probe",))
 
-    monkeypatch.setattr(module, "owner_free_identity_gate", refuse)
-    strategy = SimpleNamespace(enable_completed_recovery_proofs=True)
+    monkeypatch.setattr(module, "certify_owner_free_identity", refuse)
+    strategy = SimpleNamespace(enable_completed_recovery_proofs=True, _normalize_nested_tuple=lambda value: value)
     case1, case2 = object(), object()
     analysis = SimpleNamespace(completed_recovery_proof_evidence=())
-    leading = (SimpleNamespace(reason_id="x"),) + (analysis,) * (arguments - 1)
+    leading = (SimpleNamespace(reason_id="x", object_target_key=("target",)),) + (analysis,) * (arguments - 1)
     kwargs = {"input_correspondence": None} if module_name == "readonly_reduction" else {}
     assert getattr(module, recorder)(strategy, *leading, case1, case2, **kwargs) is None
     assert seen == [((case1,), (case2,))]
@@ -917,3 +1153,125 @@ def test_the_cross_side_identity_encoder_observes_one_cause_per_vetoed_compariso
     assert encoder.authority_for_signal(other, first).occurrence.occurrence_id != occurrence.occurrence_id
     with pytest.raises(TypeError):
         encoder(session, object())
+
+
+# ---------------------------------------------------------------------------
+# PR #253 review の反例: runtime ref の中の入力 VARIABLE・call effect の狭い引数
+# ---------------------------------------------------------------------------
+
+
+def _in_stack(name="in_stack_00000028"):
+    return Expression.variable(name, size=8)
+
+
+def test_an_input_variable_inside_a_runtime_ref_is_refused_and_a_bound_loop_variable_is_not():
+    """関数の入力の VARIABLE は、ref の中（loop の limit）でも左右を名前で同一視しない。
+    ref の中の束縛された loop 変数（``LoopVariableIdentityRef``）は入力ではないので拒否しない。"""
+
+    from scripts.function_tracer_pcode.core import LoopVariableIdentityRef
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import _is_bound_loop_variable
+
+    left = _raw("f", [], _loop_value(_in_stack()))
+    right = _raw("g", [], _loop_value(_in_stack()))
+    with comparison_scope(comparison_binding_of(left, right)):
+        verdict = owner_free_identity_gate((_case(left),), (_case(right),))
+    assert not verdict.passed
+    assert any("variable" in ref for ref in verdict.evidence_refs)
+    constant_left = _raw("f", [], _loop_value(_c(5)))
+    constant_right = _raw("g", [], _loop_value(_c(5)))
+    with comparison_scope(comparison_binding_of(constant_left, constant_right)):
+        assert owner_free_identity_gate((_case(constant_left),), (_case(constant_right),)).passed
+    # 束縛の判定は型で行う（名前の接頭辞ではない）: 同じ名前でも、ref の外・別の ref の印では入力。
+    bound = Expression.variable(
+        "in_stack_00000028", size=8,
+        runtime_ref=LoopVariableIdentityRef(role="induction", varnode_key=("unique", 0x100)),
+    )
+    assert _is_bound_loop_variable(bound, True)
+    assert not _is_bound_loop_variable(bound, False)
+    assert not _is_bound_loop_variable(_in_stack(), True)
+
+
+def test_counterexample_1_an_input_variable_limit_is_not_equivalent_in_production():
+    """修正前（42bc6b3c）は EQUIVALENT（RuntimeReductionClosureArtifact / OWNER_FREE を採用）。"""
+
+    variable = _production(
+        "prp-r3-variable-limit",
+        _unpublished("f", [], _loop_value(_in_stack())),
+        _unpublished("g", [], _loop_value(_in_stack())),
+    )
+    assert variable["final_outcome"] == "UNKNOWN"
+    control = _production(
+        "prp-r3-constant-limit",
+        _unpublished("f", [], _loop_value(_c(5))),
+        _unpublished("g", [], _loop_value(_c(5))),
+    )
+    assert control["final_outcome"] == "EQUIVALENT"
+
+
+def _call_effect_check(argument_sizes):
+    from unittest.mock import Mock
+
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+    from scripts.function_tracer_pcode.tests.unit import _sat_decisiveness_fixtures as fixtures
+    from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        formula_builder = echo_input_correspondence(Mock())
+        formula_builder.build_base_context.return_value = fixtures._base_context_for_single_int_param()
+        runner = Mock()
+        runner.timeout = 5
+        strategy = PairwiseStrategy(formula_builder, runner, debug=False)
+        left = fixtures._analysis_with_deferred_call_argument_blocker(function_name="func1", binary_id="B1", entry=0x1000)
+        right = fixtures._analysis_with_deferred_call_argument_blocker(
+            function_name="func2", binary_id="B14", entry=0x2000, argument_sizes=argument_sizes,
+        )
+        fixtures._patch_pairwise_single_unsat_case(monkeypatch, strategy, left, right)
+        result = strategy.check(left, right)
+    finally:
+        monkeypatch.undo()
+    evidence = [
+        record for analysis in (left, right) for record in analysis.completed_recovery_proof_evidence
+        if record.get("proof_source") == "matched_deferred_call_argument_evidence"
+    ]
+    return strategy, left, right, result, evidence
+
+
+def test_counterexample_2_call_effect_evidence_is_not_recorded_for_narrow_call_arguments():
+    """修正前は 32 bit と 16 bit で読む引数の照合を OWNER_FREE の証拠として記録・採用し、blocker を消した。"""
+
+    _strategy, _left, _right, narrow, narrow_evidence = _call_effect_check({1: 2})
+    assert narrow_evidence == []
+    assert narrow.is_equivalent is not True
+    _strategy, _left, _right, full, full_evidence = _call_effect_check(None)
+    assert full.is_equivalent is True
+    assert len(full_evidence) == 2
+    for record in full_evidence:
+        assert record[CROSS_SIDE_IDENTIFICATION_KEY] == CrossSideIdentification.OWNER_FREE.value
+        assert issued_certificate(record[CROSS_SIDE_IDENTITY_CERTIFICATE_KEY]) is not None
+
+
+def test_the_call_effect_certificate_reads_the_matched_call_surface_under_a_full_relation():
+    """relation（pair 全体の述語）は満たしたまま、照合する call の引数だけを狭くする: 証明書は出ない。"""
+
+    strategy, left, right, _result, _evidence = _call_effect_check(None)
+    _strategy, _narrow_left, narrow_right, _narrow, _narrow_evidence = _call_effect_check({1: 2})
+    subject = ("comparison_evidence", ("target",))
+    with comparison_scope(comparison_binding_of(left, right)):
+        assert positional_identity_gate(current_relation()).passed
+        surface = strategy._call_effect_comparison_surface
+        assert certify_owner_free_identity(surface(left), surface(right), subject=subject).passed
+        refused = certify_owner_free_identity(surface(left), surface(narrow_right), subject=subject)
+    assert not refused.passed and refused.certificate is None
+
+
+def test_call_effect_evidence_with_a_borrowed_certificate_is_not_adopted():
+    """記録を迂回して、別の対象の証明書を付けた OWNER_FREE の call effect 証拠は採用しない。"""
+
+    _strategy, left, right, _result, evidence = _call_effect_check(None)
+    comparison = comparison_binding_of(left, right)
+    (record, *_rest) = evidence
+    forged = dict(record)
+    forged["object_target_key"] = ("another_call_target",)
+    with comparison_scope(comparison):
+        assert comparison_evidence((forged,)) == ()

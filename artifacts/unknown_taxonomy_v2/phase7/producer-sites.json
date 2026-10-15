@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "4481c6af903b1bc0887b275b7c62c3a3ddf54615dc54ac87e12edb8bdd591c8c",
+  "manifest_digest": "a5b691ec92288b148962261dee35b4de40297bd9eb5d72401b86537abef34695",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 33,
   "sites": [
@@ -143,10 +143,10 @@
       "emitter": "emit_call_effect_signal",
       "enclosing_function": "_call_effect_shadow_manifest",
       "expected_cause_slots": [],
-      "line": 441,
+      "line": 405,
       "path": "scripts/function_tracer_pcode/checker/preflight_gate.py",
       "producer_site_manifest_id": "checker-call-effect-proof-batch",
-      "source_sha256": "42391c719d2bd39a87cfa0ec952f863511f739a37217332096ee816e241e49fe"
+      "source_sha256": "6c8bc98f6a4833d629fb4c81629a58f6dbec69cf3514004d2ec3cfa3cde25040"
     },
     {
       "allowed_dispositions": [
@@ -460,6 +460,35 @@
         "ELIGIBLE"
       ],
       "allowed_producer_ids": [
+        "cross-side-identity-final-gate-v1"
+      ],
+      "branch_or_attempt_contract_id": "pairwise-cross-side-identity-veto:invocation",
+      "column": 4,
+      "domain": "cross_side_identity",
+      "emitter": "emit_cross_side_identity_signal",
+      "enclosing_function": "veto_unproven_cross_side_identity",
+      "expected_cause_slots": [
+        {
+          "allowed_reason_ids": [
+            "cross_side_identity_unproven"
+          ],
+          "expected_domain": "cross_side_identity",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "pair_comparison_identification",
+          "slot_id": "pairwise-cross-side-identity-veto:cross_side_identity_unproven",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        }
+      ],
+      "line": 212,
+      "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
+      "producer_site_manifest_id": "pairwise-cross-side-identity-veto",
+      "source_sha256": "919890390042d2077e10ecaa84fd1960f07d5a36094df19124235c6faca40eb0"
+    },
+    {
+      "allowed_dispositions": [
+        "ELIGIBLE"
+      ],
+      "allowed_producer_ids": [
         "typed-loop-pair-fallback-signal-v2"
       ],
       "branch_or_attempt_contract_id": "pairwise-loop-fallback-blocker:invocation",
@@ -509,10 +538,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 871,
+      "line": 959,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-loop-fallback-blocker",
-      "source_sha256": "5d2612d1104cd18997b01e7734e3565ab472202371224826d1fcab3343f321de"
+      "source_sha256": "919890390042d2077e10ecaa84fd1960f07d5a36094df19124235c6faca40eb0"
     },
     {
       "allowed_dispositions": [
@@ -527,10 +556,10 @@
       "emitter": "emit_loop_recurrence_signal",
       "enclosing_function": "_impl__record_completed_method_b_covering_case_proof_if_safe",
       "expected_cause_slots": [],
-      "line": 136,
+      "line": 141,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/method_b_closure.py",
       "producer_site_manifest_id": "pairwise-loop-guard-completed",
-      "source_sha256": "11f32e8bbd96cd7a560ca99a042c74bb2dc57ee8a7b282c66f1152ee8b0fb6e2"
+      "source_sha256": "7042846963ac4358bc230df352268b6ffdfdebda6a5c163b201b14bcd94e6dcc"
     },
     {
       "allowed_dispositions": [
@@ -584,10 +613,10 @@
       "emitter": "emit_loop_recurrence_signal",
       "enclosing_function": "_impl__record_completed_method_b_covering_case_proof_if_safe",
       "expected_cause_slots": [],
-      "line": 92,
+      "line": 97,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/method_b_closure.py",
       "producer_site_manifest_id": "pairwise-loop-term-completed",
-      "source_sha256": "11f32e8bbd96cd7a560ca99a042c74bb2dc57ee8a7b282c66f1152ee8b0fb6e2"
+      "source_sha256": "7042846963ac4358bc230df352268b6ffdfdebda6a5c163b201b14bcd94e6dcc"
     },
     {
       "allowed_dispositions": [
@@ -643,10 +672,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1795,
+      "line": 1883,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-pending-loop-blocker",
-      "source_sha256": "5d2612d1104cd18997b01e7734e3565ab472202371224826d1fcab3343f321de"
+      "source_sha256": "919890390042d2077e10ecaa84fd1960f07d5a36094df19124235c6faca40eb0"
     },
     {
       "allowed_dispositions": [
@@ -672,10 +701,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 941,
+      "line": 1029,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-readonly-correspondence-member",
-      "source_sha256": "5d2612d1104cd18997b01e7734e3565ab472202371224826d1fcab3343f321de"
+      "source_sha256": "919890390042d2077e10ecaa84fd1960f07d5a36094df19124235c6faca40eb0"
     },
     {
       "allowed_dispositions": [
@@ -701,39 +730,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 918,
+      "line": 1006,
       "path": "scripts/function_tracer_pcode/proof/strategies/pairwise_services/orchestration.py",
       "producer_site_manifest_id": "pairwise-readonly-identity-blocker",
-      "source_sha256": "5d2612d1104cd18997b01e7734e3565ab472202371224826d1fcab3343f321de"
-    },
-    {
-      "allowed_dispositions": [
-        "ELIGIBLE"
-      ],
-      "allowed_producer_ids": [
-        "cross-side-identity-final-gate-v1"
-      ],
-      "branch_or_attempt_contract_id": "preflight-cross-side-identity-veto:invocation",
-      "column": 8,
-      "domain": "cross_side_identity",
-      "emitter": "emit_cross_side_identity_signal",
-      "enclosing_function": "_veto_unproven_cross_side_identity",
-      "expected_cause_slots": [
-        {
-          "allowed_reason_ids": [
-            "cross_side_identity_unproven"
-          ],
-          "expected_domain": "cross_side_identity",
-          "expected_identity_scope": "RELATIONAL",
-          "expected_target_kind": "pair_comparison_identification",
-          "slot_id": "preflight-cross-side-identity-veto:cross_side_identity_unproven",
-          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
-        }
-      ],
-      "line": 353,
-      "path": "scripts/function_tracer_pcode/checker/preflight_gate.py",
-      "producer_site_manifest_id": "preflight-cross-side-identity-veto",
-      "source_sha256": "42391c719d2bd39a87cfa0ec952f863511f739a37217332096ee816e241e49fe"
+      "source_sha256": "919890390042d2077e10ecaa84fd1960f07d5a36094df19124235c6faca40eb0"
     },
     {
       "allowed_dispositions": [
@@ -1161,10 +1161,10 @@
       "emitter": "emit_sat_safety_signal",
       "enclosing_function": "emit_safe_counterexample_production_signal",
       "expected_cause_slots": [],
-      "line": 794,
+      "line": 820,
       "path": "scripts/function_tracer_pcode/proof/obligations/pair_disposition.py",
       "producer_site_manifest_id": "safe-counterexample-pairwise-production",
-      "source_sha256": "419db5abbf3c304bc9c80c5b46c1bd75725957a5c81a3f4bd86094421072c767"
+      "source_sha256": "92cb78928eef931cc2e9e6c2f654fe2fec803017d9fdefbff36bd3e06d669296"
     },
     {
       "allowed_dispositions": [

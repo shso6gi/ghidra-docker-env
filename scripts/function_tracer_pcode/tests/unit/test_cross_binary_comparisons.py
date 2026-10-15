@@ -32,15 +32,19 @@ BASELINE_PATH = PACKAGE_ROOT / "tests" / "fixtures" / "cross_binary" / "comparis
 #: owner を含まない同一視を判定へ通す関所。key は baseline の ``gated:<key>``、値は
 #: (関所の関数がある file, 関数名, その関数が呼ぶ gate の名前)。
 CHOKEPOINTS = {
-    "G1": ("proof/obligations/pair_closure_producers.py", "_owner_free_identity_admitted", "owner_free_identity_gate"),
+    # 発行する site: owner を含まない closure・証拠・query の等式は、ここで出す証明書なしに作れない
+    # （ledger・証拠の束縛・等式の登録が証明書を要求する）。
+    "G1": ("proof/obligations/pair_closure_producers.py", "_owner_free_identity_certificate", "certify_owner_free_identity"),
+    # 採用: 証拠の証明書が発行済みで、対象・比較・relation を覆うときだけ採用する。
     "G2": ("proof/formula/input_correspondence/binding.py", "_identification_is_justified", "positional_identity_gate"),
     "G3": ("proof/strategies/pairwise_services/auxiliary_smt.py", "_impl__collect_intrinsic_parameter_specs", "owner_free_identity_gate"),
-    "G4": ("proof/strategies/pairwise_services/readonly_reduction.py", "_impl__readonly_contract_pairwise_extra_assertions", "owner_free_identity_gate"),
-    "G5": ("proof/strategies/pairwise_services/unresolved_lowering.py", "_impl__try_build_unresolved_deferred_call_lowering", "owner_free_identity_gate"),
-    "G6": ("proof/strategies/pairwise_solver_proven_rewrite.py", "_rewritten_values_are_trivially_equal", "owner_free_identity_gate"),
-    "G7": ("proof/strategies/loop_template.py", "_try_normalization_equivalence", "owner_free_identity_gate"),
+    "G4": ("proof/strategies/pairwise_services/readonly_reduction.py", "_impl__readonly_contract_pairwise_extra_assertions", "certify_owner_free_identity"),
+    "G5": ("proof/strategies/pairwise_services/unresolved_lowering.py", "_impl__try_build_unresolved_deferred_call_lowering", "certify_owner_free_identity"),
+    "G6": ("proof/strategies/pairwise_solver_proven_rewrite.py", "try_solver_proven_rewrite_equivalence", "certify_owner_free_identity"),
+    "G7": ("proof/strategies/loop_template.py", "_try_normalization_equivalence", "certify_owner_free_identity"),
     "G8": ("proof/strategies/pairwise_services/orchestration.py", "produce", "owner_free_identity_gate"),
     "G9": ("authority/domains/abi_width_readonly.py", "_positional_parameter_identity_holds", "positional_parameter_identity_gate"),
+    "G10": ("proof/strategies/proof_gates/call_effect.py", "_impl__record_completed_call_effect_summary_proof_if_safe", "certify_owner_free_identity"),
     "G11": ("proof/call_effect/producer.py", "_require_positional_parameter_locations", "positional_pairing_gate"),
 }
 
@@ -101,7 +105,7 @@ def test_the_closure_validators_all_pass_the_chokepoint():
     assert len(validators) == 6
     for node in validators:
         calls = {getattr(call.func, "id", "") for call in ast.walk(node) if isinstance(call, ast.Call)}
-        assert "_owner_free_identity_admitted" in calls, node.name
+        assert "_owner_free_identity_certificate" in calls, node.name
 
 
 def test_every_memory_stage_requires_positional_parameter_locations():

@@ -94,7 +94,10 @@ _LAZY = {
         for name in (
             "CROSS_SIDE_IDENTITY_REF",
             "CrossSideIdentification",
+            "CrossSideIdentityCertificate",
             "CrossSideIdentityGate",
+            "certify_owner_free_identity",
+            "issued_certificate",
             "closure_reads_are_full",
             "final_equivalence_identity_gate",
             "owner_free_identity_gate",

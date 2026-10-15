@@ -16,8 +16,8 @@
   Expression でなく数値（``parameter_index``）で持っていても成り立つ（読みを集めない）。
 * :func:`closure_reads_are_full` — closure が比べる値の局所の検査。到達できる PARAMETER の leaf が
   全て表の行の幅で読み、名前と index が同じ行を指す。index だけの key は読みの幅を持たないので、
-  狭い読み・広い読みがあれば拒否する。式の graph に入力 VARIABLE（builder が側ごとの extra var
-  として宣言する入力）があれば拒否する（名前の一致は対応の証明でない。#248 で scope へ移す）。
+  狭い読み・広い読みがあれば拒否する。自由な入力 VARIABLE（束縛された loop 変数以外。graph でも
+  runtime ref の中でも）があれば拒否する（名前の一致は対応の証明でない。#248 で scope へ移す）。
 * :func:`owner_free_identity_gate` — 上の 2 つの組。owner を含まない同一視をする site はこれだけを
   呼ぶ。relation を渡さなければ現在の比較の relation（``binding.current_relation``）を読み、
   比較の外では通さない（fail-closed）。
@@ -40,13 +40,20 @@ PR-H は、この gate を relation を通した翻訳（``CorrespondenceScope``
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
+import hashlib
+import secrets
+from threading import Lock
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
-from scripts.function_tracer_pcode.core.semantic_freeze import reachable_semantic_values
-from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import current_relation
+from scripts.function_tracer_pcode.core.runtime_refs.loops import LoopVariableIdentityRef
+from scripts.function_tracer_pcode.core.semantic_freeze import reachable_semantic_values_by_origin
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    current_comparison,
+    current_relation,
+)
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.model import (
     LEFT,
     RIGHT,
@@ -86,12 +93,66 @@ class CrossSideIdentification(str, Enum):
     OWNER_FREE = "owner_free"
 
 
+_CERTIFICATE_TOKEN = object()
+#: 発行した証明書（process の中だけ）。証拠の record は証明書の id しか持たないので、採用の側は
+#: ここで発行済みの証明書を引く。id は乱数を含み、record から作り直せない。
+_ISSUED_CERTIFICATES: Dict[str, "CrossSideIdentityCertificate"] = {}
+_ISSUED_LOCK = Lock()
+
+
+@dataclass(frozen=True)
+class CrossSideIdentityCertificate:
+    """owner を含まない同一視を検査した結果（``certify_owner_free_identity`` だけが発行する）。
+
+    何を検査したか（``subject``）・どの比較（``comparison_digest``）・どの relation
+    （``relation_digest``）の下で検査したかを持つ。owner を含まない closure・証拠・query の等式は、
+    これを持たないと発行も採用もされない（申告の enum だけでは検査済みにならない）。
+    """
+
+    certificate_id: str
+    comparison_digest: str
+    relation_digest: str
+    subject: Tuple[Any, ...]
+    _token: Any = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._token is not _CERTIFICATE_TOKEN:
+            raise TypeError("cross-side identity certificates are issued only by certify_owner_free_identity")
+
+    def is_issued(self) -> bool:
+        with _ISSUED_LOCK:
+            return _ISSUED_CERTIFICATES.get(self.certificate_id) is self
+
+    def covers(self, subject: Any, *, comparison_digest: Any, relation_digest: Any = None) -> bool:
+        """この証明書が ``subject`` を、その比較（と relation）の下で検査したものか。"""
+
+        return bool(
+            self.is_issued()
+            and self.subject == subject
+            and self.comparison_digest == comparison_digest
+            and (relation_digest is None or self.relation_digest == relation_digest)
+        )
+
+
+def issued_certificate(certificate_id: Any) -> Optional[CrossSideIdentityCertificate]:
+    """id から発行済みの証明書を引く（無ければ None）。"""
+
+    if type(certificate_id) is not str:
+        return None
+    with _ISSUED_LOCK:
+        return _ISSUED_CERTIFICATES.get(certificate_id)
+
+
 @dataclass(frozen=True)
 class CrossSideIdentityGate:
-    """gate の答え。``passed`` が偽なら ``evidence_refs`` が拒否の理由を持つ。"""
+    """gate の答え。``passed`` が偽なら ``evidence_refs`` が拒否の理由を持つ。
+
+    ``certify_owner_free_identity`` が通したときだけ ``certificate`` を持つ。
+    """
 
     passed: bool
     evidence_refs: Tuple[str, ...] = ()
+    certificate: Optional[CrossSideIdentityCertificate] = None
 
     def __bool__(self) -> bool:  # pragma: no cover - 誤用の防止
         raise TypeError("read CrossSideIdentityGate.passed explicitly")
@@ -209,15 +270,34 @@ def _parameter_read_refusal(expr: Expression, rows: Mapping[int, ParameterInfo],
     return None
 
 
+def _is_bound_loop_variable(expr: Expression, inside_runtime_ref: bool) -> bool:
+    """loop の summary が束縛した placeholder か（自由な入力ではない）。
+
+    束縛は名前でなく型で表す: recurrence の summarizer は loop の placeholder の VARIABLE に
+    ``LoopVariableIdentityRef`` を付け、summary の ref の中にだけ置く。式の graph に現れた
+    placeholder は束縛の外へ漏れた値なので、束縛とみなさない。
+    """
+
+    return inside_runtime_ref and isinstance(expr.__dict__.get("runtime_ref"), LoopVariableIdentityRef)
+
+
 def _side_refusals(values: Sequence[Any], rows: Mapping[int, ParameterInfo], side: str) -> Tuple[str, ...]:
+    """比べる値に到達できる入力の読み（1 回の走査。runtime ref の中を含む）。
+
+    * PARAMETER: 行の index・名前・全幅で読む。
+    * VARIABLE: 束縛された loop 変数のほかは全て自由な入力で、名前の一致は対応の証明でない
+      （``in_stack_*``・post-state・未解決の varnode）。graph でも runtime ref の中でも拒否する。
+    """
+
     refs = []
-    for value in reachable_semantic_values(tuple(values), through_runtime_refs=True):
-        if isinstance(value, Expression) and value.expr_type is ExpressionType.PARAMETER:
+    for value, inside in reachable_semantic_values_by_origin(tuple(values)):
+        if not isinstance(value, Expression):
+            continue
+        if value.expr_type is ExpressionType.PARAMETER:
             refusal = _parameter_read_refusal(value, rows, side)
             if refusal is not None:
                 refs.append(refusal)
-    for value in reachable_semantic_values(tuple(values), through_runtime_refs=False):
-        if isinstance(value, Expression) and value.expr_type is ExpressionType.VARIABLE:
+        elif value.expr_type is ExpressionType.VARIABLE and not _is_bound_loop_variable(value, inside):
             refs.append(f"input_variable:{side}:{value.name}")
     return tuple(refs)
 
@@ -230,8 +310,8 @@ def closure_reads_are_full(
     """closure が比べる値の PARAMETER の読みが全て行の幅で、入力 VARIABLE が無いか。
 
     ``left_values`` / ``right_values`` は closure が比べる側ごとの値（式・条件・case・ref を
-    含む入れ物）。到達は ``reachable_semantic_values``（公開と同じ規則）で、PARAMETER は runtime
-    ref の中まで、入力 VARIABLE は式の graph（builder が extra var を集める範囲）で数える。
+    含む入れ物）。到達は ``reachable_semantic_values_by_origin``（公開と同じ規則）で、PARAMETER も
+    自由な入力 VARIABLE も runtime ref の中まで数える。
     """
 
     if type(ics) is not InputCorrespondenceSet:
@@ -263,34 +343,82 @@ def owner_free_identity_gate(
     return closure_reads_are_full(relation, left_values, right_values)
 
 
-def final_equivalence_identity_gate(
-    owner_free_sources: Sequence[str],
-    ics: Any,
+def certify_owner_free_identity(
+    left_values: Sequence[Any],
+    right_values: Sequence[Any],
+    *,
+    subject: Tuple[Any, ...],
 ) -> CrossSideIdentityGate:
-    """最終の EQ gate（backstop）: owner を含まない方法で閉じた部分がある比較に pair 全体の述語を課す。
+    """``owner_free_identity_gate`` を現在の比較の relation で検査し、通れば証明書を発行する。
 
-    ``owner_free_sources`` は EQ の根拠のうち owner を含まない方法で左右を同一視したもの
-    （ledger の ``owner_free_closures`` の pair など）。無ければ全て relation の premise の下の
-    SMT なので通す。あれば ``positional_identity_gate`` が通るときだけ通す。site の gate を
-    漏らした経路も、ここで最終判定の前に止まる。
+    owner を含まない closure・証拠・query の等式を **発行する** site はこれを呼び、結果の証明書を
+    発行物に付ける（ledger と証拠の採用が証明書を要求する）。``subject`` は発行物を指す値
+    （``("pair_closure", pair_key)``・``("pair_query_assertions", pair_id)``・
+    ``("comparison_evidence", object_target_key)``）。比較の外では発行しない。
     """
 
-    sources = tuple(str(item) for item in owner_free_sources)
+    comparison = current_comparison()
+    if comparison is None:
+        return CrossSideIdentityGate.refuse(("relation_unavailable",))
+    verdict = owner_free_identity_gate(left_values, right_values, ics=comparison.relation)
+    if not verdict.passed:
+        return verdict
+    if type(subject) is not tuple or not subject:
+        raise TypeError("cross-side identity certificate requires a subject tuple")
+    nonce = secrets.token_hex(16)
+    certificate_id = hashlib.sha256(repr((
+        "cross_side_identity_certificate_v1", comparison.digest,
+        comparison.input_correspondence_digest, subject, nonce,
+    )).encode("utf-8")).hexdigest()
+    certificate = CrossSideIdentityCertificate(
+        certificate_id, comparison.digest, comparison.input_correspondence_digest, subject,
+        _token=_CERTIFICATE_TOKEN,
+    )
+    with _ISSUED_LOCK:
+        _ISSUED_CERTIFICATES[certificate_id] = certificate
+    return CrossSideIdentityGate(True, (), certificate)
+
+
+def final_equivalence_identity_gate(
+    owner_free_sources: Sequence[Tuple[str, Any]],
+    ics: Any,
+) -> CrossSideIdentityGate:
+    """最終の EQ gate（backstop）: owner を含まない方法で閉じた部分がある比較を検査し直す。
+
+    ``owner_free_sources`` は EQ の根拠のうち owner を含まない方法で左右を同一視したものと、その
+    検査の証明書の組（ledger の ``owner_free_closures``）。無ければ全て relation の premise の下の
+    SMT なので通す。あれば、比較の relation が pair 全体の述語を満たし、全ての証明書が発行済みで
+    同じ relation の下で発行されたときだけ通す。site の gate を漏らした closure も、ここで止まる。
+    """
+
+    sources = tuple(owner_free_sources)
     if not sources:
         return CrossSideIdentityGate.accept()
+    labels = tuple(str(label) for label, _certificate in sources)
     positional = positional_identity_gate(ics)
-    if positional.passed:
-        return positional
-    return CrossSideIdentityGate.refuse(
-        tuple(f"owner_free_source:{item}" for item in sources[:1])
-        + tuple(ref[len(CROSS_SIDE_IDENTITY_REF) + 1:] for ref in positional.evidence_refs)
-    )
+    refs = [] if positional.passed else [
+        ref[len(CROSS_SIDE_IDENTITY_REF) + 1:] for ref in positional.evidence_refs
+    ]
+    relation_digest = getattr(ics, "digest", None) if type(ics) is InputCorrespondenceSet else None
+    for label, certificate in sources:
+        if (
+            type(certificate) is not CrossSideIdentityCertificate
+            or not certificate.is_issued()
+            or certificate.relation_digest != relation_digest
+        ):
+            refs.append(f"certificate_missing:{label}")
+    if not refs:
+        return CrossSideIdentityGate.accept()
+    return CrossSideIdentityGate.refuse((f"owner_free_source:{labels[0]}", *refs))
 
 
 __all__ = (
     "CROSS_SIDE_IDENTITY_REF",
     "CrossSideIdentification",
+    "CrossSideIdentityCertificate",
     "CrossSideIdentityGate",
+    "certify_owner_free_identity",
+    "issued_certificate",
     "closure_reads_are_full",
     "final_equivalence_identity_gate",
     "owner_free_identity_gate",

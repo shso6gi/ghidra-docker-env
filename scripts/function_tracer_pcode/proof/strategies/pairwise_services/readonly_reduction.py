@@ -18,9 +18,12 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     RIGHT as INPUT_RIGHT,
     InputCorrespondenceSet,
 )
+from scripts.function_tracer_pcode.proof.obligations.pair_disposition import pair_identity_subject
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import comparison_evidence_subject
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     CrossSideIdentification,
-    owner_free_identity_gate,
+    OwnerFreePairAssertions,
+    certify_owner_free_identity,
     ConditionSMTOracle,
     ConditionSimplifier,
     ParameterInfo,
@@ -588,30 +591,35 @@ def _impl__readonly_contract_pairwise_extra_assertions(
     right_case: ReturnCase,
     left_param_replace_fn,
     right_param_replace_fn,
-) -> Tuple[str, ...]:
+    *,
+    pair_id: str,
+) -> Optional[OwnerFreePairAssertions]:
     result_size = self._case_pair_readonly_contract_result_size(left_case, right_case)
     if result_size is None:
-        return ()
+        return None
     left_ref = getattr(getattr(left_case, "value_expr", None), "runtime_ref", None)
     right_ref = getattr(getattr(right_case, "value_expr", None), "runtime_ref", None)
     if not isinstance(left_ref, ReadonlyReductionRef) or not isinstance(right_ref, ReadonlyReductionRef):
-        return ()
+        return None
     decision = self._runtime_loop_contract_shortcut_decision(
         left_ref,
         right_ref,
         result_size=result_size,
     )
     if not decision.equivalent:
-        return ()
+        return None
     # 契約 key（count の parameter index・pointer base の ``("parameter", i)``）の一致で左右を
     # 同一視する。relation が位置どおり・全幅の等式でなければ等式を足さない（plan v4 PR-P）。
-    if not owner_free_identity_gate((left_case,), (right_case,)).passed:
-        return ()
+    certification = certify_owner_free_identity(
+        (left_case,), (right_case,), subject=pair_identity_subject(pair_id),
+    )
+    if not certification.passed:
+        return None
     if decision.requires_guard_equivalence and not self._case_pair_has_runtime_guard_coverage_or_equivalence(
         left_case,
         right_case,
     ):
-        return ()
+        return None
     target_bits = int(result_size) * 8
     left_value = left_case.get_value_smt(
         left_param_replace_fn,
@@ -624,10 +632,13 @@ def _impl__readonly_contract_pairwise_extra_assertions(
         use_sign_extension=right_case.should_sign_extend_value(),
     )
     if not left_value or not right_value:
-        return ()
-    return (
-        "; readonly reduction contract equality at proven narrow return surface",
-        f"(assert (= {left_value} {right_value}))",
+        return None
+    return OwnerFreePairAssertions(
+        (
+            "; readonly reduction contract equality at proven narrow return surface",
+            f"(assert (= {left_value} {right_value}))",
+        ),
+        certification.certificate,
     )
 
 
@@ -1012,9 +1023,13 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
     if not self.enable_completed_recovery_proofs:
         return
     # 左右を owner を含まない key で比べて作る証拠。比べる値の読み（runtime ref の中を含む）が全幅で、
-    # relation が位置どおり・全幅の等式のときだけ作る（plan v4 PR-P。採用の規則は pair 全体の述語を
-    # もう一度課す）。
-    if not owner_free_identity_gate((case1,), (case2,)).passed:
+    # relation が位置どおり・全幅の等式のときだけ作り、その検査の証明書と一緒に記録する（plan v4
+    # PR-P。採用の規則は証明書を照合する）。
+    certification = certify_owner_free_identity(
+        (case1,), (case2,),
+        subject=comparison_evidence_subject(self._normalize_nested_tuple(reason_record.object_target_key)),
+    )
+    if not certification.passed:
         return
     if reason_record.reason_id != UnknownReasonId.READONLY_IDENTITY_MISSING.value:
         return
@@ -1104,7 +1119,10 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
             "proof_content": proof_content,
         }
     )
-    store_comparison_evidence(analysis1, records, identification=CrossSideIdentification.OWNER_FREE)
+    store_comparison_evidence(
+        analysis1, records, identification=CrossSideIdentification.OWNER_FREE,
+        certificate=certification.certificate,
+    )
 
 
 def _impl__readonly_projection_term_contracts_match(

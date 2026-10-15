@@ -14,6 +14,7 @@ from typing import Any, ClassVar, Dict, Mapping, Optional, Tuple, Union
 
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
     CrossSideIdentification,
+    CrossSideIdentityCertificate,
 )
 from scripts.function_tracer_pcode.proof.obligations.guard_overlap import GuardDisjointArtifact
 
@@ -276,6 +277,10 @@ class SolverQueryExecutionReceipt:
         return self._authority_payload() + (self.authority_digest,)
 
 
+#: 構造の等価の receipt のうち、左右を同一視しないもの（void の return は値を比べない）。
+_CORRESPONDENCE_STRUCTURAL_PROOF_KINDS = frozenset({"void-return"})
+
+
 @dataclass(frozen=True)
 class StructuralEqualityReceipt:
     """Typed authority for equality proved without an UNSAT value query."""
@@ -286,6 +291,8 @@ class StructuralEqualityReceipt:
     supporting_solver_receipts: Tuple[SolverQueryExecutionReceipt, ...]
     authority_digest: str
     schema_version: str = "structural_equality_receipt_v1"
+    #: 名前で比べる構造の等価（void-return 以外）の、検査の証明書（plan v4 PR-P）。
+    identity_certificate: Optional[CrossSideIdentityCertificate] = None
 
     def _authority_payload(self) -> Tuple[Any, ...]:
         return (
@@ -297,6 +304,7 @@ class StructuralEqualityReceipt:
                 receipt.stable_key()
                 for receipt in self.supporting_solver_receipts
             ),
+            None if self.identity_certificate is None else self.identity_certificate.certificate_id,
         )
 
     def validates_authority(self) -> bool:
@@ -387,6 +395,7 @@ def issue_structural_equality_receipt(
     proof_kind: str,
     evidence: Any,
     supporting_solver_receipts: Tuple[SolverQueryExecutionReceipt, ...] = (),
+    identity_certificate: Optional[CrossSideIdentityCertificate] = None,
 ) -> StructuralEqualityReceipt:
     """Seal structural EQ only from the registered proof implementation."""
 
@@ -412,6 +421,17 @@ def issue_structural_equality_receipt(
         for receipt in receipts
     ):
         raise ValueError("structural equality has invalid solver support")
+    # 名前で比べる構造の等価は owner を含まない同一視で、この pair を検査した証明書を必須にする
+    # （void-return は値を比べないので要らない）。比較の digest は ledger が照合する。
+    if str(proof_kind) in _CORRESPONDENCE_STRUCTURAL_PROOF_KINDS:
+        if identity_certificate is not None:
+            raise ValueError("a void-return receipt does not carry a cross-side identity certificate")
+    elif (
+        type(identity_certificate) is not CrossSideIdentityCertificate
+        or not identity_certificate.is_issued()
+        or identity_certificate.subject != pair_identity_subject(str(query_label))
+    ):
+        raise ValueError("owner-free structural equality requires the certificate of its pair")
     schema_version = "structural_equality_receipt_v1"
     evidence_digest = hashlib.sha256(repr(evidence).encode("utf-8")).hexdigest()
     payload = (
@@ -420,6 +440,7 @@ def issue_structural_equality_receipt(
         str(proof_kind),
         evidence_digest,
         tuple(receipt.stable_key() for receipt in receipts),
+        None if identity_certificate is None else identity_certificate.certificate_id,
     )
     return StructuralEqualityReceipt(
         query_label=str(query_label),
@@ -428,6 +449,7 @@ def issue_structural_equality_receipt(
         supporting_solver_receipts=receipts,
         authority_digest=_closure_artifact_seal(payload),
         schema_version=schema_version,
+        identity_certificate=identity_certificate,
     )
 
 
@@ -703,6 +725,10 @@ class StructuralEqualityClosureArtifact:
             schema_version=schema_version,
         )
 
+    @property
+    def identity_certificate(self) -> Optional[CrossSideIdentityCertificate]:
+        return self.receipt.identity_certificate
+
     def validates(self, binding: PairLedgerBinding) -> bool:
         payload = (
             self.schema_version,
@@ -912,7 +938,9 @@ class ProducerValidatedClosureArtifact:
     comparison_authority_digest: str
     authority_digest: str
     validation_status: str = "validated"
-    schema_version: str = "producer_validated_closure_v3"
+    schema_version: str = "producer_validated_closure_v4"
+    #: この closure の左右の同一視を検査した証明書（owner を含まない closure は必須）。
+    identity_certificate: Optional[CrossSideIdentityCertificate] = None
 
     PRODUCER_KIND: ClassVar[str] = "abstract"
 
@@ -922,6 +950,7 @@ class ProducerValidatedClosureArtifact:
             self.derived_view_id, self.premise_digest,
             self.graph_generation, self.comparison_authority_digest,
             self.validation_status, self.schema_version,
+            None if self.identity_certificate is None else self.identity_certificate.certificate_id,
         )
         return (
             self.PRODUCER_KIND != "abstract"
@@ -932,13 +961,20 @@ class ProducerValidatedClosureArtifact:
             and self.premise_digest == binding.premise_digest
             and self.graph_generation == binding.graph_generation
             and self.comparison_authority_digest == binding.comparison_authority_digest
+            # 発行と同じ条件: この比較で発行された証明書を持つ（封印の値だけでなく発行台帳を引く）。
+            and type(self.identity_certificate) is CrossSideIdentityCertificate
+            and self.identity_certificate.is_issued()
+            and self.identity_certificate.comparison_digest == binding.comparison_authority_digest
             and hmac.compare_digest(
                 self.authority_digest, _closure_artifact_seal(payload)
             )
         )
 
     def stable_key(self) -> Tuple[Any, ...]:
-        return (self.PRODUCER_KIND,) + tuple(self.__dict__.values())
+        return (self.PRODUCER_KIND,) + tuple(
+            value.certificate_id if type(value) is CrossSideIdentityCertificate else value
+            for value in self.__dict__.values()
+        )
 
 
 class RuntimeReductionClosureArtifact(ProducerValidatedClosureArtifact):
@@ -973,6 +1009,8 @@ def issue_producer_validated_closure(
     binding: PairLedgerBinding,
     proposition: Any,
     evidence: Any,
+    *,
+    identity_certificate: CrossSideIdentityCertificate,
 ) -> ProducerValidatedClosureArtifact:
     """Issue authority only from an import-time registered validator."""
 
@@ -989,19 +1027,28 @@ def issue_producer_validated_closure(
     finally:
         del caller
         del current
+    # producer の closure は全て owner を含まない key で左右を同一視する。発行は、この比較で
+    # 検査した証明書を必須にする（ledger もこの証明書と pair を照合する）。
+    if (
+        type(identity_certificate) is not CrossSideIdentityCertificate
+        or not identity_certificate.is_issued()
+        or identity_certificate.comparison_digest != binding.comparison_authority_digest
+    ):
+        raise ValueError("producer closure requires the cross-side identity certificate of its comparison")
     proposition_digest = hashlib.sha256(repr(proposition).encode()).hexdigest()
     evidence_digest = hashlib.sha256(repr(evidence).encode()).hexdigest()
     payload = (
         artifact_type.PRODUCER_KIND, proposition_digest, evidence_digest,
         binding.derived_view_id, binding.premise_digest,
         binding.graph_generation, binding.comparison_authority_digest, "validated",
-        artifact_type.schema_version,
+        artifact_type.schema_version, identity_certificate.certificate_id,
     )
     return artifact_type(
         proposition_digest, evidence_digest, binding.derived_view_id,
         binding.premise_digest, binding.graph_generation,
         binding.comparison_authority_digest,
         _closure_artifact_seal(payload),
+        identity_certificate=identity_certificate,
     )
 
 
@@ -1036,10 +1083,6 @@ ValidatedClosureArtifact = Union[
 ]
 
 
-#: 構造の等価の receipt のうち、左右を同一視しないもの（void の return は値を比べない）。
-_CORRESPONDENCE_STRUCTURAL_PROOF_KINDS = frozenset({"void-return"})
-
-
 def closure_identification_floor(artifact: Any) -> CrossSideIdentification:
     """closure の種類だけから決まる、左右の同一視の下限（呼び手の申告で弱められない）。
 
@@ -1057,6 +1100,29 @@ def closure_identification_floor(artifact: Any) -> CrossSideIdentification:
     ):
         return CrossSideIdentification.CORRESPONDENCE
     return CrossSideIdentification.OWNER_FREE
+
+
+def pair_identity_subject(pair: Any) -> Tuple[Any, ...]:
+    """pair の closure・query の等式の左右の同一視を検査した証明書が指す値。
+
+    ``pair`` は pair key の組 ``(i, j)`` か、orchestration の pair id ``"(i,j)"``。
+    """
+
+    if isinstance(pair, str):
+        return ("pair", pair)
+    return ("pair", f"({int(pair[0])},{int(pair[1])})")
+
+
+def _certificate_covers_pair(
+    certificate: Any, pair_key: Tuple[int, int], binding: "PairLedgerBinding",
+) -> bool:
+    return (
+        type(certificate) is CrossSideIdentityCertificate
+        and certificate.covers(
+            pair_identity_subject(pair_key),
+            comparison_digest=binding.comparison_authority_digest,
+        )
+    )
 
 
 def _effective_identification(
@@ -1084,12 +1150,16 @@ class PairClosureEvidence:
     #: 左右の同一視の方法。UNSAT の closure は ``validated`` が決めて digest に封印する。
     #: 終端の記録（SAT / UNKNOWN）は閉じないので、既定の fail-closed の値のまま。
     identification: CrossSideIdentification = CrossSideIdentification.OWNER_FREE
+    #: owner を含まない closure の、検査の証明書（``certify_owner_free_identity`` がこの比較の
+    #: この pair に発行したもの）。証明書の無い owner を含まない closure は作れない。
+    identity_certificate: Optional[CrossSideIdentityCertificate] = None
 
     @classmethod
     def validated(
         cls, pair_key: Tuple[int, int], closure_kind: PairClosureKind,
         binding: PairLedgerBinding, artifact: ValidatedClosureArtifact, *,
         identification: CrossSideIdentification,
+        identity_certificate: Optional[CrossSideIdentityCertificate] = None,
         required_binding_uses: Tuple[str, ...] = (),
         consumed_binding_uses: Tuple[str, ...] = (),
     ) -> "PairClosureEvidence":
@@ -1113,13 +1183,19 @@ class PairClosureEvidence:
             raise ValueError("consumed binding use is not required by pair")
         excluded = tuple(sorted(set(required) - set(consumed)))
         effective = _effective_identification(artifact, identification)
+        if effective is CrossSideIdentification.OWNER_FREE:
+            if not _certificate_covers_pair(identity_certificate, pair_key, binding):
+                raise ValueError("owner-free pair closure lacks the cross-side identity certificate of its pair")
+        elif identity_certificate is not None:
+            raise ValueError("a correspondence pair closure does not carry a cross-side identity certificate")
+        certificate_id = None if identity_certificate is None else identity_certificate.certificate_id
         digest = hashlib.sha256(repr((
             binding.stable_key(), artifact.stable_key(), required, consumed, excluded,
-            effective.value,
+            effective.value, certificate_id,
         )).encode()).hexdigest()
         return cls(
             pair_key, PairDisposition.UNSAT, closure_kind, binding.stable_key(),
-            artifact, digest, required, consumed, excluded, effective,
+            artifact, digest, required, consumed, excluded, effective, identity_certificate,
         )
 
     def validates(self, binding: PairLedgerBinding) -> bool:
@@ -1151,10 +1227,18 @@ class PairClosureEvidence:
             is not self.identification
         ):
             return False
+        if self.identification is CrossSideIdentification.OWNER_FREE:
+            if not _certificate_covers_pair(self.identity_certificate, self.pair_key, binding):
+                return False
+        elif self.identity_certificate is not None:
+            return False
+        certificate_id = (
+            None if self.identity_certificate is None else self.identity_certificate.certificate_id
+        )
         expected = hashlib.sha256(repr((
             binding.stable_key(), self.artifact.stable_key(),
             self.required_binding_uses, self.consumed_binding_uses,
-            self.excluded_binding_uses, self.identification.value,
+            self.excluded_binding_uses, self.identification.value, certificate_id,
         )).encode()).hexdigest()
         return valid and self.evidence_digest == expected
 
@@ -1174,6 +1258,7 @@ class PairClosureEvidence:
             self.excluded_binding_uses,
             self.evidence_digest,
             self.identification.value,
+            None if self.identity_certificate is None else self.identity_certificate.certificate_id,
         )
 
 
@@ -1287,11 +1372,11 @@ class PairDispositionLedger:
                 )
             self.provisional.clear()
 
-    def owner_free_closures(self) -> Tuple[Tuple[int, int], ...]:
-        """owner を含まない方法で左右を同一視して閉じた pair（最終の EQ gate が読む）。"""
+    def owner_free_closures(self) -> Tuple[Tuple[Tuple[int, int], Optional[CrossSideIdentityCertificate]], ...]:
+        """owner を含まない方法で左右を同一視して閉じた pair と、その検査の証明書（最終の EQ gate が読む）。"""
 
         return tuple(
-            key for key in sorted(self.closures)
+            (key, self.closures[key].identity_certificate) for key in sorted(self.closures)
             if self.closures[key].disposition == PairDisposition.UNSAT
             and self.closures[key].identification is not CrossSideIdentification.CORRESPONDENCE
         )

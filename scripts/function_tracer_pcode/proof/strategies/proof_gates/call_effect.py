@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     CrossSideIdentification,
+    certify_owner_free_identity,
     UnknownReasonRecord,
     UnknownRecoveryProofKind,
     build_proof_obligation_id,
@@ -120,7 +121,47 @@ def _impl__record_completed_call_effect_summary_proof_if_safe(
             "proof_content": proof_content,
         }
     )
-    store_comparison_evidence(analysis, records, identification=CrossSideIdentification.OWNER_FREE)
+    if proof_rule in _UNARY_CALL_EFFECT_PROOF_RULES:
+        # 片側の関数だけについての事実（左右を同一視しない）。
+        store_comparison_evidence(analysis, records, identification=CrossSideIdentification.CORRESPONDENCE)
+        return
+    # 左右の call site（target・引数・path guard）を、index に正規化した部品 key で対応づけた証拠。
+    # 照合した部品が読む値（両側の call の面）を検査した証明書と一緒にだけ記録する（plan v4 PR-P）。
+    certification = certify_owner_free_identity(
+        self._call_effect_comparison_surface(analysis1),
+        self._call_effect_comparison_surface(analysis2),
+        subject=("comparison_evidence", object_target_key),
+    )
+    if not certification.passed:
+        return
+    store_comparison_evidence(
+        analysis, records, identification=CrossSideIdentification.OWNER_FREE,
+        certificate=certification.certificate,
+    )
+
+
+#: 片側の関数だけを読む call effect の証明（左右の call site を対応づけない）。ここに無い規則は
+#: 左右を対応づける規則として扱う（fail-closed）。
+_UNARY_CALL_EFFECT_PROOF_RULES = frozenset({
+    "self_recursive_no_store_effect_summary",
+    "call_argument_evidence_phase15_complete",
+})
+
+
+def _impl__call_effect_comparison_surface(cls, analysis: Any) -> Tuple[Any, ...]:
+    """call effect の照合が左右の部品 key を作る、片側の call の面（plan v4 PR-P）。
+
+    deferred call（target の式・引数・条件）、未対応の call site（target・引数・path guard）、
+    call の引数の証拠。部品 key は parameter を index で表し、読みの幅を落とすので、owner を含まない
+    同一視の検査はこの面の値そのものを読む。
+    """
+
+    summary = getattr(analysis, "effect_summary", None)
+    return (
+        tuple((getattr(analysis, "deferred_calls", None) or {}).values()),
+        tuple(getattr(summary, "unsupported_call_sites", ()) or ()),
+        tuple((getattr(summary, "call_argument_evidence", None) or {}).values()),
+    )
 
 
 def _impl__iter_call_effect_blocker_candidates(

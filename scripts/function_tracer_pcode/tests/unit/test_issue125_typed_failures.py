@@ -510,7 +510,7 @@ PRODUCER_SITES_ADDED_AFTER_ISSUE125 = (
     # Issue #15 PR-15-A: 同一バイナリ・同一関数の identity proof。
     "checker-identical-function-identity",
     # plan v4 PR-P (#247): 最終の EQ gate が owner を含まない同一視を止めた cause。
-    "preflight-cross-side-identity-veto",
+    "pairwise-cross-side-identity-veto",
 )
 
 #: PR-125-A の後に別 Issue が **既存 site** へ足した cause slot（site は増えない）。

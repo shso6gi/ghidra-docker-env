@@ -34,6 +34,7 @@ from scripts.function_tracer_pcode.proof.strategies.expression_safety import Exp
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import extension_premise_lines
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
     CrossSideIdentification,
+    certify_owner_free_identity,
     owner_free_identity_gate,
 )
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
@@ -88,6 +89,21 @@ class _RuntimeShortcutDecision:
 class _UnresolvedDeferredCallLowering:
     assertions: Tuple[str, ...]
     evidence: Tuple[Any, ...]
+    #: lowering の等式は左右の deferred call を owner を含まない key で対応づける（plan v4 PR-P）。
+    identity_certificate: Any = None
+
+
+@dataclass(frozen=True)
+class OwnerFreePairAssertions:
+    """pair の query に足す、owner を含まない key で左右を同一視した等式と、その検査の証明書。
+
+    ``_register_pairwise_extra_assertions`` はこの型だけを受け付け、証明書がこの比較のこの pair を
+    検査したものでなければ登録しない。closure の記録（``record_pair_closed``）がこの証明書を ledger へ
+    渡す。
+    """
+
+    lines: Tuple[str, ...]
+    identity_certificate: Any
 
 @dataclass(frozen=True)
 class _ExactReadonlyReductionProof:
@@ -192,4 +208,4 @@ class _PendingLoopSummaryPair:
     right_case: ReturnCase
     reason: str
 
-__all__ = ('CheckStrategy', 'ConditionNormalizer', 'ConditionSMTOracle', 'ConditionSimplifier', 'CrossSideIdentification', 'ExpressionSafetyChecker', 'NormalizationContext', 'NormalizationRuleApplication', 'NormalizationSettings', 'ParameterInfo', 'QueryResult', 'ReturnCase', 'SignFacts', 'StrategyResult', 'UnknownReasonId', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', '_ExactReadonlyReductionProof', '_MethodBCoveringCaseProof', '_PendingLoopSummaryPair', '_ReadonlyLoopSummaryProofAdapter', '_RuntimeShortcutDecision', '_UnresolvedDeferredCallLowering', 'align_return_value_extension_surfaces', 'are_structurally_equivalent', 'build_canonical_return_observation_query', 'build_condition_only_query', 'build_normalized_inequality_query', 'build_pair_query', 'build_single_case_condition_query', 'build_symbol_replacer', 'build_unknown_recovery_actions', 'canonicalize_location', 'comparison_evidence', 'contains_udiv', 'extension_premise_lines', 'extract_min_excluded_params', 'extract_return_cases', 'extract_sign_facts', 'extract_upper_bound_facts', 'get_structural_summary', 'infer_parameter_semantics', 'make_internal_v2_reason_diagnostic', 'make_unknown_reason', 'merge_new_evidence', 'normalize_analysis_semantic_width', 'normalize_expression', 'normalize_udiv_with_guard', 'owner_free_identity_gate', 'parameter_identity_key_from_descriptor', 'parameter_identity_key_from_expression', 'save_unknown_query', 'solve_query_internal', 'solve_query_twostage', 'store_comparison_evidence', 'try_normalization_equivalence', 'try_solver_proven_rewrite_equivalence', 'validate_counterexample_across_cases')
+__all__ = ('CheckStrategy', 'ConditionNormalizer', 'ConditionSMTOracle', 'ConditionSimplifier', 'CrossSideIdentification', 'ExpressionSafetyChecker', 'NormalizationContext', 'NormalizationRuleApplication', 'NormalizationSettings', 'OwnerFreePairAssertions', 'ParameterInfo', 'QueryResult', 'ReturnCase', 'SignFacts', 'StrategyResult', 'UnknownReasonId', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', '_ExactReadonlyReductionProof', '_MethodBCoveringCaseProof', '_PendingLoopSummaryPair', '_ReadonlyLoopSummaryProofAdapter', '_RuntimeShortcutDecision', '_UnresolvedDeferredCallLowering', 'align_return_value_extension_surfaces', 'are_structurally_equivalent', 'build_canonical_return_observation_query', 'build_condition_only_query', 'build_normalized_inequality_query', 'build_pair_query', 'build_single_case_condition_query', 'build_symbol_replacer', 'build_unknown_recovery_actions', 'canonicalize_location', 'certify_owner_free_identity', 'comparison_evidence', 'contains_udiv', 'extension_premise_lines', 'extract_min_excluded_params', 'extract_return_cases', 'extract_sign_facts', 'extract_upper_bound_facts', 'get_structural_summary', 'infer_parameter_semantics', 'make_internal_v2_reason_diagnostic', 'make_unknown_reason', 'merge_new_evidence', 'normalize_analysis_semantic_width', 'normalize_expression', 'normalize_udiv_with_guard', 'owner_free_identity_gate', 'parameter_identity_key_from_descriptor', 'parameter_identity_key_from_expression', 'save_unknown_query', 'solve_query_internal', 'solve_query_twostage', 'store_comparison_evidence', 'try_normalization_equivalence', 'try_solver_proven_rewrite_equivalence', 'validate_counterexample_across_cases')
