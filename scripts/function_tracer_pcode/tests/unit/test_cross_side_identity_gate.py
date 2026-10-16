@@ -1897,3 +1897,28 @@ def test_a_direct_checker_call_owns_its_certificate_session():
             publish_raw_function_analysis(left), publish_raw_function_analysis(right), "left", "right",
         )
     assert result.is_equivalent is True, [getattr(r, "reason_id", None) for r in result.unknown_reasons]
+
+
+def test_copies_of_a_loop_value_keep_their_binders_bound():
+    """束縛は型の object の同一性で決めるので、値を写す経路（deepcopy・clone_with）が binder と出現を
+    別々の object にすると、束縛された変数が自由な入力に見えて拒否が増える（EQ → UNKNOWN）。値をまとめて
+    写す経路では、binder と出現が同じ写しの型を持ち、束縛されたままであることを固定する。"""
+
+    import copy
+
+    from scripts.function_tracer_pcode.core.runtime_refs import LoopBodyEffectRef, LoopCaseRef
+
+    state = _state_loop(_placeholder("s"))
+    accumulator = _placeholder("acc")
+    case = LoopCaseRef(
+        body_effect=LoopBodyEffectRef(kind="accumulator_update", source="t", scope="loop", value_expr=accumulator),
+        term_expr=_c(1), loop_binders=(accumulator,),
+    )
+    summed = _loop_value(_c(5))
+    summed.runtime_ref = replace(
+        summed.runtime_ref, loop_summary=replace(summed.runtime_ref.loop_summary, cases=(case,)),
+    )
+    for value in (state, summed):
+        assert _binder_gate(value).passed
+        assert _binder_gate(copy.deepcopy(value)).passed
+        assert _binder_gate(value.clone_with()).passed
