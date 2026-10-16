@@ -113,6 +113,22 @@ def _p211b_folded(name: str, value_on_negative_path: int) -> FunctionReturnAnaly
     ])
 
 
+def _condition_minority(name: str = "f") -> FunctionReturnAnalysis:
+    """少数派の ``u<`` が値でなく **条件** にある形: ``100 u< value`` なら ``ZEXT(value s< -200) + 5``、それ以外は 0。
+
+    符号付きの score 4（負の定数との比較）が符号なしの 2（2 本の条件）を上回るので、撤去前は条件の ``u<``
+    が ``s<`` に書き換わった。``value = -250`` で、機械語の値は 6（``100 u< 0xffffff06`` は真）、書き換え後は 0。
+    """
+
+    flag = Expression(ExpressionType.UNARY_OP, operator="INT_ZEXT", operands=[_cmp("INT_SLESS", _value(), _k(-200))], size=4)
+    return _analysis(name, [
+        ReturnInfo(address="0x401010", value=Expression(ExpressionType.BINARY_OP, operator="INT_ADD", operands=[flag, _k(5)], size=4),
+                   conditions=[_cond("INT_LESS", _k(100), _value())], branch_index=1),
+        ReturnInfo(address="0x401020", value=_k(0),
+                   conditions=[Condition(_cmp("INT_LESS", _k(100), _value()), True)], branch_index=2),
+    ])
+
+
 def _issue211_fixture() -> FunctionReturnAnalysis:
     """Issue #211 本文の fixture: 2 本目の path（``-101 s< value ∧ value != 0``）が ``value = -50`` を許す。"""
 
@@ -238,9 +254,10 @@ def test_the_p211b_shape_is_a_real_counterexample():
 
     assert _machine_value_at(_p211b(), -250) == 3
     assert _machine_value_at(_signed_only(), -250) == 2
+    assert _machine_value_at(_condition_minority(), -250) == 6
 
 
-@pytest.mark.parametrize("build", [_p211b, _issue211_fixture])
+@pytest.mark.parametrize("build", [_p211b, _condition_minority, _issue211_fixture])
 def test_analyzer_keeps_the_comparison_that_a_signedness_vote_would_flip(build):
     published = analyze_through_pipeline(build())
 
@@ -249,7 +266,8 @@ def test_analyzer_keeps_the_comparison_that_a_signedness_vote_would_flip(build):
     # 解析の関数の値は書き換え前の式の値と同じ（Issue 本文の fixture の 2 本目は ``value = -50`` を条件に
     # 含むが、1 本目が先に成り立つので関数の値は -2。``value <= -101`` と 0 ではどの return も成り立たない）。
     # 区間の両端と内側を見る。
-    assert _value_at(published, -250) == 3 if build is _p211b else _value_at(published, -50) == -2
+    pinned = {_p211b: (-250, 3), _condition_minority: (-250, 6), _issue211_fixture: (-50, -2)}[build]
+    assert _value_at(published, pinned[0]) == pinned[1]
     for witness in (-2**31, -250, -201, -200, -101, -100, -50, -1, 0, 1, 100, 101, 2**31 - 1):
         assert _value_at(published, witness) == _machine_value_at(build(), witness), witness
 
@@ -315,6 +333,32 @@ def test_production_check_does_not_equate_the_vote_result_with_the_original():
 
     result = _production("pr211-p211b-neq", left, right)
     assert result["final_outcome"] == "NOT_EQ"
+
+
+def test_production_check_keeps_a_condition_side_minority_equivalent():
+    """少数派が条件にある形。右は同じ関数を符号なしの比較だけで書いた形（混在が無いので書き換えの対象外）。
+
+    ``100 u< value`` の範囲では ``value s< -200`` ⇔ ``0x7fffffff u< value ∧ value u< 0xffffff38``。撤去前は
+    左の条件だけが ``s<`` に書き換わり、``value = -250`` で左 0・右 6 に分かれて EQ にならなかった。
+    """
+
+    in_range = Expression(ExpressionType.BINARY_OP, operator="BOOL_AND", operands=[
+        _cmp("INT_LESS", _k(0x7FFFFFFF), _value()), _cmp("INT_LESS", _value(), _k(-200)),
+    ], size=1)
+    right = _analysis("g", [
+        ReturnInfo(address="0x401010",
+                   value=Expression(ExpressionType.BINARY_OP, operator="INT_ADD", operands=[
+                       Expression(ExpressionType.UNARY_OP, operator="INT_ZEXT", operands=[in_range], size=4), _k(5),
+                   ], size=4),
+                   conditions=[_cond("INT_LESS", _k(100), _value())], branch_index=1),
+        ReturnInfo(address="0x401020", value=_k(0),
+                   conditions=[_cond("INT_LESSEQUAL", _value(), _k(100))], branch_index=2),
+    ])
+    for witness in (-2**31, -250, -201, -200, -199, -1, 0, 100, 101, 2**31 - 1):
+        assert _machine_value_at(_condition_minority("f"), witness) == _machine_value_at(right, witness), witness
+
+    result = _production("pr211-condition-minority-eq", _condition_minority("f"), right)
+    assert result["final_outcome"] == "EQUIVALENT"
 
 
 def test_production_check_proves_a_meaning_preserving_mix_by_the_solver():
