@@ -15,10 +15,6 @@ from scripts.function_tracer_pcode.proof.obligations.model import (
     ActivationState,
     FunctionProofOutcome,
 )
-from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import (
-    certificate_session,
-    current_certificate_session,
-)
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
     ComparisonAuthorityBinding,
     comparison_scope,
@@ -237,14 +233,6 @@ def run_obligation_branch_plan(
 ) -> Any:
     """Execute branch obligations under the versioned activation policy."""
 
-    if current_certificate_session() is None:
-        # 左右の同一視の証明書（plan v4 PR-P）は、branch・replan・最終 gate を通して有効でなければ
-        # ならないので、branch plan 全体を 1 つの session にする（workflow の中なら外側の session）。
-        with certificate_session():
-            return run_obligation_branch_plan(
-                checker, analysis1, analysis2, binary1_name, binary2_name, save_formula,
-                type_fix_result, retry_count, original_signature1, original_signature2,
-            )
     runtime = ObligationRuntimeSession.create(analysis1, analysis2)
     # Issue #167: runner の runtime は runner の raw pair の比較だけに仕える。
     runtime.reserve_for_its_raw_pair()

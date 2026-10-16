@@ -656,62 +656,31 @@ def _walk_semantic_carriers(container: Any, on_expression, on_condition, *, fram
     渡し、操作は ``(値, frame)`` で呼ぶ。一度見たかは ``(object, frame)`` で数える。
     """
 
-    if frame is not None:
-        return _walk_semantic_carriers_in_frames(container, on_expression, on_condition, frame)
-
-    stack: List[Any] = [container]
-    seen: Dict[int, bool] = {}
-    while stack:
-        value = stack.pop()
-        if value is None or isinstance(value, _PUBLISH_LEAF_SCALARS):
-            continue
-        value_id = id(value)
-        if value_id in seen:
-            continue
-        seen[value_id] = True
-        rule = _carrier_rule(value)
-        if rule is CarrierRule.EXPRESSION:
-            on_expression(value)
-        elif rule is CarrierRule.CONDITION:
-            on_condition(value)
-        elif rule is CarrierRule.SEQUENCE or rule is CarrierRule.MAPPING:
-            # 容器は基底型の実装で読む（Issue #215 `read_container`）: subclass の `__iter__` /
-            # `keys` が中身を隠すと、到達できる意味値を取りこぼす
-            _tag, elements = read_container(value)
-            if rule is CarrierRule.MAPPING:
-                for key, item in elements:
-                    stack.append(key)
-                    stack.append(item)
-            else:
-                stack.extend(elements)
-        elif rule is CarrierRule.FIELDS:
-            stack.extend(getattr(value, field.name, None) for field in dataclasses.fields(value))
-        elif rule is CarrierRule.OWNED_STATE:
-            owned_state = getattr(value, "__dict__", None)
-            if isinstance(owned_state, dict):
-                stack.extend(owned_state.values())
-    return container
-
-
-def _walk_semantic_carriers_in_frames(container: Any, on_expression, on_condition, frame: Any) -> Any:
-    """`_walk_semantic_carriers` の束縛の文脈つきの形（規則の表は同じ `_carrier_rule`）。"""
-
+    scoped = frame is not None
     stack: List[Tuple[Any, Any]] = [(container, frame)]
-    seen: Dict[Tuple[int, int], bool] = {}
+    seen: Dict[Any, bool] = {}
     while stack:
         value, current = stack.pop()
         if value is None or isinstance(value, _PUBLISH_LEAF_SCALARS):
             continue
-        key = (id(value), id(current))
+        key = (id(value), id(current)) if scoped else id(value)
         if key in seen:
             continue
         seen[key] = True
         rule = _carrier_rule(value)
         if rule is CarrierRule.EXPRESSION:
-            on_expression(value, current)
+            if scoped:
+                on_expression(value, current)
+            else:
+                on_expression(value)
         elif rule is CarrierRule.CONDITION:
-            on_condition(value, current)
+            if scoped:
+                on_condition(value, current)
+            else:
+                on_condition(value)
         elif rule is CarrierRule.SEQUENCE or rule is CarrierRule.MAPPING:
+            # 容器は基底型の実装で読む（Issue #215 `read_container`）: subclass の `__iter__` /
+            # `keys` が中身を隠すと、到達できる意味値を取りこぼす
             _tag, elements = read_container(value)
             if rule is CarrierRule.MAPPING:
                 for element_key, item in elements:
@@ -720,13 +689,16 @@ def _walk_semantic_carriers_in_frames(container: Any, on_expression, on_conditio
             else:
                 stack.extend((element, current) for element in elements)
         elif rule is CarrierRule.FIELDS:
-            scope = _declared_binder_scope(value)
-            inner = current.extended(tuple(scope.binders)) if scope is not None else current
-            scoped_fields = frozenset(scope.scoped_fields) if scope is not None else frozenset()
-            stack.extend(
-                (getattr(value, item.name, None), inner if item.name in scoped_fields else current)
-                for item in dataclasses.fields(value)
-            )
+            scope = _declared_binder_scope(value) if scoped else None
+            if scope is None:
+                stack.extend((getattr(value, item.name, None), current) for item in dataclasses.fields(value))
+            else:
+                inner = current.extended(tuple(scope.binders))
+                scoped_fields = frozenset(scope.scoped_fields)
+                stack.extend(
+                    (getattr(value, item.name, None), inner if item.name in scoped_fields else current)
+                    for item in dataclasses.fields(value)
+                )
         elif rule is CarrierRule.OWNED_STATE:
             owned_state = getattr(value, "__dict__", None)
             if isinstance(owned_state, dict):

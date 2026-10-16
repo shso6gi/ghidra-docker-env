@@ -433,6 +433,7 @@ def issue_structural_equality_receipt(
             raise ValueError("a void-return receipt does not carry a cross-side identity certificate")
     elif not certificate_attests(
         identity_certificate, pair_identity_subject(str(query_label)), checked_values,
+        comparison_digest=_current_comparison_digest(),
     ):
         raise ValueError("owner-free structural equality requires the certificate of its pair and values")
     schema_version = "structural_equality_receipt_v1"
@@ -1108,6 +1109,15 @@ def closure_identification_floor(artifact: Any) -> CrossSideIdentification:
     ):
         return CrossSideIdentification.CORRESPONDENCE
     return CrossSideIdentification.OWNER_FREE
+
+
+def _current_comparison_digest() -> Any:
+    """発行の時点の比較の digest（比較の外では、どの証明書とも一致しない値）。"""
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import current_comparison
+
+    current = current_comparison()
+    return "outside_comparison" if current is None else current.digest
 
 
 def pair_identity_subject(pair: Any) -> Tuple[Any, ...]:

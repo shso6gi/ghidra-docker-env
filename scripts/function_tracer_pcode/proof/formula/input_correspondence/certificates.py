@@ -5,13 +5,17 @@
 ``gate.py``、証明書の発行・照合・寿命はこの module が持つ（変更の軸が違う）。
 
 * **何を検査したか**: 証明書は、比較の digest・relation の digest・発行物の対象（``subject``）と、
-  側ごとに gate が読んだ意味値の列（object の identity。証明書が強参照で持つ）を記録する。読んだ値は
-  全て不変（VALIDATED / PUBLISHED）でなければ発行しない。``attests(left, right)`` は、同じ走査で
-  ``left`` / ``right`` から届く意味値の列が記録と同じ object の同じ並びかを確かめる。別の pair・別の
+  側ごとに gate が読んだ意味値とその位置で有効な loop 変数の binder の組の列（object の identity。
+  証明書が強参照で持つ）を記録する。読んだ値は全て不変（VALIDATED / PUBLISHED）でなければ発行しない。
+  ``attests(left, right)`` は、同じ走査で ``left`` / ``right`` から届く列が記録と同じ object・同じ
+  束縛の文脈・同じ並びかを確かめる。別の pair・別の
   branch の analysis・付け替えた case の属性・別の view の値は、同じ ``subject`` でも通らない。digest は
   id と封印にだけ使い、検査対象の一致には使わない。
-* **誰が持つか**: 証明書は ``CertificateSession`` が持つ。session は 1 つの比較の実行（checker の
-  ``check`` の 1 回）の間だけ開き、入れ子の実行は外側の session を使う（再入）。後で実行する仕事
+* **誰が持つか**: 証明書は ``CertificateSession`` が持つ。session は 1 つの pair の比較の実行の間だけ
+  開く（持ち主は workflow の ``run_check_from_binaries``（全 phase・retry・branch・最終 gate を含む）。
+  checker を直接呼ぶ経路は strategy の branch（``run_strategy_branch`` / ``run_legacy_strategy``）、
+  strategy を直接呼ぶ経路は frame の無い pairwise の check。いちばん外側が持ち主）。
+  入れ子の実行は外側の session を使う（再入）。後で実行する仕事
   （worklist の producer / replanner）は ``binding.run_in_current_comparison`` が session も一緒に運ぶ。
 * **いつ失効するか**: いちばん外側の実行が終わると session を閉じ、全ての証明書を失効させて台帳を
   空にする。閉じた session・今の実行でない session（複製を含む）の証明書は、無い証明書と同じに
@@ -113,8 +117,8 @@ def entered_certificate_session(session: Optional[CertificateSession]) -> Iterat
         _CURRENT_SESSION.reset(token)
 
 
-#: 意味値の列: gate が読んだ値（不変）を、読んだ順に並べたもの。
-CheckedSurface = Tuple[Any, ...]
+#: gate が読んだ値（不変）と、その位置で有効な loop 変数の binder の組を、読んだ順に並べたもの。
+CheckedSurface = Tuple[Tuple[Any, Tuple[Any, ...]], ...]
 
 
 @dataclass(frozen=True, eq=False)
@@ -170,7 +174,14 @@ class CrossSideIdentityCertificate:
 
 
 def _same_objects(observed: CheckedSurface, recorded: CheckedSurface) -> bool:
-    return len(observed) == len(recorded) and all(a is b for a, b in zip(observed, recorded))
+    """同じ値を同じ束縛の文脈で読んだか（値も binder も object の identity で比べる）。"""
+
+    return len(observed) == len(recorded) and all(
+        value is recorded_value
+        and len(binders) == len(recorded_binders)
+        and all(binder is recorded_binder for binder, recorded_binder in zip(binders, recorded_binders))
+        for (value, binders), (recorded_value, recorded_binders) in zip(observed, recorded)
+    )
 
 
 def certificate_attests(
@@ -231,6 +242,8 @@ def derive_owner_free_pair_assertions(
 
     ``build`` は検査した値（``left_values`` / ``right_values``）を受け取り、等式の行を返す。証明書が
     この値を検査していなければ ``ValueError``（全幅で得た証明書を狭い読みの等式に使わせない）。
+    等式をその値から組み立てるのは site の責務で（API は値を渡すだけ）、site は build の中で受け取った
+    値を使うか、組み立てに使った object と同じであることを確かめる。
     """
 
     left = tuple(left_values)

@@ -645,6 +645,10 @@ def validate_aggregate_partition_candidate(
 ) -> Optional[AggregatePartitionClosureArtifact]:
     if not candidate.is_current_for(binding):
         return None
+    # 左右を同一視するのは pending の pair の case どうしだけ（証明書はそれを検査する）。証明は resolved の
+    # pair の case も読むが、それは同じ側の case の被覆（左の case を左の case で覆う）で、左右を結ばない:
+    # parameter は ``("parameter_index", i, 幅)`` の記号なので狭い読みは別の記号になり、自由な入力
+    # VARIABLE は検査した pending の側にしか相手が無い（PR #253 review 3）。
     checked = (
         tuple(pending.left_case for pending in pending_pairs),
         tuple(pending.right_case for pending in pending_pairs),

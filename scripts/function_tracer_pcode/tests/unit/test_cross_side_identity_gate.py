@@ -457,11 +457,12 @@ def test_a_name_based_structural_receipt_requires_the_certificate_of_its_pair():
     # 直接呼ぶ: 登録表の code を一時的にこの関数の code にして呼ぶ。
     comparison = _positional_comparison_binding()
 
-    def issue(certificate, kind, checked=((), ())):
-        return ledger_module.issue_structural_equality_receipt(
-            query_label="(0,0)", proof_kind=kind, evidence=(kind,), identity_certificate=certificate,
-            checked_values=None if certificate is None else checked,
-        )
+    def issue(certificate, kind, checked=((), ()), within=comparison):
+        with comparison_scope(within):
+            return ledger_module.issue_structural_equality_receipt(
+                query_label="(0,0)", proof_kind=kind, evidence=(kind,), identity_certificate=certificate,
+                checked_values=None if certificate is None else checked,
+            )
 
     table = ledger_module._TRUSTED_STRUCTURAL_EQUALITY_PRODUCER_CODES
     saved = dict(table)
@@ -477,6 +478,9 @@ def test_a_name_based_structural_receipt_requires_the_certificate_of_its_pair():
             values_certificate = _certificate(("pair", "(0,0)"), comparison, *checked)
             with pytest.raises(ValueError):
                 issue(values_certificate, kind)  # 証明書は別の値（case）を検査した
+            with pytest.raises(ValueError):
+                # 別の比較の中では発行しない
+                issue(values_certificate, kind, checked, within=comparison_binding_of(*_swapped_pair()))
             receipt = issue(values_certificate, kind, checked)
             assert receipt.identity_certificate is not None and receipt.validates_authority()
         with pytest.raises(ValueError):
@@ -680,8 +684,11 @@ def test_owner_free_evidence_expires_with_its_session():
 
         with comparison_scope(comparison):
             later = run_in_current_comparison(read)
-        # 登録した実行がまだ続いている間（遅延 producer）は採用する。
+        # 登録した実行がまだ続いている間（遅延 producer）は、呼んだ場所の session に依らず採用する
+        # （callable が登録した session を運ぶ）。
         assert later() == (record,)
+        with entered_certificate_session(None):
+            assert later() == (record,)
     # 実行が終わった後は、同じ callable でも採用しない（失効）。
     assert later() == ()
 
@@ -1355,7 +1362,8 @@ def _state_loop(binder, transition_leaf=None, limit=None):
         initial_state=_c(1), start_expr=_c(1), limit_expr=limit, step_expr=_c(1),
         transition_expr=transition, state_placeholder=binder, state_size=8, result_size=8,
     )
-    return Expression.intrinsic("COUNTED_STATE_TRANSITION_VALUE", [_c(1), _c(1), limit], size=8, runtime_ref=ref, opcode=0xF001)
+    # operand には上限を置かない（上限は ref の field としてだけ届く: 束縛の範囲の規則だけを見る）。
+    return Expression.intrinsic("COUNTED_STATE_TRANSITION_VALUE", [_c(1), _c(1), _c(5)], size=8, runtime_ref=ref, opcode=0xF001)
 
 
 def _binder_gate(value_left, value_right=None):
@@ -1379,14 +1387,24 @@ def _binder_gate(value_left, value_right=None):
     ("outer_binder_in_nested_limit", lambda: (lambda p: _state_loop(
         p, transition_leaf=Expression.binary_op("INT_ADD", p, _state_loop(_placeholder("i"), limit=p)),
     ))(_placeholder("o")), True),
-    # shadowing: 内側が外側と equals で同じ binder を宣言しても束縛されたまま。
+    # shadowing: 内側が外側と同じ binder を宣言しても（内側の遷移の中で）束縛されたまま。
     ("shadowed_binder", lambda: (lambda p: _state_loop(
-        p, transition_leaf=Expression.binary_op("INT_ADD", p, _state_loop(_placeholder("o"))),
+        p, transition_leaf=Expression.binary_op("INT_ADD", p, _state_loop(p)),
     ))(_placeholder("o")), True),
     # 外側の binder を、外側の束縛の外（上限）に置いた内側の loop が使う: 束縛の外。
     ("outer_binder_outside_its_scope", lambda: (lambda p: _state_loop(
         p, limit=_state_loop(_placeholder("i"), limit=p),
     ))(_placeholder("o")), False),
+    # 入れ子: 内側の loop の遷移（内側の束縛の中）が外側の binder を使う（外側の束縛は内側でも有効）。
+    ("outer_binder_in_nested_transition", lambda: (lambda p: _state_loop(
+        p, transition_leaf=Expression.binary_op("INT_ADD", p, (lambda q: _state_loop(
+            q, transition_leaf=Expression.binary_op("INT_ADD", q, p),
+        ))(_placeholder("i"))),
+    ))(_placeholder("o")), True),
+    # review 3 r-c 1: 同じ合成の場所が別の loop に作った placeholder（別の loop）が、遷移の中にある。
+    ("same_site_foreign_placeholder_in_transition", lambda: _state_loop(
+        _placeholder("s"), transition_leaf=_placeholder("s"),
+    ), False),
     # DAG: 同じ node が束縛の中（遷移）と外（上限）の両方から届く。
     ("shared_node_inside_and_outside", lambda: (lambda p: _state_loop(
         p, transition_leaf=p, limit=Expression.binary_op("INT_ADD", p, _c(0)),
@@ -1799,3 +1817,79 @@ def test_only_the_gate_issues_certificates_and_only_derive_builds_query_equaliti
                         callers[name].add((path.name, function.name))
     assert callers["issue_certificate"] == {("gate.py", "certify_owner_free_identity")}
     assert callers["OwnerFreePairAssertions"] == {("certificates.py", "derive_owner_free_pair_assertions")}
+
+
+
+def test_synthesized_placeholders_are_distinct_per_construction():
+    """合成した状態の placeholder は 1 回ごとに別の binder（同じ場所・同じ幅でも ``equals`` で一致しない）。"""
+
+    first, second = _placeholder("s"), _placeholder("s")
+    assert not first.equals(second)
+    assert first.equals(first)
+
+
+def test_counted_loop_case_refs_declare_the_accumulator_binders():
+    """counted loop の producer は case に accumulator の placeholder を binder として宣言する。"""
+
+    from scripts.function_tracer_pcode.analysis.recurrence.counted_loop import _impl__build_counted_loop_case_refs
+    from scripts.function_tracer_pcode.analysis.recurrence.models import CountedLoopUpdateCase
+
+    accumulator = _placeholder("acc")
+    update = CountedLoopUpdateCase(
+        conditions=(), update_expr=Expression.binary_op("INT_ADD", accumulator, _c(1)), delta_expr=_c(1),
+    )
+    (case,) = _impl__build_counted_loop_case_refs(None, (update,), loop_binders=(accumulator,))
+    assert case.loop_binders == (accumulator,)
+    scope = case.loop_binder_scope()
+    assert scope.binders == (accumulator,) and "body_effect" in scope.scoped_fields
+    (undeclared,) = _impl__build_counted_loop_case_refs(None, (update,))
+    assert undeclared.loop_binder_scope() is None
+
+
+def test_a_certificate_is_not_issued_for_values_that_may_still_change():
+    """証明書は読んだ値そのものを記録するので、不変でない（未検証の）値には発行しない。"""
+
+    from scripts.function_tracer_pcode.core.semantic_lifecycle import is_validated
+
+    left, right = _p("n", 0), _p("n", 0)  # 組み立て中（CONSTRUCTION）の値
+    assert not is_validated(left)
+    with comparison_scope(comparison_binding_of(_raw("f", [_d("n", 0)], _p("n", 0)), _raw("g", [_d("n", 0)], _p("n", 0)))):
+        refused = certify_owner_free_identity((left,), (right,), subject=("pair", "(0,0)"))
+    assert not refused.passed
+    assert any("checked_value_not_frozen" in ref for ref in refused.evidence_refs)
+
+
+def test_a_surface_records_the_binder_context_of_each_read():
+    """同じ値でも、束縛された位置で読んだ証明書は、自由な位置で読む値には使えない。"""
+
+    from scripts.function_tracer_pcode.core.runtime_refs import LoopBodyEffectRef, LoopCaseRef
+    from scripts.function_tracer_pcode.core.semantic_freeze import publish_semantic_values
+
+    accumulator = _placeholder("acc")
+    case = LoopCaseRef(
+        body_effect=LoopBodyEffectRef(kind="accumulator_update", source="t", scope="loop", value_expr=accumulator),
+        term_expr=_c(1), loop_binders=(accumulator,),
+    )
+    publish_semantic_values(case)
+    comparison = _positional_comparison_binding()
+    certificate = _certificate(("pair", "(0,0)"), comparison, (case,), (case,))
+    assert certificate.attests((case,), (case,))
+    # 同じ placeholder を束縛の外で読む値（自由な入力）には使えない。
+    assert not certificate.attests((accumulator,), (accumulator,))
+
+
+def test_a_direct_checker_call_owns_its_certificate_session():
+    """checker を直接呼ぶ経路（workflow の外）も、strategy の branch が証明書の session を持つ:
+    閉じた closure の証明書を最終 gate が照合できる（session が早く閉じると EQ が UNKNOWN になる）。"""
+
+    from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import (
+        entered_certificate_session,
+    )
+
+    left, right = _a04_cases()["identity_eq_control"]
+    with entered_certificate_session(None):
+        result = EquivalenceChecker(timeout=5).check(
+            publish_raw_function_analysis(left), publish_raw_function_analysis(right), "left", "right",
+        )
+    assert result.is_equivalent is True, [getattr(r, "reason_id", None) for r in result.unknown_reasons]

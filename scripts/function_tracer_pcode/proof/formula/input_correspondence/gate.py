@@ -260,13 +260,14 @@ def _read_side(values: Sequence[Any], rows: Mapping[int, ParameterInfo], side: s
     * PARAMETER: 行の index・名前・全幅で読む。
     * VARIABLE: その位置で有効な束縛の binder のほかは全て自由な入力で、名前の一致は対応の証明でない
       （``in_stack_*``・post-state・未解決の varnode・別の loop の placeholder）。
-    読んだ値の列（走査の順、束縛の文脈ごと）は証明書が記録し、``attests`` が同じ走査で照合する。
+    読んだ値と、その位置で有効な binder の組の列（走査の順）は証明書が記録し、``attests`` が同じ走査で
+    照合する。
     """
 
     refs = []
     surface = []
     for value, frame in reachable_semantic_values_in_binder_scope(tuple(values)):
-        surface.append(value)
+        surface.append((value, frame.binders_in_scope()))
         if not isinstance(value, Expression):
             continue
         if value.expr_type is ExpressionType.PARAMETER:
@@ -278,10 +279,14 @@ def _read_side(values: Sequence[Any], rows: Mapping[int, ParameterInfo], side: s
     return tuple(refs), tuple(surface)
 
 
-def checked_surface(values: Sequence[Any]) -> Tuple[Any, ...]:
-    """gate が ``values`` から読む意味値の列（証明書の ``attests`` が使う。規則は ``_read_side`` と同じ走査）。"""
+def checked_surface(values: Sequence[Any]) -> Tuple[Tuple[Any, Tuple[Any, ...]], ...]:
+    """gate が ``values`` から読む意味値と、その位置で有効な binder の組の列（証明書の ``attests`` が使う。
+    ``_read_side`` と同じ走査）。同じ値でも束縛の文脈が違えば別の読み（束縛された変数と自由な入力）。"""
 
-    return tuple(value for value, _frame in reachable_semantic_values_in_binder_scope(tuple(values)))
+    return tuple(
+        (value, frame.binders_in_scope())
+        for value, frame in reachable_semantic_values_in_binder_scope(tuple(values))
+    )
 
 
 def closure_reads_are_full(
@@ -364,7 +369,7 @@ def certify_owner_free_identity(
     mutable = tuple(
         f"checked_value_not_frozen:{side}"
         for side, surface in ((LEFT, left_surface), (RIGHT, right_surface))
-        if any(isinstance(value, (Expression, Condition)) and not is_validated(value) for value in surface)
+        if any(isinstance(value, (Expression, Condition)) and not is_validated(value) for value, _binders in surface)
     )
     if mutable:
         return CrossSideIdentityGate.refuse(mutable)

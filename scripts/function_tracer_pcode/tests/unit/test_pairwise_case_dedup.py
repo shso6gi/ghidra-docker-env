@@ -1312,7 +1312,7 @@ _PAIR_CASES_BY_REASON = {}
 
 
 def _record_readonly_projection_proof_in(strategy, reason, analysis1, analysis2, left_case, right_case, relation):
-    _PAIR_CASES_BY_REASON[id(reason)] = ((left_case,), (right_case,))
+    _PAIR_CASES_BY_REASON[id(reason)] = (reason, ((left_case,), (right_case,)))
     scope = comparison_binding_of(analysis1, analysis2, relation) if isinstance(relation, InputCorrespondenceSet) else None
     with comparison_scope(scope):
         strategy._record_completed_readonly_identity_projection_proof_if_safe(
@@ -1339,7 +1339,9 @@ def _readonly_gate_accepts(strategy, reason, analysis1, analysis2, relation, com
     from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import owner_free_evidence_values
 
     # 読む側は、その pair の case を示す（owner を含まない証拠は、示した値について作ったものだけを採用）。
-    values = _PAIR_CASES_BY_REASON.get(id(reason), ((), ()))
+    recorded_reason, values = _PAIR_CASES_BY_REASON.get(id(reason), (None, ((), ())))
+    if recorded_reason is not reason:  # id の使い回し（別の test の reason）は使わない
+        values = ((), ())
     with comparison_scope(comparison_binding_of(*(comparison_pair or (analysis1, analysis2)), relation)), (
         owner_free_evidence_values(*values)
     ):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import itertools
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
@@ -1085,8 +1086,12 @@ def _impl__synthesized_loop_state_placeholder(self, source: str, size: object) -
 
     placeholder は summary の ref が束縛する変数で、関数の入力ではない。varnode 由来の placeholder
     （``_loop_variable_expression``）と同じく ``LoopVariableIdentityRef`` で束縛を表す（名前の
-    ``__loop_state`` は束縛の証拠にしない）。key は合成した場所（``source``）で、ref の中の
-    alpha-renaming（binder key）は varnode 由来のものと同じ規則に従う。
+    ``__loop_state`` は束縛の証拠にしない）。
+
+    identity は 1 回の合成ごとに別（``source`` と合成の通し番号）: 同じ場所が別の loop の placeholder を
+    作っても ``equals`` で一致しないので、ある loop の placeholder を別の loop の binder とみなさない
+    （束縛の判定も consumer の置き換えも ``equals`` で照合する）。ref の中の alpha-renaming（binder key は
+    role と ordinal だけ）は通し番号に依らないので、左右の summary の key は従来どおり一致する。
     """
 
     try:
@@ -1098,9 +1103,13 @@ def _impl__synthesized_loop_state_placeholder(self, source: str, size: object) -
         size=normalized_size,
         runtime_ref=LoopVariableIdentityRef(
             role="state",
-            varnode_key=("synthesized_loop_state", str(source)),
+            varnode_key=("synthesized_loop_state", str(source), next(_SYNTHESIZED_LOOP_STATE_SERIAL)),
         ),
     )
+
+
+#: 合成した状態の placeholder の通し番号（placeholder の identity を合成ごとに別にするだけ）。
+_SYNTHESIZED_LOOP_STATE_SERIAL = itertools.count()
 
 def _impl__trace_varnode_expression(
     self,

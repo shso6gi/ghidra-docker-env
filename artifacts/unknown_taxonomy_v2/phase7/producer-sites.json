@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "f98846d01fdfa6dcdb42c11946242d2994d916ae9a353c5f3df706d19add2e0a",
+  "manifest_digest": "6305dff038f1ee73ae7a105ea5cd1cfca6b1267dc899c917b3ed9b1ac9d47923",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 33,
   "sites": [
@@ -1161,10 +1161,10 @@
       "emitter": "emit_sat_safety_signal",
       "enclosing_function": "emit_safe_counterexample_production_signal",
       "expected_cause_slots": [],
-      "line": 823,
+      "line": 824,
       "path": "scripts/function_tracer_pcode/proof/obligations/pair_disposition.py",
       "producer_site_manifest_id": "safe-counterexample-pairwise-production",
-      "source_sha256": "6238deb0a87db616d6f9b2f20c159e36cd6e200f059b9f2838c775ab012da49b"
+      "source_sha256": "ef2268cf1961685df09eac3e256dc490f2614e5fd4118d207b2af28b00c83ea1"
     },
     {
       "allowed_dispositions": [
