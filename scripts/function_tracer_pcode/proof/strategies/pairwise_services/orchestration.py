@@ -59,11 +59,18 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     make_internal_v2_reason_diagnostic,
     make_unknown_reason,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import (
+    certificate_attests,
+    certificate_session,
+    current_certificate_session,
+)
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
-    CrossSideIdentityCertificate,
     owner_free_identity_gate,
 )
 from scripts.function_tracer_pcode.proof.obligations.pair_disposition import pair_identity_subject
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    owner_free_evidence_values,
+)
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     LEFT as INPUT_LEFT,
     RIGHT as INPUT_RIGHT,
@@ -131,20 +138,22 @@ def record_pair_closed(
     extra = (base_ctx.get("pairwise_extra_assertions_by_pair") or {}).get(pair_id)
     certificate = getattr(artifact, "identity_certificate", None)
     if extra:
-        # 等式の証明書は登録のときに検査済みだが、この ledger の比較・この pair のものかをここでも
-        # 照合する（登録を迂回して ``base_ctx`` に書いた等式は閉じない）。artifact も証明書を持つ
-        # （owner を含まない種類の closure）なら、どちらもこの pair を検査しているので artifact の方を
-        # 封印する。
-        extra_certificate = (base_ctx.get("pairwise_extra_assertion_certificates_by_pair") or {}).get(pair_id)
+        # query に入った等式は、登録した carrier（検査した値から作った等式と証明書）と同じ行でなければ
+        # ならず、証明書はこの ledger の比較・この pair で、その値をもう一度 attests する（``base_ctx``
+        # に直接書いた等式・別の pair / 値の証明書では閉じない）。artifact も証明書を持つ（owner を
+        # 含まない種類の closure）なら、どちらもこの pair を検査しているので artifact の方を封印する。
+        carrier = (base_ctx.get("pairwise_extra_assertion_carriers_by_pair") or {}).get(pair_id)
         if not (
-            isinstance(extra_certificate, CrossSideIdentityCertificate)
-            and extra_certificate.covers(
-                pair_identity_subject(pair_key), comparison_digest=binding.comparison_authority_digest,
+            type(carrier) is OwnerFreePairAssertions
+            and tuple(str(line) for line in extra) == tuple(line for line in carrier.lines if line.strip())
+            and certificate_attests(
+                carrier.identity_certificate, pair_identity_subject(pair_key), carrier.checked_values,
+                comparison_digest=binding.comparison_authority_digest,
             )
         ):
             raise ValueError("owner-free query assertions lack the cross-side identity certificate of their pair")
         if certificate is None:
-            certificate = extra_certificate
+            certificate = carrier.identity_certificate
     identification = (
         CrossSideIdentification.OWNER_FREE
         if certificate is not None
@@ -285,6 +294,11 @@ def _impl_check(
     analysis2: FunctionReturnAnalysis,
     save_formula: bool = False
 ) -> StrategyResult:
+    if current_certificate_session() is None:
+        # 左右の同一視の証明書は、この比較の実行の間だけ有効（checker の外からの互換呼び出しでは、
+        # この呼び出しが session の持ち主。plan v4 PR-P）。
+        with certificate_session():
+            return _impl_check(self, analysis1, analysis2, save_formula)
     start_time = time.time()
     from scripts.function_tracer_pcode.proof.call_effect.preflight import (
         QueryExecutionRecord,
@@ -887,7 +901,7 @@ def _impl_check(
                     self._register_pairwise_extra_assertions(
                         base_ctx,
                         pair_id,
-                        OwnerFreePairAssertions(lowering.assertions, lowering.identity_certificate),
+                        lowering.assertions,
                     )
                     self._debug_print(
                         f"  Pair {pair_id}: unresolved runtime unknown "
@@ -2220,11 +2234,13 @@ def _register_loop_pair_replanner(
         )
 
         def produce():
-            complete = strategy._recovery_proof_is_complete(
-                reason_record,
-                analysis1,
-                analysis2,
-            )
+            # 証拠は、この pair の case について作った owner を含まない証拠だけを読む。
+            with owner_free_evidence_values((case1,), (case2,)):
+                complete = strategy._recovery_proof_is_complete(
+                    reason_record,
+                    analysis1,
+                    analysis2,
+                )
             # 閉じた値・loop summary の比較は owner を含まない key で左右を同一視する（plan v4 PR-P）。
             if not complete and owner_free_identity_gate((case1,), (case2,)).passed:
                 complete = (

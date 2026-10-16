@@ -43,6 +43,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     build_single_case_condition_query,
     build_unknown_recovery_actions,
     comparison_evidence,
+    owner_free_evidence_values,
     merge_new_evidence,
     parameter_identity_key_from_descriptor,
     parameter_identity_key_from_expression,
@@ -144,10 +145,12 @@ def _impl__record_completed_method_b_dual_summary_solver_proof_if_safe(
         for item in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
         if isinstance(item, Mapping)
     ]
-    existing_ids = {
-        self._normalize_nested_tuple(item.get("proof_obligation_id"))
-        for item in comparison_evidence(records)
-    }
+    # 既にある証拠は、この pair の値について作ったもの（と relation の premise の下の証拠）だけを数える。
+    with owner_free_evidence_values((case1,), (case2,)):
+        existing_ids = {
+            self._normalize_nested_tuple(item.get("proof_obligation_id"))
+            for item in comparison_evidence(records)
+        }
     changed = False
     for action in actions:
         proof_id = self._normalize_nested_tuple(action.proof_obligation_id)
@@ -183,6 +186,7 @@ def _impl__record_completed_method_b_dual_summary_solver_proof_if_safe(
         store_comparison_evidence(
             analysis, records, identification=CrossSideIdentification.OWNER_FREE,
             certificate=certification.certificate,
+            checked_values=((case1,), (case2,)),
         )
 
 def _impl__method_b_dual_summary_solver_proof_content(

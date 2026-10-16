@@ -61,9 +61,8 @@ class LoopTemplatePairwiseStrategy(PairwiseStrategy):
             return base_result
         # 定数の代入と template の key は名前で左右を同一視する。relation が位置どおり・全幅の
         # 等式でなければ使わない。検査の証明書を receipt に封印する（plan v4 PR-P）。
-        certification = certify_owner_free_identity(
-            (case1,), (case2,), subject=pair_identity_subject(pair_id),
-        )
+        checked = ((case1,), (case2,))
+        certification = certify_owner_free_identity(*checked, subject=pair_identity_subject(pair_id))
         if not certification.passed:
             return base_result
 
@@ -173,6 +172,7 @@ class LoopTemplatePairwiseStrategy(PairwiseStrategy):
                 ),
                 supporting_solver_receipts=supporting_solver_receipts,
                 identity_certificate=certification.certificate,
+                checked_values=checked,
             )
         )
         return result

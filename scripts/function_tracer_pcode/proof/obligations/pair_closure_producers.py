@@ -20,9 +20,12 @@ from typing import Any, Mapping, Optional, Tuple
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
     comparison_digest_is_current,
+    owner_free_evidence_values,
+)
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import (
+    CrossSideIdentityCertificate,
 )
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
-    CrossSideIdentityCertificate,
     certify_owner_free_identity,
 )
 
@@ -470,7 +473,8 @@ def validate_runtime_reduction_candidate(
 ) -> Optional[RuntimeReductionClosureArtifact]:
     if not candidate.is_current_for(binding):
         return None
-    certificate = _owner_free_identity_certificate(candidate, (case1,), (case2,))
+    checked = ((case1,), (case2,))
+    certificate = _owner_free_identity_certificate(candidate, *checked)
     if certificate is None:
         return None
     implementation = _fixed_proof_implementation(
@@ -487,6 +491,7 @@ def validate_runtime_reduction_candidate(
         RuntimeReductionClosureArtifact, binding,
         (candidate.pair_id, candidate.proposition), candidate.evidence,
         identity_certificate=certificate,
+        checked_values=checked,
     )
 
 
@@ -500,7 +505,8 @@ def validate_counted_loop_closed_expression_candidate(
 ) -> Optional[CountedLoopClosedExpressionArtifact]:
     if not candidate.is_current_for(binding):
         return None
-    certificate = _owner_free_identity_certificate(candidate, (case1,), (case2,))
+    checked = ((case1,), (case2,))
+    certificate = _owner_free_identity_certificate(candidate, *checked)
     if certificate is None:
         return None
     implementation = _fixed_proof_implementation(
@@ -515,6 +521,7 @@ def validate_counted_loop_closed_expression_candidate(
         CountedLoopClosedExpressionArtifact, binding,
         (candidate.pair_id, candidate.proposition), candidate.evidence,
         identity_certificate=certificate,
+        checked_values=checked,
     )
 
 
@@ -530,19 +537,23 @@ def validate_method_b_candidate(
 ) -> Optional[MethodBClosureArtifact]:
     if not candidate.is_current_for(binding):
         return None
-    certificate = _owner_free_identity_certificate(candidate, (case1,), (case2,))
+    checked = ((case1,), (case2,))
+    certificate = _owner_free_identity_certificate(candidate, *checked)
     if certificate is None:
         return None
     implementation = _fixed_proof_implementation(strategy, "_method_b_closure_proof_is_complete")
-    executed, valid = _execute_pinned_proof(
-        implementation, reason, analysis1, analysis2
-    )
+    # 証明は証拠を読む: owner を含まない証拠は、この pair の case について作ったものだけを使う。
+    with owner_free_evidence_values(*checked):
+        executed, valid = _execute_pinned_proof(
+            implementation, reason, analysis1, analysis2
+        )
     if not executed or not valid:
         return None
     return issue_producer_validated_closure(
         MethodBClosureArtifact, binding,
         (candidate.pair_id, candidate.proposition), candidate.evidence,
         identity_certificate=certificate,
+        checked_values=checked,
     )
 
 
@@ -558,19 +569,23 @@ def validate_readonly_identity_candidate(
 ) -> Optional[ReadonlyIdentityClosureArtifact]:
     if not candidate.is_current_for(binding):
         return None
-    certificate = _owner_free_identity_certificate(candidate, (case1,), (case2,))
+    checked = ((case1,), (case2,))
+    certificate = _owner_free_identity_certificate(candidate, *checked)
     if certificate is None:
         return None
     implementation = _fixed_proof_implementation(strategy, "_readonly_identity_proof_is_complete")
-    executed, valid = _execute_pinned_proof(
-        implementation, reason, analysis1, analysis2
-    )
+    # 証明は証拠を読む: owner を含まない証拠は、この pair の case について作ったものだけを使う。
+    with owner_free_evidence_values(*checked):
+        executed, valid = _execute_pinned_proof(
+            implementation, reason, analysis1, analysis2
+        )
     if not executed or not valid:
         return None
     return issue_producer_validated_closure(
         ReadonlyIdentityClosureArtifact, binding,
         (candidate.pair_id, candidate.proposition), candidate.evidence,
         identity_certificate=certificate,
+        checked_values=checked,
     )
 
 
@@ -585,7 +600,8 @@ def validate_counted_loop_value_candidate(
 ) -> Optional[CountedLoopValueRelationArtifact]:
     if not candidate.is_current_for(binding):
         return None
-    certificate = _owner_free_identity_certificate(candidate, (case1,), (case2,))
+    checked = ((case1,), (case2,))
+    certificate = _owner_free_identity_certificate(candidate, *checked)
     if certificate is None:
         return None
     closed_values = _fixed_proof_implementation(
@@ -612,6 +628,7 @@ def validate_counted_loop_value_candidate(
         CountedLoopValueRelationArtifact, binding,
         (candidate.pair_id, candidate.proposition), candidate.evidence,
         identity_certificate=certificate,
+        checked_values=checked,
     )
 
 
@@ -628,11 +645,11 @@ def validate_aggregate_partition_candidate(
 ) -> Optional[AggregatePartitionClosureArtifact]:
     if not candidate.is_current_for(binding):
         return None
-    certificate = _owner_free_identity_certificate(
-        candidate,
+    checked = (
         tuple(pending.left_case for pending in pending_pairs),
         tuple(pending.right_case for pending in pending_pairs),
     )
+    certificate = _owner_free_identity_certificate(candidate, *checked)
     if certificate is None:
         return None
     normalized = tuple(sorted(set(tuple(pair) for pair in partition_witness)))
@@ -658,6 +675,7 @@ def validate_aggregate_partition_candidate(
         AggregatePartitionClosureArtifact, binding,
         (candidate.pair_id, candidate.proposition), candidate.evidence,
         identity_certificate=certificate,
+        checked_values=checked,
     )
 
 

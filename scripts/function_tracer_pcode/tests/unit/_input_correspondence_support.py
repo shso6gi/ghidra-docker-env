@@ -167,6 +167,11 @@ def open_cross_side_gate(monkeypatch: Any) -> None:
         gate_module, "closure_reads_are_full",
         lambda _ics, _left, _right: gate_module.CrossSideIdentityGate.accept(),
     )
+    # 規則の適用は 1 つ（``_owner_free_reading``）。読んだ値の列は本物の走査で作る（証明書は値に束縛される）。
+    monkeypatch.setattr(
+        gate_module, "_owner_free_reading",
+        lambda _relation, left, right: ((), gate_module.checked_surface(left), gate_module.checked_surface(right)),
+    )
 
 
 def fixed_test_comparison(name: str = "f") -> Any:

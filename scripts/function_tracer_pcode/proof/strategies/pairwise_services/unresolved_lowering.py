@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.proof.obligations.pair_disposition import pai
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     ReturnCase,
     certify_owner_free_identity,
+    derive_owner_free_pair_assertions,
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
     UnknownRecoveryProofObligation,
@@ -1167,11 +1168,11 @@ def _impl__try_build_unresolved_deferred_call_lowering(
     # 位置どおり・全幅の等式で、case と両側の call の面の読みが全幅でなければ lowering しない:
     # unknown は未解決のまま、解析の不安全の gate を受ける（等式だけを外すと、gate を免除された
     # unknown が左右で自由になる。plan v4 PR-P）。等式はこの証明書と一緒にだけ query へ入る。
-    certification = certify_owner_free_identity(
+    checked = (
         (case1, self._call_effect_comparison_surface(analysis1)),
         (case2, self._call_effect_comparison_surface(analysis2)),
-        subject=pair_identity_subject(pair_id),
     )
+    certification = certify_owner_free_identity(*checked, subject=pair_identity_subject(pair_id))
     if not certification.passed:
         return None
     value1 = getattr(case1, "value_expr", None)
@@ -1294,10 +1295,12 @@ def _impl__try_build_unresolved_deferred_call_lowering(
         "left": tuple(lowered_left_unknown_keys),
         "right": tuple(lowered_right_unknown_keys),
     }
+    # 等式は上で検査した case と両側の call の面から組み立てた（``checked``）。
     return _UnresolvedDeferredCallLowering(
-        assertions=tuple(assertions),
+        assertions=derive_owner_free_pair_assertions(
+            certification.certificate, *checked, lambda _left, _right: tuple(assertions),
+        ),
         evidence=tuple(evidence),
-        identity_certificate=certification.certificate,
     )
 
 def _impl__case_conditions_contain_unresolved(self, case: ReturnCase) -> bool:

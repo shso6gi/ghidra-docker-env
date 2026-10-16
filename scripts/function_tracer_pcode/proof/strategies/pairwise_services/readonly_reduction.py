@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     CrossSideIdentification,
     OwnerFreePairAssertions,
     certify_owner_free_identity,
+    derive_owner_free_pair_assertions,
     ConditionSMTOracle,
     ConditionSimplifier,
     ParameterInfo,
@@ -34,6 +35,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     _RuntimeShortcutDecision,
     build_unknown_recovery_actions,
     comparison_evidence,
+    owner_free_evidence_values,
     parameter_identity_key_from_expression,
     store_comparison_evidence,
 )
@@ -621,25 +623,31 @@ def _impl__readonly_contract_pairwise_extra_assertions(
     ):
         return None
     target_bits = int(result_size) * 8
-    left_value = left_case.get_value_smt(
-        left_param_replace_fn,
-        target_bits=target_bits,
-        use_sign_extension=left_case.should_sign_extend_value(),
-    )
-    right_value = right_case.get_value_smt(
-        right_param_replace_fn,
-        target_bits=target_bits,
-        use_sign_extension=right_case.should_sign_extend_value(),
-    )
-    if not left_value or not right_value:
-        return None
-    return OwnerFreePairAssertions(
-        (
+
+    def build(left_values, right_values):
+        # 等式は証明書が検査した case から描く（別の case の値を描かない）。
+        (left,), (right,) = left_values, right_values
+        left_value = left.get_value_smt(
+            left_param_replace_fn,
+            target_bits=target_bits,
+            use_sign_extension=left.should_sign_extend_value(),
+        )
+        right_value = right.get_value_smt(
+            right_param_replace_fn,
+            target_bits=target_bits,
+            use_sign_extension=right.should_sign_extend_value(),
+        )
+        if not left_value or not right_value:
+            return ()
+        return (
             "; readonly reduction contract equality at proven narrow return surface",
             f"(assert (= {left_value} {right_value}))",
-        ),
-        certification.certificate,
+        )
+
+    assertions = derive_owner_free_pair_assertions(
+        certification.certificate, (left_case,), (right_case,), build,
     )
+    return assertions if assertions.lines else None
 
 
 def _readonly_base_keys_agree(left_base_key: Any, right_base_key: Any) -> bool:
@@ -1070,10 +1078,12 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
         for item in getattr(analysis1, "completed_recovery_proof_evidence", ()) or ()
         if isinstance(item, Mapping)
     ]
-    existing_ids = {
-        self._normalize_nested_tuple(item.get("proof_obligation_id"))
-        for item in comparison_evidence(records)
-    }
+    # 既にある証拠は、この pair の値について作ったもの（と relation の premise の下の証拠）だけを数える。
+    with owner_free_evidence_values((case1,), (case2,)):
+        existing_ids = {
+            self._normalize_nested_tuple(item.get("proof_obligation_id"))
+            for item in comparison_evidence(records)
+        }
     if proof_id in existing_ids:
         return
     proof_content = {
@@ -1122,6 +1132,7 @@ def _impl__record_completed_readonly_identity_projection_proof_if_safe(
     store_comparison_evidence(
         analysis1, records, identification=CrossSideIdentification.OWNER_FREE,
         certificate=certification.certificate,
+        checked_values=((case1,), (case2,)),
     )
 
 

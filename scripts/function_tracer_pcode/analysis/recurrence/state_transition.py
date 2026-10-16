@@ -1008,6 +1008,11 @@ def _impl__try_summarize_state_transition_loop(
         side_effect_profile=side_effect_profile,
         state_size=state_size,
         result_size=result_size,
+        loop_binders=tuple(
+            placeholder
+            for placeholder in (model.state_placeholder, model.accumulator_placeholder)
+            if placeholder is not None
+        ),
     )
     transition_evidence_key = self._state_transition_loop_transition_evidence_key(summary_ref)
     if transition_evidence_key is None:

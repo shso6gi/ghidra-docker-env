@@ -19,7 +19,9 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate impor
 )
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
     comparison_evidence,
+    comparison_evidence_subject,
     current_relation,
+    owner_free_evidence_values,
     relation_digest_is_current,
     store_comparison_evidence,
 )
@@ -66,4 +68,4 @@ class ReturnCoverageCheckResult:
     coverage_proof_method: Optional[str] = None
     solver_status: Optional[str] = None
 
-__all__ = ('Any', 'ConditionSMTOracle', 'CrossSideIdentification', 'Dict', 'List', 'Optional', 'ParallelResult', 'ReadonlyReductionRef', 'ReturnCoverageCheckResult', 'Set', 'StrategyResult', 'Tuple', 'UnknownReasonId', 'UnknownReasonRecord', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', 'build_proof_obligation_id', 'build_unknown_recovery_actions', 'certify_owner_free_identity', 'coerce_unknown_reason_records', 'coerce_value_to_bitvec_width', 'comparison_evidence', 'current_relation', 'dataclass', 'field', 'make_internal_v2_reason_diagnostic', 'make_unknown_reason', 'relation_digest_is_current', 'store_comparison_evidence')
+__all__ = ('Any', 'ConditionSMTOracle', 'CrossSideIdentification', 'Dict', 'List', 'Optional', 'ParallelResult', 'ReadonlyReductionRef', 'ReturnCoverageCheckResult', 'Set', 'StrategyResult', 'Tuple', 'UnknownReasonId', 'UnknownReasonRecord', 'UnknownRecoveryActionStatus', 'UnknownRecoveryProofKind', 'UnknownRecoveryProofObligation', 'build_proof_obligation_id', 'build_unknown_recovery_actions', 'certify_owner_free_identity', 'coerce_unknown_reason_records', 'coerce_value_to_bitvec_width', 'comparison_evidence', 'comparison_evidence_subject', 'current_relation', 'dataclass', 'field', 'make_internal_v2_reason_diagnostic', 'make_unknown_reason', 'owner_free_evidence_values', 'relation_digest_is_current', 'store_comparison_evidence')

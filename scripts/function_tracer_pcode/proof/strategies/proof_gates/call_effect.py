@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
@@ -11,6 +12,8 @@ from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     UnknownRecoveryProofKind,
     build_proof_obligation_id,
     comparison_evidence,
+    comparison_evidence_subject,
+    owner_free_evidence_values,
     store_comparison_evidence,
 )
 
@@ -84,10 +87,17 @@ def _impl__record_completed_call_effect_summary_proof_if_safe(
         for item in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
         if isinstance(item, Mapping)
     ]
-    existing_ids = {
-        self._normalize_nested_tuple(item.get("proof_obligation_id"))
-        for item in comparison_evidence(records)
-    }
+    # 照合の部品 key を作る両側の call の面。owner を含まない証拠はこの値について作り、読む側も
+    # この値を示す（``owner_free_evidence_values``）。
+    surfaces = (
+        self._call_effect_comparison_surface(analysis1),
+        self._call_effect_comparison_surface(analysis2),
+    )
+    with owner_free_evidence_values(*surfaces):
+        existing_ids = {
+            self._normalize_nested_tuple(item.get("proof_obligation_id"))
+            for item in comparison_evidence(records)
+        }
     if proof_obligation_id in existing_ids:
         return
 
@@ -128,15 +138,14 @@ def _impl__record_completed_call_effect_summary_proof_if_safe(
     # 左右の call site（target・引数・path guard）を、index に正規化した部品 key で対応づけた証拠。
     # 照合した部品が読む値（両側の call の面）を検査した証明書と一緒にだけ記録する（plan v4 PR-P）。
     certification = certify_owner_free_identity(
-        self._call_effect_comparison_surface(analysis1),
-        self._call_effect_comparison_surface(analysis2),
-        subject=("comparison_evidence", object_target_key),
+        *surfaces, subject=comparison_evidence_subject(object_target_key),
     )
     if not certification.passed:
         return
     store_comparison_evidence(
         analysis, records, identification=CrossSideIdentification.OWNER_FREE,
         certificate=certification.certificate,
+        checked_values=surfaces,
     )
 
 
@@ -1981,15 +1990,27 @@ def _impl__completed_call_effect_summary_proof_ids(
     *analyses: FunctionReturnAnalysis,
 ) -> Tuple[Tuple[Any, ...], ...]:
     proof_ids: List[Tuple[Any, ...]] = []
-    for analysis in analyses:
-        evidence_records = comparison_evidence(
-            getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
-        )
-        for evidence in evidence_records:
-            proof_id = cls._call_effect_summary_proof_id_from_evidence(evidence)
-            if proof_id is not None:
-                proof_ids.append(proof_id)
+    with cls._owner_free_call_effect_evidence_values(*analyses):
+        for analysis in analyses:
+            evidence_records = comparison_evidence(
+                getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
+            )
+            for evidence in evidence_records:
+                proof_id = cls._call_effect_summary_proof_id_from_evidence(evidence)
+                if proof_id is not None:
+                    proof_ids.append(proof_id)
     return tuple(proof_ids)
+
+
+def _impl__owner_free_call_effect_evidence_values(cls, *analyses: FunctionReturnAnalysis):
+    """call effect の証拠を読む側が示す値（両側の call の面）。2 つの analysis が無ければ何も示さない。"""
+
+    if len(analyses) != 2:
+        return nullcontext()
+    return owner_free_evidence_values(
+        cls._call_effect_comparison_surface(analyses[0]),
+        cls._call_effect_comparison_surface(analyses[1]),
+    )
 
 
 def _impl__call_effect_summary_proof_id_from_evidence(cls, evidence: Any) -> Optional[Tuple[Any, ...]]:

@@ -33,7 +33,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     try_normalization_equivalence,
 )
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import current_comparison
-from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import CrossSideIdentityCertificate
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import certificate_attests
 from scripts.function_tracer_pcode.proof.obligations.pair_disposition import pair_identity_subject
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._api import (
     contains_udiv,
@@ -283,8 +283,9 @@ def _impl__register_pairwise_extra_assertions(
 ) -> None:
     """pair の query に owner を含まない等式を足す（readonly の契約・deferred call の lowering）。
 
-    等式はその pair を検査した証明書と一緒にだけ登録する（plan v4 PR-P）。証明書の無い・別の pair /
-    比較の証明書は ``ValueError``。登録した証明書は ``record_pair_closed`` が closure に封印する。
+    等式は ``derive_owner_free_pair_assertions`` が検査した値から作ったものだけを、その pair・この比較の
+    証明書がその値をもう一度 ``attests`` するときだけ登録する（plan v4 PR-P）。それ以外は ``ValueError``。
+    登録した証明書は ``record_pair_closed`` が closure に封印する。
     """
 
     if type(assertions) is not OwnerFreePairAssertions:
@@ -295,14 +296,13 @@ def _impl__register_pairwise_extra_assertions(
         return
     comparison = current_comparison()
     certificate = assertions.identity_certificate
-    if (
-        type(certificate) is not CrossSideIdentityCertificate
-        or comparison is None
-        or not certificate.covers(pair_identity_subject(pair_id), comparison_digest=comparison.digest)
+    if comparison is None or not certificate_attests(
+        certificate, pair_identity_subject(pair_id), assertions.checked_values,
+        comparison_digest=comparison.digest, relation_digest=comparison.input_correspondence_digest,
     ):
-        raise ValueError("owner-free pair assertions lack the certificate of their pair")
+        raise ValueError("owner-free pair assertions lack the certificate of their pair and values")
     base_ctx.setdefault("pairwise_extra_assertions_by_pair", {})[pair_id] = lines
-    base_ctx.setdefault("pairwise_extra_assertion_certificates_by_pair", {})[pair_id] = certificate
+    base_ctx.setdefault("pairwise_extra_assertion_carriers_by_pair", {})[pair_id] = assertions
 
 
 def _impl__clear_pairwise_extra_assertions(
@@ -313,9 +313,9 @@ def _impl__clear_pairwise_extra_assertions(
     by_pair = base_ctx.get("pairwise_extra_assertions_by_pair")
     if isinstance(by_pair, dict):
         by_pair.pop(pair_id, None)
-    certificates_by_pair = base_ctx.get("pairwise_extra_assertion_certificates_by_pair")
-    if isinstance(certificates_by_pair, dict):
-        certificates_by_pair.pop(pair_id, None)
+    carriers_by_pair = base_ctx.get("pairwise_extra_assertion_carriers_by_pair")
+    if isinstance(carriers_by_pair, dict):
+        carriers_by_pair.pop(pair_id, None)
     evidence_by_pair = base_ctx.get("pairwise_unresolved_deferred_call_lowering_evidence_by_pair")
     if isinstance(evidence_by_pair, dict):
         evidence_by_pair.pop(pair_id, None)

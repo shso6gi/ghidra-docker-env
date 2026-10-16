@@ -16,32 +16,36 @@
   Expression でなく数値（``parameter_index``）で持っていても成り立つ（読みを集めない）。
 * :func:`closure_reads_are_full` — closure が比べる値の局所の検査。到達できる PARAMETER の leaf が
   全て表の行の幅で読み、名前と index が同じ行を指す。index だけの key は読みの幅を持たないので、
-  狭い読み・広い読みがあれば拒否する。自由な入力 VARIABLE（束縛された loop 変数以外。graph でも
-  runtime ref の中でも）があれば拒否する（名前の一致は対応の証明でない。#248 で scope へ移す）。
-* :func:`owner_free_identity_gate` — 上の 2 つの組（pair 全体の述語が先）。relation を渡さなければ
-  現在の比較の relation（``binding.current_relation``）を読み、比較の外では通さない（fail-closed）。
+  狭い読み・広い読みがあれば拒否する。自由な入力 VARIABLE があれば拒否する（名前の一致は対応の証明で
+  ない。#248 で scope へ移す）。
+* :func:`owner_free_identity_gate` — 上の 2 つの組（pair 全体の述語が先。適用は ``_owner_free_reading``
+  の 1 つ）。relation を渡さなければ現在の比較の relation を読み、比較の外では通さない（fail-closed）。
 * :func:`certify_owner_free_identity` — owner を含まない同一視を **発行する** site が呼ぶ唯一の入口。
-  現在の比較の relation で ``owner_free_identity_gate`` を検査し、通れば発行物の対象（pair・証拠の
-  target）・比較・relation に束縛した証明書（:class:`CrossSideIdentityCertificate`）を出す。証明書は
-  この関数だけが作れ（private token）、発行台帳に載ったものだけが有効（作り直した値は通らない）。
+  同じ規則で検査し、通れば証明書（``certificates.CrossSideIdentityCertificate``）を出す。証明書は比較・
+  relation・発行物の対象と、**読んだ値そのもの**（不変の意味値の列）を記録し、発行物を作る側・証拠を
+  読む側が示す値を ``attests`` で照合する。持ち主は比較の実行の session で、実行が終わると失効する。
 
-束縛された loop 変数（summary の placeholder）は名前でなく型で区別する: runtime ref の中で届く
-VARIABLE に ``LoopVariableIdentityRef`` が付いていれば入力でない。それ以外の VARIABLE は自由な入力。
+**loop 変数の束縛**は名前・型・「ref の中にある」ことでは決めない。束縛を持つ ref（loop の case・状態
+遷移の summary）が ``loop_binder_scope()`` で binder と、それが効く field を宣言し、走査
+（``core/semantic_freeze.reachable_semantic_values_in_binder_scope``）は宣言した field を通って届いた
+位置にだけ束縛の文脈を渡す（外側の文脈は内側でも有効）。VARIABLE は、loop 変数の型を持ち、その位置で
+有効な binder と ``equals`` で一致するときだけ束縛された変数。それ以外（別の loop の placeholder・
+束縛の外の field・漏れた placeholder）は自由な入力として拒否する。
 
 拒否は「証明できない」であって、反証ではない。site は計算をせず、保守的な答え（closure を
 発行しない、併合しない、lowering しない）へ戻る。
 
 この規則が判定に効く面は 3 つで、どれも証明書を要求する（呼び手の注意に頼らない）:
 
-* pair の closure: producer の closure・名前で比べる構造の等価・owner を含まない query の等式は、
-  その pair の証明書なしに発行・登録できない。ledger（``PairClosureEvidence``）が証明書を封印・照合し、
-  最終の EQ gate（``orchestration.veto_unproven_cross_side_identity``。dispatch frame の
-  ``checker/preflight_gate`` と frame の無い互換・legacy の経路、pairwise の後の昇格が呼ぶ）が
-  ``final_equivalence_identity_gate`` で relation と証明書をもう一度照合する。
-* 比較の証拠（completed recovery proof）: owner を含まない証拠は対象の証明書と一緒にだけ束縛でき、
-  採用の規則（``binding.evidence_authority_holds``）は発行済みで対象・比較・relation を覆う証明書を
-  要求する。blocker の解消（gate の producer・``DecisionAggregator``・replan）は証拠を通してしか
-  起きないので、この採用の規則がそれらの関所になる。
+* pair の closure: producer の closure・名前で比べる構造の等価は、その pair の証明書と、証明が読んだ
+  値（``checked_values``）なしに発行できない。owner を含まない query の等式は、証明書が検査した値から
+  ``derive_owner_free_pair_assertions`` だけが作る。ledger（``PairClosureEvidence``・
+  ``record_pair_closed``）が証明書を封印・照合し、最終の EQ gate（``orchestration.
+  veto_unproven_cross_side_identity``）が relation と証明書をもう一度照合する。
+* 比較の証拠（completed recovery proof）: owner を含まない証拠は、その証拠を作った値を検査した証明書と
+  一緒にだけ束縛でき、採用（``binding.evidence_authority_holds``）は読む側が示した値（``binding.
+  owner_free_evidence_values``）を証明書が検査したときだけ。同じ ``object_target_key`` でも別の pair・
+  別の branch の値には使えない。値を示さない読み手は採用しない。
 * site の検査: 計算そのものを始めない（無駄を避け、拒否したときの保守的な答えを決める）。
 
 PR-H は、この gate を relation を通した翻訳（``CorrespondenceScope``）に置き換える。
@@ -49,19 +53,23 @@ PR-H は、この gate を relation を通した翻訳（``CorrespondenceScope``
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-import hashlib
-import secrets
-from threading import Lock
-from typing import Any, Dict, Iterable, Mapping, Optional, Sequence, Tuple
+from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
 
+from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.runtime_refs.loops import LoopVariableIdentityRef
-from scripts.function_tracer_pcode.core.semantic_freeze import reachable_semantic_values_by_origin
+from scripts.function_tracer_pcode.core.semantic_freeze import reachable_semantic_values_in_binder_scope
+from scripts.function_tracer_pcode.core.semantic_lifecycle import is_validated
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
     current_comparison,
     current_relation,
+)
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import (
+    CrossSideIdentityCertificate,
+    issue_certificate,
+    issued_certificate,
 )
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.model import (
     LEFT,
@@ -95,61 +103,11 @@ class CrossSideIdentification(str, Enum):
     pair の closure は種類が下限を決め（``pair_disposition.closure_identification_floor``）、
     呼び手は下限より保守的な値（``OWNER_FREE``）にしか変えられない。比較の証拠（completed
     recovery proof）は書いた producer が申告し（``binding.store_comparison_evidence``）、申告の
-    無い record は ``OWNER_FREE`` として扱う。
+    無い・知らない値の record は採用しない。
     """
 
     CORRESPONDENCE = "correspondence"
     OWNER_FREE = "owner_free"
-
-
-_CERTIFICATE_TOKEN = object()
-#: 発行した証明書（process の中だけ）。証拠の record は証明書の id しか持たないので、採用の側は
-#: ここで発行済みの証明書を引く。id は乱数を含み、record から作り直せない。
-_ISSUED_CERTIFICATES: Dict[str, "CrossSideIdentityCertificate"] = {}
-_ISSUED_LOCK = Lock()
-
-
-@dataclass(frozen=True)
-class CrossSideIdentityCertificate:
-    """owner を含まない同一視を検査した結果（``certify_owner_free_identity`` だけが発行する）。
-
-    何を検査したか（``subject``）・どの比較（``comparison_digest``）・どの relation
-    （``relation_digest``）の下で検査したかを持つ。owner を含まない closure・証拠・query の等式は、
-    これを持たないと発行も採用もされない（申告の enum だけでは検査済みにならない）。
-    """
-
-    certificate_id: str
-    comparison_digest: str
-    relation_digest: str
-    subject: Tuple[Any, ...]
-    _token: Any = field(default=None, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        if self._token is not _CERTIFICATE_TOKEN:
-            raise TypeError("cross-side identity certificates are issued only by certify_owner_free_identity")
-
-    def is_issued(self) -> bool:
-        with _ISSUED_LOCK:
-            return _ISSUED_CERTIFICATES.get(self.certificate_id) is self
-
-    def covers(self, subject: Any, *, comparison_digest: Any, relation_digest: Any = None) -> bool:
-        """この証明書が ``subject`` を、その比較（と relation）の下で検査したものか。"""
-
-        return bool(
-            self.is_issued()
-            and self.subject == subject
-            and self.comparison_digest == comparison_digest
-            and (relation_digest is None or self.relation_digest == relation_digest)
-        )
-
-
-def issued_certificate(certificate_id: Any) -> Optional[CrossSideIdentityCertificate]:
-    """id から発行済みの証明書を引く（無ければ None）。"""
-
-    if type(certificate_id) is not str:
-        return None
-    with _ISSUED_LOCK:
-        return _ISSUED_CERTIFICATES.get(certificate_id)
 
 
 @dataclass(frozen=True)
@@ -279,36 +237,51 @@ def _parameter_read_refusal(expr: Expression, rows: Mapping[int, ParameterInfo],
     return None
 
 
-def _is_bound_loop_variable(expr: Expression, inside_runtime_ref: bool) -> bool:
-    """loop の summary が束縛した placeholder か（自由な入力ではない）。
+def _is_bound_loop_variable(expr: Expression, frame: Any) -> bool:
+    """この位置で有効な束縛の binder か（自由な入力ではない）。
 
-    束縛は名前でなく型で表す: recurrence の summarizer は loop の placeholder の VARIABLE に
-    ``LoopVariableIdentityRef`` を付け、summary の ref の中にだけ置く。式の graph に現れた
-    placeholder は束縛の外へ漏れた値なので、束縛とみなさない。
+    束縛は名前・型・「ref の中にある」ことでは決めない: loop 変数の型（``LoopVariableIdentityRef``）を
+    持ち、届いた位置で有効な binder（宣言した ref の scope の field を通って届いたときだけ有効。
+    ``runtime_refs.loops`` の ``loop_binder_scope``）のどれかと ``equals`` で一致するときだけ束縛。
+    一致の規則は、consumer が placeholder を置き換えるときの規則（``Expression.equals``）と同じ。
     """
 
-    return inside_runtime_ref and isinstance(expr.__dict__.get("runtime_ref"), LoopVariableIdentityRef)
+    if not isinstance(expr.__dict__.get("runtime_ref"), LoopVariableIdentityRef):
+        return False
+    return any(
+        binder is expr or (isinstance(binder, Expression) and binder.equals(expr))
+        for binder in frame.binders_in_scope()
+    )
 
 
-def _side_refusals(values: Sequence[Any], rows: Mapping[int, ParameterInfo], side: str) -> Tuple[str, ...]:
-    """比べる値に到達できる入力の読み（1 回の走査。runtime ref の中を含む）。
+def _read_side(values: Sequence[Any], rows: Mapping[int, ParameterInfo], side: str) -> Tuple[Tuple[str, ...], Tuple[Any, ...]]:
+    """比べる値の読み（1 回の走査。runtime ref の中と束縛の文脈を含む）の拒否と、読んだ値の列。
 
     * PARAMETER: 行の index・名前・全幅で読む。
-    * VARIABLE: 束縛された loop 変数のほかは全て自由な入力で、名前の一致は対応の証明でない
-      （``in_stack_*``・post-state・未解決の varnode）。graph でも runtime ref の中でも拒否する。
+    * VARIABLE: その位置で有効な束縛の binder のほかは全て自由な入力で、名前の一致は対応の証明でない
+      （``in_stack_*``・post-state・未解決の varnode・別の loop の placeholder）。
+    読んだ値の列（走査の順、束縛の文脈ごと）は証明書が記録し、``attests`` が同じ走査で照合する。
     """
 
     refs = []
-    for value, inside in reachable_semantic_values_by_origin(tuple(values)):
+    surface = []
+    for value, frame in reachable_semantic_values_in_binder_scope(tuple(values)):
+        surface.append(value)
         if not isinstance(value, Expression):
             continue
         if value.expr_type is ExpressionType.PARAMETER:
             refusal = _parameter_read_refusal(value, rows, side)
             if refusal is not None:
                 refs.append(refusal)
-        elif value.expr_type is ExpressionType.VARIABLE and not _is_bound_loop_variable(value, inside):
+        elif value.expr_type is ExpressionType.VARIABLE and not _is_bound_loop_variable(value, frame):
             refs.append(f"input_variable:{side}:{value.name}")
-    return tuple(refs)
+    return tuple(refs), tuple(surface)
+
+
+def checked_surface(values: Sequence[Any]) -> Tuple[Any, ...]:
+    """gate が ``values`` から読む意味値の列（証明書の ``attests`` が使う。規則は ``_read_side`` と同じ走査）。"""
+
+    return tuple(value for value, _frame in reachable_semantic_values_in_binder_scope(tuple(values)))
 
 
 def closure_reads_are_full(
@@ -319,18 +292,33 @@ def closure_reads_are_full(
     """closure が比べる値の PARAMETER の読みが全て行の幅で、入力 VARIABLE が無いか。
 
     ``left_values`` / ``right_values`` は closure が比べる側ごとの値（式・条件・case・ref を
-    含む入れ物）。到達は ``reachable_semantic_values_by_origin``（公開と同じ規則）で、PARAMETER も
-    自由な入力 VARIABLE も runtime ref の中まで数える。
+    含む入れ物）。到達は ``reachable_semantic_values_in_binder_scope``（公開と同じ規則に束縛の文脈を
+    足したもの）で、PARAMETER も自由な入力 VARIABLE も runtime ref の中まで数える。
     """
 
     if type(ics) is not InputCorrespondenceSet:
         return CrossSideIdentityGate.refuse(("relation_unavailable",))
-    refs = _side_refusals(left_values, _side_rows(ics, LEFT), LEFT) + _side_refusals(
-        right_values, _side_rows(ics, RIGHT), RIGHT
-    )
-    if refs:
-        return CrossSideIdentityGate.refuse(refs)
+    left_refs, _left_surface = _read_side(left_values, _side_rows(ics, LEFT), LEFT)
+    right_refs, _right_surface = _read_side(right_values, _side_rows(ics, RIGHT), RIGHT)
+    if left_refs or right_refs:
+        return CrossSideIdentityGate.refuse(left_refs + right_refs)
     return CrossSideIdentityGate.accept()
+
+
+def _owner_free_reading(
+    relation: Any, left_values: Sequence[Any], right_values: Sequence[Any],
+) -> Tuple[Tuple[str, ...], Tuple[Any, ...], Tuple[Any, ...]]:
+    """owner を含まない同一視の規則の唯一の適用: pair 全体の述語が先で、通ったときだけ局所の読み。
+
+    返すのは（拒否の理由, 左で読んだ値の列, 右で読んだ値の列）。
+    """
+
+    positional = positional_identity_gate(relation)
+    if not positional.passed:
+        return tuple(ref[len(CROSS_SIDE_IDENTITY_REF) + 1:] for ref in positional.evidence_refs), (), ()
+    left_refs, left_surface = _read_side(left_values, _side_rows(relation, LEFT), LEFT)
+    right_refs, right_surface = _read_side(right_values, _side_rows(relation, RIGHT), RIGHT)
+    return left_refs + right_refs, left_surface, right_surface
 
 
 def owner_free_identity_gate(
@@ -339,17 +327,17 @@ def owner_free_identity_gate(
     *,
     ics: Any = _CURRENT_RELATION,
 ) -> CrossSideIdentityGate:
-    """owner を含まない key で ``left_values`` と ``right_values`` を同一視してよいか。
+    """owner を含まない key で ``left_values`` と ``right_values`` を同一視してよいか（判定だけ）。
 
-    site が呼ぶ唯一の入口。``ics`` を省くと現在の比較の最終 relation を使う（比較の外では
-    relation が無いので拒否）。pair 全体の述語が先で、通ったときだけ局所の読みを数える。
+    ``ics`` を省くと現在の比較の最終 relation を使う（比較の外では relation が無いので拒否）。
+    発行物を作る site はこれでなく ``certify_owner_free_identity`` を呼ぶ。
     """
 
     relation = current_relation() if ics is _CURRENT_RELATION else ics
-    positional = positional_identity_gate(relation)
-    if not positional.passed:
-        return positional
-    return closure_reads_are_full(relation, left_values, right_values)
+    refs, _left, _right = _owner_free_reading(relation, left_values, right_values)
+    if refs:
+        return CrossSideIdentityGate.refuse(refs)
+    return CrossSideIdentityGate.accept()
 
 
 def certify_owner_free_identity(
@@ -358,33 +346,37 @@ def certify_owner_free_identity(
     *,
     subject: Tuple[Any, ...],
 ) -> CrossSideIdentityGate:
-    """``owner_free_identity_gate`` を現在の比較の relation で検査し、通れば証明書を発行する。
+    """現在の比較の relation で ``left_values`` / ``right_values`` を検査し、通れば証明書を発行する。
 
-    owner を含まない closure・証拠・query の等式を **発行する** site はこれを呼び、結果の証明書を
-    発行物に付ける（ledger と証拠の採用が証明書を要求する）。``subject`` は発行物を指す値
-    （``("pair_closure", pair_key)``・``("pair_query_assertions", pair_id)``・
-    ``("comparison_evidence", object_target_key)``）。比較の外では発行しない。
+    owner を含まない closure・証拠・query の等式を **発行する** site が呼ぶ唯一の入口。証明書は
+    比較・relation・``subject`` と、ここで読んだ値の列を記録する（``certificates``）。発行物を作る側は、
+    発行物の入力そのものを ``attests`` で照合させる（同じ ``subject`` でも別の値には使えない）。
+    比較の外・証明書の session の外では発行しない。
     """
 
     comparison = current_comparison()
     if comparison is None:
         return CrossSideIdentityGate.refuse(("relation_unavailable",))
-    verdict = owner_free_identity_gate(left_values, right_values, ics=comparison.relation)
-    if not verdict.passed:
-        return verdict
-    if type(subject) is not tuple or not subject:
-        raise TypeError("cross-side identity certificate requires a subject tuple")
-    nonce = secrets.token_hex(16)
-    certificate_id = hashlib.sha256(repr((
-        "cross_side_identity_certificate_v1", comparison.digest,
-        comparison.input_correspondence_digest, subject, nonce,
-    )).encode("utf-8")).hexdigest()
-    certificate = CrossSideIdentityCertificate(
-        certificate_id, comparison.digest, comparison.input_correspondence_digest, subject,
-        _token=_CERTIFICATE_TOKEN,
+    refs, left_surface, right_surface = _owner_free_reading(comparison.relation, left_values, right_values)
+    if refs:
+        return CrossSideIdentityGate.refuse(refs)
+    # 証明書は読んだ値そのものを記録する。検査の後で変わり得る値（不変でない意味値）は記録できない。
+    mutable = tuple(
+        f"checked_value_not_frozen:{side}"
+        for side, surface in ((LEFT, left_surface), (RIGHT, right_surface))
+        if any(isinstance(value, (Expression, Condition)) and not is_validated(value) for value in surface)
     )
-    with _ISSUED_LOCK:
-        _ISSUED_CERTIFICATES[certificate_id] = certificate
+    if mutable:
+        return CrossSideIdentityGate.refuse(mutable)
+    certificate = issue_certificate(
+        comparison_digest=comparison.digest,
+        relation_digest=comparison.input_correspondence_digest,
+        subject=subject,
+        checked=(left_surface, right_surface),
+        surface_of=checked_surface,
+    )
+    if certificate is None:
+        return CrossSideIdentityGate.refuse(("certificate_session_unavailable",))
     return CrossSideIdentityGate(True, (), certificate)
 
 
@@ -427,6 +419,7 @@ __all__ = (
     "CrossSideIdentityCertificate",
     "CrossSideIdentityGate",
     "certify_owner_free_identity",
+    "checked_surface",
     "issued_certificate",
     "closure_reads_are_full",
     "final_equivalence_identity_gate",

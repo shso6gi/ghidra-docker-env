@@ -23,6 +23,7 @@ from scripts.function_tracer_pcode.core.runtime_refs.loops import (  # noqa: F40
     ComposedLoopSummaryRef,
     CountedLoopSummaryRef,
     CountedStateTransitionLoopSummaryRef,
+    LoopBinderScope,
     LoopBodyEffectRef,
     LoopCaseRef,
     LoopSideEffectProfileRef,

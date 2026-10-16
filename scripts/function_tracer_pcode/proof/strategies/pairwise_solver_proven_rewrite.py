@@ -129,9 +129,8 @@ def try_solver_proven_rewrite_equivalence(
     # 自明な一致は左右の値を名前（``are_structurally_equivalent``）・runtime ref の key で同一視する。
     # relation が位置どおり・全幅の等式で読みが全幅のときだけ使い、その証明書を receipt に封印する。
     # 通らなければ下の SMT の不等式 query で確かめる（plan v4 PR-P）。
-    certification = certify_owner_free_identity(
-        (rewritten_case1,), (rewritten_case2,), subject=pair_identity_subject(pair_id),
-    )
+    checked = ((rewritten_case1,), (rewritten_case2,))
+    certification = certify_owner_free_identity(*checked, subject=pair_identity_subject(pair_id))
     if certification.passed and _rewritten_values_are_trivially_equal(
         strategy,
         base_ctx,
@@ -202,6 +201,7 @@ def try_solver_proven_rewrite_equivalence(
                     supporting_solver_receipts
                 ),
                 identity_certificate=certification.certificate,
+                checked_values=checked,
             )
         )
         return result

@@ -12,9 +12,12 @@ import secrets
 from threading import Lock
 from typing import Any, ClassVar, Dict, Mapping, Optional, Tuple, Union
 
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import (
+    CrossSideIdentityCertificate,
+    certificate_attests,
+)
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
     CrossSideIdentification,
-    CrossSideIdentityCertificate,
 )
 from scripts.function_tracer_pcode.proof.obligations.guard_overlap import GuardDisjointArtifact
 
@@ -396,6 +399,7 @@ def issue_structural_equality_receipt(
     evidence: Any,
     supporting_solver_receipts: Tuple[SolverQueryExecutionReceipt, ...] = (),
     identity_certificate: Optional[CrossSideIdentityCertificate] = None,
+    checked_values: Optional[Tuple[Any, Any]] = None,
 ) -> StructuralEqualityReceipt:
     """Seal structural EQ only from the registered proof implementation."""
 
@@ -421,17 +425,16 @@ def issue_structural_equality_receipt(
         for receipt in receipts
     ):
         raise ValueError("structural equality has invalid solver support")
-    # 名前で比べる構造の等価は owner を含まない同一視で、この pair を検査した証明書を必須にする
-    # （void-return は値を比べないので要らない）。比較の digest は ledger が照合する。
+    # 名前で比べる構造の等価は owner を含まない同一視で、この pair を検査した証明書と、等価を確かめた
+    # 値そのもの（``checked_values``）を必須にする（void-return は値を比べないので要らない）。比較の
+    # digest は ledger が照合する。
     if str(proof_kind) in _CORRESPONDENCE_STRUCTURAL_PROOF_KINDS:
-        if identity_certificate is not None:
+        if identity_certificate is not None or checked_values is not None:
             raise ValueError("a void-return receipt does not carry a cross-side identity certificate")
-    elif (
-        type(identity_certificate) is not CrossSideIdentityCertificate
-        or not identity_certificate.is_issued()
-        or identity_certificate.subject != pair_identity_subject(str(query_label))
+    elif not certificate_attests(
+        identity_certificate, pair_identity_subject(str(query_label)), checked_values,
     ):
-        raise ValueError("owner-free structural equality requires the certificate of its pair")
+        raise ValueError("owner-free structural equality requires the certificate of its pair and values")
     schema_version = "structural_equality_receipt_v1"
     evidence_digest = hashlib.sha256(repr(evidence).encode("utf-8")).hexdigest()
     payload = (
@@ -1011,8 +1014,13 @@ def issue_producer_validated_closure(
     evidence: Any,
     *,
     identity_certificate: CrossSideIdentityCertificate,
+    checked_values: Tuple[Any, Any],
 ) -> ProducerValidatedClosureArtifact:
-    """Issue authority only from an import-time registered validator."""
+    """Issue authority only from an import-time registered validator.
+
+    ``proposition`` の先頭は pair id。``checked_values`` は validator の証明が読んだ値（側ごと）で、
+    証明書がその pair について、その値そのものを、この比較で検査したときだけ発行する。
+    """
 
     current = inspect.currentframe()
     caller = current.f_back if current is not None else None
@@ -1027,14 +1035,14 @@ def issue_producer_validated_closure(
     finally:
         del caller
         del current
-    # producer の closure は全て owner を含まない key で左右を同一視する。発行は、この比較で
-    # 検査した証明書を必須にする（ledger もこの証明書と pair を照合する）。
-    if (
-        type(identity_certificate) is not CrossSideIdentityCertificate
-        or not identity_certificate.is_issued()
-        or identity_certificate.comparison_digest != binding.comparison_authority_digest
+    # producer の closure は全て owner を含まない key で左右を同一視する。発行は、この比較でこの pair の
+    # 証明の入力を検査した証明書を必須にする（ledger もこの証明書と pair を照合する）。
+    pair_id = proposition[0] if isinstance(proposition, tuple) and proposition else None
+    if pair_id is None or not certificate_attests(
+        identity_certificate, pair_identity_subject(pair_id), checked_values,
+        comparison_digest=binding.comparison_authority_digest,
     ):
-        raise ValueError("producer closure requires the cross-side identity certificate of its comparison")
+        raise ValueError("producer closure requires the cross-side identity certificate of its pair and values")
     proposition_digest = hashlib.sha256(repr(proposition).encode()).hexdigest()
     evidence_digest = hashlib.sha256(repr(evidence).encode()).hexdigest()
     payload = (
