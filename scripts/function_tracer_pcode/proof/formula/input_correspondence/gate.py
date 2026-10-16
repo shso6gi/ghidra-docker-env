@@ -242,14 +242,24 @@ def _is_bound_loop_variable(expr: Expression, frame: Any) -> bool:
 
     束縛は名前・型・「ref の中にある」ことでは決めない: loop 変数の型（``LoopVariableIdentityRef``）を
     持ち、届いた位置で有効な binder（宣言した ref の scope の field を通って届いたときだけ有効。
-    ``runtime_refs.loops`` の ``loop_binder_scope``）のどれかと ``equals`` で一致するときだけ束縛。
-    一致の規則は、consumer が placeholder を置き換えるときの規則（``Expression.equals``）と同じ。
+    ``runtime_refs.loops`` の ``loop_binder_scope``）のどれかと同じ binder のときだけ束縛。
+
+    同じ binder とは、``equals`` で一致し（consumer が placeholder を置き換えるときの規則）、**型の object が
+    同じ**こと: producer は loop ごとに ``LoopVariableIdentityRef`` を 1 つ作り、その loop の placeholder は
+    全てそれを持つ。key（``varnode_key`` など）は左右の summary を alpha-renaming で突き合わせるための値で、
+    同じ場所が作った別の loop の placeholder とも一致し得るので、束縛の根拠にしない。
     """
 
-    if not isinstance(expr.__dict__.get("runtime_ref"), LoopVariableIdentityRef):
+    tag = expr.__dict__.get("runtime_ref")
+    if not isinstance(tag, LoopVariableIdentityRef):
         return False
     return any(
-        binder is expr or (isinstance(binder, Expression) and binder.equals(expr))
+        binder is expr
+        or (
+            isinstance(binder, Expression)
+            and binder.__dict__.get("runtime_ref") is tag
+            and binder.equals(expr)
+        )
         for binder in frame.binders_in_scope()
     )
 

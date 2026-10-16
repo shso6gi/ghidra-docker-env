@@ -1820,12 +1820,16 @@ def test_only_the_gate_issues_certificates_and_only_derive_builds_query_equaliti
 
 
 
-def test_synthesized_placeholders_are_distinct_per_construction():
-    """合成した状態の placeholder は 1 回ごとに別の binder（同じ場所・同じ幅でも ``equals`` で一致しない）。"""
+def test_synthesized_placeholders_share_keys_but_not_binder_identity():
+    """同じ場所が合成した 2 つの placeholder は key（``equals``・alpha-renaming）では一致するが、別の loop の
+    binder（型の object が別）なので、一方の loop の束縛の中で他方を束縛とみなさない。"""
 
     first, second = _placeholder("s"), _placeholder("s")
-    assert not first.equals(second)
-    assert first.equals(first)
+    assert first.equals(second)
+    assert first.__dict__["runtime_ref"] == second.__dict__["runtime_ref"]
+    assert first.__dict__["runtime_ref"] is not second.__dict__["runtime_ref"]
+    assert _binder_gate(_state_loop(first)).passed
+    assert not _binder_gate(_state_loop(first, transition_leaf=second)).passed
 
 
 def test_counted_loop_case_refs_declare_the_accumulator_binders():
