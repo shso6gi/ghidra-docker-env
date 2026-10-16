@@ -1295,15 +1295,12 @@ def _impl__try_build_unresolved_deferred_call_lowering(
         "left": tuple(lowered_left_unknown_keys),
         "right": tuple(lowered_right_unknown_keys),
     }
-    # 等式は上で検査した case と両側の call の面から組み立てた（``checked``）。derive は証明書がその値を
-    # 検査したことを確かめ、build はその値が等式を組み立てた case そのものであることを確かめる。
-    def build(left_values, right_values):
-        if left_values[0] is not case1 or right_values[0] is not case2:
-            raise ValueError("lowering equalities must come from the certified cases")
-        return tuple(assertions)
-
+    # 等式は上で検査した case と両側の call の面（``checked``）から組み立てた。derive は証明書がその値を
+    # 検査したことを確かめる。
     return _UnresolvedDeferredCallLowering(
-        assertions=derive_owner_free_pair_assertions(certification.certificate, *checked, build),
+        assertions=derive_owner_free_pair_assertions(
+            certification.certificate, *checked, lambda _left, _right: tuple(assertions),
+        ),
         evidence=tuple(evidence),
     )
 

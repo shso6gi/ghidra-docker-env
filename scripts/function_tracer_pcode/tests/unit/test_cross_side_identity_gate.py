@@ -1401,6 +1401,10 @@ def _binder_gate(value_left, value_right=None):
             q, transition_leaf=Expression.binary_op("INT_ADD", q, p),
         ))(_placeholder("i"))),
     ))(_placeholder("o")), True),
+    # 束縛の型は同じでも幅を変えた出現は consumer が置き換えない（``equals`` で一致しない）: 自由な変数。
+    ("resized_binder_in_transition", lambda: (lambda p: _state_loop(p, transition_leaf=p.clone_with(size=4)))(
+        _placeholder("s"),
+    ), False),
     # review 3 r-c 1: 同じ合成の場所が別の loop に作った placeholder（別の loop）が、遷移の中にある。
     ("same_site_foreign_placeholder_in_transition", lambda: _state_loop(
         _placeholder("s"), transition_leaf=_placeholder("s"),
@@ -1880,6 +1884,17 @@ def test_a_surface_records_the_binder_context_of_each_read():
     assert certificate.attests((case,), (case,))
     # 同じ placeholder を束縛の外で読む値（自由な入力）には使えない。
     assert not certificate.attests((accumulator,), (accumulator,))
+    # 読む値の並びは同じで、束縛の文脈だけが違う（宣言の無い case）: 使えない。
+    bare_bound = LoopCaseRef(term_expr=accumulator, loop_binders=(accumulator,))
+    bare_free = LoopCaseRef(term_expr=accumulator)
+    publish_semantic_values((bare_bound, bare_free))
+    bound_certificate = _certificate(("pair", "(0,1)"), comparison, (bare_bound,), (bare_bound,))
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import checked_surface
+
+    assert [value for value, _binders in checked_surface((bare_bound,))] == [
+        value for value, _binders in checked_surface((bare_free,))
+    ]
+    assert not bound_certificate.attests((bare_free,), (bare_free,))
 
 
 def test_a_direct_checker_call_owns_its_certificate_session():
