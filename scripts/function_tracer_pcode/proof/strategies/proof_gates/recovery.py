@@ -106,8 +106,9 @@ def _impl__completed_recovery_proof_ids(
     *analyses: FunctionReturnAnalysis,
 ) -> Tuple[Tuple[Any, ...], ...]:
     proof_ids: List[Tuple[Any, ...]] = []
-    for analysis in analyses:
-        proof_ids.extend(cls._produced_recovery_proof_ids(analysis))
+    with cls._owner_free_call_effect_evidence_values(*analyses):
+        for analysis in analyses:
+            proof_ids.extend(cls._produced_recovery_proof_ids(analysis))
     return tuple(proof_ids)
 
 def _impl__produced_recovery_proof_ids(

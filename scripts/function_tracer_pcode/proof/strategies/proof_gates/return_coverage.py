@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_wid
 from scripts.function_tracer_pcode.core.atom_validity import tags_of
 from scripts.function_tracer_pcode.core.structural import NON_STRUCTURAL_IDENTITY_TAGS
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
+    CrossSideIdentification,
     ConditionSMTOracle,
     ReturnCoverageCheckResult,
     UnknownReasonId,
@@ -1073,7 +1074,7 @@ def _impl__record_completed_return_coverage_proof(
             continue
         records.append(candidate)
         existing_ids.add(proof_id)
-    store_comparison_evidence(analysis, records)
+    store_comparison_evidence(analysis, records, identification=CrossSideIdentification.CORRESPONDENCE)
 
 def _impl__return_coverage_covered_proof_content(
     self,

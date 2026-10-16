@@ -60,13 +60,16 @@ def _apply_in_comparison(runtime, wrappers, **kwargs):
     """この比較の中で作った完了証拠として runtime に渡す。"""
 
     from scripts.function_tracer_pcode.core.evidence_authority import evidence_authority_scope
-    from scripts.function_tracer_pcode.proof.formula.input_correspondence import bind_evidence_to_comparison
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        CrossSideIdentification,
+        bind_evidence_to_comparison,
+    )
 
     bound = []
     for wrapper in wrappers:
         evidence = dict(wrapper.get("evidence", wrapper))
         if evidence_authority_scope(evidence) is None:
-            bind_evidence_to_comparison(evidence)
+            bind_evidence_to_comparison(evidence, identification=CrossSideIdentification.CORRESPONDENCE)
         bound.append({**wrapper, "evidence": evidence} if "evidence" in wrapper else evidence)
     return runtime.apply_completed_evidence(tuple(bound), **kwargs)
 

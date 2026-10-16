@@ -32,6 +32,7 @@ from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementId,
 )
 from scripts.function_tracer_pcode.proof.obligations import (
+    CrossSideIdentification,
     GuardOverlapGraph,
     GuardRegionSeed,
     GuardUnsatClosureArtifact,
@@ -369,8 +370,7 @@ def test_receipt_merges_guard_closure_binding_consumption_and_exclusion():
             _canonical_guard_disjoint_artifact(ledger_binding)
         ),
         required_binding_uses=("guard-binding", "value-binding"),
-        consumed_binding_uses=("guard-binding",),
-    ))
+        consumed_binding_uses=("guard-binding",), identification=CrossSideIdentification.CORRESPONDENCE))
     frame.pair_disposition_ledger = ledger
     frame.pending_query_records = ()
     frame.pending_consumed_projection_binding_ids = ()
@@ -464,8 +464,7 @@ def test_call_effect_replan_binds_successor_after_new_projection_is_extracted():
         (0, 0), PairClosureKind.GUARD_QUERY, successor.binding,
         GuardUnsatClosureArtifact(
             _canonical_guard_disjoint_artifact(successor.binding)
-        ),
-    ))
+        ), identification=CrossSideIdentification.CORRESPONDENCE))
     frame.pair_disposition_ledger = successor
     frame.replan_successor_plan = runtime.pair_ledger_manager.last_composed_successor
     frame.replan_successor_ledger = successor

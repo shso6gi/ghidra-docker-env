@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import positional_comparison
 from scripts.function_tracer_pcode.analysis import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
 from scripts.function_tracer_pcode.analysis.effects.summary import EffectSummary, StoreEffect
@@ -1375,8 +1376,11 @@ def test_pairwise_auxiliary_loop_proof_renders_duplicate_names_by_object_identit
         Expression.parameter("count", index=0, data_type="int", size=4),
     )
 
-    specs = strategy._collect_intrinsic_parameter_specs(case, case, left, right)
-    query = strategy._build_intrinsic_equivalence_query(left, right, [], specs)
+    # 補助 query の記号は左右の parameter を index で共有する。位置どおり・全幅の等式の relation の
+    # 比較の中でだけ作る（plan v4 PR-P）。
+    with positional_comparison(case.parameters):
+        specs = strategy._collect_intrinsic_parameter_specs(case, case, left, right)
+        query = strategy._build_intrinsic_equivalence_query(left, right, [], specs)
 
     assert specs is not None
     assert [spec["identity"] for spec in specs] == [
@@ -1397,8 +1401,11 @@ def test_pairwise_auxiliary_loop_proof_extracts_narrow_occurrence_from_canonical
     )
     narrow_count = Expression.parameter("count", index=0, data_type="int", size=4)
 
-    specs = strategy._collect_intrinsic_parameter_specs(case, case, narrow_count)
-    query = strategy._build_intrinsic_equivalence_query(narrow_count, narrow_count, [], specs)
+    # 補助 query の記号は左右の parameter を index で共有する。位置どおり・全幅の等式の relation の
+    # 比較の中でだけ作る（plan v4 PR-P）。
+    with positional_comparison(case.parameters):
+        specs = strategy._collect_intrinsic_parameter_specs(case, case, narrow_count)
+        query = strategy._build_intrinsic_equivalence_query(narrow_count, narrow_count, [], specs)
 
     assert specs is not None
     assert specs[0]["size"] == 8

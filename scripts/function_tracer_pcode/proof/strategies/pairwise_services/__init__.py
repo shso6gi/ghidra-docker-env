@@ -89,7 +89,6 @@ def implementations() -> dict[str, Callable[..., Any]]:
         "_case_value_unresolved_is_pairwise_lowered": _unresolved_lowering._impl__case_value_unresolved_is_pairwise_lowered,
         "_cases_admit_reduction_count": _readonly_reduction._impl__cases_admit_reduction_count,
         "_cases_admit_reduction_count_values": _readonly_reduction._impl__cases_admit_reduction_count_values,
-        "_cases_are_contradictory": _pair_cases._impl__cases_are_contradictory,
         "_cases_have_equivalent_readonly_reduction_proof": _readonly_reduction._impl__cases_have_equivalent_readonly_reduction_proof,
         "_cases_have_equivalent_runtime_reductions": _readonly_reduction._impl__cases_have_equivalent_runtime_reductions,
         "_cases_have_equivalent_summary_conditions": _case_conditions._impl__cases_have_equivalent_summary_conditions,

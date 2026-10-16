@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import positional_comparison
 from scripts.function_tracer_pcode.authority.contracts import IdentityScope, authority_digest
 from scripts.function_tracer_pcode.core.errors import ExpressionCycleError
 from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
@@ -738,13 +739,16 @@ def test_real_method_b_producer_dual_writes_blocker_term_and_guard():
         )
 
         emit_loop_recurrence_signal(blocker)
-        strategy._record_completed_method_b_covering_case_proof_if_safe(
-            reason,
-            analysis1,
-            exact_case,
-            summary_case,
-            v2_blocker_signal=blocker,
-        )
+        # 左右を owner を含まない key で比べる recorder は、位置どおり・全幅の relation の比較の中でだけ
+        # 証拠を作る（plan v4 PR-P）。
+        with positional_comparison(exact_case.parameters):
+            strategy._record_completed_method_b_covering_case_proof_if_safe(
+                reason,
+                analysis1,
+                exact_case,
+                summary_case,
+                v2_blocker_signal=blocker,
+            )
 
     assert [intent.event_type for intent in session.intents] == [
         EventType.CAUSE_OBSERVED,

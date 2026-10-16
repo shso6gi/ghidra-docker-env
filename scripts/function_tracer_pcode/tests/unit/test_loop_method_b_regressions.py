@@ -8,6 +8,10 @@ path-sensitive summaries remain proof-required and must not silently fall
 through legacy shortcuts.
 """
 
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import (
+    open_cross_side_gate,
+    positional_comparison,
+)
 from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 from dataclasses import replace
 from unittest.mock import Mock
@@ -1850,10 +1854,13 @@ def test_exact_prefix_return_matches_wide_abi_summary_count_by_active_parameter_
         _analysis("summary_prefix_64bit_abi_count", [ReturnInfo(address="0x1200", value=summarized, conditions=[_count_gt(0)])]),
     )
 
+    # relation は不十分（count の読みが宣言より広い: hidden input）。owner を含まない key で
+    # 左右を同一視する recovery closure は、位置どおり・全幅の等式の relation でしか発行しない
+    # （plan v4 PR-P）ので、pair は閉じずに UNKNOWN のまま（最終判定は元から UNKNOWN）。
     assert result.is_equivalent is None
     assert result.total_pairs == 1
-    assert result.unsat_pairs == 1
-    assert result.unknown_pairs == 0
+    assert result.unsat_pairs == 0
+    assert result.unknown_pairs == 1
     strategy.solver_runner.run_sequential.assert_called()
 
 
@@ -2025,10 +2032,13 @@ def test_ptradd_guarded_exact_wrong_tail_matches_seeded_readonly_summary():
         ),
     )
 
+    # relation は不十分（count の読みが宣言より広い: hidden input）。owner を含まない key で
+    # 左右を同一視する recovery closure は、位置どおり・全幅の等式の relation でしか発行しない
+    # （plan v4 PR-P）ので、pair は閉じずに UNKNOWN のまま（最終判定は元から UNKNOWN）。
     assert result.is_equivalent is None
     assert result.total_pairs == 1
-    assert result.unsat_pairs == 1
-    assert result.unknown_pairs == 0
+    assert result.unsat_pairs == 0
+    assert result.unknown_pairs == 1
     strategy.solver_runner.run_sequential.assert_called()
 
 
@@ -4090,62 +4100,65 @@ def test_counted_loop_summary_vs_nonzero_start_step3_closed_form_is_discharged()
         parameters=parameters,
         comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
     )
-    strategy = _pairwise_strategy()
-    _stub_pair_solver_unsat(strategy)
-    parameter_specs = strategy._collect_intrinsic_parameter_specs(
-        counted_case,
-        closed_case,
-        counted,
-        closed,
-        positive.expression,
-    )
-    assert parameter_specs is not None
+    # 左右の parameter を index で同一視する補助証明・近道は、位置どおり・全幅の等式の relation の
+    # 比較の中でだけ使える（plan v4 PR-P）。
+    with positional_comparison(parameters):
+        strategy = _pairwise_strategy()
+        _stub_pair_solver_unsat(strategy)
+        parameter_specs = strategy._collect_intrinsic_parameter_specs(
+            counted_case,
+            closed_case,
+            counted,
+            closed,
+            positive.expression,
+        )
+        assert parameter_specs is not None
 
-    assert strategy._counted_loop_positive_closed_expression(
-        counted,
-        counted_case=counted_case,
-        result_size=4,
-        conditions=[positive],
-        parameters=parameter_specs,
-    ) is None
-    assert strategy._counted_loop_affine_closed_expression_candidate(
-        counted,
-        result_size=4,
-        conditions=[positive],
-        parameters=parameter_specs,
-    ) is not None
+        assert strategy._counted_loop_positive_closed_expression(
+            counted,
+            counted_case=counted_case,
+            result_size=4,
+            conditions=[positive],
+            parameters=parameter_specs,
+        ) is None
+        assert strategy._counted_loop_affine_closed_expression_candidate(
+            counted,
+            result_size=4,
+            conditions=[positive],
+            parameters=parameter_specs,
+        ) is not None
 
-    result = strategy.check(
-        raw_function_analysis(
-            function_name="nonzero_start_counted",
-            entry_point="0x1000",
-            parameters=parameters,
-            returns=[
-                ReturnInfo(address="0x7400", value=counted, conditions=[positive]),
-                ReturnInfo(address="0x7404", value=Expression.constant(0, size=4), conditions=[non_positive]),
-            ],
-            return_type="int",
-            return_abi_facts=_present_return_abi_facts(),
-            comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
-        ),
-        raw_function_analysis(
-            function_name="nonzero_start_closed",
-            entry_point="0x2000",
-            parameters=parameters,
-            returns=[
-                ReturnInfo(address="0x7408", value=closed, conditions=[positive]),
-                ReturnInfo(address="0x740c", value=Expression.constant(0, size=4), conditions=[non_positive]),
-            ],
-            return_type="int",
-            return_abi_facts=_present_return_abi_facts(),
-            comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
-        ),
-    )
+        result = strategy.check(
+            raw_function_analysis(
+                function_name="nonzero_start_counted",
+                entry_point="0x1000",
+                parameters=parameters,
+                returns=[
+                    ReturnInfo(address="0x7400", value=counted, conditions=[positive]),
+                    ReturnInfo(address="0x7404", value=Expression.constant(0, size=4), conditions=[non_positive]),
+                ],
+                return_type="int",
+                return_abi_facts=_present_return_abi_facts(),
+                comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+            ),
+            raw_function_analysis(
+                function_name="nonzero_start_closed",
+                entry_point="0x2000",
+                parameters=parameters,
+                returns=[
+                    ReturnInfo(address="0x7408", value=closed, conditions=[positive]),
+                    ReturnInfo(address="0x740c", value=Expression.constant(0, size=4), conditions=[non_positive]),
+                ],
+                return_type="int",
+                return_abi_facts=_present_return_abi_facts(),
+                comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+            ),
+        )
 
-    assert result.is_equivalent is True
-    assert result.total_pairs == 4
-    assert result.unsat_pairs == 4
-    assert result.unknown_pairs == 0
+        assert result.is_equivalent is True
+        assert result.total_pairs == 4
+        assert result.unsat_pairs == 4
+        assert result.unknown_pairs == 0
 
 
 def test_counted_loop_summary_vs_nonzero_start_step2_closed_form_near_miss_is_not_promoted():
@@ -4189,42 +4202,45 @@ def test_counted_loop_summary_vs_nonzero_start_step2_closed_form_near_miss_is_no
         {"name": "param_1", "index": 0, "data_type": "int", "size": 4, "is_signed": True},
         {"name": "param_2", "index": 1, "data_type": "uint", "size": 4, "is_signed": False},
     ]
-    strategy = _pairwise_strategy()
-    sat = SolverResult("mock", SolverStatus.SAT, elapsed_time=0.0)
-    strategy.solver_runner.run_sequential = Mock(return_value=ParallelResult([sat]))
-    counted_case = ReturnCase(
-        0,
-        [positive],
-        counted,
-        ReturnInfo(address="0x7410", value=counted, conditions=[positive]),
-        parameters=parameters,
-        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
-    )
-    closed_case = ReturnCase(
-        0,
-        [positive],
-        wrong_closed,
-        ReturnInfo(address="0x7414", value=wrong_closed, conditions=[positive]),
-        parameters=parameters,
-        comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
-    )
-    parameter_specs = strategy._collect_intrinsic_parameter_specs(
-        counted_case,
-        closed_case,
-        counted,
-        wrong_closed,
-        positive.expression,
-    )
-    assert parameter_specs is not None
+    # 左右の parameter を index で同一視する補助証明・近道は、位置どおり・全幅の等式の relation の
+    # 比較の中でだけ使える（plan v4 PR-P）。
+    with positional_comparison(parameters):
+        strategy = _pairwise_strategy()
+        sat = SolverResult("mock", SolverStatus.SAT, elapsed_time=0.0)
+        strategy.solver_runner.run_sequential = Mock(return_value=ParallelResult([sat]))
+        counted_case = ReturnCase(
+            0,
+            [positive],
+            counted,
+            ReturnInfo(address="0x7410", value=counted, conditions=[positive]),
+            parameters=parameters,
+            comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+        )
+        closed_case = ReturnCase(
+            0,
+            [positive],
+            wrong_closed,
+            ReturnInfo(address="0x7414", value=wrong_closed, conditions=[positive]),
+            parameters=parameters,
+            comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
+        )
+        parameter_specs = strategy._collect_intrinsic_parameter_specs(
+            counted_case,
+            closed_case,
+            counted,
+            wrong_closed,
+            positive.expression,
+        )
+        assert parameter_specs is not None
 
-    assert strategy._prove_counted_loop_closed_expression_candidates(
-        counted=counted,
-        closed=wrong_closed,
-        counted_case=counted_case,
-        result_size=4,
-        conditions=[positive],
-        parameters=parameter_specs,
-    ) is False
+        assert strategy._prove_counted_loop_closed_expression_candidates(
+            counted=counted,
+            closed=wrong_closed,
+            counted_case=counted_case,
+            result_size=4,
+            conditions=[positive],
+            parameters=parameter_specs,
+        ) is False
 
 
 def test_counted_loop_summary_affine_step5_variant_is_discharged_pairwise():
@@ -4312,38 +4328,41 @@ def test_counted_loop_summary_affine_step5_variant_is_discharged_pairwise():
             ReturnInfo(address="0x2004", value=zero, conditions=[non_positive]),
         ],
     )
-    strategy = _pairwise_strategy()
-    positive_left_case = ReturnCase(
-        0,
-        [positive],
-        left_counted,
-        analysis_left.returns[0],
-        parameters=analysis_left.parameters,
-        comparison_surface=analysis_left.comparison_surface,
-    )
-    positive_right_case = ReturnCase(
-        0,
-        [positive],
-        right_counted,
-        analysis_right.returns[0],
-        parameters=analysis_right.parameters,
-        comparison_surface=analysis_right.comparison_surface,
-    )
-    assert strategy._cases_have_equivalent_runtime_reductions(positive_left_case, positive_right_case) is True
-    _stub_pair_solver_unsat(strategy)
-    assert strategy._case_pair_loop_summaries_solver_equivalent(
-        left_counted.runtime_ref,
-        right_counted.runtime_ref,
-        left_case=positive_left_case,
-        right_case=positive_right_case,
-    ) is True
+    # 左右の parameter を index で同一視する補助証明・近道は、位置どおり・全幅の等式の relation の
+    # 比較の中でだけ使える（plan v4 PR-P）。
+    with positional_comparison(analysis_left.parameters):
+        strategy = _pairwise_strategy()
+        positive_left_case = ReturnCase(
+            0,
+            [positive],
+            left_counted,
+            analysis_left.returns[0],
+            parameters=analysis_left.parameters,
+            comparison_surface=analysis_left.comparison_surface,
+        )
+        positive_right_case = ReturnCase(
+            0,
+            [positive],
+            right_counted,
+            analysis_right.returns[0],
+            parameters=analysis_right.parameters,
+            comparison_surface=analysis_right.comparison_surface,
+        )
+        assert strategy._cases_have_equivalent_runtime_reductions(positive_left_case, positive_right_case) is True
+        _stub_pair_solver_unsat(strategy)
+        assert strategy._case_pair_loop_summaries_solver_equivalent(
+            left_counted.runtime_ref,
+            right_counted.runtime_ref,
+            left_case=positive_left_case,
+            right_case=positive_right_case,
+        ) is True
 
-    result = strategy.check(analysis_left, analysis_right)
+        result = strategy.check(analysis_left, analysis_right)
 
-    assert result.is_equivalent is True
-    assert result.total_pairs == 4
-    assert result.unsat_pairs == 4
-    assert result.unknown_pairs == 0
+        assert result.is_equivalent is True
+        assert result.total_pairs == 4
+        assert result.unsat_pairs == 4
+        assert result.unknown_pairs == 0
 
 
 def test_monkeypatched_method_b_producer_falls_back_to_canonical_solver():
@@ -4523,15 +4542,18 @@ def test_loop_summary_solver_comparator_proves_equivalent_seed_expressions():
         parameters=parameters,
         comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
     )
-    strategy = _pairwise_strategy()
-    _stub_pair_solver_unsat(strategy)
+    # 左右の parameter を index で同一視する補助証明・近道は、位置どおり・全幅の等式の relation の
+    # 比較の中でだけ使える（plan v4 PR-P）。
+    with positional_comparison(parameters):
+        strategy = _pairwise_strategy()
+        _stub_pair_solver_unsat(strategy)
 
-    assert strategy._case_pair_loop_summaries_solver_equivalent(
-        left_counted.runtime_ref,
-        right_counted.runtime_ref,
-        left_case=left_case,
-        right_case=right_case,
-    ) is True
+        assert strategy._case_pair_loop_summaries_solver_equivalent(
+            left_counted.runtime_ref,
+            right_counted.runtime_ref,
+            left_case=left_case,
+            right_case=right_case,
+        ) is True
 
 
 def test_loop_summary_solver_comparator_keeps_unproved_seed_expressions_unknown():
@@ -4951,7 +4973,7 @@ def test_counted_loop_summary_affine_step5_mips64_without_semantic_width_is_not_
     ) is False
 
 
-def test_counted_loop_summary_affine_step5_mips64_with_entailed_extension_is_direct_eq():
+def test_counted_loop_summary_affine_step5_mips64_with_entailed_extension_is_direct_eq(monkeypatch):
     # Issue #167: 幅の事実は最終 InputCorrespondence が含意した extension としてだけ
     # 補助証明に届く（synthetic consumer test。production provider は IEE を出さない）。
     left_counted, right_counted, left_case, right_case = _mips64_step5_affine_counted_loop_pair()
@@ -4977,13 +4999,21 @@ def test_counted_loop_summary_affine_step5_mips64_with_entailed_extension_is_dir
         ParameterInfo("param_2", "param_2_2", 32, 1, is_signed=True),
     )
 
-    assert strategy._counted_loop_affine_values_are_provably_equivalent(
-        left_counted,
-        right_counted,
-        left_case=left_case,
-        right_case=right_case,
-        semantic_parameter_sources=semantic_sources,
-    ) is True
+    def proved():
+        return strategy._counted_loop_affine_values_are_provably_equivalent(
+            left_counted,
+            right_counted,
+            left_case=left_case,
+            right_case=right_case,
+            semantic_parameter_sources=semantic_sources,
+        )
+
+    # 補助証明は左右の parameter を index で 1 つの記号にする。relation が位置どおり・全幅の等式で
+    # ない（param_1 は EXTENSION_BOUND）比較では作らない（plan v4 PR-P。比較の外も同じ）。
+    assert proved() is False
+    # extension を補助証明へ届ける仕組みそのもの（PR-H の relation を通した翻訳で使う経路）。
+    open_cross_side_gate(monkeypatch)
+    assert proved() is True
 
 
 def _mips64_counted_loop_vs_low32_closed_form_fixture():
@@ -5139,22 +5169,25 @@ def test_auxiliary_counted_loop_runtime_bias_terms_are_cloned_for_smt():
         parameters=parameters,
         comparison_surface=ComparisonSurface(kind="return_value", explicit_bit_width=32, type_name="int"),
     )
-    strategy = _pairwise_strategy()
-    conditions = strategy._combined_summary_conditions(left_case, right_case)
-    parameter_specs = strategy._collect_intrinsic_parameter_specs(
-        left_case,
-        right_case,
-        counted,
-        right_value,
-        *(condition.expression for condition in conditions),
-    )
+    # 左右の parameter を index で同一視する補助証明・近道は、位置どおり・全幅の等式の relation の
+    # 比較の中でだけ使える（plan v4 PR-P）。
+    with positional_comparison(parameters):
+        strategy = _pairwise_strategy()
+        conditions = strategy._combined_summary_conditions(left_case, right_case)
+        parameter_specs = strategy._collect_intrinsic_parameter_specs(
+            left_case,
+            right_case,
+            counted,
+            right_value,
+            *(condition.expression for condition in conditions),
+        )
 
-    query = strategy._build_intrinsic_equivalence_query(counted, right_value, conditions, parameter_specs)
+        query = strategy._build_intrinsic_equivalence_query(counted, right_value, conditions, parameter_specs)
 
-    assert query is not None
-    assert "(declare-const aux_param_1 (_ BitVec 32))" in query
-    assert "param_2" not in query
-    assert "aux_param_1" in query
+        assert query is not None
+        assert "(declare-const aux_param_1 (_ BitVec 32))" in query
+        assert "param_2" not in query
+        assert "aux_param_1" in query
 
 
 def test_counted_loop_summary_vs_closed_form_near_miss_stays_proof_missing():

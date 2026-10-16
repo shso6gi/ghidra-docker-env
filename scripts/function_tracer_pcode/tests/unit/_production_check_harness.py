@@ -107,13 +107,19 @@ def run_production_check(
         def dispose(self) -> None:
             pass
 
-    checker = _production_checker(FakeReturnAnalyzer, debug=debug)
-    result = checker.check_from_binaries(
-        MockProgram("left", left_architecture), MockProgram("right", right_architecture), "f", "f",
-        binary1_id="left-id", binary2_id="right-id",
-        binary1_content_identity=("sha256", "a" * 64), binary2_content_identity=("sha256", "b" * 64),
-        retry_with_type_fix=retry_with_type_fix,
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import (
+        entered_certificate_session,
     )
+
+    checker = _production_checker(FakeReturnAnalyzer, debug=debug)
+    # production の実行は自分で左右の同一視の証明書の session を持つ（test の既定の session を使わない）。
+    with entered_certificate_session(None):
+        result = checker.check_from_binaries(
+            MockProgram("left", left_architecture), MockProgram("right", right_architecture), "f", "f",
+            binary1_id="left-id", binary2_id="right-id",
+            binary1_content_identity=("sha256", "a" * 64), binary2_content_identity=("sha256", "b" * 64),
+            retry_with_type_fix=retry_with_type_fix,
+        )
     return result.to_dict()
 
 
@@ -123,11 +129,16 @@ def run_recursive_abstraction_branch(case_id: str, left: Any, right: Any, *, deb
     require_z3_cli()
     _require_unpublished(left, right)
     _activate_execution_authority(case_id)
-    checker = _production_checker(debug=debug)
-    return checker._run_recursive_abstraction_stage(
-        publish_like_the_analyzer(left), publish_like_the_analyzer(right),
-        "left", "right", False, None, 0, None, None,
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import (
+        entered_certificate_session,
     )
+
+    checker = _production_checker(debug=debug)
+    with entered_certificate_session(None):
+        return checker._run_recursive_abstraction_stage(
+            publish_like_the_analyzer(left), publish_like_the_analyzer(right),
+            "left", "right", False, None, 0, None, None,
+        )
 
 
 def has_no_synthetic_parameter(analysis1: Any, analysis2: Any) -> bool:

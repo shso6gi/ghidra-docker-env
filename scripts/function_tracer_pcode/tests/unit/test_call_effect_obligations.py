@@ -2129,6 +2129,39 @@ def test_preflight_monolithic_branch_consumes_prepared_surface_and_emits_receipt
     assert ambient_dispatch_reads == 1
 
 
+@pytest.mark.parametrize("mode", ["preflight_projection", "legacy_post_pairwise"])
+def test_the_typed_call_promotion_keeps_the_cross_side_identity_veto(monkeypatch, mode):
+    """call の証明の昇格は pair の数だけを見て EQ にし、reason を空にする（legacy の phase 2）。pairwise の
+    最終 gate（owner を含まない同一視の backstop、plan v4 PR-P）が止める比較は、どちらの mode でも
+    昇格の後に止まったままで、reason が結果に残る。"""
+
+    pytest.importorskip("z3")
+    from scripts.function_tracer_pcode.proof.obligations.pair_disposition import PairDispositionLedger
+
+    # pairwise の ledger に、証明書の無い owner を含まない closure が 1 つある比較（最終 gate が止める）。
+    monkeypatch.setattr(PairDispositionLedger, "owner_free_closures", lambda _self: (((0, 0), None),))
+    left = _phase2_caller_analysis("B1", 1, 0x1000)
+    right = _phase2_caller_analysis("B2", 2, 0x3000)
+
+    result = EquivalenceChecker(
+        timeout=5,
+        enable_completed_recovery_proofs=True,
+        call_proof_decision_mode=mode,
+    ).check(left, right, "left", "right")
+
+    assert result.is_equivalent is None
+    assert "cross_side_identity_unproven" in {
+        getattr(reason, "reason_id", None) for reason in result.unknown_reasons
+    }
+    if mode == "legacy_post_pairwise":
+        # 昇格の直後に同じ backstop をもう一度課した（昇格は記録されない）。
+        assert result.call_effect_shadow_manifest["phase2_discharge_gate"]["failure_cause"] == (
+            "cross_side_identity_unproven"
+        )
+        # 昇格しなかったので、昇格が消すはずだった call の reason も残る。
+        assert len({getattr(reason, "reason_id", None) for reason in result.unknown_reasons}) > 1
+
+
 def test_default_preflight_mode_does_not_enter_legacy_post_pairwise_gate(monkeypatch):
     pytest.importorskip("z3")
     left = _phase2_caller_analysis("B1", 1, 0x1000)

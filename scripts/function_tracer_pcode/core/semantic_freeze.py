@@ -440,42 +440,128 @@ def unpublished_semantic_values(container: Any) -> Tuple[Any, ...]:
 
         PUBLISHED(value) ⇒ solver が到達する意味 closure もすべて PUBLISHED
 
-    走査は公開とまったく同じ規則を使う（`_walk_semantic_carriers` + graph の辺
-    + PHI の branch 条件 + runtime ref が抱える値）。別の走査を書くと「公開は
-    辿るのに検査は辿らない」隙間ができるので、到達規則は 1 つに保つ。
+    走査は公開とまったく同じ規則を使う（`_reach_semantic_values`）。別の走査を書くと
+    「公開は辿るのに検査は辿らない」隙間ができるので、到達規則は 1 つに保つ。
 
     状態は動かさない。未検証の値は公開されていないので、当然ここに現れる。
     """
 
-    found: Dict[int, Any] = {}
-    seen: Dict[int, bool] = {}
+    return tuple(
+        value for value, _inside in _reach_semantic_values(container)
+        if not is_published(value)
+    )
+
+
+class BinderFrame:
+    """走査が今いる位置で有効な loop 変数の束縛（外側から内側への入れ子）。
+
+    束縛を宣言するのは runtime ref で（``loop_binder_scope()``。``core/runtime_refs/loops.py``）、
+    宣言した ref の scope の field を通って届いた値にだけ、その ref の binder が効く。外側の binder は
+    内側の ref の中でも効く（lexical）。frame は object の identity で区別し、同じ値でも別の frame の下で
+    届けば別に数える。
+    """
+
+    __slots__ = ("binders", "parent", "_children")
+
+    def __init__(self, binders: Tuple[Any, ...] = (), parent: Optional["BinderFrame"] = None) -> None:
+        self.binders = tuple(binders)
+        self.parent = parent
+        self._children: Dict[Tuple[int, ...], "BinderFrame"] = {}
+
+    def extended(self, binders: Tuple[Any, ...]) -> "BinderFrame":
+        key = tuple(id(binder) for binder in binders)
+        child = self._children.get(key)
+        if child is None:
+            child = BinderFrame(binders, self)
+            self._children[key] = child
+        return child
+
+    def binders_in_scope(self) -> Tuple[Any, ...]:
+        """この位置で有効な binder（内側から外側の順）。"""
+
+        found: List[Any] = []
+        frame: Optional[BinderFrame] = self
+        while frame is not None:
+            found.extend(frame.binders)
+            frame = frame.parent
+        return tuple(found)
+
+
+def _declared_binder_scope(value: Any) -> Any:
+    """``value`` が loop 変数の束縛を宣言する ref なら、その宣言（``loop_binder_scope()``）。"""
+
+    declare = getattr(type(value), "loop_binder_scope", None)
+    if not callable(declare):
+        return None
+    return declare(value)
+
+
+def reachable_semantic_values_in_binder_scope(container: Any) -> Tuple[Tuple[Any, BinderFrame], ...]:
+    """到達できる意味値と、その位置で有効な loop 変数の束縛（``BinderFrame``）の組。
+
+    到達規則は公開と同じ 1 実装（`_reach_semantic_values`）。値は、届いた束縛の文脈ごとに 1 回ずつ
+    現れる（同じ node が束縛の内と外の両方から届けば 2 回）。並びは走査の順で決定的。
+    """
+
+    return _reach_semantic_values(container, scoped=True)
+
+
+def _reach_semantic_values(container: Any, *, scoped: bool = False) -> Tuple[Tuple[Any, Any], ...]:
+    """到達できる意味値の走査の唯一の実装（`_walk_semantic_carriers` + graph の辺 + PHI の
+    branch 条件 + runtime ref が抱える値）。
+
+    ``scoped=False`` は値ごとに 1 回で、組の 2 つ目は「runtime ref の中でだけ届いた」か。``scoped=True``
+    は値を束縛の文脈（``BinderFrame``）ごとに数え、組の 2 つ目はその frame。graph の辺は frame を
+    そのまま引き継ぎ、式の runtime ref はその式の frame の下で開き、ref が宣言した scope の field で
+    frame が内側へ伸びる。
+    """
+
+    found: List[Tuple[Any, Any]] = []
+    seen: Dict[Tuple[int, int], bool] = {}
+    root = BinderFrame() if scoped else None
     # 明示 stack（graph が深くても再帰上限に当たらない。module の他の走査と同じ形）
-    pending: List[Any] = []
+    graph_pending: List[Tuple[Any, Any]] = []
+    ref_pending: List[Tuple[Any, Any]] = []
+    deferred_refs: List[Tuple[Any, Any]] = []
+    inside = False
 
-    def enqueue(value: Any) -> None:
-        if value is None or id(value) in seen:
+    def enqueue(value: Any, frame: Any = root) -> None:
+        if value is None:
             return
-        seen[id(value)] = True
-        if not is_published(value):
-            found.setdefault(id(value), value)
-        pending.append(value)
+        key = (id(value), id(frame))
+        if key in seen:
+            return
+        seen[key] = True
+        found.append((value, frame if scoped else inside))
+        (ref_pending if inside else graph_pending).append((value, frame))
 
-    _walk_semantic_carriers(container, enqueue, enqueue)
-    while pending:
-        value = pending.pop()
+    _walk_semantic_carriers(container, enqueue, enqueue, frame=root)
+    while True:
+        pending = graph_pending if graph_pending else ref_pending
+        if not pending:
+            if not deferred_refs:
+                break
+            inside = True
+            runtime_ref, frame = deferred_refs.pop()
+            _walk_semantic_carriers(runtime_ref, enqueue, enqueue, frame=frame)
+            continue
+        value, frame = pending.pop()
         if isinstance(value, Condition):
-            enqueue(value.expression)
+            enqueue(value.expression, frame)
             continue
         for edge in ordered_semantic_edges(value):
-            enqueue(edge.child)
+            enqueue(edge.child, frame)
         for condition in _phi_branch_conditions(value):
-            enqueue(condition)
+            enqueue(condition, frame)
         runtime_ref = value.__dict__.get("runtime_ref")
-        if runtime_ref is None or id(runtime_ref) in seen:
+        if runtime_ref is None:
             continue
-        seen[id(runtime_ref)] = True
-        _walk_semantic_carriers(runtime_ref, enqueue, enqueue)
-    return tuple(found.values())
+        key = (id(runtime_ref), id(frame))
+        if key in seen:
+            continue
+        seen[key] = True
+        deferred_refs.append((runtime_ref, frame))
+    return tuple(found)
 
 
 def _run_publication(stage: Any) -> None:
@@ -541,7 +627,7 @@ def _commit_publication(staging: _LifecycleStaging) -> None:
         mark_published(condition.__dict__)
 
 
-def _walk_semantic_carriers(container: Any, on_expression, on_condition) -> Any:
+def _walk_semantic_carriers(container: Any, on_expression, on_condition, *, frame: Any = None) -> Any:
     """入れ物から到達できる意味値に操作を 1 回ずつ適用する。**到達規則の唯一の実装**。
 
     値をどう扱うかは `_carrier_rule` が **優先順位つきの 1 つの表** で決める（上から最初に
@@ -564,39 +650,59 @@ def _walk_semantic_carriers(container: Any, on_expression, on_condition) -> Any:
 
     深さで打ち切らない（明示 stack なので再帰上限も無い）。`id` で一度見た
     object は二度見ないので、循環があっても止まる。
+
+    ``frame``（``BinderFrame``）を渡すと、loop 変数の束縛の文脈も運ぶ: 規則 5 で loop 変数の束縛を
+    宣言する ref（``loop_binder_scope()``）に入ると、宣言した scope の field にだけ内側の frame を
+    渡し、操作は ``(値, frame)`` で呼ぶ。一度見たかは ``(object, frame)`` で数える。
     """
 
-    stack: List[Any] = [container]
-    seen: Dict[int, bool] = {}
+    scoped = frame is not None
+    stack: List[Tuple[Any, Any]] = [(container, frame)]
+    seen: Dict[Any, bool] = {}
     while stack:
-        value = stack.pop()
+        value, current = stack.pop()
         if value is None or isinstance(value, _PUBLISH_LEAF_SCALARS):
             continue
-        value_id = id(value)
-        if value_id in seen:
+        key = (id(value), id(current)) if scoped else id(value)
+        if key in seen:
             continue
-        seen[value_id] = True
+        seen[key] = True
         rule = _carrier_rule(value)
         if rule is CarrierRule.EXPRESSION:
-            on_expression(value)
+            if scoped:
+                on_expression(value, current)
+            else:
+                on_expression(value)
         elif rule is CarrierRule.CONDITION:
-            on_condition(value)
+            if scoped:
+                on_condition(value, current)
+            else:
+                on_condition(value)
         elif rule is CarrierRule.SEQUENCE or rule is CarrierRule.MAPPING:
             # 容器は基底型の実装で読む（Issue #215 `read_container`）: subclass の `__iter__` /
             # `keys` が中身を隠すと、到達できる意味値を取りこぼす
             _tag, elements = read_container(value)
             if rule is CarrierRule.MAPPING:
-                for key, item in elements:
-                    stack.append(key)
-                    stack.append(item)
+                for element_key, item in elements:
+                    stack.append((element_key, current))
+                    stack.append((item, current))
             else:
-                stack.extend(elements)
+                stack.extend((element, current) for element in elements)
         elif rule is CarrierRule.FIELDS:
-            stack.extend(getattr(value, field.name, None) for field in dataclasses.fields(value))
+            scope = _declared_binder_scope(value) if scoped else None
+            if scope is None:
+                stack.extend((getattr(value, item.name, None), current) for item in dataclasses.fields(value))
+            else:
+                inner = current.extended(tuple(scope.binders))
+                scoped_fields = frozenset(scope.scoped_fields)
+                stack.extend(
+                    (getattr(value, item.name, None), inner if item.name in scoped_fields else current)
+                    for item in dataclasses.fields(value)
+                )
         elif rule is CarrierRule.OWNED_STATE:
             owned_state = getattr(value, "__dict__", None)
             if isinstance(owned_state, dict):
-                stack.extend(owned_state.values())
+                stack.extend((item, current) for item in owned_state.values())
     return container
 
 

@@ -125,9 +125,14 @@ def _frame(comparison, **fields):
 
 
 def _comparison_evidence(comparison, record):
-    from scripts.function_tracer_pcode.proof.formula.input_correspondence import bind_evidence_to_comparison
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        CrossSideIdentification,
+        bind_evidence_to_comparison,
+    )
 
-    return bind_evidence_to_comparison(record, comparison)
+    return bind_evidence_to_comparison(
+        record, comparison, identification=CrossSideIdentification.CORRESPONDENCE,
+    )
 
 
 def _run(checker, method_name):
@@ -393,6 +398,7 @@ def test_branch_gates_run_in_the_comparison_that_made_the_result(evidence_compar
 
     from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis, ReturnInfo
     from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        CrossSideIdentification,
         bind_evidence_to_comparison,
         current_comparison,
     )
@@ -433,7 +439,7 @@ def test_branch_gates_run_in_the_comparison_that_made_the_result(evidence_compar
     )
     result.completed_recovery_proof_evidence = [{"evidence": bind_evidence_to_comparison({
         "proof_requirement_id": requirement.to_dict(), "status": "complete", "proof_source": "coverage_test_producer",
-    }, other)}]
+    }, other, identification=CrossSideIdentification.CORRESPONDENCE)}]
     gate_comparisons = []
 
     def coverage_gate(*_args):

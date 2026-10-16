@@ -78,7 +78,6 @@ def test_pairwise_strategy_downgrades_sat_when_return_cases_leave_coverage_gap(m
         lambda analysis: [case1] if analysis.function_name == "func1" else [case2],
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
         "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",
@@ -163,7 +162,6 @@ def test_pairwise_strategy_does_not_prove_equivalent_with_return_coverage_gap(mo
         lambda analysis: [case1] if analysis.function_name == "func1" else [case2],
     )
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_args, **_kwargs: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_args, **_kwargs: False)
     strategy._solve_query_after_guard = Mock(
         return_value=_solver_bound_query_result(True)
@@ -1721,7 +1719,6 @@ def test_pairwise_relational_partition_mismatch_keeps_sat_decisive(monkeypatch):
     monkeypatch.setattr(strategy, "_extract_return_cases",
                         lambda analysis: [case1] if analysis.function_name == "func1" else [case2])
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_a, **_k: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_a, **_k: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_a, **_k: False)
     monkeypatch.setattr(strategy, "_outcome_partition_covered_labels", lambda *_a, **_k: set())
     monkeypatch.setattr(strategy, "_outcome_partition_inconclusive_labels",

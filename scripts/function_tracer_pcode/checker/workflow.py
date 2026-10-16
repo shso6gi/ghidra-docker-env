@@ -3,6 +3,7 @@
 
 import time
 
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import certificate_session
 from scripts.function_tracer_pcode.checker.debug_trace import (
     Attempt,
     DebugTrace,
@@ -68,6 +69,10 @@ def run_check_from_binaries(
     checker._phase_timeline = phase_timeline
     result = None
     pair_started = time.time()
+    # 左右の同一視の証明書（plan v4 PR-P）は、この pair の比較の実行（全 phase・retry・branch・最終
+    # gate）の間だけ有効で、ここで閉じると全て失効する。
+    certificates = certificate_session()
+    certificates.__enter__()
     try:
         try:
             result = _run_phase_plan(
@@ -118,6 +123,7 @@ def run_check_from_binaries(
                 result.emit_debug_trace = bool(getattr(checker, "debug", False))
             attach_phase_timings(result, phase_timeline)
         finally:
+            certificates.__exit__(None, None, None)
             # この run の timeline を checker に残さない。残すと、workflow を経由しない
             # 後続処理の `phase_timeline_of(checker)` が前 run の記録先を掴んでしまう。
             if previous_timeline is _NO_PHASE_TIMELINE:

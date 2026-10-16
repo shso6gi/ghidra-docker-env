@@ -5,8 +5,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import certify_owner_free_identity
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
+from scripts.function_tracer_pcode.proof.obligations.pair_disposition import pair_identity_subject
 from scripts.function_tracer_pcode.proof.obligations import (
     SolverQueryExecutionReceipt,
     issue_structural_equality_receipt,
@@ -124,7 +126,12 @@ def try_solver_proven_rewrite_equivalence(
 
     rewritten_case1 = _clone_case_with_value_expr(case1, rewritten_expr1)
     rewritten_case2 = _clone_case_with_value_expr(case2, rewritten_expr2)
-    if _rewritten_values_are_trivially_equal(
+    # 自明な一致は左右の値を名前（``are_structurally_equivalent``）・runtime ref の key で同一視する。
+    # relation が位置どおり・全幅の等式で読みが全幅のときだけ使い、その証明書を receipt に封印する。
+    # 通らなければ下の SMT の不等式 query で確かめる（plan v4 PR-P）。
+    checked = ((rewritten_case1,), (rewritten_case2,))
+    certification = certify_owner_free_identity(*checked, subject=pair_identity_subject(pair_id))
+    if certification.passed and _rewritten_values_are_trivially_equal(
         strategy,
         base_ctx,
         rewritten_case1,
@@ -193,6 +200,8 @@ def try_solver_proven_rewrite_equivalence(
                 supporting_solver_receipts=tuple(
                     supporting_solver_receipts
                 ),
+                identity_certificate=certification.certificate,
+                checked_values=checked,
             )
         )
         return result

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementContract,
@@ -10,6 +11,7 @@ from scripts.function_tracer_pcode.proof.cause_identity import (
 )
 from scripts.function_tracer_pcode.proof.obligations.model import FunctionProofOutcome
 from scripts.function_tracer_pcode.proof.obligations import (
+    CrossSideIdentification,
     PairClosureEvidence,
     PairClosureKind,
     PairDisposition,
@@ -44,6 +46,7 @@ from scripts.function_tracer_pcode.smt import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.smt.parallel import run_backend_query
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
+    OwnerFreePairAssertions,
     ExpressionSafetyChecker,
     QueryResult,
     ReturnCase,
@@ -55,6 +58,18 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     infer_parameter_semantics,
     make_internal_v2_reason_diagnostic,
     make_unknown_reason,
+)
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import (
+    certificate_attests,
+    certificate_session,
+    current_certificate_session,
+)
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
+    owner_free_identity_gate,
+)
+from scripts.function_tracer_pcode.proof.obligations.pair_disposition import pair_identity_subject
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+    owner_free_evidence_values,
 )
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     LEFT as INPUT_LEFT,
@@ -98,6 +113,163 @@ def validate_counterexample_across_cases(*args, **kwargs):
     return _pairwise_facade().validate_counterexample_across_cases(*args, **kwargs)
 
 
+def record_pair_closed(
+    pair_ledger: PairDispositionLedger,
+    base_ctx: Dict[str, Any],
+    pair_key: Tuple[int, int],
+    closure_kind: PairClosureKind,
+    binding: PairLedgerBinding,
+    artifact: Any,
+    *,
+    required_binding_uses: Tuple[str, ...] = (),
+    consumed_binding_uses: Tuple[str, ...] = (),
+) -> None:
+    """pair を「閉じた」と数える唯一の入口（plan v4 PR-P の backstop の記録点）。
+
+    左右の同一視の方法（``CrossSideIdentification``）と、owner を含まない同一視ならその検査の
+    証明書を closure に封印する。証明書の出所は 2 つだけ: owner を含まない種類の closure（producer の
+    closure・名前で比べる構造の等価）は artifact が持つ証明書、query に owner を含まない等式（readonly の
+    契約・deferred call の lowering）を足した SMT の closure は等式と一緒に登録した証明書。ledger は
+    証明書がこの比較のこの pair を検査したものか照合し、最終の EQ gate（``veto_unproven_cross_side_identity``
+    の ``final_equivalence_identity_gate``）がもう一度照合する。
+    """
+
+    pair_id = f"({int(pair_key[0])},{int(pair_key[1])})"
+    extra = (base_ctx.get("pairwise_extra_assertions_by_pair") or {}).get(pair_id)
+    certificate = getattr(artifact, "identity_certificate", None)
+    if extra:
+        # query に入った等式は、登録した carrier（検査した値から作った等式と証明書）と同じ行でなければ
+        # ならず、証明書はこの ledger の比較・この pair で、その値をもう一度 attests する（``base_ctx``
+        # に直接書いた等式・別の pair / 値の証明書では閉じない）。artifact も証明書を持つ（owner を
+        # 含まない種類の closure）なら、どちらもこの pair を検査しているので artifact の方を封印する。
+        carrier = (base_ctx.get("pairwise_extra_assertion_carriers_by_pair") or {}).get(pair_id)
+        if not (
+            type(carrier) is OwnerFreePairAssertions
+            and tuple(str(line) for line in extra) == tuple(line for line in carrier.lines if line.strip())
+            and certificate_attests(
+                carrier.identity_certificate, pair_identity_subject(pair_key), carrier.checked_values,
+                comparison_digest=binding.comparison_authority_digest,
+            )
+        ):
+            raise ValueError("owner-free query assertions lack the cross-side identity certificate of their pair")
+        if certificate is None:
+            certificate = carrier.identity_certificate
+    identification = (
+        CrossSideIdentification.OWNER_FREE
+        if certificate is not None
+        else CrossSideIdentification.CORRESPONDENCE
+    )
+    pair_ledger.close(PairClosureEvidence.validated(
+        pair_key, closure_kind, binding, artifact,
+        identification=identification,
+        identity_certificate=certificate,
+        required_binding_uses=required_binding_uses,
+        consumed_binding_uses=consumed_binding_uses,
+    ))
+
+
+@dataclass(frozen=True)
+class CrossSideIdentityBackstop:
+    """pairwise の結果に付く、最終の EQ gate の入力（ledger・最終 relation・比較の identity）。
+
+    pairwise の後で EQ に昇格させる経路（legacy の phase 2 の call の relational discharge など）は、
+    昇格の後で ``reapply_cross_side_identity_veto`` を呼び、同じ 1 つの実装で検査し直す。
+    """
+
+    pair_ledger: Optional[PairDispositionLedger]
+    relation: Any
+    comparison_session_id: str
+    branch_id: str
+    generation: int
+
+    def veto(self, strategy_result: Any) -> bool:
+        return veto_unproven_cross_side_identity(
+            strategy_result, self.pair_ledger, self.relation,
+            comparison_session_id=self.comparison_session_id,
+            branch_id=self.branch_id,
+            generation=self.generation,
+        )
+
+
+def reapply_cross_side_identity_veto(strategy_result: Any) -> bool:
+    """pairwise の後で EQ に昇格させた結果に、pairwise が付けた backstop をもう一度課す。
+
+    backstop の無い結果（pairwise 以外の strategy）は ledger の closure を持たないので何もしない。
+    """
+
+    backstop = getattr(strategy_result, "cross_side_identity_backstop", None)
+    if type(backstop) is not CrossSideIdentityBackstop:
+        return False
+    return backstop.veto(strategy_result)
+
+
+def veto_unproven_cross_side_identity(
+    strategy_result: Any,
+    pair_ledger: Optional[PairDispositionLedger],
+    relation: Any,
+    *,
+    comparison_session_id: str,
+    branch_id: str,
+    generation: int,
+) -> bool:
+    """最終の EQ gate の backstop の唯一の実装（plan v4 PR-P）。``True`` なら EQ を止めた。
+
+    EQ の根拠に owner を含まない方法で左右を同一視した closure（ledger の ``owner_free_closures``）が
+    あれば、比較の最終 relation が位置どおり・全幅の等式で、各 closure の証明書が発行済みで同じ
+    relation の下で発行されたときだけ EQ を残す。残せなければ UNKNOWN（``cross_side_identity_unproven``、
+    evidence は ``cross_side_identity:*``）にし、その cause を authority へ出す（``blocks_equivalence``）。
+    呼ぶのは dispatch frame の最終 gate（``checker/preflight_gate``）、frame を持たない互換・legacy の
+    pairwise の最終判定、pairwise の後の EQ への昇格（``reapply_cross_side_identity_veto``）だけ。
+    実装が proof 層にあるのは、frame を持たない経路（``_impl_check``）が proof 層で終わるため（checker から
+    呼ぶ 2 つの経路も同じ実装を使う。authority への signal は既存の proof → authority の辺）。
+    """
+
+    from scripts.function_tracer_pcode.authority.domains.cross_side_identity import (
+        CROSS_SIDE_IDENTITY_REASON_ID,
+        CrossSideIdentityBlockerSignal,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        emit_cross_side_identity_signal,
+    )
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
+        final_equivalence_identity_gate,
+    )
+
+    if getattr(strategy_result, "is_equivalent", None) is not True:
+        return False
+    sources = tuple(
+        (f"pair{key}", certificate)
+        for key, certificate in (pair_ledger.owner_free_closures() if pair_ledger is not None else ())
+    )
+    verdict = final_equivalence_identity_gate(sources, relation)
+    if verdict.passed:
+        return False
+    strategy_result.is_equivalent = None
+    strategy_result.unknown_reasons.append(
+        make_internal_v2_reason_diagnostic(
+            CROSS_SIDE_IDENTITY_REASON_ID,
+            stage="S_PAIRWISE",
+            evidence_refs=verdict.evidence_refs,
+            detail=(
+                "EQ closure identified left and right values by an owner-free key "
+                "that the final input correspondence does not justify"
+            ),
+        )
+    )
+    emit_cross_side_identity_signal(
+        CrossSideIdentityBlockerSignal(
+            comparison_session_id=str(comparison_session_id),
+            branch_id=str(branch_id),
+            generation=int(generation),
+            input_correspondence_digest=str(getattr(relation, "digest", "") or "unavailable"),
+            owner_free_sources=tuple(label for label, _certificate in sources),
+            evidence_refs=verdict.evidence_refs,
+        ),
+        producer_site_manifest_id="pairwise-cross-side-identity-veto",
+    )
+    return True
+
+
 def _extract_cases_under_authorization(strategy, analysis, input_correspondence, side):
     """prepared surface と同じ authorization で case を再 normalize する。
 
@@ -122,6 +294,11 @@ def _impl_check(
     analysis2: FunctionReturnAnalysis,
     save_formula: bool = False
 ) -> StrategyResult:
+    if current_certificate_session() is None:
+        # 左右の同一視の証明書は、この比較の実行の間だけ有効（checker の外からの互換呼び出しでは、
+        # この呼び出しが session の持ち主。plan v4 PR-P）。
+        with certificate_session():
+            return _impl_check(self, analysis1, analysis2, save_formula)
     start_time = time.time()
     from scripts.function_tracer_pcode.proof.call_effect.preflight import (
         QueryExecutionRecord,
@@ -532,8 +709,8 @@ def _impl_check(
                 ))
                 continue
             if guard_node.disjoint_artifact is not None:
-                closure = PairClosureEvidence.validated(
-                    (i, j), PairClosureKind.GUARD_QUERY, ledger_binding,
+                record_pair_closed(
+                    pair_ledger, base_ctx, (i, j), PairClosureKind.GUARD_QUERY, ledger_binding,
                     GuardUnsatClosureArtifact(guard_node.disjoint_artifact),
                     required_binding_uses=tuple(
                         getattr(prepass_lowered, "binding_ids", ()) or ()
@@ -542,7 +719,6 @@ def _impl_check(
                         getattr(prepass_lowered, "guard_binding_ids", ()) or ()
                     ),
                 )
-                pair_ledger.close(closure)
                 unsat_count += 1
                 resolved_pairs.add((i, j))
                 continue
@@ -622,8 +798,9 @@ def _impl_check(
                 case2,
                 symbol_replace_fn1,
                 symbol_replace_fn2,
+                pair_id=pair_id,
             )
-            if readonly_contract_assertions:
+            if readonly_contract_assertions is not None:
                 self._register_pairwise_extra_assertions(
                     base_ctx,
                     pair_id,
@@ -646,10 +823,11 @@ def _impl_check(
                 semantic_parameter_sources,
             )
             if runtime_relation_artifact is not None:
-                pair_ledger.close(PairClosureEvidence.validated(
+                record_pair_closed(
+                    pair_ledger, base_ctx,
                     (i, j), PairClosureKind.RECOVERY, ledger_binding,
                     runtime_relation_artifact,
-                ))
+                )
                 unsat_count += 1
                 resolved_pairs.add((i, j))
                 continue
@@ -670,10 +848,11 @@ def _impl_check(
                 )
             )
             if closed_expression_artifact is not None:
-                pair_ledger.close(PairClosureEvidence.validated(
+                record_pair_closed(
+                    pair_ledger, base_ctx,
                     (i, j), PairClosureKind.RECOVERY, ledger_binding,
                     closed_expression_artifact,
-                ))
+                )
                 unsat_count += 1
                 resolved_pairs.add((i, j))
                 continue
@@ -1043,6 +1222,8 @@ def _impl_check(
                         reason_record,
                         analysis1,
                         analysis2,
+                        case1,
+                        case2,
                     )
                 elif reason_id == UnknownReasonId.READONLY_IDENTITY_MISSING:
                     self._record_completed_readonly_identity_projection_proof_if_safe(
@@ -1065,6 +1246,8 @@ def _impl_check(
                         reason_record,
                         analysis1,
                         analysis2,
+                        case1,
+                        case2,
                     )
                 if semantic_artifact is None:
                     candidate = CountedLoopValueRelationCandidate.create(
@@ -1083,10 +1266,11 @@ def _impl_check(
                         semantic_parameter_sources,
                     )
                 if semantic_artifact is not None:
-                    pair_ledger.close(PairClosureEvidence.validated(
+                    record_pair_closed(
+                        pair_ledger, base_ctx,
                         (i, j), PairClosureKind.RECOVERY, ledger_binding,
                         semantic_artifact,
-                    ))
+                    )
                     unsat_count += 1
                     resolved_pairs.add((i, j))
                     continue
@@ -1606,7 +1790,8 @@ def _impl_check(
                     continue
                 unsat_count += 1
                 resolved_pairs.add((i, j))
-                pair_ledger.close(PairClosureEvidence.validated(
+                record_pair_closed(
+                    pair_ledger, base_ctx,
                     (i, j), closure_kind, ledger_binding,
                     closure_artifact,
                     required_binding_uses=tuple(
@@ -1615,7 +1800,7 @@ def _impl_check(
                         )
                     ),
                     consumed_binding_uses=binding_ids,
-                ))
+                )
                 if self.debug and (unsat_count % 10 == 0 or unsat_count <= 5):
                     self._debug_print(f"  Pair {pair_id}: UNSAT ({unsat_count}/{total_pairs})")
                 continue
@@ -1634,7 +1819,8 @@ def _impl_check(
                 if completed_bridge_result is not None and completed_bridge_result.is_equivalent is True:
                     unsat_count += 1
                     resolved_pairs.add((i, j))
-                    pair_ledger.close(PairClosureEvidence.validated(
+                    record_pair_closed(
+                        pair_ledger, base_ctx,
                         (i, j), PairClosureKind.RETURN_WIDTH, ledger_binding,
                         SolverUnsatClosureArtifact.from_validated_result(
                             str(completed_bridge_result.last_query or ""),
@@ -1651,7 +1837,7 @@ def _impl_check(
                                 pair_id, ()
                             )
                         ),
-                    ))
+                    )
                     last_formula = completed_bridge_result.last_query or last_formula
                     self._debug_print(
                         f"  Pair {pair_id}: return-width bridge proof -> UNSAT "
@@ -1729,10 +1915,11 @@ def _impl_check(
                 resolved_pairs,
             )
             if aggregate_artifact is not None:
-                pair_ledger.close(PairClosureEvidence.validated(
+                record_pair_closed(
+                    pair_ledger, base_ctx,
                     pending_pair, PairClosureKind.AGGREGATE, ledger_binding,
                     aggregate_artifact,
-                ))
+                )
                 unsat_count += 1
                 resolved_pairs.add(pending_pair)
                 continue
@@ -1991,7 +2178,9 @@ def _impl_check(
                 "function_name": getattr(analysis, "function_name", None),
                 "binary_name": getattr(analysis, "binary_id", None),
                 "binary_id": getattr(analysis, "binary_id", None),
-                "evidence": bind_evidence_to_comparison(dict(evidence)),
+                "evidence": bind_evidence_to_comparison(
+                    dict(evidence), identification=CrossSideIdentification.CORRESPONDENCE,
+                ),
             }
             for side, analysis, prepared in (
                 ("function1", solver_analysis1, prepared_widths1),
@@ -2000,6 +2189,18 @@ def _impl_check(
             for evidence in prepared.completion_evidence
         ]
         final_result.comparison_execution_receipt = comparison_receipt
+        final_result.cross_side_identity_backstop = CrossSideIdentityBackstop(
+            pair_ledger,
+            input_correspondence,
+            ledger_binding.comparison_session_id,
+            ledger_binding.branch_id,
+            ledger_binding.frame_generation,
+        )
+        if dispatch_frame is None:
+            # dispatch frame を持たない実行（互換の直接呼び出し・``LEGACY_POST_PAIRWISE``）は preflight の
+            # 最終 gate を通らないので、同じ backstop をここで課す（plan v4 PR-P）。後で EQ に昇格させる
+            # 経路は ``reapply_cross_side_identity_veto`` でもう一度課す。
+            final_result.cross_side_identity_backstop.veto(final_result)
         return final_result
     finally:
         self._active_safety_checker = None
@@ -2033,12 +2234,15 @@ def _register_loop_pair_replanner(
         )
 
         def produce():
-            complete = strategy._recovery_proof_is_complete(
-                reason_record,
-                analysis1,
-                analysis2,
-            )
-            if not complete:
+            # 証拠は、この pair の case について作った owner を含まない証拠だけを読む。
+            with owner_free_evidence_values((case1,), (case2,)):
+                complete = strategy._recovery_proof_is_complete(
+                    reason_record,
+                    analysis1,
+                    analysis2,
+                )
+            # 閉じた値・loop summary の比較は owner を含まない key で左右を同一視する（plan v4 PR-P）。
+            if not complete and owner_free_identity_gate((case1,), (case2,)).passed:
                 complete = (
                     strategy._case_pair_counted_loop_summaries_match_by_closed_values(
                         case1,

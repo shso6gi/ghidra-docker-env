@@ -91,7 +91,7 @@ def test_extract_return_cases_preserves_mutually_implied_signed_bounds_in_query_
     )
 
 
-def test_pairwise_contradiction_precheck_uses_object_centric_condition_basis():
+def test_condition_set_contradiction_uses_object_centric_condition_basis():
     add_branch = ReturnCase(
         index=0,
         conditions=[
@@ -120,4 +120,10 @@ def test_pairwise_contradiction_precheck_uses_object_centric_condition_basis():
 
     strategy = PairwiseStrategy(formula_builder=None, solver_runner=None, debug=False)
 
-    assert strategy._cases_are_contradictory(add_branch, subtract_branch) is True
+    # 左右の case の組を併合して矛盾とする検査（``_cases_are_contradictory``）は、左右の parameter を
+    # index で 1 つの記号にするので撤去した（plan v4 PR-P）。同じ object-centric な条件の基底は、
+    # 1 つの解析の条件集合を読む ``_condition_set_is_unsat`` が使う。
+    assert strategy._condition_set_is_unsat(
+        list(add_branch.conditions) + list(subtract_branch.conditions),
+        list(getattr(subtract_branch, "parameters", None) or []),
+    ) is True

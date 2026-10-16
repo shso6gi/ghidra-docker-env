@@ -108,6 +108,17 @@ class ReturnAbiAuthorityInvalid(ValueError):
         )
 
 
+
+def _positional_parameter_identity_holds(index: int) -> bool:
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+        current_relation,
+    )
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
+        positional_parameter_identity_gate,
+    )
+
+    return positional_parameter_identity_gate(current_relation(), index).passed
+
 @dataclass(frozen=True)
 class AbiWidthReadonlyReasonSpec:
     reason_id: str
@@ -1165,6 +1176,9 @@ class ReadonlyReductionObjectSetSeed:
             and left_pointer[0] == right_pointer[0] == "parameter"
             and type(left_pointer[1]) is int
             and left_pointer[1] == right_pointer[1]
+            # 同じ index の pointer base を同じ入力とみなすのは、比較の relation が位置どおり・
+            # 全幅の等式のときだけ（plan v4 PR-P）。そうでなければ共有 memory の契約を作らない。
+            and _positional_parameter_identity_holds(left_pointer[1])
         ):
             shared_input_memory_contract = (
                 PINNED_SHARED_PARAMETER_MEMORY_CONTRACT_ID,

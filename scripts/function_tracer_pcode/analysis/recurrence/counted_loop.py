@@ -233,7 +233,9 @@ def _impl__build_counted_scalar_loop_summary(
         self._debug("Declined counted scalar loop summary: residue affine uses address-like vector literal")
         return None
     update_cases = self._try_extract_counted_loop_update_cases_for_summary(accumulator, induction, guard)
-    loop_cases = self._build_counted_loop_case_refs(update_cases)
+    loop_cases = self._build_counted_loop_case_refs(
+        update_cases, loop_binders=tuple(accumulator.member_placeholders),
+    )
     start_expr = induction.init_expr
     limit_expr = guard.bound_expr
     header_block = getattr(induction.phi_op, "getParent", lambda: None)()
@@ -1555,7 +1557,12 @@ def _impl__try_extract_counted_loop_update_cases_for_summary(
 def _impl__build_counted_loop_case_refs(
     self,
     cases: Sequence[CountedLoopUpdateCase],
+    *,
+    loop_binders: Tuple[Expression, ...] = (),
 ) -> Tuple[LoopCaseRef, ...]:
+    """更新の case を loop の case にする。``loop_binders`` はこの loop が束縛する accumulator の
+    placeholder で、case の中（条件・更新・差分）でだけ束縛として扱われる（plan v4 PR-P）。"""
+
     refs: List[LoopCaseRef] = []
     for case in cases or ():
         body_effect = LoopBodyEffectRef(
@@ -1572,6 +1579,7 @@ def _impl__build_counted_loop_case_refs(
                 term_expr=case.delta_expr,
                 case_kind="accumulator_delta",
                 source="counted_loop_update_case",
+                loop_binders=tuple(loop_binders),
             )
         )
     return tuple(refs)

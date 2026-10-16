@@ -38,6 +38,9 @@ from scripts.function_tracer_pcode.proof.call_effect.obligations import (
     _INTERNAL_SOLVER_PRODUCER_TOKEN,
     _digest,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
+    positional_pairing_gate,
+)
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     InputRelationKind,
     build_tie_only_correspondence_set,
@@ -1869,6 +1872,27 @@ def _final_memory_cases(
     return {key: tuple(value) for key, value in by_location.items()}
 
 
+def _require_positional_parameter_locations(
+    proof_input: Any,
+    *,
+    failure_prefix: str,
+) -> None:
+    """memory の stage は左右の最終の memory 位置を owner を含まない key で組にする。
+
+    parameter が指す位置の key は ``LocationBaseRef.semantic_key`` の ``("parameter", i)`` で、左の
+    ``*p_i`` と右の ``*p_i`` を同じ位置として比べる。これが対応する入力の位置になるのは、caller の
+    parameter の組が位置どおり・同じ名前・全幅の等式のときだけ（plan v4 PR-P）。そうでなければ
+    stage を作らない（call effect は証明されないまま）。拒否の理由は、左右の位置の対応が無いときと
+    同じ ``<prefix>_location_relation_missing``（登録済みの producer の失敗）。
+    """
+
+    left_infos = collect_param_info(list(proof_input.left_parameters), "_1")
+    right_infos = collect_param_info(list(proof_input.right_parameters), "_2")
+    gate = positional_pairing_gate(build_tie_only_correspondence_set(left_infos, right_infos))
+    if not gate.passed:
+        raise ValueError(f"{failure_prefix}_location_relation_missing")
+
+
 def _render_final_post_state_relation(
     left_effects: Sequence[StoreEffect],
     right_effects: Sequence[StoreEffect],
@@ -2004,6 +2028,7 @@ def _render_memory_stage(
     lines, left_mapping, right_mapping = _parameter_prelude(proof_input)
     left_reach = _render_reachability(proof_input.left_arguments, left_mapping)
     right_reach = _render_reachability(proof_input.right_arguments, right_mapping)
+    _require_positional_parameter_locations(proof_input, failure_prefix="memory_effect")
     violations, left_partial_order, right_partial_order = _render_final_post_state_relation(
         _call_derived_effects_for_evidence(
             proof_input.left_caller_effects,
@@ -2064,6 +2089,7 @@ def _render_call_region_memory_stage(
                 proof_input.call_effect,
             ),
         )
+    _require_positional_parameter_locations(proof_input, failure_prefix="memory_effect")
     violations, left_partial_order, right_partial_order = _render_final_post_state_relation(
         left_effects,
         right_effects,
@@ -2342,6 +2368,7 @@ def _render_caller_memory_stage(
     )
     lines.extend(left_definition_lines)
     lines.extend(right_definition_lines)
+    _require_positional_parameter_locations(proof_input, failure_prefix="caller_memory_effect")
     violations, left_partial_order, right_partial_order = _render_final_post_state_relation(
         proof_input.left_caller_effects,
         proof_input.right_caller_effects,

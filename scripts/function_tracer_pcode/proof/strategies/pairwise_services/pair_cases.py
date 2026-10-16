@@ -29,8 +29,12 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     get_structural_summary,
     make_unknown_reason,
     normalize_udiv_with_guard,
+    OwnerFreePairAssertions,
     try_normalization_equivalence,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import current_comparison
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import certificate_attests
+from scripts.function_tracer_pcode.proof.obligations.pair_disposition import pair_identity_subject
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._api import (
     contains_udiv,
     extract_min_excluded_params,
@@ -275,13 +279,30 @@ def _impl__register_pairwise_extra_assertions(
     self,
     base_ctx: Dict[str, Any],
     pair_id: str,
-    assertions: Sequence[str],
+    assertions: OwnerFreePairAssertions,
 ) -> None:
-    if not assertions:
+    """pair の query に owner を含まない等式を足す（readonly の契約・deferred call の lowering）。
+
+    等式は ``derive_owner_free_pair_assertions`` が検査した値から作ったものだけを、その pair・この比較の
+    証明書がその値をもう一度 ``attests`` するときだけ登録する（plan v4 PR-P）。それ以外は ``ValueError``。
+    登録した証明書は ``record_pair_closed`` が closure に封印する。
+    """
+
+    if type(assertions) is not OwnerFreePairAssertions:
+        raise TypeError("pairwise extra assertions must be OwnerFreePairAssertions")
+    lines = tuple(str(item) for item in assertions.lines if str(item).strip())
+    if not lines:
         self._clear_pairwise_extra_assertions(base_ctx, pair_id)
         return
-    by_pair = base_ctx.setdefault("pairwise_extra_assertions_by_pair", {})
-    by_pair[pair_id] = tuple(str(item) for item in assertions if str(item).strip())
+    comparison = current_comparison()
+    certificate = assertions.identity_certificate
+    if comparison is None or not certificate_attests(
+        certificate, pair_identity_subject(pair_id), assertions.checked_values,
+        comparison_digest=comparison.digest, relation_digest=comparison.input_correspondence_digest,
+    ):
+        raise ValueError("owner-free pair assertions lack the certificate of their pair and values")
+    base_ctx.setdefault("pairwise_extra_assertions_by_pair", {})[pair_id] = lines
+    base_ctx.setdefault("pairwise_extra_assertion_carriers_by_pair", {})[pair_id] = assertions
 
 
 def _impl__clear_pairwise_extra_assertions(
@@ -292,6 +313,9 @@ def _impl__clear_pairwise_extra_assertions(
     by_pair = base_ctx.get("pairwise_extra_assertions_by_pair")
     if isinstance(by_pair, dict):
         by_pair.pop(pair_id, None)
+    carriers_by_pair = base_ctx.get("pairwise_extra_assertion_carriers_by_pair")
+    if isinstance(carriers_by_pair, dict):
+        carriers_by_pair.pop(pair_id, None)
     evidence_by_pair = base_ctx.get("pairwise_unresolved_deferred_call_lowering_evidence_by_pair")
     if isinstance(evidence_by_pair, dict):
         evidence_by_pair.pop(pair_id, None)
@@ -426,25 +450,6 @@ def _impl__create_aggregate_result(
         model=counterexample_raw,
     )
     return ParallelResult(results=[solver_result])
-
-
-def _impl__cases_are_contradictory(
-    self,
-    case1: ReturnCase,
-    case2: ReturnCase,
-) -> bool:
-    combined_conditions = list(case1.conditions) + list(case2.conditions)
-    if not combined_conditions:
-        return False
-    identity_conditions = self._conditions_with_object_identity_parameter_symbols(
-        combined_conditions,
-        list(getattr(case1, "parameters", None) or [])
-        + list(getattr(case2, "parameters", None) or []),
-    )
-    solver_result = ConditionSMTOracle.conjunction_is_unsat(identity_conditions)
-    if solver_result is not None:
-        return solver_result
-    return ConditionSimplifier.object_centric_is_contradiction(identity_conditions)
 
 
 def _impl__get_expression_safety_checker(
