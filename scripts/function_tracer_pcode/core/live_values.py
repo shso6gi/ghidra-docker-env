@@ -33,6 +33,7 @@ import operator
 import os
 import sys
 import threading
+import weakref
 import types
 import contextvars
 from collections import OrderedDict
@@ -379,6 +380,9 @@ class _Nesting(threading.local):
         #: 結果は、判定を始めたときの長さから後の class の名前空間に依る（値の型の `__get__`・入れ子の型）: 記録は
         #: その class 全部の状態を比べる（`_TypeFactTable.record`）
         self.reads: list = []
+        #: 1 つの最も外の判定の中で、判定が型・中身を読んだ object の列（名前空間の値が包む関数・accessor・closure の
+        #: 中身・wrapper が包む callable）。identity が同じでも変わる状態（`_watch`）を記録が確かめる
+        self.objects: list = []
         self.provisional_types: dict = {}
         self.provisional_bodies: dict = {}
         self.by_depth: list = [[] for _ in range(NESTING_LIMIT + 1)]
@@ -399,7 +403,9 @@ def _settle(state: "_Nesting", depth: int, *, commit: bool, retag: Optional[int]
         del table[key]
         if commit:
             # 仮の判定の依存は、最も外の判定が読んだ class 全部（上位集合: 捨てる機会が増えるだけ）
-            (_PACKAGE_TYPES if table is state.provisional_types else _TRUSTED_BODIES).record(key, True, state.reads)
+            (_PACKAGE_TYPES if table is state.provisional_types else _TRUSTED_BODIES).record(
+                key, True, state.reads, state.class_states, state.objects
+            )
 
 
 def _provisionally(state: "_Nesting", table: dict, key: Any, assumed: int) -> None:
@@ -465,7 +471,7 @@ def _note_read(klass: type) -> None:
 class _TypeFactTable:
     """型ごとの事実（型の名前空間から決めた判定）の表。**引くたびに** 事実が依る状態が記録したときと同じかを確かめる。
 
-    型の状態（`_class_snapshot` / `_snapshot_holds`）: 型の metaclass と MRO の identity、MRO の heap type の class ごとの metaclass と名前空間の
+    型の状態（`_class_snapshot` / `_state_check` / `_state_holds`）: 型の metaclass と MRO の identity、MRO の heap type の class ごとの metaclass と名前空間の
     key と値の identity。外の code は class の名前空間・`__bases__`・`__class__` を書き換えられるので、状態が変われば
     記録を捨てて判定し直す（古い判定を使わない）。記録は key の型と名前空間の key・値を生かす（`id` を再利用させない）。
     組み込みの型（heap type でない）の名前空間は変わらない。key は型か型の tuple で、`id` で引く（型の metaclass の
@@ -480,8 +486,9 @@ class _TypeFactTable:
     __slots__ = ("entries", "extra")
 
     def __init__(self, extra: Any = None) -> None:
-        #: slot → (key, 型の snapshot, 依存の class の snapshot の tuple, 値, 依存の class, extra の状態, extra の生かす object)
-        self.entries: Dict[Any, Tuple[Any, Any, Any, Any, Tuple[type, ...], Any, Any]] = {}
+        #: slot → (key, 型と依存の class の状態の確かめ（`_state_check`）, 値, 依存の class, extra の状態, extra の生かす object,
+        #: 判定が読んだ object)
+        self.entries: Dict[Any, Tuple[Any, Any, Any, Tuple[type, ...], Any, Any]] = {}
         #: 判定が名前空間の値の **中身** も読むとき、その中身の状態（`(identity の tuple, 生かす list)` を返す関数）
         self.extra = extra
 
@@ -500,22 +507,27 @@ class _TypeFactTable:
         same = all(map(_IS, recorded, key)) if type(key) is tuple else recorded is key
         if not same:
             return default
-        if not _snapshot_holds(entry[1]) or not all(map(_part_holds, entry[2])):
+        if not _state_holds(entry[1]):
             return default
-        if self.extra is not None and self.extra(kind)[0] != entry[5]:
+        if self.extra is not None and self.extra(kind)[0] != entry[4]:
             return default
         nesting = _NESTING
         if nesting.active:
             # 判定の途中に記録を使った: その記録が依る class（記録の依存と key の型の MRO）は今の判定の依存
-            nesting.reads.extend(entry[4])
+            nesting.reads.extend(entry[3])
             nesting.reads.extend(_TYPE_MRO.__get__(kind))
-        return entry[3]
+            nesting.objects.extend(entry[6])
+        return entry[2]
 
     def __setitem__(self, key: Any, value: Any) -> None:
         self.record(key, value)
 
-    def record(self, key: Any, value: Any, reads: Any = ()) -> None:
-        """事実を記録する。`reads` は判定が名前空間を読んだ class の列（重複・key の型の MRO の class は除いて持つ）。"""
+    def record(
+        self, key: Any, value: Any, reads: Any = (), memo: Optional[dict] = None, objects: Any = (),
+    ) -> None:
+        """事実を記録する。`reads` は判定が名前空間を読んだ class の列（重複・key の型の MRO の class は除いて持つ）。
+        `memo` は記録の直前に終わった判定が読んだ名前空間の snapshot（その間に外の code は走っていない: 使い回す）。
+        `objects` は判定が型・中身を読んだ object の列（`_Nesting.objects`: その状態も確かめる）。"""
 
         slot, kind = self._key(key)
         depends: Tuple[type, ...] = ()
@@ -529,19 +541,25 @@ class _TypeFactTable:
                 if id(klass) not in own:
                     unique[id(klass)] = klass
             depends = tuple(unique.values())
-        snapshot = _class_snapshot(kind)
+        snapshot = _class_snapshot(kind, memo)
         if snapshot is None:
             return  # 状態を読めない型の事実は記録しない（毎回判定する）
         parts = []
         for klass in depends:
-            part = _dependency_part(klass)
+            part = _dependency_part(klass, memo)
             if part is None:
                 return
             parts.append(part)
         extra, extra_held = self.extra(kind) if self.extra is not None else (None, None)
         if len(self.entries) >= _TYPE_FACTS_LIMIT:
             self.entries.clear()
-        self.entries[slot] = (key, snapshot, tuple(parts), value, depends, extra, extra_held)
+        objects = tuple({id(item): item for item in objects}.values())
+        if not _within_scan(tuple.__len__(objects)):
+            return  # 読んだ object を上限の中で確かめられない: 記録しない（毎回判定する）
+        check = _state_check(snapshot, parts, _watch(objects))
+        if check is None:
+            return
+        self.entries[slot] = (key, check, value, depends, extra, extra_held, objects)
 
     def clear(self) -> None:
         self.entries.clear()
@@ -550,13 +568,13 @@ class _TypeFactTable:
         return len(self.entries)
 
 
-def _dependency_part(klass: type) -> Optional[Tuple[Any, ...]]:
-    """依存の class 1 つの snapshot（`_part_holds` が確かめる）。組み込みの型は MRO の identity だけ。読めない（上限の外）は
+def _dependency_part(klass: type, memo: Optional[dict] = None) -> Optional[Tuple[Any, ...]]:
+    """依存の class 1 つの snapshot（`_state_check` にまとめ、`_state_holds` が確かめる）。組み込みの型は MRO の identity だけ。読めない（上限の外）は
     `None`。"""
 
     if not _TYPE_FLAGS.__get__(klass) & _HEAP_TYPE:
         return (klass, _TYPE_MRO.__get__(klass), None)
-    part = _namespace_part(klass)
+    part = _namespace_part(klass, memo)
     if part is None:
         return None
     return (klass, _TYPE_MRO.__get__(klass), part)
@@ -566,8 +584,8 @@ def _dependency_part(klass: type) -> Optional[Tuple[Any, ...]]:
 _TYPE_FACTS_LIMIT = 4096
 
 
-def _class_snapshot(kind: type) -> Optional[Tuple[Any, Any, Any, Tuple[Any, ...]]]:
-    """型の snapshot（型・MRO の tuple・metaclass と、MRO の heap type ごとの名前空間の snapshot）。`_snapshot_holds` が
+def _class_snapshot(kind: type, memo: Optional[dict] = None) -> Optional[Tuple[Any, Any, Any, Tuple[Any, ...]]]:
+    """型の snapshot（型・MRO の tuple・metaclass と、MRO の heap type ごとの名前空間の snapshot）。`_state_holds` が
     今も同じかを確かめる。読めない（MRO・名前空間が型の上限を超える）型は `None`: その型の事実は記録しない（型の判定は
     文脈に依らない: 量の信号にしない）。snapshot は読んだ object（MRO・名前空間の storage・key・値）を生かす（`id` を
     再利用させない）。
@@ -583,52 +601,97 @@ def _class_snapshot(kind: type) -> Optional[Tuple[Any, Any, Any, Tuple[Any, ...]
     for klass in mro:
         if not _TYPE_FLAGS.__get__(klass) & _HEAP_TYPE:
             continue
-        part = _namespace_part(klass)
+        part = _namespace_part(klass, memo)
         if part is None:
             return None
         parts.append(part)
     return (kind, mro, type(kind), tuple(parts))
 
 
-def _snapshot_holds(snapshot: Tuple[Any, Any, Any, Tuple[Any, ...]]) -> bool:
-    """型の snapshot が今も同じか（MRO の tuple・metaclass が同じ object で、どの名前空間も同じ key と値を同じ順に持つ）。
-    比べるのは identity だけ（C の反復: object を作らない。値の `__eq__` を呼ばない）。"""
+def _state_check(
+    snapshot: Tuple[Any, Any, Any, Tuple[Any, ...]], dependencies: Any = (), objects_watch: Any = (),
+) -> Optional[Tuple[Any, ...]]:
+    """型の snapshot（`_class_snapshot`）と依存の class の snapshot（`_dependency_part`）を、確かめる列にまとめる
+    （`_state_holds` が確かめる）: MRO を確かめる class と MRO の tuple・metaclass を確かめる class と metaclass・名前空間の
+    storage と大きさ・全部の名前空間の key と値（並べた列）・読んだ値の状態（`_watch`）。列は読んだ object を生かす。class の数が上限の外は
+    `None`（記録しない）。"""
 
-    kind, mro, metatype, parts = snapshot
-    if _TYPE_MRO.__get__(kind) is not mro or type(kind) is not metatype or not _within_scan(tuple.__len__(parts)):
-        return False
-    for klass, meta, raw, keys, values in parts:
-        if (
-            type(klass) is not meta or dict.__len__(raw) != tuple.__len__(keys)
-            or not all(map(_IS, dict.__iter__(raw), keys)) or not all(map(_IS, dict.values(raw), values))
-        ):
-            return False
-    return True
-
-
-def _part_holds(dependency: Tuple[Any, Any, Any]) -> bool:
-    """依存の class の snapshot（`_dependency_part`）が今も同じか。"""
-
-    klass, mro, part = dependency
-    if _TYPE_MRO.__get__(klass) is not mro:
-        return False
-    if part is None:
-        return True
-    _klass, meta, raw, keys, values = part
-    if not _within_scan(tuple.__len__(keys)):
-        return False
+    kind, mro, metatype, own_parts = snapshot
+    if not _within_scan(tuple.__len__(own_parts) + len(dependencies)):
+        return None
+    owners = [kind]
+    mros = [mro]
+    parts = list(own_parts)
+    for klass, klass_mro, part in dependencies:
+        owners.append(klass)
+        mros.append(klass_mro)
+        if part is not None:
+            parts.append(part)
+    classes = [kind]
+    metas = [metatype]
+    raws = []
+    lengths = []
+    keys: List[Any] = []
+    values: List[Any] = []
+    watches = []
+    for klass, meta, raw, part_keys, part_values, watched in parts:
+        classes.append(klass)
+        metas.append(meta)
+        raws.append(raw)
+        lengths.append(tuple.__len__(part_keys))
+        keys.extend(part_keys)
+        values.extend(part_values)
+        if watched is not _NO_WATCH:
+            watches.append(watched)
+    if objects_watch:
+        watches.append(objects_watch)  # 判定が型・中身を読んだ object（`_Nesting.objects`）
+    watch = _merged_watch(watches)
+    if watch is _NO_WATCH:
+        watch = ((),) * 12
+    heap_objects, heap_types, props, fgets, fsets, fdels, statics, static_funcs, methods, method_funcs, others, states = watch
+    # 確かめる object と、読んで得るはずの object を 1 つの列に並べる（`_state_holds` が 1 度の C の反復で比べる）
+    expected = (
+        tuple(mros) + tuple(metas) + heap_types + tuple(keys) + tuple(values) + fgets + fsets + fdels + static_funcs
+        + method_funcs
+    )
+    # `_state_holds` は `expected` と読み直す列を 1 つの `map` で比べる（短い方で止まる）: 列の長さが揃うことをここで確かめる
+    read_count = (
+        len(owners) + len(classes) + len(heap_objects) + 2 * sum(lengths) + 3 * len(props) + len(statics) + len(methods)
+    )
+    if read_count != tuple.__len__(expected):
+        raise RuntimeError("type fact check columns are misaligned")
     return (
-        type(klass) is meta and dict.__len__(raw) == tuple.__len__(keys)
-        and all(map(_IS, dict.__iter__(raw), keys)) and all(map(_IS, dict.values(raw), values))
+        tuple(raws), tuple(lengths), tuple(owners), tuple(classes) + heap_objects, props, statics, methods, expected,
+        others, states,
     )
 
 
-def _namespace_part(klass: type) -> Optional[Tuple[Any, ...]]:
+def _state_holds(check: Tuple[Any, ...]) -> bool:
+    """`_state_check` の列が今も同じか（MRO の tuple・metaclass が同じ object で、どの名前空間も同じ大きさで同じ key と値を
+    同じ順に持ち、読んだ値の状態も同じ）。比べるのは identity と大きさだけ（C の反復: object を作らない。値の `__eq__` を
+    呼ばない。名前空間の storage は組み込みの `dict`）。大きさを先に比べる: 並べた列の長さは記録したときと同じ（途中で
+    ずれない）。名前空間の数は記録したときに上限と比べた（大きさが同じなら辿る数も同じ）。"""
+
+    raws, lengths, owners, typed, props, statics, methods, expected, others, states = check
+    if not _within_scan(tuple.__len__(raws)) or tuple(map(dict.__len__, raws)) != lengths:
+        return False
+    if not all(map(_IS, itertools.chain(
+        map(_TYPE_MRO.__get__, owners), map(type, typed),
+        itertools.chain.from_iterable(map(dict.__iter__, raws)), itertools.chain.from_iterable(map(dict.values, raws)),
+        map(_PROPERTY_FGET, props), map(_PROPERTY_FSET, props), map(_PROPERTY_FDEL, props),
+        map(_STATICMETHOD_FUNC, statics), map(_CLASSMETHOD_FUNC, methods),
+    ), expected)):
+        return False
+    return _accessors_hold(others, states)
+
+
+def _namespace_part(klass: type, memo: Optional[dict] = None) -> Optional[Tuple[Any, ...]]:
     """1 つの heap type の名前空間の snapshot（class・metaclass・storage・key・値）。上限の外は `None`。判定の途中は判定の
     間だけ使い回す（判定は型を読むだけで外の code を呼ばない）。"""
 
-    nesting = _NESTING
-    memo = nesting.class_states if nesting.active else None
+    if memo is None:
+        nesting = _NESTING
+        memo = nesting.class_states if nesting.active else None
     if memo is not None:
         found = memo.get(id(klass))
         if found is not None and found[0] is klass:
@@ -637,10 +700,155 @@ def _namespace_part(klass: type) -> Optional[Tuple[Any, ...]]:
     raw = known[1] if known is not None and known[0] is klass else _unwrapped(_TYPE_DICT.__get__(klass))
     if not _within_scan(dict.__len__(raw)):
         return None
-    part = (klass, type(klass), raw, tuple(dict.__iter__(raw)), tuple(dict.values(raw)))
+    _require_scan(dict.__len__(raw), "a class namespace's values")
+    values = tuple(dict.values(raw))
+    part = (klass, type(klass), raw, tuple(dict.__iter__(raw)), values, _watch(values))
     if memo is not None:
         memo[id(klass)] = part
     return part
+
+
+def _watch(objects: Any) -> Any:
+    """判定が読んだ object の、identity の外の状態の記録（`_watch_holds` が確かめる）。identity が同じでも変わり得るもの:
+
+    - heap type の instance の型（`__class__` の代入で変わる。組み込みの型の instance は変えられない。module は
+      `__class__` を ModuleType の subclass にできる）。
+    - 組み込みの descriptor の中身（`property`（subclass を含む）の accessor・`staticmethod` / `classmethod` の関数:
+      `__init__` を呼び直すと差し替わる）。heap type の descriptor（`types.DynamicClassAttribute`）の accessor（instance の
+      属性）。
+    - 判定が中を辿った関数（`_OpenedFunction`: package の外の実行環境の関数の closure を辿った）の `__code__`
+      （代入できる）と、その closure の cell の中身（`cell_contents` は代入できる）。package の関数の code・closure の
+      書き換えは契約の外（呼ぶ code を書き換える操作）。
+
+    状態は種類ごとの列（object の列と、その状態の列）にし、確かめは C の反復で identity だけを比べる（値・型の `__eq__` を
+    呼ばない）。状態を持つ object が無ければ `_NO_WATCH`。読みは組み込みの descriptor の slot と型だけ。
+    """
+
+    objects = tuple(objects)
+    _require_scan(tuple.__len__(objects), "the objects a type fact read")
+    flags = _TYPE_FLAGS.__get__
+    heap_objects: List[Any] = []
+    props: List[Any] = []
+    statics: List[Any] = []
+    classes: List[Any] = []
+    others: List[Any] = []
+    for value in objects:
+        kind = type(value)
+        heap = flags(kind) & _HEAP_TYPE
+        if heap or kind is types.ModuleType:
+            heap_objects.append(value)
+        if kind is property or (heap and issubclass(kind, property)):
+            props.append(value)
+        elif kind is staticmethod:
+            statics.append(value)
+        elif kind is classmethod:
+            classes.append(value)
+        elif kind is types.DynamicClassAttribute:
+            others.append(value)
+        elif kind is _OpenedFunction or kind is types.CellType:
+            others.append(value)  # 状態は `_object_state`
+    if not (heap_objects or props or statics or classes or others):
+        return _NO_WATCH
+    heap_objects_t, props_t, statics_t, classes_t, others_t = (
+        tuple(heap_objects), tuple(props), tuple(statics), tuple(classes), tuple(others)
+    )
+    return (
+        heap_objects_t, tuple(map(type, heap_objects_t)),
+        props_t, tuple(map(_PROPERTY_FGET, props_t)), tuple(map(_PROPERTY_FSET, props_t)), tuple(map(_PROPERTY_FDEL, props_t)),
+        statics_t, tuple(map(_STATICMETHOD_FUNC, statics_t)),
+        classes_t, tuple(map(_CLASSMETHOD_FUNC, classes_t)),
+        others_t, tuple(map(_object_state, others_t)),
+    )
+
+
+#: 状態を持つ object が無い記録
+_NO_WATCH = ()
+
+
+def _object_state(value: Any) -> Tuple[Any, ...]:
+    """identity の外の状態を Python の読みで取る object の状態（`_watch` の「その他」）。読めなければ毎回違う印（確かめは
+    いつも偽: 判定し直す）。
+
+    - `types.DynamicClassAttribute`（heap type の descriptor）: accessor（instance の属性）。
+    - `_OpenedFunction`: 判定が中を辿った関数の `__code__`。
+    - closure の cell: 中身（空の cell は `_EMPTY_CELL`）。
+    """
+
+    kind = type(value)
+    try:
+        if kind is _OpenedFunction:
+            return (_FUNCTION_CODE(value.function),)
+        if kind is types.CellType:
+            try:
+                return (_CELL_CONTENTS(value),)
+            except ValueError:
+                return (_EMPTY_CELL,)
+        return tuple(instance_state(value, name, None) for name in ("fget", "fset", "fdel"))
+    except TypeError:
+        return (object(),)  # 読めない: 確かめはいつも偽（判定し直す）
+
+
+class _OpenedFunction:
+    """判定が中（closure）を辿った関数の印（`_Nesting.objects` に置く: 記録はその関数の `__code__` を確かめる）。"""
+
+    __slots__ = ("function",)
+
+    def __init__(self, function: Any) -> None:
+        self.function = function
+
+
+_FUNCTION_CODE = types.FunctionType.__dict__["__code__"].__get__
+_CELL_CONTENTS = types.CellType.__dict__["cell_contents"].__get__
+#: 空の closure の cell の状態の印
+_EMPTY_CELL = object()
+
+
+def _merged_watch(watches: List[Any]) -> Any:
+    """`_watch` の記録をまとめた 1 つの記録（種類ごとの列をつなぐ）。"""
+
+    if not watches:
+        return _NO_WATCH
+    _require_scan(len(watches), "the records a type fact watches")  # 呼ぶ側が class の数を上限と比べた
+    if len(watches) == 1:
+        return watches[0]
+    return tuple(tuple(itertools.chain.from_iterable(column)) for column in zip(*watches))
+
+
+def _watch_holds(watch: Any) -> bool:
+    """記録した状態が今も同じか（`_watch`）。"""
+
+    if watch is _NO_WATCH:
+        return True
+    (
+        heap_objects, heap_types, props, fgets, fsets, fdels, statics, static_funcs, classes, class_funcs, others, states,
+    ) = watch
+    if not _within_scan(tuple.__len__(heap_objects) + tuple.__len__(props) + tuple.__len__(others)):
+        return False
+    if not all(map(_IS, itertools.chain(
+        map(type, heap_objects), map(_PROPERTY_FGET, props), map(_PROPERTY_FSET, props), map(_PROPERTY_FDEL, props),
+        map(_STATICMETHOD_FUNC, statics), map(_CLASSMETHOD_FUNC, classes),
+    ), heap_types + fgets + fsets + fdels + static_funcs + class_funcs)):
+        return False
+    return _accessors_hold(others, states)
+
+
+def _accessors_hold(others: Tuple[Any, ...], states: Tuple[Any, ...]) -> bool:
+    """「その他」の object の状態（`_object_state`）が記録したときと同じか。"""
+
+    if not _within_scan(tuple.__len__(others)):
+        return False
+    for value, state in zip(others, states):
+        now = _object_state(value)
+        if tuple.__len__(now) != tuple.__len__(state) or not all(map(_IS, now, state)):
+            return False
+    return True
+
+
+_PROPERTY_FGET = property.__dict__["fget"].__get__
+_PROPERTY_FSET = property.__dict__["fset"].__get__
+_PROPERTY_FDEL = property.__dict__["fdel"].__get__
+_STATICMETHOD_FUNC = staticmethod.__dict__["__func__"].__get__
+_CLASSMETHOD_FUNC = classmethod.__dict__["__func__"].__get__
 
 
 _PACKAGE_TYPES = _TypeFactTable()
@@ -679,10 +887,12 @@ def package_type(kind: type) -> bool:
         state.assumed, state.cut = NESTING_LIMIT + 1, False
         state.class_states = {}
         state.reads = []
+        state.objects = []
     outer_assumed, outer_cut = state.assumed, state.cut
     state.assumed, state.cut = NESTING_LIMIT + 1, False
     state.active[kind] = depth
     mark = len(state.reads)  # この判定が読む class（入れ子の判定・引いた記録の依存を含む）は、ここから後
+    seen = len(state.objects)  # この判定が型・中身を読んだ object も、ここから後
     known = False
     decided = False
     try:
@@ -702,11 +912,11 @@ def package_type(kind: type) -> bool:
     if assumed >= depth:
         # 自分より外を仮定していない（自分が循環の根）: 判定は確定し、自分を仮定した仮の判定も決まる
         _settle(state, depth, commit=known)
-        _PACKAGE_TYPES.record(kind, known, state.reads[mark:])
+        _PACKAGE_TYPES.record(kind, known, state.reads[mark:], state.class_states, state.objects[seen:])
     elif known is False:
         # 楽観的な仮定の下でも信頼しない: 確定（自分を仮定した仮の判定は仮定が崩れたので捨てる）
         _settle(state, depth, commit=False)
-        _PACKAGE_TYPES.record(kind, False, state.reads[mark:])
+        _PACKAGE_TYPES.record(kind, False, state.reads[mark:], state.class_states, state.objects[seen:])
     else:
         # 外の祖先を仮定した「信頼」: 仮の判定（自分を仮定した仮の判定もその祖先の仮定へ移す）
         _settle(state, depth, commit=False, retag=assumed)
@@ -794,6 +1004,7 @@ def _trusted_callables(pending: list, *, generated: bool, scan: Any) -> bool:
         if not scan.admit(1):
             return False
         item = pending.pop()
+        _note_object(item)  # 判定がこの object の型・中身を読む: 記録が状態を確かめる（`_Nesting.objects`）
         holder = type(item)
         if holder is types.MethodType:
             item = item.__func__
@@ -806,7 +1017,10 @@ def _trusted_callables(pending: list, *, generated: bool, scan: Any) -> bool:
                 cells = item.__closure__ or ()
                 if not _within_scan(scan.used + len(pending) + tuple.__len__(cells)):
                     return False
+                # 関数の中を辿る: その code と cell の中身も判定が読んだ状態（記録が確かめる: `_object_state`）
+                _note_object(_OpenedFunction(item))
                 for cell in cells:
+                    _note_object(cell)
                     try:
                         pending.append(cell.cell_contents)
                     except ValueError:
@@ -818,10 +1032,13 @@ def _trusted_callables(pending: list, *, generated: bool, scan: Any) -> bool:
             if (_TYPE_FLAGS.__get__(item) & _HEAP_TYPE) and not package_type(item):
                 return False
             continue
-        wrapped = instance_state(item, "__wrapped__", _ABSENT) if _plain_metatype(holder) else _ABSENT
-        if holder is _LRU_WRAPPER and wrapped is not _ABSENT:
-            # `functools.lru_cache` の wrapper（C）: 包んだ関数を信頼するものだけ
-            pending.append(wrapped)
+        if holder is _LRU_WRAPPER:
+            # `functools.lru_cache` の wrapper（C）: 呼ぶのは C の struct が持つ関数（`__wrapped__` は instance の属性で
+            # 書き換えられる: 根拠にしない）。その関数を信頼するものだけ
+            callee = _lru_callee(item)
+            if callee is None:
+                return False
+            pending.append(callee)
             continue
         if not _inert_value(item):
             return False
@@ -829,6 +1046,26 @@ def _trusted_callables(pending: list, *, generated: bool, scan: Any) -> bool:
 
 
 _LRU_WRAPPER = type(__import__("functools").lru_cache(maxsize=None)(len))
+
+
+def _lru_callee(wrapper: Any) -> Any:
+    """`lru_cache` の wrapper が呼ぶ callable（C の struct の `func`: wrapper が直接参照する object（C の struct の固定の
+    field と instance の `__dict__`）のうちの唯一の Python の関数か C の callable。`gc.get_referents` は C の traverse を
+    読む: hook を呼ばない）。1 つに決まらなければ `None`（型を包んだ wrapper など: 信頼しない）。"""
+
+    found = [
+        item for item in gc.get_referents(wrapper)
+        if type(item) is types.FunctionType or _one_of(type(item), _C_CODE_TYPES)
+    ]
+    return found[0] if len(found) == 1 else None
+
+
+def _note_object(item: Any) -> None:
+    """型の信頼の判定の途中なら、型・中身を読んだ object を判定の依存に足す（`_Nesting.objects`）。"""
+
+    state = _NESTING
+    if state.active:
+        state.objects.append(item)
 
 
 def _inert_value(value: Any) -> bool:
@@ -893,6 +1130,7 @@ def _trusted_class_body(klass: type) -> bool:
     outer_assumed, outer_cut = state.assumed, state.cut
     state.assumed, state.cut = NESTING_LIMIT + 1, False
     mark = len(state.reads)
+    seen = len(state.objects)
     try:
         known = _trusted_class_body_uncached(klass)
     finally:
@@ -903,7 +1141,7 @@ def _trusted_class_body(klass: type) -> bool:
     if not cacheable or cut:
         return known
     if assumed > NESTING_LIMIT or known is False:
-        _TRUSTED_BODIES.record(klass, known, state.reads[mark:])
+        _TRUSTED_BODIES.record(klass, known, state.reads[mark:], state.class_states, state.objects[seen:])
     else:
         _provisionally(state, state.provisional_bodies, klass, assumed)
     return known
@@ -992,8 +1230,32 @@ def _type_lookup(kind: type, name: str, missing: Any) -> Any:
     """
 
     mro = _TYPE_MRO.__get__(kind)
+    plain = _PLAIN_MROS.get(id(kind))
+    if plain is not None and plain[0] is kind and plain[1] is mro:
+        # MRO の名前空間が全部確かめた storage（`_PLAIN_MROS`）: storage を組み込みの `str` の名前で直接引く
+        nesting = _NESTING
+        if nesting.active:
+            nesting.reads.extend(plain[3])  # 名前空間を読んだ heap class は判定の依存（`_note_read`）
+        witness = _LOOKUPS.active
+        if witness is None:
+            for raw in plain[2]:
+                found = dict.get(raw, name, _MISSING_DUNDER)
+                if found is not _MISSING_DUNDER:
+                    return found
+            return missing
+        witness.append((_MRO_READ, kind, mro))  # 引いた storage の列は `kind` の MRO が決める（`_LookupFactTable`）
+        for raw, heap in zip(plain[2], plain[4]):
+            found = dict.get(raw, name, _MISSING_DUNDER)
+            if heap:
+                witness.append((raw, name, found))  # 判定が読んだ名前と見つけた object（`_LookupFactTable`）
+            if found is not _MISSING_DUNDER:
+                return found
+        return missing
     _require_scan(tuple.__len__(mro), "a type's MRO")
+    _remember_plain_mro(mro, kind)
     witness = _LOOKUPS.active
+    if witness is not None:
+        witness.append((_MRO_READ, kind, mro))  # 引いた storage の列は `kind` の MRO が決める（`_LookupFactTable`）
     noting = _NESTING.active
     for klass in mro:
         known = _STR_KEYED_NAMESPACES.get(id(klass))
@@ -1003,6 +1265,13 @@ def _type_lookup(kind: type, name: str, missing: Any) -> Any:
             found = dict.get(raw, name, _MISSING_DUNDER)
             if witness is not None:
                 witness.append((raw, name, found))  # 判定が読んだ名前と見つけた object（`_LookupFactTable`）
+            if found is not _MISSING_DUNDER:
+                return found
+            continue
+        static = _STATIC_NAMESPACES.get(id(klass))
+        if static is not None and static[0] is klass:
+            # 組み込みの型の名前空間（変わらない: 読みの記録も要らない）
+            found = dict.get(static[1], name, _MISSING_DUNDER)
             if found is not _MISSING_DUNDER:
                 return found
             continue
@@ -1022,6 +1291,38 @@ def _type_lookup(kind: type, name: str, missing: Any) -> Any:
     return missing
 
 
+def _remember_plain_mro(mro: Tuple[type, ...], kind: type) -> None:
+    """MRO のどの class の名前空間も key が全部組み込みの `str` なら、その storage の列を記録する（`_PLAIN_MROS`）。"""
+
+    raws = []
+    heaps = []
+    for klass in mro:
+        reader = _NamespaceReader(klass)
+        if not reader.plain:
+            return  # 組み込みの `str` でない key（引きを決めない名前空間）: 記録しない（毎回 class ごとに引く）
+        heap = not reader.static
+        if heap:
+            raws.append(reader.raw)
+        else:
+            static = _STATIC_NAMESPACES.get(id(klass))
+            if static is None or static[0] is not klass:
+                return  # 表が上限: 記録しない
+            raws.append(static[1])
+        heaps.append(heap)
+    if len(_PLAIN_MROS) >= _TYPE_FACTS_LIMIT:
+        _PLAIN_MROS.clear()
+    heap_classes = tuple(klass for klass, heap in zip(mro, heaps) if heap)
+    _PLAIN_MROS[id(kind)] = (kind, mro, tuple(raws), heap_classes, tuple(heaps))
+
+
+#: 型ごとの MRO の名前空間の storage の列（`id(型)` → (型, MRO, storage の列, heap class の列, heap type か の列)）。
+#: MRO の tuple が同じ object の間（`__bases__` の書き換えは MRO を作り直す）だけ使う。class の名前空間の storage は class
+#: が生きている間同じ dict で、確かめた storage の key は組み込みの `str` のまま（`_STR_KEYED_NAMESPACES` の前提）・組み込み
+#: の型の名前空間は変わらない（`_STATIC_NAMESPACES`）: 名前の引きは記録した storage を直接引くのと同じ。記録は型・MRO・
+#: storage を生かす（`id` を再利用させない）
+_PLAIN_MROS: Dict[int, Tuple[type, Tuple[type, ...], Tuple[dict, ...], Tuple[type, ...], Tuple[bool, ...]]] = {}
+
+
 class _Lookups(threading.local):
     """thread ごとの、計算中の型の事実が名前で引いた (名前空間の storage, 名前, 見つけた object) の列（`_witnessed`）。"""
 
@@ -1032,6 +1333,9 @@ class _Lookups(threading.local):
 _LOOKUPS = _Lookups()
 #: 読みの記録の印: 計算が決めない名前空間に当たった（`_witnessed` は記録しない）
 _UNRECORDABLE = ("unrecordable",)
+#: 読みの記録の印: `(_MRO_READ, 型, MRO)` は、名前を引いた型の MRO（引く storage の列を決める）。key の型でない型の
+#: `__bases__` の書き換えも、記録を古くする
+_MRO_READ = object()
 
 
 def _witnessed(compute: Any, *args: Any) -> Tuple[Any, Optional[Tuple[Tuple[dict, str, Any], ...]]]:
@@ -1063,45 +1367,77 @@ class _LookupFactTable:
     が確かめた: 組み込みでない key があれば計算は `TypeError` で記録しない）で、class の名前空間の書き換えは名前を
     組み込みの `str` にして置く（`_STR_KEYED_NAMESPACES` の前提）: 組み込みの `str` の名前で引く `dict.get` は key の
     `__eq__` を呼ばない。組み込みの型の名前空間は変わらない（記録しない）。記録は key・MRO・storage・見つけた object を
-    生かす（`id` を再利用させない）。
+    生かす（`id` を再利用させない）。key は型だけ（記録は `id(key)` で引き、identity で確かめる）。
+
+    記録を使った計算の外側（読みを記録している外の計算・型の事実の判定）へは、記録の読みを渡す（`lookup_fact`）: 外の
+    記録が内の記録の読みを確かめないまま古くならない。
     """
 
     __slots__ = ("entries",)
 
     def __init__(self) -> None:
-        self.entries: Dict[Any, Tuple[Any, Any, Tuple[Tuple[dict, str, Any], ...], Any]] = {}
-
-    def get(self, key: Any, default: Any = None) -> Any:
-        if type(key) is tuple:
-            slot, kind = _TypeFactTable._key(key)
-            entry = self.entries.get(slot)
-            if entry is None or not all(map(_IS, entry[0], key)):
-                return default
-        else:
-            kind = key
-            entry = self.entries.get(id(key))
-            if entry is None or entry[0] is not key:
-                return default
-        if _TYPE_MRO.__get__(kind) is not entry[1]:
-            return default  # `__bases__` を書き換えた（MRO の tuple が作り直される）
-        for raw, name, found in entry[2]:
-            if dict.get(raw, name, _MISSING_DUNDER) is not found:
-                return default
-        return entry[3]
+        self.entries: Dict[int, Tuple[type, Any, Tuple[Any, ...], Any]] = {}
 
     def record(self, key: Any, value: Any, witness: Optional[Tuple[Tuple[dict, str, Any], ...]]) -> None:
         if witness is None:
             return  # 読みの記録が上限の外: 記録しない
-        slot, kind = _TypeFactTable._key(key)
+        if not issubclass(type(key), type):  # 値の `__class__` を読まない
+            raise TypeError("a lookup fact is keyed by a type")
         if len(self.entries) >= _TYPE_FACTS_LIMIT:
             self.entries.clear()
-        self.entries[slot] = (key, _TYPE_MRO.__get__(kind), witness, value)
+        reads = [item for item in witness if item[0] is not _MRO_READ]
+        mro_reads = {id(item[1]): item for item in witness if item[0] is _MRO_READ}.values()
+        raws = tuple(item[0] for item in reads)
+        names = tuple(item[1] for item in reads)
+        founds = tuple(item[2] for item in reads)
+        owners = tuple(item[1] for item in mro_reads)
+        mros = tuple(item[2] for item in mro_reads)
+        if not all(map(_IS, map(_TYPE_MRO.__get__, owners), mros)):
+            return  # 計算の途中で MRO が変わった（外の code は走らないはず）: 記録しない
+        checks = (raws, names, founds, _watch(found for found in founds if found is not _MISSING_DUNDER), owners, mros)
+        self.entries[id(key)] = (key, _TYPE_MRO.__get__(key), checks, value)
 
     def clear(self) -> None:
         self.entries.clear()
 
     def __len__(self) -> int:
         return len(self.entries)
+
+
+#: 公開の名前（package の他の層が名前の引きだけで決まる型の事実を記録する表: `lookup_fact` と使う）
+LookupFactTable = _LookupFactTable
+
+
+def lookup_fact(table: "LookupFactTable", key: Any, compute: Any, *args: Any) -> Any:
+    """名前の引き（`type_attribute` / `_type_lookup`）だけで決まる型の事実を、表に記録して引く（引くたびに引いた名前と
+    MRO を確かめる: `_LookupFactTable`）。`compute(*args)` は型の名前空間を名前で引くだけで決める関数。型の事実の cache を
+    足すときの唯一の入口（記録の確かめを各所で書かない）。"""
+
+    entry = table.entries.get(id(key))
+    if entry is not None and entry[0] is key and _TYPE_MRO.__get__(key) is entry[1]:  # MRO: `__bases__` の書き換え
+        raws, names, founds, watch, owners, mros = entry[2]
+        if (
+            all(map(_IS, map(_TYPE_MRO.__get__, owners), mros))
+            and all(map(_IS, map(dict.get, raws, names, _REPEAT_MISSING), founds))
+            and (watch is _NO_WATCH or _watch_holds(watch))
+        ):
+            # 計算の途中で記録を使った: 記録の読みは外の計算の読みでもある（外の記録も同じ読みを確かめる）
+            outer = _LOOKUPS.active
+            if outer is not None:
+                outer.extend(zip(raws, names, founds))
+                outer.extend(zip(_REPEAT_MRO_READ, owners, mros))
+            nesting = _NESTING
+            if nesting.active:
+                nesting.reads.extend(entry[1])
+                nesting.reads.extend(owners)
+            return entry[3]
+    known, witness = _witnessed(compute, *args)
+    table.record(key, known, witness)
+    return known
+
+
+#: `lookup_fact` の「記録が無い」印（記録する値は `None` もある）
+_MISSING_FACT = object()
 
 
 def _exact_str_keys(raw: dict) -> bool:
@@ -1177,10 +1513,70 @@ def plain_scalar(value: Any) -> Any:
     if issubclass(kind, int):
         return int.__index__(value)
     if issubclass(kind, float):
-        return float.__float__(value)
+        plain = float.__float__(value)
+        return plain if plain == plain else _canonical_nan(value, plain)
     if issubclass(kind, str):
         return str.__str__(value)
     return NOT_PLAIN
+
+
+#: scalar の subclass の NaN の葉 → その写し（`id(元の葉)` → (元の葉の weakref か元の葉, 写し)）。NaN は identity で
+#: 比べ・hash する唯一の組み込みの値: 同じ元の葉はいつ読んでも同じ写しにする（写しの identity が元の葉の identity に
+#: 従う: 比べる・hash する・key にする読みが、呼び出しの間で双子と同じに振る舞う）。entry は元の葉が消えると消える
+#: （weakref の callback）。weakref を作れない型の葉は entry が生かし、表のほかに元の葉を指すものが無くなった entry を
+#: 掃く（`_sweep_nan_copies`: その葉はもう誰も読めない）: 表の大きさは生きている元の葉の数の 2 倍まで。lock は
+#: 再入できる（callback は GC が lock の中の割り当てで走らせることがある: 同じ thread で取り直す）
+_NAN_COPIES: Dict[int, Tuple[Any, float]] = {}
+_NAN_COPIES_LOCK = threading.RLock()
+_NAN_SWEEP = [_TYPE_FACTS_LIMIT]  # 次に掃く表の大きさ
+
+
+def _canonical_nan(source: Any, fresh: float) -> float:
+    """`source`（NaN の scalar の subclass）の写し。同じ `source` には同じ写しを返す（hook を呼ばない）。"""
+
+    key = id(source)
+    with _NAN_COPIES_LOCK:
+        entry = _NAN_COPIES.get(key)
+        if entry is not None:
+            held = entry[0]
+            if (held() if type(held) is weakref.ref else held) is source:
+                return entry[1]
+        try:
+            held = weakref.ref(source, lambda gone, key=key: _forget_nan(key, gone))
+        except TypeError:
+            held = source  # weakref を作れない型: 写しと一緒に生かす（`_sweep_nan_copies`）
+        if len(_NAN_COPIES) >= _NAN_SWEEP[0]:
+            _sweep_nan_copies()
+        _NAN_COPIES[key] = (held, fresh)
+        return fresh
+
+
+def _sweep_nan_copies() -> None:
+    """表のほかに元の葉を指すものが無い entry（weakref を作れない型の葉）を捨てる（lock の中で呼ぶ）。次に掃くのは表が
+    今の 2 倍になったとき（償却して O(1)）。"""
+
+    for key in list(_NAN_COPIES):
+        entry = _NAN_COPIES.get(key)  # 同じ thread の weakref の callback が先に消していることがある
+        if entry is not None and type(entry[0]) is not weakref.ref and _held_count(entry) <= _HELD_ONLY_BY_ENTRY:
+            del _NAN_COPIES[key]
+    _NAN_SWEEP[0] = max(_TYPE_FACTS_LIMIT, 2 * len(_NAN_COPIES))
+
+
+def _held_count(entry: Tuple[Any, Any]) -> int:
+    """entry の元の葉の参照の数（`sys.getrefcount`。基準は同じ関数で測る: `_HELD_ONLY_BY_ENTRY`）。"""
+
+    return sys.getrefcount(entry[0])
+
+
+#: entry だけが指す object の `_held_count`（import のときに同じ形で測る）
+_HELD_ONLY_BY_ENTRY = _held_count((object(), 0.0))
+
+
+def _forget_nan(key: int, gone: Any) -> None:
+    with _NAN_COPIES_LOCK:
+        entry = _NAN_COPIES.get(key)
+        if entry is not None and entry[0] is gone:
+            del _NAN_COPIES[key]
 
 
 def json_scalar(value: Any) -> Any:
@@ -2344,11 +2740,16 @@ def _exact_tree_read(value: Any, memo: Any = _ACTIVE) -> Tuple[Any, bool]:
 # |---|---|---|---|
 # | 葉の比較の分類（不活性・package の比較・外の code・不透明） | 次に外の code を呼ぶまで | class の名前空間・`__bases__`・instance の `__class__` の書き換え | 分類は使う時点で読む（`_ComparisonScope` の memo は外の code の呼び出しで捨てる）。不活性は比較と hash の dunder が全部 Python の code を呼ばないこと（`in`・set の引きは葉を hash する）。葉のどれかが Python の code を呼び得るなら、exact でない葉を全部包む |
 # | 名前空間の読みが hook を呼ばない | 確かめた名前空間は class が生きている間（書き換えは名前を組み込みの `str` にして置く: `_STR_KEYED_NAMESPACES`） | 組み込みでない key を持つ class を作る（`type()` の dict・`__prepare__`）。storage への直接の書き込みは前提の外 | key が全部組み込みの `str` かを使うたびに C の反復で確かめる。組み込みの `str` でない key（文字列に依らない: 引きは hash の等しい key の `__eq__` を呼ぶ）があればどの名前も決めない（不透明 / `TypeError`） |
-# | 型の事実の表（`package_type` など） | 型の状態が記録したときと同じ間 | 名前空間・`__bases__`・metaclass の書き換え、表の値の中身の書き換え | 引くたびに型の状態（identity の tuple、object は生かす）と、判定が読んだ key の型の MRO の外の class（値の型・入れ子の型: `_Nesting.reads`）の状態を比べ、違えば判定し直す。判定の途中に引いた記録の依存は今の判定の依存へ足す |
+# | 型の事実の表（`package_type` など） | 型の状態が記録したときと同じ間 | 名前空間・`__bases__`・metaclass の書き換え、表の値の中身の書き換え | 引くたびに型の状態（identity の tuple、object は生かす）と、判定が読んだ key の型の MRO の外の class（値の型・入れ子の型: `_Nesting.reads`）の状態と、判定が型・中身を読んだ object（名前空間の値と、それが包む関数・accessor・判定が中を辿った実行環境の関数とその closure の cell・cell の中身・`lru_cache` が呼ぶ関数: `_Nesting.objects`）の identity の外の状態（`_watch`: heap type の instance の `__class__`・組み込みの descriptor の中身・辿った関数の `__code__`・cell の中身）を比べ、違えば判定し直す。判定の途中に引いた記録の依存は今の判定の依存へ足す。`lru_cache` の wrapper は C の struct が呼ぶ関数で判定する（`__wrapped__` は書き換えられる） |
 # | 写しと元が同じ | 外の code が元を変えない間 | 写した容器の元・包まない値・基底型の値で比べる容器の subclass の元の、中身・`__class__`・型の名前空間の変更 | 外の code の呼び出しごとに確かめ（`_CopyFrame`）、変わっていれば判定不能 |
-# | hash が同じ値の間で変わらない | 値と値が持つ葉の object が変わらない間 | （読みが作る object の identity: NaN の hash） | NaN は固定の印で hash する（`hash_tree`） |
+# | hash が同じ値の間で変わらない | 値と値が持つ葉の object が変わらない間 | （読みが作る object の identity: NaN の hash） | NaN は identity で比べ・hash する: exact な NaN は読まずにその object、scalar の subclass の NaN は元の葉ごとに 1 つの写し（`_canonical_nan`: 同じ葉はいつ読んでも同じ写し）。比較・正規化・hash は同じ写しを見る |
+# | 名前の引きだけで決まる型の事実（`lookup_fact`: `_BUILTIN_HASHED`・`_builtin_behaviour`・JSON の protocol） | 引いた名前が同じ object を引く間 | 名前空間・`__bases__` の書き換え、引いた object の `__class__`・descriptor の中身の書き換え | 引くたびに key の型の MRO の identity・引いた (storage, 名前, 見つけた object)・見つけた object 自身の identity の外の状態（`_watch`。計算は見つけた object の中身を読まない）を確かめ、違えば計算し直す。計算の途中に引いた記録の読みは外の計算の読みへ足す |
+# | 名前空間の storage の列（`_PLAIN_MROS`・`_STATIC_NAMESPACES`） | MRO の tuple が同じ object の間 | `__bases__` の書き換え（MRO を作り直す） | 引くたびに MRO の identity を比べる。storage は class が生きている間同じ dict・key は組み込みの `str` のまま（上の行の前提）・組み込みの型の名前空間は変わらない |
+# | JSON の walk の中の型の protocol（`json_encoding._WALK_PROTOCOLS`） | 最も外の walk の間 | （walk の間に class を書き換える code は走らない: walk が呼ぶのは owner の API と、J19 の監査が live な値に許した操作だけをする package の関数） | walk が終われば捨てる（例外でも）。walk の外は引くたびに上の行の確かめ |
+# | instance の `__dict__` を読む descriptor（`_DICT_HOLDERS`） | MRO の tuple が同じ object の間 | `__bases__` の書き換え | metaclass が `type` の class の `__dict__` の entry は作った後に書けも消せもしない（`_fixed_dict_entries`: CPython 3.10 / 3.12 で確かめる test）。そうでない MRO は記録しない。引くたびに MRO の identity を比べる |
 # | 判定不能が確定判定にならない | いつも | helper・`except` の捕捉 | 普通の例外の派生でない。作るときに pair の台帳へ記録（登録した reason `comparison_undecidable`、`blocks_decision`）。名指しの捕捉は分類した場所だけ |
-# | ref の比べる field（owner `core/runtime_ref_record`） | class ごとに最初に読んだ表と同じ間 | `__dataclass_fields__`・`Field.compare` / `repr` の書き換え | 使うたびに表を hook を呼ばずに読み（`dataclass_field_specs`）、最初の表と違えば決めない（比較・hash は判定不能、作るのは `TypeError`） |
+# | ref の比べる field（owner `core/runtime_ref_record`） | 固定した後はずっと（class ごとに最初の使用で固定。自分の表を持たない subclass は親の表の固定を共有） | `__dataclass_fields__`・`Field.compare` / `repr` の書き換え | 書き換えは使わない（固定した表で比べ・hash し・写す: 同じ ref の比べ方と hash は使う間変わらない。PR の D17）。表は固定するときに hook を呼ばずに読み（`dataclass_field_specs`）、読めない表は決めない（比較・hash は判定不能、作るのは `TypeError`） |
+# | dataclass の field の名前（`dataclass_field_names`: owner の外の読み手） | 記録した表の中身と同じ間 | 同上 | 引くたびに表の中身（key・`Field`・種類の slot）を確かめ（`_dataclass_table_state`）、違えば読み直す（今の表に従う） |
 #
 # 前提の外（この契約が守らないもの。破られると分類の根拠が無くなる）: 信頼する関数（package の code・`Enum.__hash__`・
 # 登録した比較）の code object・closure の中身・module の global・interpreter の builtin を書き換えること（code を書いて
@@ -2685,6 +3086,8 @@ class _NamespaceReader:
         if self.static:
             self.raw = namespace
             self.plain = True
+            if _STATIC_NAMESPACES.get(id(klass)) is None and len(_STATIC_NAMESPACES) < _TYPE_FACTS_LIMIT:
+                _STATIC_NAMESPACES[id(klass)] = (klass, _unwrapped(namespace))
             return
         _note_read(klass)
         known = _STR_KEYED_NAMESPACES.get(id(klass))
@@ -2719,6 +3122,9 @@ class _NamespaceReader:
 #: `test_issue242_assumptions`）。組み込みでない key は class を作るときにだけ入る。storage への直接の書き込み
 #: （`gc.get_referents` で得た dict を書く）は前提の外（code の書き換えと同じ: 型の cache も壊す操作）
 _STR_KEYED_NAMESPACES: Dict[int, Tuple[type, dict]] = {}
+#: 組み込みの型（heap type でない）の名前空間の storage（`id(class)` → (class, storage)。class を生かす）。組み込みの型の
+#: 名前空間は書き換えられない（`type.__setattr__` が拒む）・key は組み込みの `str`: `_type_lookup` が直接引く
+_STATIC_NAMESPACES: Dict[int, Tuple[type, dict]] = {}
 
 
 def _namespace_value(klass: type, name: str) -> Any:
@@ -2950,7 +3356,8 @@ class _CopyFrame:
         self.members = list(members)
         self.member_types = tuple(map(type, self.members))
         kinds = {id(kind): kind for kind in self.member_types}
-        self.type_states = [_class_snapshot(kind) for kind in kinds.values()]
+        snapshots = [_class_snapshot(kind) for kind in kinds.values()]
+        self.type_states = [None if snapshot is None else _state_check(snapshot) for snapshot in snapshots]
 
     def _read(self) -> Tuple[Any, ...]:
         lengths = (
@@ -2969,7 +3376,7 @@ class _CopyFrame:
             return False
         if self.members and not all(map(_IS, map(type, self.members), self.member_types)):
             return False  # 包まない値の `__class__` が変わった
-        return all(snapshot is not None and _snapshot_holds(snapshot) for snapshot in self.type_states)
+        return all(check is not None and _state_holds(check) for check in self.type_states)
 
 
 class _CopyFrames(threading.local):
@@ -3289,6 +3696,9 @@ def _resolved_dunder(kind: type, name: str) -> Any:
 
 
 _MISSING_DUNDER = object()
+#: `lookup_fact` の `dict.get` の既定値の列（`map` が名前の数だけ読む）
+_REPEAT_MISSING = itertools.repeat(_MISSING_DUNDER)
+_REPEAT_MRO_READ = itertools.repeat(_MRO_READ)
 
 
 def inert(value: Any) -> bool:
@@ -3545,84 +3955,64 @@ def sorted_trees(items: Any) -> List[Any]:
 def hash_tree(value: Any) -> int:
     """比べる側の契約の hash（`equal` と同じ読み）。返す値の保証:
 
-    - `equal(a, b)` が真なら `hash_tree(a) == hash_tree(b)`。
-    - 同じ値の hash は、値（と値が持つ葉の object）が変わらない間は呼び出しの間で同じ。読みが作った object の identity
-      に依らない: identity で hash する組み込みの値は NaN の float だけで、NaN は固定の印にして hash する（`_NAN`）。
+    - `equal(a, b)` が真なら `hash_tree(a) == hash_tree(b)`。比べると等しい外の object（`__hash__` が同じ値を返す
+      object）とも整合する: hash は読んだ木を組み込みの `hash` で求め、葉の hash はその葉自身の hash。
+    - 同じ値の hash は、値（と値が持つ葉の object）が変わらない間は呼び出しの間で同じ: identity で hash する組み込みの
+      値は NaN の float だけで、exact な NaN はその object の hash、scalar の subclass の NaN は読みの写し（同じ元の葉には
+      いつも同じ写し: `_canonical_nan`）の hash。
     - scalar の subclass の葉は基底型の値で hash する（subclass の `__hash__` を呼ばない）。外の object の葉は、その
       object 自身の `__hash__`（戻り値は C が基底型の値で読む: 双子と同じ呼び出し）。
 
-    hash の値そのものは双子の hash と同じとは限らない（NaN を含む値）。hash できない値は `TypeError`（組み込みの
+    hash の値そのものは双子の hash と同じとは限らない（scalar の subclass の NaN の写しは双子の写しと別の object）。hash できない値は `TypeError`（組み込みの
     `hash` と同じ）、比べ方・hash が基底型と違う容器・読めない値は `UndecidableComparison`。
     """
 
-    if type(value) is tuple and _within_scan(tuple.__len__(value)) and _flat_exact_without_nan(value):
-        # よくある形（ref の比べる値の tuple）: exact な scalar とその tuple だけの木は読んでも同じ木（`exact_tree` は
-        # 写さない）で、NaN も無い: そのまま組み込みの hash
-        return hash(value)
+    if type(value) is tuple and _within_scan(tuple.__len__(value)) and _flat_exact(value):
+        return hash(value)  # よくある形（ref の比べる値の tuple）: exact な scalar とその tuple だけの木は読んでも同じ木
     tree = _compared_tree(value)
     if tree is not value:
         _comparison_shape(value)  # hash を変えた容器の subclass を基底型の値で hash しない
-    return hash(_nan_free(tree))
+    _require_hashed_lookups(tree)  # 組み込みの `hash` が葉の型の `__hash__` を名前で引く: 引きが hook を呼ばないこと
+    return hash(tree)
 
 
-def _flat_exact_without_nan(tree: tuple) -> bool:
-    """tuple の要素が全部 NaN でない exact な scalar か、その tuple か（入れ子は 1 段だけ。外の長さは呼ぶ側が上限と
-    比べた）。"""
+def _flat_exact(tree: tuple) -> bool:
+    """tuple の要素が全部 exact な scalar か、その tuple か（入れ子は 1 段だけ。外の長さは呼ぶ側が上限と比べた）。exact な
+    NaN もそのまま（その object の hash: 読みは写さない）。"""
 
     for item in tuple.__iter__(tree):
         kind = type(item)
-        if item is None or kind is int or kind is str or kind is bool or (kind is float and item == item):
+        if item is None or kind is int or kind is str or kind is bool or kind is float:
             continue
         if kind is not tuple or not _within_scan(tuple.__len__(item)):
             return False
         for inner in tuple.__iter__(item):
             inner_kind = type(inner)
-            if not (
-                inner is None or inner_kind is int or inner_kind is str or inner_kind is bool
-                or (inner_kind is float and inner == inner)
-            ):
+            if not (inner is None or inner_kind is int or inner_kind is str or inner_kind is bool or inner_kind is float):
                 return False
     return True
 
 
-#: hash で NaN の float の代わりに置く印（NaN の hash は object の identity: 読みが作った NaN は呼ぶたびに違う）
-_NAN = ("live_values.nan",)
-
-
-def _nan_free(tree: Any) -> Any:
-    """hash する木の NaN の float を `_NAN` にした木（tuple / frozenset を作り直す。NaN が無ければ同じ object）。
-
-    作り直す frozenset の要素は exact な scalar・印・元の要素（hash は作る前と同じ値: 外の object の `__hash__` は
-    元の set を作ったときと同じ規則で呼ばれる）。list / dict / set は hash できない（`hash` が `TypeError`）ので辿らない。
-    """
+def _require_hashed_lookups(tree: Any) -> None:
+    """hash する木の葉（tuple / frozenset の中の葉）の型の `__hash__` の引きが、名前空間の key の hook を呼ばないこと
+    （`_require_named_lookup`）。list / dict / set は hash できない（`hash` が `TypeError`）ので辿らない。"""
 
     read = _StorageRead(_COMPARISON_NODES, traversal=True)
-    done: Dict[int, Any] = {}
+    seen: set = set()
     alive: List[Any] = [tree]
-    stack: List[Tuple[Any, bool]] = [(tree, False)]
-    while stack:
-        node, leaving = stack.pop()
+    pending = [tree]
+    while pending:
+        node = pending.pop()
         kind = type(node)
-        if leaving:
-            items = list(kind.__iter__(node))
-            rebuilt = [_NAN if type(item) is float and item != item else done.get(id(item), item) for item in items]
-            if any(new is not old for new, old in zip(rebuilt, items)):
-                if kind is frozenset and not all(_rebuildable(item) for item in rebuilt if item is not _NAN):
-                    # 作り直すと要素の hash・比較を双子に無い時点で呼ぶ（比較の戻り値を組み込みの code が真偽で読む）
-                    raise undecidable("a frozenset holding NaN and values whose class may change is not hashed")
-                done[id(node)] = tuple(rebuilt) if kind is tuple else frozenset(rebuilt)
-            continue
-        if (kind is tuple or kind is frozenset) and id(node) not in done:
-            done[id(node)] = node
+        if kind is tuple or kind is frozenset:
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
             alive.append(node)
             read.admit(kind.__len__(node))
-            stack.append((node, True))
-            stack.extend((item, False) for item in kind.__iter__(node))
-        elif not (kind is tuple or kind is frozenset):
+            pending.extend(kind.__iter__(node))
+        else:
             _require_named_lookup(node, "__hash__")  # `hash` は葉の型の `__hash__` を名前で引く
-    if type(tree) is float and tree != tree:
-        return _NAN
-    return done.get(id(tree), tree)
 
 
 def inert_key(value: Any) -> Any:
@@ -3712,11 +4102,7 @@ def builtin_hashed_scalar(value: Any) -> bool:
 
     kind = type(value)
     if type(kind) is type:
-        known = _BUILTIN_HASHED.get(kind)
-        if known is None:
-            known, witness = _witnessed(_builtin_hashed_type, kind)
-            _BUILTIN_HASHED.record(kind, known, witness)
-        return known
+        return lookup_fact(_BUILTIN_HASHED, kind, _builtin_hashed_type, kind)
     return _plain_metatype(kind) and _builtin_hashed_type(kind)
 
 
@@ -3891,12 +4277,38 @@ def _dict_holder(kind: type) -> Any:
     `__dict__`（型 object 用）を instance に当てない。
     """
 
-    known = _DICT_HOLDERS.get(kind, _ABSENT) if type(kind) is type else _ABSENT
-    if known is _ABSENT:
-        known, witness = _witnessed(_dict_holder_of, kind)
-        if type(kind) is type:
-            _DICT_HOLDERS.record(kind, known, witness)
-    return known
+    entry = _DICT_HOLDERS.get(id(kind))
+    if (
+        entry is not None and entry[0] is kind and _TYPE_MRO.__get__(kind) is entry[1]
+        and _LOOKUPS.active is None and not _NESTING.active
+    ):
+        return entry[2]
+    # 読みを記録している計算・型の信頼の判定の途中は引き直す（名前の引きを記録・依存に足す）
+    mro = _TYPE_MRO.__get__(kind)
+    holder = _dict_holder_of(kind)
+    if _TYPE_MRO.__get__(kind) is mro and _fixed_dict_entries(mro):
+        if len(_DICT_HOLDERS) >= _TYPE_FACTS_LIMIT:
+            _DICT_HOLDERS.clear()
+        _DICT_HOLDERS[id(kind)] = (kind, mro, holder)
+    return holder
+
+
+def _fixed_dict_entries(mro: Tuple[type, ...]) -> bool:
+    """MRO のどの class の名前空間の `__dict__` の entry も、class を作った後に変えられないか（`_DICT_HOLDERS` の前提）。
+
+    metaclass が `type` の class は `__dict__` を書けも消せもしない（`setattr` / `type.__setattr__` / `delattr` は metaclass
+    の `type.__dict__["__dict__"]`（書けない data descriptor）に当たって `AttributeError`。`__class__` も `type` から変え
+    られない）。組み込みの型の名前空間は変わらない。metaclass が `type` でない heap class（metaclass が `__dict__` を
+    descriptor でない値で持てば、`setattr` は class の名前空間に書く）は前提の外: 記録しない。
+    """
+
+    if not _within_scan(tuple.__len__(mro)):
+        return False
+    flags = _TYPE_FLAGS.__get__
+    for klass in mro:
+        if type(klass) is not type and flags(klass) & _HEAP_TYPE:
+            return False
+    return True
 
 
 def _dict_holder_of(kind: type) -> Any:
@@ -3908,7 +4320,10 @@ def _dict_holder_of(kind: type) -> Any:
     ) else None
 
 
-_DICT_HOLDERS = _LookupFactTable()
+#: 型ごとの `_dict_holder` の結果（`id(型)` → (型, MRO, descriptor)）。結果は MRO の class の名前空間の `__dict__` の entry
+#: だけで決まり、その entry は class を作った後に変わらない（`_fixed_dict_entries`）: MRO の tuple が同じ object の間
+#: （`__bases__` の書き換えは MRO を作り直す）使う。記録は型と MRO を生かす（`id` を再利用させない）
+_DICT_HOLDERS: Dict[int, Tuple[type, Tuple[type, ...], Any]] = {}
 
 
 def _in_mro(klass: Any, kind: type) -> bool:
@@ -3927,7 +4342,14 @@ def instance_state(value: Any, name: str, default: Any = _MISSING) -> Any:
     """instance の `__dict__` か slot に在る値（descriptor・`__getattr__` を呼ばない）。"""
 
     kind = type(value)
-    offset_holder = _dict_holder(kind)
+    entry = _DICT_HOLDERS.get(id(kind))
+    if (
+        entry is not None and entry[0] is kind and _TYPE_MRO.__get__(kind) is entry[1]
+        and _LOOKUPS.active is None and not _NESTING.active
+    ):
+        offset_holder = entry[2]  # `_dict_holder` の記録（同じ確かめ）
+    else:
+        offset_holder = _dict_holder(kind)
     if offset_holder is not None:
         state = offset_holder.__get__(value, kind)
         if type(state) is dict:
@@ -4126,7 +4548,7 @@ def dataclass_field_names(value: Any) -> Optional[Tuple[str, ...]]:
         return None
     if not _plain_metatype(kind):
         return _dataclass_field_names(kind)
-    # 型ごとに 1 度だけ（field の表は class を作るときに決まる）
+    # 型ごとに記録し、引くたびに表の中身を確かめる（`_DATACLASS_FIELD_NAMES` の extra: 今の表に従う。owner の固定とは別）
     known = _DATACLASS_FIELD_NAMES.get(kind, _ABSENT)
     if known is _ABSENT:
         known = _DATACLASS_FIELD_NAMES[kind] = _dataclass_field_names(kind)
@@ -4151,7 +4573,11 @@ def _dataclass_table_state(kind: type) -> Tuple[Any, List[Any]]:
         slot.__get__(field, dataclasses.Field) if type(field) is dataclasses.Field and slot is not None else None
         for _name, field in items
     )
-    return (id(table), tuple(id(item) for pair in items for item in pair), tuple(map(id, kinds))), [table, items, kinds]
+    field_types = tuple(type(field) for _name, field in items)  # `Field` は heap type: `__class__` を変えられる
+    return (
+        (id(table), tuple(id(item) for pair in items for item in pair), tuple(map(id, kinds)), tuple(map(id, field_types))),
+        [table, items, kinds, field_types],
+    )
 
 
 _DATACLASS_FIELD_NAMES = _TypeFactTable(_dataclass_table_state)
@@ -4354,11 +4780,7 @@ def _builtin_behaviour(kind: type, bases: Tuple[type, ...], names: Tuple[str, ..
     table = _BUILTIN_BEHAVIOUR.get(id(bases))
     if table is None or table[0] is not bases:
         table = _BUILTIN_BEHAVIOUR[id(bases)] = (bases, _LookupFactTable())  # 基底型の組は module の定数（数は固定）
-    known = table[1].get(kind)
-    if known is None:
-        known, witness = _witnessed(_same_behaviour, kind, base, names)
-        table[1].record(kind, known, witness)
-    return known
+    return lookup_fact(table[1], kind, _same_behaviour, kind, base, names)
 
 
 def _same_behaviour(kind: type, base: type, names: Tuple[str, ...]) -> bool:
@@ -4710,6 +5132,8 @@ __all__ = [
     "package_type",
     "trust_code_directory",
     "trusted_hash",
+    "LookupFactTable",
+    "lookup_fact",
     "plain_attribute_lookup",
     "dataclass_field_specs",
     "class_namespace_value",

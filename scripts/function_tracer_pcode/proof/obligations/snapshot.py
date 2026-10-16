@@ -17,6 +17,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     identity_key_of,
     is_json_record,
     materialize,
+    protocol_scope,
 )
 from scripts.function_tracer_pcode.core.live_values import (
     metered_storage_reads,
@@ -312,11 +313,13 @@ class SnapshotFingerprintCodec:
         は walker が同じ `budget` で数えながら作る（作ってから数えない）。
         """
 
-        if budget is None:
-            return cls._freeze_unmetered(value)
-        # 値の storage の読みも固定の上限を超えた分は同じ予算へ（超えればその予算の超過）
-        with metered_storage_reads(budget):
-            return cls._freeze(value, _FreezeMeter(budget))
+        # 型の protocol の判定は写す間 1 度（J19 の監査の entry root: `protocol_scope`）
+        with protocol_scope():
+            if budget is None:
+                return cls._freeze_unmetered(value)
+            # 値の storage の読みも固定の上限を超えた分は同じ予算へ（超えればその予算の超過）
+            with metered_storage_reads(budget):
+                return cls._freeze(value, _FreezeMeter(budget))
 
     @classmethod
     def _freeze_unmetered(cls, value: Any) -> Any:

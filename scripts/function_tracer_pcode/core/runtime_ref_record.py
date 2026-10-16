@@ -90,9 +90,9 @@ from scripts.function_tracer_pcode.core.live_values import (
     trusted_hash, type_name, verified_tree_holder as _holder,
 )
 
-#: `id(class)` → (class, field の表の読み（`dataclass_field_specs`）, 写す field の (名前, 分類) の列)。注釈は最初の構築で
-#: 解決し、表の読みが記録と違えば解決し直す（外の code は field の表を書き換えられる）。型を dict の key にしない（型の
-#: metaclass の `__hash__` / `__eq__` を呼ばない）。entry が型を持つので `id` は再利用されない
+#: `id(class)` → (class, 固定した field の表（`_field_table`）, 写す field の (名前, 分類) の列)。注釈は固定した表ごとに 1 度
+#: だけ解決する（表の書き換えは使わない: `_field_table`）。型を dict の key にしない（型の metaclass の `__hash__` /
+#: `__eq__` を呼ばない）。entry が型を持つので `id` は再利用されない
 _FIELD_KINDS: Dict[int, Tuple[type, Any, Tuple[Tuple[str, str], ...]]] = {}
 
 #: この decorator が置いた `__post_init__` / `__init__` → 包んだ元の関数（無ければ `None`）。
@@ -727,7 +727,7 @@ def _ref_repr(self: Any) -> str:
         try:
             specs = _field_specs(cls)
         except TypeError:
-            return type_name(cls) + "(...)"  # field の表を組み込みの code だけで読めない・最初の表と違う
+            return type_name(cls) + "(...)"  # field の表を組み込みの code だけで読めない
         parts = [
             name + "=" + scalar_repr(object.__getattribute__(self, name))
             for name, _compare, shown in specs if shown

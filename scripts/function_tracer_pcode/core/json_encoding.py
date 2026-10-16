@@ -51,7 +51,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from json.encoder import encode_basestring, encode_basestring_ascii
-from typing import Any, Callable, Iterable, Iterator, List, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
 from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.canonical_digest import STRING_CHUNK
@@ -389,11 +389,23 @@ def _walkable_items(items: Any) -> bool:
 
 
 def _walk_iter(items: Any) -> Iterator[Any]:
-    """walker が辿ってよい列の iterator（それ以外は `TypeError`。上書きした `__iter__` を呼ばない）。"""
+    """walker が辿ってよい列の iterator（それ以外は `TypeError`。上書きした `__iter__` を呼ばない）。package の generator は
+    進めるたびに walk の protocol の記録を捨てる（`_forgetting`: generator の code は J19 の監査の root とは限らない）。"""
 
     if not _walkable_items(items):
         raise TypeError(f"{type_name(type(items))} is not a builtin iterable")
+    if package_generator(items) and not _audited(items):
+        return _forgetting(items)
     return iter(items)
+
+
+def _record_items(json_items: Any, item: Any) -> Iterator[Any]:
+    """record の `json_items(item)` の列。`json_items` 自身の generator（J19 の監査の root の code）はそのまま進める。"""
+
+    items = json_items(item)
+    if type(items) is types.GeneratorType and items.gi_code is json_items.__code__:
+        return items
+    return _walk_iter(items)
 
 
 def _is_one_shot(source: Any) -> bool:
@@ -418,26 +430,128 @@ def inline(*pairs: Tuple[Any, Any]) -> _Source:
 
 
 
-def _record_protocol(kind: type, name: str) -> Any:
-    """型の MRO が持つ protocol の method（`json_items` / `__json_tree__`）。package の code の関数だけ。
+def _record_protocols(kind: type) -> Tuple[Any, ...]:
+    """型の MRO が持つ protocol の method の組（`_PROTOCOL_NAMES` の順）。package の code の関数だけ（無ければ `None`）。
 
-    信頼は関数の code の file（書き換えられない）で決める。型の `__module__` は書き換えられるので使わない。
+    信頼は関数の code の file（書き換えられない）で決める。型の `__module__` は書き換えられるので使わない。型の信頼の判定
+    （`package_type`）と名前の引きの記録（引くたびに引いた名前を確かめる）は型ごとに 1 度ずつ。
+
+    protocol の scope の中（`protocol_scope`: walk と、J19 の監査の entry root）は、最も外の scope の間、型ごとに 1 度だけ
+    判定する（`_WALK_PROTOCOLS`）。記録は scope の中で owner の API と、J19 の監査（`tests/unit/_live_flow_audit.py` の
+    `protocol_roots` / `ENTRY_ROOTS`）が live な値に許した操作だけをする package の関数（record の protocol・source
+    converter・reducer・entry root の本体と呼び先）だけが走る間だけ使う: その間は外の code が走らず class は変わらない
+    （`_Nesting` の判定と同じ前提。finalizer・signal handler が class を書き換えることは `core/live_values` の契約の外）。
+    監査の root でない package の code（`audited_generator` で宣言していない package の generator・identity key の
+    `stable_key()` / `to_key()`）を進めるたびに捨てる（`_forget_walk_protocols`）。scope の外は引くたびに確かめる。
     """
 
+    memo = _WALK_PROTOCOLS.get()
+    if memo is not None:
+        known = memo.get(id(kind))
+        if known is not None and known[0] is kind:
+            return known[1]
     if not live_values.package_type(kind):
-        # （hash・比較を上書きした metaclass の型もここで外れる: 下の cache の key にしない）
-        return None
-    key = (kind, name)
-    known = _RECORD_PROTOCOLS.get(key, _NO_PROTOCOL)
-    if known is _NO_PROTOCOL:
+        # （hash・比較を上書きした metaclass の型もここで外れる: 下の記録の key にしない）
+        found = _NO_PROTOCOLS
+    else:
+        found = live_values.lookup_fact(_RECORD_PROTOCOLS, kind, _protocols_of, kind)
+    if memo is not None:
+        memo[id(kind)] = (kind, found)  # 型を生かす（walk の間 `id` を再利用させない）
+    return found
+
+
+def _record_protocol(kind: type, name: str) -> Any:
+    """型の MRO が持つ protocol の method（`_PROTOCOL_NAMES` の 1 つ: `_record_protocols`）。"""
+
+    return _record_protocols(kind)[_PROTOCOL_INDEX[name]]
+
+
+class protocol_scope:
+    """型の protocol の判定を scope の間 1 度にする（`_record_protocols`）。入れ子は最も外の scope の記録を使う。
+
+    開けてよいのは walk（`_Walk.run`）と、J19 の監査の entry root（`_live_flow_audit.ENTRY_ROOTS`）の関数の本体だけ
+    （`test_issue242_assumptions` の static test が場所を固定する）: scope の中で走る package の code は監査が live な値に
+    許した操作だけをする。
+    """
+
+    __slots__ = ("token",)
+
+    def __enter__(self) -> "protocol_scope":
+        self.token = _WALK_PROTOCOLS.set({}) if _WALK_PROTOCOLS.get() is None else None
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        if self.token is not None:
+            _WALK_PROTOCOLS.reset(self.token)
+
+
+def _forget_walk_protocols() -> None:
+    """walk の protocol の記録を捨てる（J19 の監査の root でない package の code を呼んだ後: `_record_protocols`）。"""
+
+    memo = _WALK_PROTOCOLS.get()
+    if memo:
+        memo.clear()
+
+
+def audited_generator(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """`fn`（package の generator 関数）を、J19 の監査が本体を辿る関数として宣言する: walker はその generator を進めても
+    protocol の scope の記録を捨てない（`_forgetting`）。宣言した関数が監査の辿った関数（`_live_flow_audit.audit` の
+    analyzed）にあることは `test_issue242_assumptions` が確かめる（監査の外の generator を宣言すれば落ちる）。"""
+
+    code = getattr(fn, "__code__", None) if type(fn) is types.FunctionType else None
+    if code is None or not live_values.package_function(fn) or not code.co_flags & _CO_GENERATOR:
+        raise TypeError("an audited generator is a package generator function")
+    _AUDITED_GENERATORS[id(code)] = code
+    return fn
+
+
+#: `audited_generator` で宣言した generator 関数の code（`id(code)` → code: identity で確かめる）
+_AUDITED_GENERATORS: Dict[int, Any] = {}
+_CO_GENERATOR = 0x20  # `inspect.CO_GENERATOR`
+
+
+def _audited(generator: Any) -> bool:
+    """package の generator の code が、監査が本体を辿る関数のものか（`audited_generator`）。"""
+
+    code = generator.gi_code
+    return _AUDITED_GENERATORS.get(id(code)) is code
+
+
+def _forgetting(generator: Any) -> Iterator[Any]:
+    """値の中の package の generator を 1 要素ずつ進め、進めるたびに walk の protocol の記録を捨てる（generator の code は
+    J19 の監査の root ではない）。"""
+
+    try:
+        for child in generator:
+            _forget_walk_protocols()
+            yield child
+    finally:
+        _forget_walk_protocols()
+
+
+def _protocols_of(kind: type) -> Tuple[Any, Any]:
+    found = []
+    for name in _PROTOCOL_NAMES:
         method = type_attribute(kind, name)
-        known = _RECORD_PROTOCOLS[key] = method if live_values.package_function(method) else None
-    return known
+        found.append(method if live_values.package_function(method) else None)
+    return tuple(found)
 
 
-#: 型と名前ごとの `_record_protocol` の結果（package の型だけ）
-_RECORD_PROTOCOLS: dict = {}
-_NO_PROTOCOL = object()
+#: owner が型から引く protocol の名前（`_record_protocols` の組の順。先頭 2 つが record の判定に使う名前）: walker と
+#: sized leaf の protocol と、producer の identity key（`identity_key_of`）。protocol を足すときはここに足す
+_PROTOCOL_NAMES = (
+    "json_items",
+    "__json_tree__",
+    "__json_tree_bytes__",
+    "__json_tree_metered__",
+    "__json_identity__",
+    "stable_key",
+    "to_key",
+)
+_PROTOCOL_INDEX = {name: index for index, name in enumerate(_PROTOCOL_NAMES)}
+_NO_PROTOCOLS = (None,) * len(_PROTOCOL_NAMES)
+#: 型ごとの `_record_protocols` の結果（package の型だけ。引くたびに引いた名前を確かめる）
+_RECORD_PROTOCOLS = live_values.LookupFactTable()
 
 
 def protocol_method(value: Any, name: str) -> Any:
@@ -453,7 +567,8 @@ def is_json_record(value: Any) -> bool:
     """walker が辿れる object（package の型の `json_items()` を持つ record か、sized leaf）か。"""
 
     kind = type(value)
-    return _record_protocol(kind, "json_items") is not None or _record_protocol(kind, "__json_tree__") is not None
+    protocols = _record_protocols(kind)
+    return protocols[0] is not None or protocols[1] is not None
 
 
 def raw(value: Any) -> _Source:
@@ -863,6 +978,10 @@ def max_rows_within(max_bytes: int, row_min: int, policy: Optional["JsonEncoding
 # ---------------------------------------------------------------------------
 
 
+#: 最も外の `protocol_scope` の間の、型ごとの `_record_protocols` の結果（`id(型)` → (型, 結果)。scope の外は `None`）
+_WALK_PROTOCOLS: "contextvars.ContextVar[Optional[Dict[int, Tuple[type, Tuple[Any, ...]]]]]" = contextvars.ContextVar(
+    "json_encoding_walk_protocols", default=None,
+)
 #: いま走っている walk の作業量（`_Walk.run` の間だけ）。その間に作った `JsonBudget` は子になる
 _ACTIVE_WORK: "contextvars.ContextVar[Optional[JsonBudget]]" = contextvars.ContextVar(
     "json_encoding_active_work", default=None,
@@ -1795,11 +1914,22 @@ def identity_key_of(value: Any, *, names: Tuple[str, ...] = ("stable_key", "to_k
     """
 
     kind = type(value)
+    protocols = _record_protocols(kind)  # 型の `__dict__` の package の関数だけ（hook を呼ばない）
     for name in names:
-        # 型の `__dict__` の関数だけ（metaclass の hook・instance の `__getattr__` を呼ばない）
-        method = type_attribute(kind, name)
-        if live_values.package_function(method) and live_values.package_type(kind):
-            return True, method(value)
+        index = _PROTOCOL_INDEX.get(name)
+        if index is not None:
+            method = protocols[index]
+        else:
+            # 表に無い名前: 引くたびに型から引き、型を確かめる（`_record_protocols` と同じ規則）
+            method = type_attribute(kind, name)
+            if not (live_values.package_function(method) and live_values.package_type(kind)):
+                method = None
+        if method is not None:
+            try:
+                return True, method(value)
+            finally:
+                # identity の owner（#194）の code を呼んだ（J19 の root ではない）: 返っても例外でも記録を捨てる
+                _forget_walk_protocols()
     return False, None
 
 
@@ -2445,15 +2575,16 @@ class _Walk:
             return
         if builtin_iterator(item) or package_generator(item):
             # 組み込みの容器の iterator・package の generator は遅延配列: 1 要素ずつ引き出す
-            # （pure layer の record は source の構成子を import できないので、これで列を渡す）
-            self.push("list", item, parent, key, item, build=build)
+            # （pure layer の record は source の構成子を import できないので、これで列を渡す。package の generator は
+            # walk の protocol の記録を捨てながら進める: `_forgetting`）
+            self.push("list", _walk_iter(item) if package_generator(item) else item, parent, key, item, build=build)
             return
-        json_items = _record_protocol(kind, "json_items")
+        json_items, json_tree = _record_protocols(kind)[:2]
         if json_items is not None:
             # package の型の `json_items`（record の protocol。型の関数を直接呼ぶ）
-            self.push("dict", _walk_iter(json_items(item)), parent, key, item, build=build)
+            self.push("dict", _record_items(json_items, item), parent, key, item, build=build)
             return
-        if _record_protocol(kind, "__json_tree__") is not None:
+        if json_tree is not None:
             built, size = self.budget.tree(item, build=build)
             if self.token_sink is not None:
                 self.token("t" + protocol_method(item, "__json_identity__")(item))
@@ -2600,7 +2731,7 @@ class _Walk:
             if not _walkable_items(item.items):
                 # 組み込みの振る舞いでない iterable（上書きした `__iter__`）は辿らない
                 self.reject(f"{type_name(type(item.items))} is not a builtin iterable")
-            self.push("list", iter(item.items), parent, key, item, build=build, fn=item.fn)
+            self.push("list", _walk_iter(item.items), parent, key, item, build=build, fn=item.fn)
         elif kind is _Flatten:
             self.push("list", self._flat_elements(item), parent, key, item, build=build)
         elif kind is _MappingOf:
@@ -2773,7 +2904,7 @@ class _Walk:
         try:
             # 値の storage の読み（key の検査・instance の状態）も固定の上限を超えた分はこの walk の作業量へ
             # 数える（組み込みのままの容器は要素ごとに数えて辿るので、検査の要る容器も同じ意味にする）
-            with live_values.metered_storage_reads(self.effort):
+            with live_values.metered_storage_reads(self.effort), protocol_scope():
                 self.enter(source, holder, 0, self.build)
                 self.drain_to(0)
         finally:
@@ -3025,6 +3156,8 @@ __all__ = [
     "PreparedJson",
     "RESULT_JSON_POLICY",
     "identity_key_of",
+    "protocol_scope",
+    "audited_generator",
     "bounded_repr",
     "builtin_str",
     "exception_text",

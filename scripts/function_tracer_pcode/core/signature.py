@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Mapping, TYPE_CHECKING, Tuple
 from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core import read_limits
-from scripts.function_tracer_pcode.core.json_encoding import as_dict, each, mapping_of, materialize, source_converter
+from scripts.function_tracer_pcode.core.json_encoding import (
+    as_dict, audited_generator, each, mapping_of, materialize, source_converter,
+)
 from scripts.function_tracer_pcode.core.runtime_refs._reading import items as _items
 
 if TYPE_CHECKING:
@@ -493,6 +495,7 @@ def parameter_descriptor_source(param: Dict[str, Any]) -> Any:
     return pairs_of(_parameter_descriptor_pairs(param), _parameter_value_source)
 
 
+@audited_generator
 def _parameter_descriptor_pairs(param: Any):
     """`param` の (key, 値) のうち `data_type_obj` 以外（mapping は owner の API で 1 組ずつ読む）。"""
 

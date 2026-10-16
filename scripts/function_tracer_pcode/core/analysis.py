@@ -19,6 +19,7 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     RESULT_JSON_POLICY,
     as_dict,
     as_list,
+    audited_generator,
     each,
     identity_key_of,
     materialize,
@@ -1725,6 +1726,7 @@ class FunctionReturnAnalysis:
     def json_items(self):
         return self._json_items(include_derived_proof=True)
 
+    @audited_generator
     def _json_items(self, *, include_derived_proof: bool):
         """表現の schema（1 つだけ）。値は source で渡し、walker が 1 要素ずつ写す。"""
 

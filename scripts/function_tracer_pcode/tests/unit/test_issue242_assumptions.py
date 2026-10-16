@@ -832,7 +832,8 @@ def test_a_leaf_reclassified_after_a_callback_never_receives_a_read_copy():
 
 
 def _foreign_function():
-    return eval(compile("lambda self: 1", "<foreign>", "eval"))  # noqa: S307 - 外の code（package の外の file 名）
+    # 外の code（package の外の file 名）。method・`__call__`・staticmethod のどれとしても呼べる
+    return eval(compile("lambda self=None, *args: 'FOREIGN'", "<foreign>", "eval"))  # noqa: S307
 
 
 def _trusted_function():
@@ -2043,3 +2044,905 @@ def test_members_of_one_enum_are_classified_one_by_one():
     got = _run(lambda: live_values.contains(box, item))
     assert dict(HOOK_CALLS) == {}
     assert got in (expected, ("undecidable",))
+
+
+# ---------------------------------------------------------------------------
+# 第 9 回: 判定が読んだ値の状態（型・組み込みの descriptor の中身）と、NaN の hash
+# ---------------------------------------------------------------------------
+
+
+def test_package_type_follows_the_class_of_a_namespace_value():
+    """反例（第 9 回 P1）: 名前空間の値の identity が同じでも、その `__class__` を外の descriptor の型にすれば、記録した
+    判定を使わない（判定は値の型を読む）。"""
+
+    class Plain:
+        pass
+
+    class Descriptor:
+        __get__ = _foreign_function()
+
+    class Holder:
+        tag = Plain()
+
+    assert live_values.package_type(Holder) is True
+    Holder.__dict__["tag"].__class__ = Descriptor
+    expected = _fresh_package_type(lambda: type("Holder", (), {"__module__": __name__, "tag": Holder.__dict__["tag"]}))
+    assert expected is False
+    assert live_values.package_type(Holder) is expected
+
+
+@pytest.mark.parametrize("kind", ["property", "property_subclass", "staticmethod", "classmethod"])
+def test_package_type_follows_a_descriptor_reinitialised_in_place(kind):
+    """組み込みの descriptor（`property` / `staticmethod` / `classmethod`）は `__init__` を呼び直すと中身を差し替えられる
+    （identity は同じ）: 記録した判定はその中身も確かめる。"""
+
+    def trusted(*args):
+        return 1
+
+    make = {
+        "property": property,
+        "property_subclass": live_values.readable_property,  # package の property の subclass（heap type）
+        "staticmethod": staticmethod,
+        "classmethod": classmethod,
+    }[kind]
+
+    class Holder:
+        attr = make(trusted)
+
+    assert live_values.package_type(Holder) is True
+    descriptor = Holder.__dict__["attr"]
+    type(descriptor).__init__(descriptor, _foreign_function())
+    expected = _fresh_package_type(lambda: type("Holder", (), {"__module__": __name__, "attr": descriptor}))
+    assert expected is False
+    assert live_values.package_type(Holder) is expected
+
+
+def test_a_ref_field_read_through_a_descriptor_swapped_in_after_judgement_is_not_trusted():
+    """反例（第 9 回 P1 の end-to-end）: ref の class の属性の値の class を判定の後で外の descriptor にしても、ref は登録した
+    比較の分類のまま比べられない（記録した `package_type` を使わない）。"""
+
+    from scripts.function_tracer_pcode.core.runtime_refs.locations import AddressValueRef
+
+    left, right = AddressValueRef(address_offset=1), AddressValueRef(address_offset=2)
+    held = object.__new__(type("Plain", (), {"__module__": __name__}))
+    original = AddressValueRef.__dict__.get("symbol_name", _MISSING_ATTR)
+    try:
+        type.__setattr__(AddressValueRef, "probe_value", held)
+        assert live_values._leaf_trust(left) == live_values._CALLS  # 判定を記録する
+        namespace = {}
+        exec(compile("class Field:\n    def __get__(self, obj, owner=None):\n        return 1\n", "<foreign>", "exec"), namespace)
+        held.__class__ = namespace["Field"]
+        assert live_values._leaf_trust(left) == live_values._FOREIGN
+        HOOK_CALLS.clear()
+        assert _run(lambda: live_values.equal({1: left}, {1: right})) in (("value", False), ("undecidable",))
+        assert dict(HOOK_CALLS) == {}
+    finally:
+        type.__delattr__(AddressValueRef, "probe_value")
+        assert AddressValueRef.__dict__.get("symbol_name", _MISSING_ATTR) is original
+
+
+_MISSING_ATTR = object()
+
+
+class _NanPartner:
+    """float の NaN `n` と等しく、hash は `hash(n)` の外の object（main の dataclass の `==` / hash と整合する）。"""
+
+    def __init__(self, nan):
+        self.nan = nan
+
+    def __eq__(self, other):
+        return other is self.nan or other is self
+
+    def __hash__(self):
+        return hash(self.nan)
+
+
+def test_equal_refs_with_a_nan_and_a_value_equal_to_it_hash_alike():
+    """反例（第 9 回 P2）: `a == b` が真なら同じ hash（dict / set で同じ値）。NaN の hash を固定の印にすると、NaN と
+    等しいと言う外の object（hash は `hash(n)`）を持つ ref と食い違う。"""
+
+    from scripts.function_tracer_pcode.core.runtime_refs.loops import LoopSummaryRef
+    from scripts.function_tracer_pcode.tests.fixtures.runtime_ref_golden import corpus
+
+    nan = float("nan")
+    base = corpus.BASES[LoopSummaryRef]()  # 他の field は同じ object を共有する
+    left = LoopSummaryRef(**{**base, "start_expr": nan})
+    right = LoopSummaryRef(**{**base, "start_expr": _NanPartner(nan)})
+    assert _run(lambda: left == right) == ("value", True)  # main の dataclass の `==` と同じ（`_NanPartner` が等しいと言う）
+    assert hash(left) == hash(right)
+    assert right in {left: "value"} and left in {right: "value"}
+    assert live_values.equal((nan, 1), (_NanPartner(nan), 1)) is True
+    assert live_values.hash_tree((nan, 1)) == live_values.hash_tree((_NanPartner(nan), 1))
+
+
+def test_nan_leaves_hash_by_the_leaf_as_held():
+    """NaN の葉の hash は持っている葉の identity（exact な float はその hash、scalar の subclass の NaN は基底型の slot の
+    hash）: 呼び出しの間で同じで、読みが作る写しの identity に依らない。"""
+
+    held = LiarFloat(float("nan"))
+    value = (held, 1)
+    first = live_values.hash_tree(value)
+    _churn()
+    assert live_values.hash_tree(value) == first == live_values.hash_tree((held, 1))
+    assert first == hash((float.__hash__(held), 1)) or first == live_values.hash_tree(value)
+    nan = float("nan")
+    assert live_values.hash_tree((nan, 1)) == hash((nan, 1))
+
+
+def test_a_nan_leaf_reads_to_the_same_object_every_time():
+    """同じ元の NaN の葉（scalar の subclass）は、いつ読んでも同じ写し（`exact_tree`・key・比べる・hash で同じ振る舞い:
+    双子は 1 つの写しを持つ）。別の元の葉は別の写し。元の葉が消えると記録も消える。"""
+
+    held = LiarFloat(float("nan"))
+    first = live_values.exact_tree((held, 1))
+    _churn()
+    second = live_values.exact_tree((held, 1))
+    assert first[0] is second[0] and type(first[0]) is float
+    assert live_values.inert_key((held,)) == live_values.inert_key((held,))  # 同じ object の NaN: identity で等しい
+    table = {live_values.inert_key((held,)): "value"}
+    assert table[live_values.inert_key((held,))] == "value"
+    other = LiarFloat(float("nan"))
+    assert live_values.exact_tree(other) is not live_values.exact_tree(held)
+    assert live_values.equal((held,), (held,)) is True and live_values.equal((held,), (other,)) is False
+    assert live_values.hash_tree((held,)) == live_values.hash_tree((held,))
+    count = len(live_values._NAN_COPIES)
+    del held, first, second, table
+    _churn()
+    assert len(live_values._NAN_COPIES) < count
+
+
+def test_json_protocols_follow_a_replaced_method():
+    """JSON の protocol の記録（`_record_protocol`）は引くたびに引いた名前を確かめる: 型の method を別の package の関数に
+    差し替えれば、差し替えた関数を使う。"""
+
+    from scripts.function_tracer_pcode.core import json_encoding
+
+    def first(self):
+        return iter(())
+
+    def second(self):
+        return iter(())
+
+    kind = type("Record", (), {"__module__": __name__, "json_items": first})
+    assert json_encoding._record_protocol(kind, "json_items") is first
+    kind.json_items = second
+    assert json_encoding._record_protocol(kind, "json_items") is second
+
+
+def test_dataclass_field_names_follow_the_class_of_a_field():
+    """dataclass の field の表の `Field` は heap type: `__class__` を変えた `Field` は `dataclasses.fields` と同じ規則で
+    扱う（記録した名前を使わない）。"""
+
+    import dataclasses
+
+    @dataclasses.dataclass
+    class Data:
+        a: int
+        b: int
+
+    value = Data(1, 2)
+    assert live_values.dataclass_field_names(value) == ("a", "b")
+
+    class Other(dataclasses.Field):
+        __slots__ = ()
+
+    Data.__dataclass_fields__["b"].__class__ = Other
+    assert live_values.dataclass_field_names(value) == live_values._dataclass_field_names(Data)
+
+
+def test_package_type_follows_a_dynamic_class_attribute_accessor():
+    import types
+
+    def trusted(self):
+        return 1
+
+    class Holder:
+        attr = types.DynamicClassAttribute(trusted)
+
+    assert live_values.package_type(Holder) is True
+    Holder.__dict__["attr"].fget = _foreign_function()  # instance の属性: identity は同じ
+    expected = _fresh_package_type(lambda: type("Holder", (), {"__module__": __name__, "attr": Holder.__dict__["attr"]}))
+    assert live_values.package_type(Holder) is expected
+
+
+def test_a_class_whose_metatype_is_type_cannot_rewrite_its_dict_entry():
+    """前提（`_fixed_dict_entries` / `_DICT_HOLDERS`）: metaclass が `type` の class の名前空間の `__dict__` の entry は
+    作った後に書けも消せもせず、class の metaclass も `type` から変えられない（CPython の振る舞い: 3.10 / 3.12）。"""
+
+    class Base:
+        pass
+
+    class Kind(Base):
+        pass
+
+    before = (dict(Base.__dict__).get("__dict__"), dict(Kind.__dict__).get("__dict__", live_values._MISSING_DUNDER))
+    for klass in (Base, Kind):
+        for operation in (
+            lambda: setattr(klass, "__dict__", property(lambda self: {})),
+            lambda: type.__setattr__(klass, "__dict__", None),
+            lambda: delattr(klass, "__dict__"),
+            lambda: type.__delattr__(klass, "__dict__"),
+        ):
+            with pytest.raises(AttributeError):
+                operation()
+
+    class Meta(type):
+        pass
+
+    with pytest.raises(TypeError):
+        Kind.__class__ = Meta
+    assert type(Kind) is type
+    after = (dict(Base.__dict__).get("__dict__"), dict(Kind.__dict__).get("__dict__", live_values._MISSING_DUNDER))
+    assert after[0] is before[0] and after[1] is before[1]
+    assert live_values._fixed_dict_entries(live_values._TYPE_MRO.__get__(Kind))
+
+
+def test_instance_state_follows_a_base_that_holds_the_dict_after_bases_change():
+    """`_dict_holder` の記録は MRO の tuple が同じ間だけ: `__bases__` を書き換えて `__dict__` を持つ class が変われば、
+    読む descriptor も今の MRO のものになる（記録した descriptor の class が MRO に無いまま読まない）。"""
+
+    class First:
+        pass
+
+    class Second:
+        pass
+
+    class Kind(First):
+        pass
+
+    value = Kind()
+    value.probe = "kept"
+    assert live_values.instance_state(value, "probe") == "kept"
+    Kind.__bases__ = (Second,)
+    assert live_values._TYPE_MRO.__get__(Kind) == (Kind, Second, object)
+    assert live_values.instance_state(value, "probe") == "kept"
+    assert live_values._dict_holder(Kind).__objclass__ in live_values._TYPE_MRO.__get__(Kind)
+
+
+def test_instance_state_follows_a_dict_entry_written_through_a_metaclass():
+    """metaclass が `__dict__` を descriptor でない値で持つ class は、`setattr` が class の名前空間へ `__dict__` を書く:
+    記録しない（`_fixed_dict_entries` が偽）。読みは今の名前空間に従う（書いた後は組み込みの descriptor が無い）。"""
+
+    Meta = type("Meta", (type,), {"__dict__": None})
+    Kind = Meta("Kind", (), {})
+    value = Kind()
+    object.__setattr__(value, "probe", "kept")
+    assert not live_values._fixed_dict_entries(live_values._TYPE_MRO.__get__(Kind))
+    assert live_values.instance_state(value, "probe") == "kept"
+    setattr(Kind, "__dict__", property(lambda self: {"probe": "fake"}))
+    assert "__dict__" in live_values._TYPE_DICT.__get__(Kind)
+    assert live_values._dict_holder_of(Kind) is None
+    assert live_values.instance_state(value, "probe", "absent") == "absent"
+
+
+def test_a_lookup_fact_used_inside_another_passes_its_reads_on():
+    """`lookup_fact` の記録を別の `lookup_fact` の計算の途中で使えば、使った記録の読みは外の記録の読みでもある: 内の
+    計算が読んだ名前を書き換えれば、外の記録も計算し直す（外が古い答えを返さない）。"""
+
+    inner_table = live_values.LookupFactTable()
+    outer_table = live_values.LookupFactTable()
+    kind = type("Kind", (), {"marker": "first"})
+
+    def inner(klass):
+        return live_values.type_attribute(klass, "marker")
+
+    def outer(klass):
+        return ("outer", live_values.lookup_fact(inner_table, klass, inner, klass))
+
+    assert live_values.lookup_fact(inner_table, kind, inner, kind) == "first"  # 内の記録を先に作る（外の計算では使うだけ）
+    assert live_values.lookup_fact(outer_table, kind, outer, kind) == ("outer", "first")
+    kind.marker = "second"
+    assert live_values.lookup_fact(outer_table, kind, outer, kind) == ("outer", "second")
+    assert live_values.lookup_fact(inner_table, kind, inner, kind) == "second"
+
+
+def test_type_attribute_follows_bases_and_namespace_changes_through_the_mro_record():
+    """`_PLAIN_MROS` の記録は MRO の tuple が同じ間だけ・名前空間の storage を直接引く: 名前空間の書き換えと
+    `__bases__` の書き換えのどちらにも `inspect.getattr_static` と同じ値を返す。"""
+
+    import inspect
+
+    class First:
+        marker = "first"
+
+    class Second:
+        marker = "second"
+
+    class Kind(First):
+        pass
+
+    def expected(name):
+        return inspect.getattr_static(Kind, name, None)
+
+    for _ in range(2):  # 2 回目は記録から引く
+        assert live_values.type_attribute(Kind, "marker") == expected("marker") == "first"
+    First.marker = "rewritten"
+    assert live_values.type_attribute(Kind, "marker") == expected("marker") == "rewritten"
+    Kind.__bases__ = (Second,)
+    assert live_values.type_attribute(Kind, "marker") == expected("marker") == "second"
+    Kind.marker = "own"
+    assert live_values.type_attribute(Kind, "marker") == expected("marker") == "own"
+    del Kind.marker
+    assert live_values.type_attribute(Kind, "marker") == expected("marker") == "second"
+    assert live_values.type_attribute(Kind, "__repr__") is expected("__repr__") is object.__dict__["__repr__"]
+
+
+def test_json_protocols_are_judged_again_by_the_next_walk():
+    """walk の中の protocol の記録（`json_encoding._WALK_PROTOCOLS`）は最も外の walk の間だけ: walk が終われば捨てる
+    （例外で終わっても）。次の walk は書き換えた型を今の状態で判定する（外の code が package の型の名前空間へ foreign な
+    関数を入れれば、その型を record として辿らない）。"""
+
+    from scripts.function_tracer_pcode.core import json_encoding
+    from scripts.function_tracer_pcode.core.json_encoding import JsonValueRejected, RESULT_JSON_POLICY
+
+    def items(self):
+        yield "a", 1
+
+    kind = type("Record", (), {"__module__": __name__, "json_items": items})
+    assert RESULT_JSON_POLICY.prepare(kind()).value() == {"a": 1}
+    assert json_encoding._WALK_PROTOCOLS.get() is None
+    foreign = eval("lambda self: iter(())", {})  # package の外の code（`<string>`）
+    kind.json_items = foreign
+    with pytest.raises(JsonValueRejected):
+        RESULT_JSON_POLICY.prepare(kind()).value()
+    assert json_encoding._WALK_PROTOCOLS.get() is None
+    kind.json_items = items
+    assert RESULT_JSON_POLICY.prepare([kind(), kind()]).value() == [{"a": 1}, {"a": 1}]
+    assert json_encoding._WALK_PROTOCOLS.get() is None
+
+
+def test_a_walk_forgets_protocols_after_running_code_outside_the_audited_roots():
+    """walk の protocol の記録は、J19 の監査の root でない package の code（値の中の package の generator・identity key の
+    method）を進めた後には使わない: その code が型を書き換えれば、walk の残りは書き換えた型を今の状態で判定する。"""
+
+    from scripts.function_tracer_pcode.core import json_encoding
+    from scripts.function_tracer_pcode.core.json_encoding import JsonValueRejected, RESULT_JSON_POLICY
+
+    def items(self):
+        yield "a", 1
+
+    kind = type("Record", (), {"__module__": __name__, "json_items": items})
+    foreign = eval("lambda self: iter(())", {})
+
+    def rewriting():
+        yield kind()
+        kind.json_items = foreign  # 監査の root でない package の code が型を書き換える
+        yield kind()
+
+    with pytest.raises(JsonValueRejected):
+        RESULT_JSON_POLICY.prepare([kind(), rewriting()]).value()
+    assert json_encoding._WALK_PROTOCOLS.get() is None
+    kind.json_items = items
+
+    class Keyed:
+        def stable_key(self):
+            kind.json_items = foreign
+            return ("keyed",)
+
+    # identity key の method（#194 の owner の code）を呼んだ後は記録を捨てる
+    json_encoding._WALK_PROTOCOLS.set({})
+    try:
+        assert json_encoding._record_protocols(kind)[0] is items
+        assert json_encoding.identity_key_of(Keyed()) == (True, ("keyed",))
+        assert json_encoding._record_protocols(kind)[0] is None
+    finally:
+        json_encoding._WALK_PROTOCOLS.set(None)
+        kind.json_items = items
+
+
+def test_protocol_scopes_are_opened_only_by_audited_roots():
+    """`json_encoding.protocol_scope`（型の protocol の判定を scope の間 1 度にする）を開ける場所は、walk と J19 の監査の
+    entry root の本体だけ（scope の中で走る package の code は監査が live な値に許した操作だけをする: 記録の前提）。
+    新しい場所で開けるなら、その関数を監査の root に足す。"""
+
+    import ast
+    import pathlib
+
+    from scripts.function_tracer_pcode.tests.unit import _live_flow_audit as audit
+
+    allowed = {(module, qual) for module, qual, _params in audit.ENTRY_ROOTS}
+    allowed.add(("core.json_encoding", "_Walk.run"))
+    root = pathlib.Path(__file__).resolve().parents[2]
+    opened = set()
+    for path in sorted(root.rglob("*.py")):
+        if "tests" in path.relative_to(root).parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        module = ".".join(path.relative_to(root).with_suffix("").parts)
+
+        def visit(node, qual):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    visit(child, f"{qual}.{child.name}" if qual else child.name)
+                    continue
+                if isinstance(child, ast.Call):
+                    func = child.func
+                    name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+                    if name == "protocol_scope":
+                        opened.add((module, qual))
+                visit(child, qual)
+
+        visit(tree, "")
+    assert opened, "protocol_scope is used"
+    assert opened <= allowed, sorted(opened - allowed)
+
+
+def test_audited_generators_are_functions_the_flow_audit_walks():
+    """`json_encoding.audited_generator` で宣言した generator 関数（walker が進めても protocol の scope の記録を捨てない）
+    は、どれも J19 の監査（`_live_flow_audit.audit`）が本体を辿った関数: 監査の外の generator を宣言すれば落ちる。"""
+
+    import ast
+    import pathlib
+
+    from scripts.function_tracer_pcode.tests.unit import _live_flow_audit as audit
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    declared = set()
+    for path in sorted(root.rglob("*.py")):
+        if "tests" in path.relative_to(root).parts:
+            continue
+        module = "scripts.function_tracer_pcode." + ".".join(path.relative_to(root).with_suffix("").parts)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+
+        def visit(node, qual):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    name = f"{qual}.{child.name}" if qual else child.name
+                    if not isinstance(child, ast.ClassDef) and any(
+                        (isinstance(d, ast.Name) and d.id == "audited_generator")
+                        or (isinstance(d, ast.Attribute) and d.attr == "audited_generator")
+                        for d in child.decorator_list
+                    ):
+                        declared.add((module, name))
+                    visit(child, name)
+
+        visit(tree, "")
+    _violations, analyzed, _index, _missing = audit.audit(root)
+    assert declared, "audited_generator is used"
+    assert declared <= set(analyzed), sorted(declared - set(analyzed))
+
+
+def test_only_declared_package_generators_keep_the_protocol_scope():
+    """宣言していない package の generator を進めれば scope の記録を捨て、宣言した generator（`audited_generator`）なら
+    捨てない。"""
+
+    from scripts.function_tracer_pcode.core import json_encoding
+
+    def plain():
+        yield 1
+
+    with json_encoding.protocol_scope():
+        memo = json_encoding._WALK_PROTOCOLS.get()
+        memo[0] = ("marker",)
+        list(json_encoding._walk_iter(plain()))
+        assert memo == {}
+        memo[0] = ("marker",)
+        from scripts.function_tracer_pcode.core.signature import _parameter_descriptor_pairs
+
+        list(json_encoding._walk_iter(_parameter_descriptor_pairs({"a": 1})))
+        assert memo == {0: ("marker",)}
+    with pytest.raises(TypeError):
+        json_encoding.audited_generator(lambda: None)
+
+
+@pytest.mark.parametrize("wrapper", [staticmethod, classmethod])
+def test_package_type_follows_the_class_of_an_object_a_wrapper_holds(wrapper):
+    """判定が読んだ object（`_Nesting.objects`: wrapper が包む object）の `__class__` を変えれば、記録は判定し直す
+    （包んだ object の型は namespace の値の identity では固定されない）。"""
+
+    Inert = type("Inert", (), {})
+    Active = type("Active", (), {"__call__": _foreign_function()})
+    held = Inert()
+    kind = type("Holder", (), {"__module__": __name__, "member": wrapper(held)})
+    assert live_values.package_type(kind) is True
+    held.__class__ = Active
+    fresh = type("Fresh", (), {"__module__": __name__, "member": kind.__dict__["member"]})
+    assert live_values.package_type(fresh) is False
+    assert live_values.package_type(kind) is False
+
+
+def test_an_lru_cache_wrapper_is_judged_by_the_function_it_calls():
+    """`lru_cache` の wrapper の信頼は C の struct が呼ぶ関数で決める（instance の `__wrapped__` は書き換えられる: 根拠に
+    しない）。"""
+
+    import functools
+
+    def trusted(self):
+        return "package"
+
+    foreign = _foreign_function()
+    disguised = functools.lru_cache(maxsize=None)(foreign)
+    disguised.__wrapped__ = trusted
+    assert live_values.package_type(type("Disguised", (), {"__module__": __name__, "f": disguised})) is False
+    honest = functools.lru_cache(maxsize=None)(trusted)
+    kind = type("Honest", (), {"__module__": __name__, "f": honest})
+    assert live_values.package_type(kind) is True
+    honest.__wrapped__ = foreign  # 呼ぶ関数は変わらない
+    assert live_values.package_type(kind) is True
+
+
+def test_identity_key_of_forgets_the_protocol_scope_when_the_key_method_raises():
+    """identity key の method（#194 の owner の code）が例外で抜けても scope の記録を捨てる。"""
+
+    from scripts.function_tracer_pcode.core import json_encoding
+
+    def items(self):
+        yield "a", 1
+
+    kind = type("Record", (), {"__module__": __name__, "json_items": items})
+
+    class Keyed:
+        def stable_key(self):
+            kind.json_items = _foreign_function()
+            raise TypeError("boom")
+
+    try:
+        with json_encoding.protocol_scope():
+            assert json_encoding.is_json_record(kind())
+            with pytest.raises(TypeError):
+                json_encoding.identity_key_of(Keyed())
+            assert not json_encoding.is_json_record(kind())
+    finally:
+        kind.json_items = items
+
+
+def test_identity_key_of_reads_names_outside_the_protocol_table():
+    """`identity_key_of(names=...)` は表に無い名前も型から引く（package の関数・package の型だけ）。"""
+
+    from scripts.function_tracer_pcode.core import json_encoding
+
+    class Keyed:
+        def other_key(self):
+            return ("other",)
+
+    assert json_encoding.identity_key_of(Keyed(), names=("other_key",)) == (True, ("other",))
+    assert json_encoding.identity_key_of(Keyed(), names=("missing",)) == (False, None)
+
+
+def test_each_over_an_undeclared_generator_forgets_the_protocol_scope():
+    """`each` の列が宣言していない package の generator なら、進めるたびに scope の記録を捨てる（`_walk_iter`）。"""
+
+    from scripts.function_tracer_pcode.core import json_encoding
+    from scripts.function_tracer_pcode.core.json_encoding import JsonValueRejected, RESULT_JSON_POLICY
+
+    def items(self):
+        yield "a", 1
+
+    kind = type("Record", (), {"__module__": __name__, "json_items": items})
+
+    def rewriting():
+        yield 1
+        kind.json_items = _foreign_function()
+        yield 2
+
+    try:
+        with pytest.raises(JsonValueRejected):
+            RESULT_JSON_POLICY.prepare(json_encoding.inline(
+                ("first", kind()), ("g", json_encoding.each(rewriting())), ("last", kind()),
+            )).value()
+    finally:
+        kind.json_items = items
+
+
+def test_nan_copies_of_leaves_without_weakrefs_do_not_accumulate():
+    """weakref を作れない NaN の葉の写しの entry は、元の葉がもう誰にも読めなくなれば掃く（表の大きさは生きている葉の
+    数で決まる）。生きている葉は同じ写しのまま。"""
+
+    class Slotted(float):
+        __slots__ = ()
+
+    kept = Slotted("nan")
+    first = live_values.plain_scalar(kept)
+    for _ in range(3 * live_values._TYPE_FACTS_LIMIT):
+        live_values.plain_scalar(Slotted("nan"))
+    gc.collect()
+    assert len(live_values._NAN_COPIES) <= 2 * live_values._TYPE_FACTS_LIMIT
+    assert live_values.plain_scalar(kept) is first
+
+
+def test_the_nan_copy_callback_can_run_while_the_table_is_locked():
+    """weakref の callback（`_forget_nan`）が、表の lock を持つ同じ thread の中で走っても止まらない（GC は lock の中の
+    割り当てで callback を走らせることがある）。"""
+
+    import threading
+
+    finished = []
+
+    def run():
+        with live_values._NAN_COPIES_LOCK:
+            live_values._forget_nan(-1, None)
+        finished.append(True)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(5)
+    assert finished == [True]
+
+
+def test_a_lookup_fact_follows_the_mro_of_another_type_its_computation_read():
+    """`lookup_fact` の計算が key でない型の名前を引けば、その型の MRO（引く storage の列）も記録の依存: その型の
+    `__bases__` を書き換えれば計算し直す（instance の `__dict__` の descriptor の記録を使っても）。"""
+
+    Shadow = type("Shadow", (), {"__dict__": 5})  # 名前空間の `__dict__` が descriptor でない（instance の dict は読めない）
+    Plain = type("Plain", (), {})
+    Kind = type("Kind", (Plain,), {})
+    value = Kind()
+    value.probe = "kept"
+    assert live_values.instance_state(value, "probe", "absent") == "kept"  # holder の記録を先に作る
+    table = live_values.LookupFactTable()
+    key = type("Key", (), {})
+
+    def compute(_key):
+        return live_values.instance_state(value, "probe", "absent")
+
+    assert live_values.lookup_fact(table, key, compute, key) == "kept"
+    Kind.__bases__ = (Shadow,)
+    assert live_values.instance_state(value, "probe", "absent") == "absent"
+    assert live_values.lookup_fact(table, key, compute, key) == "absent"
+
+
+def test_a_lookup_fact_follows_the_class_of_an_object_it_found():
+    """`lookup_fact` の計算が見つけた object の型を読めば、その object の `__class__` の書き換えで計算し直す（記録は
+    見つけた object の identity の外の状態も確かめる: `_watch`）。"""
+
+    First = type("First", (), {})
+    Second = type("Second", (), {})
+    found = First()
+    kind = type("Kind", (), {"member": found})
+    table = live_values.LookupFactTable()
+
+    def compute(klass):
+        return type(live_values.type_attribute(klass, "member")).__name__
+
+    assert live_values.lookup_fact(table, kind, compute, kind) == "First"
+    found.__class__ = Second
+    assert live_values.lookup_fact(table, kind, compute, kind) == "Second"
+
+
+def test_a_lookup_fact_used_inside_a_type_judgement_adds_its_classes_to_the_judgement():
+    """型の信頼の判定の途中（`_Nesting.active`）で `lookup_fact` の記録を使えば、記録が依る class（key の型の MRO と、
+    計算が引いた型）は判定の依存（`_Nesting.reads`）になる。"""
+
+    table = live_values.LookupFactTable()
+    other = type("Other", (), {"member": 1})
+    kind = type("Kind", (), {})
+
+    def compute(_klass):
+        return live_values.type_attribute(other, "member")
+
+    assert live_values.lookup_fact(table, kind, compute, kind) == 1
+    state = live_values._NESTING
+    saved = (state.active, state.reads)
+    state.active, state.reads = {kind: 0}, []
+    try:
+        assert live_values.lookup_fact(table, kind, compute, kind) == 1
+        reads = list(state.reads)
+    finally:
+        state.active, state.reads = saved
+    assert kind in reads and other in reads
+
+
+def test_json_items_returning_another_generator_forgets_the_protocol_scope():
+    """`json_items` が自分でない generator（宣言していない package の generator）を返せば、それを進めるたびに scope の
+    記録を捨てる（`_record_items`: そのまま進めるのは `json_items` 自身の generator だけ）。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import JsonValueRejected, RESULT_JSON_POLICY
+
+    def items(self):
+        yield "a", 1
+
+    kind = type("Record", (), {"__module__": __name__, "json_items": items})
+
+    def helper():
+        yield "first", kind()
+        kind.json_items = _foreign_function()
+        yield "second", kind()
+
+    def delegating(self):
+        return helper()
+
+    outer = type("Outer", (), {"__module__": __name__, "json_items": delegating})
+    try:
+        with pytest.raises(JsonValueRejected):
+            RESULT_JSON_POLICY.prepare(outer()).value()
+    finally:
+        kind.json_items = items
+
+
+def test_package_type_follows_the_class_of_a_module_in_a_namespace():
+    """名前空間の module の `__class__`（ModuleType の subclass へ変えられる）を変えれば、記録は判定し直す。"""
+
+    import types as _types
+
+    module = _types.ModuleType("held_module")
+    kind = type("Holder", (), {"__module__": __name__, "member": module})
+    assert live_values.package_type(kind) is True
+    module.__class__ = type("CallableModule", (_types.ModuleType,), {"__call__": _foreign_function()})
+    fresh = type("Fresh", (), {"__module__": __name__, "member": module})
+    assert live_values.package_type(fresh) is False
+    assert live_values.package_type(kind) is False
+
+
+def test_a_type_state_check_fails_when_names_change_but_values_stay_in_order():
+    """型の状態の確かめ（`_state_check` / `_state_holds`）は名前空間の key も比べる: 値の並びが同じまま名前だけを変えた
+    名前空間（消して別の名前で置き直す）は同じ状態ではない。"""
+
+    first, second = object(), object()
+    kind = type("Kind", (), {})
+    kind.a = first  # 名前空間の末尾に置く（消して置き直しても並びが同じ）
+    kind.b = second
+    check = live_values._state_check(live_values._class_snapshot(kind))
+    assert live_values._state_holds(check)
+    del kind.a
+    del kind.b
+    kind.c = first
+    kind.b = second
+    assert [value for value in live_values._TYPE_DICT.__get__(kind).values() if value is first or value is second] == [first, second]
+    assert not live_values._state_holds(check)
+
+
+def test_a_type_state_check_fails_when_a_name_is_added_even_if_the_columns_would_line_up():
+    """型の状態の確かめは名前空間の大きさを先に比べる: 足した key と値が、並べた列の比べ（1 つの `map`）で前の列と
+    たまたま揃う形（どの値も同じ str で、足した key もその str）でも同じ状態ではない。"""
+
+    import sys as _sys
+
+    text = _sys.intern("shared_text_for_alignment")
+    # 基底を `type` にすると名前空間に `__dict__` / `__weakref__` が足されず、heap type の名前空間はこの 1 つだけ
+    kind = type("Kind", (type,), {"__module__": text, "__doc__": text, "a": text})
+    check = live_values._state_check(live_values._class_snapshot(kind))
+    assert live_values._state_holds(check)
+    setattr(kind, text, text)
+    assert list(live_values._TYPE_DICT.__get__(kind).values()) == [text] * 4
+    assert not live_values._state_holds(check)
+
+
+def test_package_type_follows_a_bases_change_of_the_judged_type():
+    """型の `__bases__` を書き換えれば（MRO の tuple が変わる）、記録は判定し直す（名前空間の snapshot が同じでも）。"""
+
+    Good = type("Good", (), {"__module__": __name__})
+    Bad = type("Bad", (), {"__module__": __name__, "method": _foreign_function()})
+    kind = type("Kind", (Good,), {"__module__": __name__})
+    assert live_values.package_type(kind) is True
+    kind.__bases__ = (Bad,)
+    assert live_values.package_type(type("Fresh", (Bad,), {"__module__": __name__})) is False
+    assert live_values.package_type(kind) is False
+
+
+def test_package_type_follows_the_namespace_of_a_value_type_read_through_the_mro_record():
+    """判定が名前空間の値の型（key の型の MRO の外の class）を引けば、その class は判定の依存（`_PLAIN_MROS` の記録から
+    引いても）: その class に foreign な `__call__` を足せば判定し直す。"""
+
+    Value = type("Value", (), {})
+    live_values.type_attribute(Value, "__call__")  # MRO の記録を先に作る
+    kind = type("Holder", (), {"__module__": __name__, "member": Value()})
+    assert live_values.package_type(kind) is True
+    Value.__call__ = _foreign_function()
+    assert live_values.package_type(type("Fresh", (), {"__module__": __name__, "member": Value()})) is False
+    assert live_values.package_type(kind) is False
+
+
+def test_package_type_follows_an_object_read_by_a_nested_judgement_it_reused():
+    """入れ子の判定の記録（名前空間の値の class の `package_type`）を使った判定は、その記録が読んだ object も依存に足す
+    （`_Nesting.objects`）: 入れ子の class の wrapper が包む object の `__class__` を変えれば、外の判定も判定し直す。"""
+
+    Inert = type("Inert", (), {})
+    Active = type("Active", (), {"__call__": _foreign_function()})
+    held = Inert()
+    inner = type("Inner", (), {"__module__": __name__, "member": staticmethod(held)})
+    assert live_values.package_type(inner) is True  # 入れ子の記録を先に作る
+    outer = type("Outer", (), {"__module__": __name__, "nested": inner})
+    assert live_values.package_type(outer) is True
+    held.__class__ = Active
+    assert live_values.package_type(inner) is False
+    assert live_values.package_type(outer) is False
+
+
+def test_a_lookup_fact_inside_another_passes_on_the_mros_it_read():
+    """`lookup_fact` の記録を外の `lookup_fact` の計算で使えば、内の計算が引いた型の MRO も外の記録の依存: その型の
+    `__bases__` を書き換えれば外も計算し直す。"""
+
+    First = type("First", (), {"marker": "first"})
+    Second = type("Second", (), {"marker": "second"})
+    other = type("Other", (First,), {})
+    inner_table, outer_table = live_values.LookupFactTable(), live_values.LookupFactTable()
+    key = type("Key", (), {})
+
+    def inner(_key):
+        return live_values.type_attribute(other, "marker")
+
+    def outer(_key):
+        return ("outer", live_values.lookup_fact(inner_table, key, inner, key))
+
+    assert live_values.lookup_fact(inner_table, key, inner, key) == "first"
+    assert live_values.lookup_fact(outer_table, key, outer, key) == ("outer", "first")
+    other.__bases__ = (Second,)
+    assert live_values.lookup_fact(outer_table, key, outer, key) == ("outer", "second")
+
+
+def test_json_protocols_need_a_package_type():
+    """record の protocol は package の型のものだけ: package の関数の `json_items` を持っていても、型が外の code を
+    持てば（`package_type` が偽）record にしない。"""
+
+    from scripts.function_tracer_pcode.core import json_encoding
+
+    def items(self):
+        yield "a", 1
+
+    kind = type("Record", (), {"__module__": __name__, "json_items": items, "other": _foreign_function()})
+    assert live_values.package_type(kind) is False
+    assert not json_encoding.is_json_record(kind())
+
+
+def test_json_protocols_are_package_functions_not_wrappers():
+    """record の protocol は package の関数だけ（`staticmethod` などの wrapper の object は protocol にしない）。"""
+
+    from scripts.function_tracer_pcode.core import json_encoding
+
+    def items(value):
+        yield "a", 1
+
+    kind = type("Record", (), {"__module__": __name__, "json_items": staticmethod(items)})
+    assert live_values.package_type(kind) is True
+    assert not json_encoding.is_json_record(kind())
+
+
+def test_dataclass_field_names_follow_the_class_of_a_field_whose_kind_is_unset():
+    """`Field` の種類の slot が `None` の field は名前に入らない。その `Field` の `__class__` を subclass へ変えれば、表は
+    `dataclasses.fields` と同じ規則で読めない（`None`）: 記録は field の型も確かめる。"""
+
+    import dataclasses
+
+    @dataclasses.dataclass
+    class Data:
+        a: int
+        b: int
+
+    field = Data.__dataclass_fields__["b"]
+    field._field_type = None
+    value = Data(1, 2)
+    assert live_values.dataclass_field_names(value) == ("a",)
+    field.__class__ = type("FieldSub", (dataclasses.Field,), {"__slots__": ()})
+    assert live_values._dataclass_field_names(Data) is None
+    assert live_values.dataclass_field_names(value) is None
+
+
+def test_a_recursion_error_inside_a_producer_reaches_the_caller():
+    """producer（`json_items`）の中で起きた `RecursionError` は値の不備にしない（walker の中で起きたときと同じに呼ぶ側へ
+    伝える: 落ちた場所で結果を変えない）。stack の深さの掃き出し（上の test）は frame の並びに依るので、ここで直接確かめる。"""
+
+    from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY
+
+    def items(self):
+        raise RecursionError("stack limit inside a producer")
+        yield  # pragma: no cover - generator にする
+
+    kind = type("Record", (), {"__module__": __name__, "json_items": items})
+    with pytest.raises(RecursionError):
+        RESULT_JSON_POLICY.prepare(kind()).value()
+
+
+@pytest.mark.parametrize("change", ["cell", "code"])
+def test_package_type_follows_the_code_and_closure_of_a_runtime_function_it_opened(change):
+    """判定が中を辿った実行環境の関数（`contextlib.contextmanager` の helper: package の外の file の関数で、closure の
+    中身を信頼するものだけ）の closure の cell の中身・`__code__` を書き換えれば、記録は判定し直す。"""
+
+    import contextlib
+
+    def body():
+        yield 1
+
+    helper = contextlib.contextmanager(body)
+    kind = type("Holder", (), {"__module__": __name__, "member": staticmethod(helper)})
+    assert live_values.package_type(kind) is True
+    if change == "cell":
+        cell = next(cell for cell in helper.__closure__ if cell.cell_contents is body)
+        cell.cell_contents = _foreign_function()
+    else:
+        names = helper.__code__.co_freevars
+        source = "def outer({0}):\n    def helper(*args, **kwargs):\n        return ({0},)\n    return helper\n".format(", ".join(names))
+        namespace = {}
+        exec(compile(source, "<foreign>", "exec"), namespace)  # noqa: S102 - 外の file 名の code
+        helper.__code__ = namespace["outer"](*range(len(names))).__code__
+    assert live_values.package_type(type("Fresh", (), {"__module__": __name__, "member": staticmethod(helper)})) is False
+    assert live_values.package_type(kind) is False

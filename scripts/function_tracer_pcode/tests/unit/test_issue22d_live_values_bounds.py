@@ -321,6 +321,11 @@ _AMORTIZED = (
     "入れ子の上限で切った判定は残さないので、切られる形の型は問い合わせごとに辿り直す（既存の設計）"
 )
 
+_AMORTIZED_TABLE = (
+    "B(償却): 表が前回に辿ったときの 2 倍になったときだけ表を 1 度辿る（挿入 1 つにつき O(1) の償却。表の大きさは"
+    "生きている元の葉の数の 2 倍まで: `test_nan_copies_of_leaves_without_weakrefs_do_not_accumulate`）"
+)
+
 LIVE_VALUES_WORK_OWNERS = {
     "package_file": _A,
     "_package_type_uncached": _B,
@@ -409,8 +414,16 @@ LIVE_VALUES_WORK_OWNERS = {
     "_class_snapshot": _B,
     "_namespace_part": _B,
     # 記録した snapshot だけを辿る（snapshot を作るときに上限と比べた）
-    "_snapshot_holds": _B,
-    "_part_holds": _B,
+    "_state_check": _B,
+    "_state_holds": _B,
+    "_merged_watch": _B,
+    "_accessors_hold": _B,
+    "_lru_callee": _A,
+    "_sweep_nan_copies": _AMORTIZED_TABLE,
+    # 判定が値から読む状態（書いた数の slot だけ）・記録した値の列（名前空間の上限の中: 呼ぶ側が比べた）
+    "_watch": _B,
+    "_watch_holds": _B,
+    "_object_state": _A,
     "_dataclass_table_state": _B,
     # 依存の class の列は `record` が上限と比べてから持つ（`_state` はその列だけを辿る）
     "_TypeFactTable.record": _B,
@@ -423,8 +436,11 @@ LIVE_VALUES_WORK_OWNERS = {
     # 条件つきの自己完結の実装（`Enum.__hash__`）: 型の MRO（長さを上限と比べてから辿る）と書いた 3 つの名前
     "_self_contained_for": _B,
     # 名前の引きだけで決まる型の事実の表: 計算が引いた名前の記録（計算の引きの数: 型の MRO の上限の中）を確かめる
-    "_LookupFactTable.get": _B_CALLER,
+    "_remember_plain_mro": _B_CALLER,
+    "_fixed_dict_entries": _B,
+    "_LookupFactTable.record": _B_CALLER,
     "_witnessed": _B,
+    "lookup_fact": _A,
     # 基底型の書いた数の名前だけ・型の MRO（長さを上限と比べてから辿る）
     "_same_behaviour": _A,
     "plain_attribute_lookup": _B,
@@ -434,8 +450,8 @@ LIVE_VALUES_WORK_OWNERS = {
     "_hashed_members": _B,
     "_rebuild_container": _B,
     "_rebuildable": _B,
-    "_nan_free": _B,
-    "_flat_exact_without_nan": _B,
+    "_require_hashed_lookups": _B,
+    "_flat_exact": _B,
     "_CopyFrame.unchanged": _B,
     # 例外の読みだけの field（型が決める field の数）だけ
     "_readonly_positions": _A,
