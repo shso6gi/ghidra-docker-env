@@ -14,7 +14,7 @@ DIRECT = {
     "pcode_sites": {"coerce_optional_int"},
 }
 FACADE_CALLBACKS = ( "target_active_key", "should_synthesize_implicit_passthrough_for_call",
-    "return_site_metadata_from_info", "make_tracked_return_value", "make_return_info",
+    "make_tracked_return_value",
     "get_freshest_callee_parameters",
 )
 SUPPLIERS = ("program_value", "debug_flag")

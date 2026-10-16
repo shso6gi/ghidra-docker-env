@@ -22,7 +22,6 @@ P-code の比較演算子（``INT_LESS`` / ``INT_SLESS`` ...）は機械語の�
 
 from __future__ import annotations
 
-import shutil
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -129,6 +128,40 @@ def _condition_minority(name: str = "f") -> FunctionReturnAnalysis:
     ])
 
 
+def _unsigned_majority(name: str = "f") -> FunctionReturnAnalysis:
+    """符号なしの score が勝つ向き: ``100 u< value ∧ value u< 0xfffffff0`` なら ``ZEXT(value s< 5) | 2``、
+    ``0xffffffef u< value`` なら 7、それ以外は 0（全域）。
+
+    符号なし 4（条件 4 本）が符号付き 2（非負の定数との比較）を上回るので、撤去前は tail の ``s<`` が ``u<`` に
+    書き換わった。``value = 0x80000000`` で、機械語の値は 3（負の数は 5 より小さい）、書き換え後は 2。
+    """
+
+    tail = Expression(ExpressionType.BINARY_OP, operator="INT_OR", operands=[
+        Expression(ExpressionType.UNARY_OP, operator="INT_ZEXT", operands=[_cmp("INT_SLESS", _value(), _k(5))], size=4),
+        _k(2),
+    ], size=4)
+    return _analysis(name, [
+        ReturnInfo(address="0x401010", value=tail,
+                   conditions=[_cond("INT_LESS", _k(100), _value()), _cond("INT_LESS", _value(), _k(-16))],
+                   branch_index=1),
+        ReturnInfo(address="0x401020", value=_k(0),
+                   conditions=[Condition(_cmp("INT_LESS", _k(100), _value()), True)], branch_index=2),
+        ReturnInfo(address="0x401030", value=_k(7),
+                   conditions=[_cond("INT_LESS", _k(-17), _value())], branch_index=3),
+    ])
+
+
+def _p211b_folded_on(template: FunctionReturnAnalysis, value_on_first_path: int) -> FunctionReturnAnalysis:
+    """``template`` と同じ path で、1 本目の値だけを定数にした解析。"""
+
+    first, *rest = template.returns
+    return _analysis(template.function_name, [
+        ReturnInfo(address=first.address, value=_k(value_on_first_path), conditions=list(first.conditions),
+                   branch_index=first.branch_index),
+        *rest,
+    ])
+
+
 def _issue211_fixture() -> FunctionReturnAnalysis:
     """Issue #211 本文の fixture: 2 本目の path（``-101 s< value ∧ value != 0``）が ``value = -50`` を許す。"""
 
@@ -209,7 +242,10 @@ def _value_at(analysis: Any, value: int) -> Optional[int]:
     """公開した解析の関数の値を z3 で評価する（``value`` を固定し、条件が成り立つ最初の return の値。
     どの return の条件も成り立たなければ None）。"""
 
-    z3 = pytest.importorskip("z3")
+    try:
+        import z3
+    except ImportError:  # 評価器が無い test を黙って通さない
+        pytest.fail("the oracle needs the z3 Python module (requirements-test.txt)")
     from scripts.function_tracer_pcode.core.render_smt import condition_to_smt, expression_to_smt
 
     for info in analysis.returns:
@@ -255,9 +291,10 @@ def test_the_p211b_shape_is_a_real_counterexample():
     assert _machine_value_at(_p211b(), -250) == 3
     assert _machine_value_at(_signed_only(), -250) == 2
     assert _machine_value_at(_condition_minority(), -250) == 6
+    assert _machine_value_at(_unsigned_majority(), -2**31) == 3
 
 
-@pytest.mark.parametrize("build", [_p211b, _condition_minority, _issue211_fixture])
+@pytest.mark.parametrize("build", [_p211b, _condition_minority, _unsigned_majority, _issue211_fixture])
 def test_analyzer_keeps_the_comparison_that_a_signedness_vote_would_flip(build):
     published = analyze_through_pipeline(build())
 
@@ -266,7 +303,9 @@ def test_analyzer_keeps_the_comparison_that_a_signedness_vote_would_flip(build):
     # 解析の関数の値は書き換え前の式の値と同じ（Issue 本文の fixture の 2 本目は ``value = -50`` を条件に
     # 含むが、1 本目が先に成り立つので関数の値は -2。``value <= -101`` と 0 ではどの return も成り立たない）。
     # 区間の両端と内側を見る。
-    pinned = {_p211b: (-250, 3), _condition_minority: (-250, 6), _issue211_fixture: (-50, -2)}[build]
+    pinned = {
+        _p211b: (-250, 3), _condition_minority: (-250, 6), _unsigned_majority: (-2**31, 3), _issue211_fixture: (-50, -2),
+    }[build]
     assert _value_at(published, pinned[0]) == pinned[1]
     for witness in (-2**31, -250, -201, -200, -101, -100, -50, -1, 0, 1, 100, 101, 2**31 - 1):
         assert _value_at(published, witness) == _machine_value_at(build(), witness), witness
@@ -306,8 +345,6 @@ def test_meaning_preserving_mix_is_kept_as_is_too():
 def _production(case_id: str, left: Any, right: Any) -> Dict[str, Any]:
     from scripts.function_tracer_pcode.tests.unit._production_check_harness import run_production_check
 
-    if shutil.which("z3") is None:
-        pytest.fail("the production check needs the z3 CLI on PATH (not skipped: a missing solver must not pass)")
     return run_production_check(case_id, left, right, analyze=analyze_through_pipeline)
 
 
@@ -332,6 +369,37 @@ def test_production_check_does_not_equate_the_vote_result_with_the_original():
     assert _machine_value_at(_p211b_folded("g", 2), -250) == 2
 
     result = _production("pr211-p211b-neq", left, right)
+    assert result["final_outcome"] == "NOT_EQ"
+
+
+def test_production_check_does_not_equate_two_mixed_sides_with_their_vote_result():
+    """plan §11.2 (c): 左右とも p211b の形。右は tail を ``s<`` で書いた同じ path の関数（混在なし）。
+
+    撤去前は左が右と同じ式に書き換わり、誤った EQ になった（``value = -250`` で 3 と 2）。
+    """
+
+    assert _machine_value_at(_p211b("f"), -250) == 3
+    assert _machine_value_at(_signed_only("g"), -250) == 2
+
+    result = _production("pr211-p211b-vs-signed", _p211b("f"), _signed_only("g"))
+    assert result["final_outcome"] == "NOT_EQ"
+
+
+def test_production_check_keeps_identical_mixed_sides_equivalent():
+    """対照: 同じ混在の形が左右にあれば、形を揃えなくても EQ のまま（形の揃いの喪失が起きない場合）。"""
+
+    result = _production("pr211-p211b-both", _p211b("f"), _p211b("g"))
+    assert result["final_outcome"] == "EQUIVALENT"
+
+
+def test_production_check_does_not_equate_an_unsigned_majority_with_its_vote_result():
+    """符号なし側が勝つ向き。右は撤去前の書き換えの結果と同じ関数（path の上で 2）。"""
+
+    right = _p211b_folded_on(_unsigned_majority("g"), 2)
+    assert _machine_value_at(_unsigned_majority("f"), -2**31) == 3
+    assert _machine_value_at(_p211b_folded_on(_unsigned_majority("g"), 2), -2**31) == 2
+
+    result = _production("pr211-unsigned-majority-neq", _unsigned_majority("f"), right)
     assert result["final_outcome"] == "NOT_EQ"
 
 

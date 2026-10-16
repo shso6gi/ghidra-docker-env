@@ -176,9 +176,7 @@ class ParameterService:
         debug_reporter: DebugReporter,
         target_active_key: Callable[..., Any],
         should_synthesize_implicit_passthrough_for_call: Callable[..., Any],
-        return_site_metadata_from_info: Callable[..., Any],
         make_tracked_return_value: Callable[..., Any],
-        make_return_info: Callable[..., Any],
         get_freshest_callee_parameters: Callable[..., Any],
         program_value: Callable[..., Any],
         debug_flag: Callable[..., Any],
@@ -188,9 +186,7 @@ class ParameterService:
         self.debug_reporter = debug_reporter
         self.target_active_key = target_active_key
         self.should_synthesize_implicit_passthrough_for_call = should_synthesize_implicit_passthrough_for_call
-        self.return_site_metadata_from_info = return_site_metadata_from_info
         self.make_tracked_return_value = make_tracked_return_value
-        self.make_return_info = make_return_info
         self.get_freshest_callee_parameters = get_freshest_callee_parameters
         self.program_value = program_value
         self.debug_flag = debug_flag
