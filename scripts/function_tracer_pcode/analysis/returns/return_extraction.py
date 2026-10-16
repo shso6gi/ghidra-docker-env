@@ -468,7 +468,6 @@ def _impl__try_pre_return_counted_loop_summary(
         }
     )
     self._synchronize_parameters_with_referenced_parameter_expressions(result)
-    self._repair_mixed_scalar_signedness(result)
     self._normalize_return_partition(result)
     self._mark_incomplete_control_flow(result)
     self._dump_return_infos(result)

@@ -1,4 +1,4 @@
-"""Parameter descriptors: collection, storage info, passthrough synthesis, signedness repair, sealed return ABI facts."""
+"""Parameter descriptors: collection, storage info, passthrough synthesis, sealed return ABI facts."""
 
 from __future__ import annotations
 
@@ -8,25 +8,20 @@ from scripts.function_tracer_pcode.core.analysis import (
     ReturnInfo,
     SignednessResult,
 )
-from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
+from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.signature import (
     get_declared_type_signedness,
     is_void_data_type,
 )
 from scripts.function_tracer_pcode.core.storage import StorageInfo
-from scripts.function_tracer_pcode.core.structural import StructuralKey
 from scripts.function_tracer_pcode.analysis.returns._shared import (
-    ConditionSimplifier,
     SignednessDetector,
-    _SIGNED_COMPARE_TO_UNSIGNED,
     _TrackedReturnValue,
-    _UNSIGNED_COMPARE_TO_SIGNED,
     _resolve_call_target_ref,
 )
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns._api import PcodeTracer
 from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
-from scripts.function_tracer_pcode.analysis.returns.return_normalization import ReturnNormalizationService
 
 
 def _sealed_return_abi_facts(function_prototype, return_type_obj, return_type):
@@ -169,7 +164,7 @@ class ParameterService:
     ``synchronize_parameters_with_referenced_parameter_expressions`` は解析全体のパラメータ一覧を更新するため
     facade の現在パラメータへ **書き込む** 唯一の collaborator であり、書き込みは注入された
     ``set_current_parameters`` setter を通す（facade 側の属性を直接触らない）。
-    optional int 変換は ``PcodeSiteService``、符号書き換えは ``ReturnNormalizationService`` を直接依存として受け取る。
+    optional int 変換は ``PcodeSiteService`` を直接依存として受け取る。
     未抽出 family（lifecycle / call_recovery / return_extraction）が所有する helper は facade 経由で遅延 dispatch
     する callable として注入する。``_sealed_return_abi_facts`` は module 関数のまま据え置く。
     """
@@ -178,7 +173,6 @@ class ParameterService:
         self,
         *,
         pcode_sites: PcodeSiteService,
-        return_normalization: ReturnNormalizationService,
         debug_reporter: DebugReporter,
         target_active_key: Callable[..., Any],
         should_synthesize_implicit_passthrough_for_call: Callable[..., Any],
@@ -191,7 +185,6 @@ class ParameterService:
         set_current_parameters: Callable[..., Any],
     ) -> None:
         self.pcode_sites = pcode_sites
-        self.return_normalization = return_normalization
         self.debug_reporter = debug_reporter
         self.target_active_key = target_active_key
         self.should_synthesize_implicit_passthrough_for_call = should_synthesize_implicit_passthrough_for_call
@@ -229,108 +222,6 @@ class ParameterService:
         parameters.sort(key=lambda param: int(param.get("index", 1 << 20)))
         analysis.parameters = parameters
         self.set_current_parameters(parameters)
-
-    def repair_mixed_scalar_signedness(
-        self,
-        analysis: FunctionReturnAnalysis,
-    ) -> None:
-        profiles = self.collect_scalar_signedness_profiles(analysis.returns)
-        preferred: Dict[Tuple[StructuralKey, int], str] = {}
-        for key, profile in profiles.items():
-            signed_score = int(profile.get("signed", 0))
-            unsigned_score = int(profile.get("unsigned", 0))
-            if signed_score <= 0 or unsigned_score <= 0 or signed_score == unsigned_score:
-                continue
-            preferred[key] = "signed" if signed_score > unsigned_score else "unsigned"
-
-        if not preferred:
-            return
-
-        repaired_returns: List[ReturnInfo] = []
-        changed = False
-        for info in analysis.returns or []:
-            rewritten_value, value_changed = self.return_normalization.rewrite_expression_signedness(
-                info.value,
-                preferred,
-            )
-            rewritten_conditions: List[Condition] = []
-            cond_changed = False
-            for cond in info.conditions or []:
-                rewritten_expr, expr_changed = self.return_normalization.rewrite_expression_signedness(
-                    cond.expression,
-                    preferred,
-                )
-                rewritten_conditions.append(Condition(rewritten_expr, cond.negated))
-                cond_changed = cond_changed or expr_changed
-            if value_changed or cond_changed:
-                changed = True
-                repaired_returns.append(
-                    self.make_return_info(
-                        address=info.address,
-                        value=rewritten_value,
-                        conditions=rewritten_conditions,
-                        branch_index=info.branch_index,
-                        site_metadata=self.return_site_metadata_from_info(info),
-                    )
-                )
-            else:
-                repaired_returns.append(info)
-
-        if not changed:
-            return
-
-        analysis.returns = repaired_returns
-        note = "object_centric_scalar_signedness_repair"
-        if note not in analysis.analysis_notes:
-            analysis.analysis_notes.append(note)
-
-    def collect_scalar_signedness_profiles(
-        self,
-        return_infos: List[ReturnInfo],
-    ) -> Dict[Tuple[StructuralKey, int], Dict[str, int]]:
-        profiles: Dict[Tuple[StructuralKey, int], Dict[str, int]] = {}
-
-        def record_expr(expr: Optional[Expression]) -> None:
-            if expr is None:
-                return
-            self.record_scalar_signedness_from_expression(expr, profiles)
-            for operand in getattr(expr, "operands", []) or []:
-                record_expr(operand)
-            if expr.expr_type == ExpressionType.PHI and expr.value:
-                for cond, value in expr.value:
-                    if cond is not None:
-                        record_expr(cond.expression)
-                    record_expr(value)
-
-        for info in return_infos or []:
-            record_expr(info.value)
-            for cond in info.conditions or []:
-                record_expr(cond.expression)
-
-        return profiles
-
-    def record_scalar_signedness_from_expression(
-        self,
-        expr: Expression,
-        profiles: Dict[Tuple[StructuralKey, int], Dict[str, int]],
-    ) -> None:
-        if expr is None or expr.expr_type != ExpressionType.BINARY_OP:
-            return
-        if expr.operator not in set(_UNSIGNED_COMPARE_TO_SIGNED) | set(_SIGNED_COMPARE_TO_UNSIGNED):
-            return
-
-        fact = ConditionSimplifier.extract_scalar_constraint(Condition(expr, False))
-        if fact is None:
-            return
-
-        profile = profiles.setdefault(fact.key, {"signed": 0, "unsigned": 0})
-        if expr.operator in _SIGNED_COMPARE_TO_UNSIGNED:
-            score = 2
-            if fact.value is not None and int(fact.value) < 0:
-                score += 2
-            profile["signed"] += score
-        else:
-            profile["unsigned"] += 1
 
     def collect_referenced_parameter_descriptors(
         self,
