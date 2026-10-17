@@ -606,11 +606,8 @@ def test_a_fixed_once_subclass_declares_its_slots():
 
 
 def test_dumps_frozen_refuses_an_unfrozen_value_without_running_its_code():
-    """`dumps_frozen` は区間を外さないので、凍結していない値（dict の subclass の `items()`・key の並べ替えが呼ぶ比較）を
-    呼ぶ場所の固定に頼らずに拒む（Python の code を呼ばない）。凍結した値は `json.dumps` と同じ文字列。"""
-
-    import enum
-    import json
+    """`dumps_frozen` は区間を外さないので、凍結していない値（容器の subclass の `items()`・反復、key の並べ替えが呼ぶ
+    比較、`default` に渡る値）と閉路を、呼ぶ場所の固定に頼らずに書く前に拒む（Python の code を呼ばない）。"""
 
     seen = []
 
@@ -619,18 +616,31 @@ def test_dumps_frozen_refuses_an_unfrozen_value_without_running_its_code():
             seen.append(live_values.region_cache("probe") is not None)
             return super().items()
 
+    class Sequence(list):
+        def __iter__(self):
+            seen.append("iter")
+            return super().__iter__()
+
+    class Key(str):
+        def __lt__(self, other):
+            seen.append("lt")
+            return str.__lt__(self, other)
+
+        __hash__ = str.__hash__
+
+    cycle: list = []
+    cycle.append(cycle)
     policy = json_encoding.JsonEncodingPolicy(ensure_ascii=True, item_separator=",", key_separator=":")
     with live_values.audited_region():
-        for value in (Mapping(a=1), {"a": 1}, [1], (1, Mapping(a=1)), object()):
+        for value in (
+            Mapping(a=1), Sequence([1]), {Key("b"): 1, Key("a"): 2}, [{1}], (1, Mapping(a=1)), [object()],
+            {(1,): 1},
+        ):
             with pytest.raises(TypeError):
                 json_encoding.JsonEncodingPolicy.dumps_frozen(policy, value)
+        with pytest.raises(ValueError):
+            json_encoding.JsonEncodingPolicy.dumps_frozen(policy, cycle)
     assert seen == []
-    Kind = enum.IntEnum("Kind", {"A": 3})
-    frozen = ("k", (1, 2.5, None, True, Kind.A), ())
-    assert json_encoding.JsonEncodingPolicy.dumps_frozen(policy, frozen) == json.dumps(
-        frozen, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
-    )
-
 
 #: package の製品の code が thread を始める場所と、その thread が走らせる code（値の code を走らせない理由）。
 #: 型の判定の記録・監査済みの区間の記録は「判定の途中・区間の間、外の code が走らない」ことに依る（同じ thread の中は
@@ -674,9 +684,11 @@ def test_dumps_frozen_writes_what_json_dumps_writes(ensure_ascii):
 
     Kind = enum.IntEnum("Kind", {"A": 1})
     Text = enum.Enum("Text", {"B": "x"}, type=str)
+    shared = [1, {"k": (2,)}]
     values = [
         "abc", "é\ud800x", 1, -2 ** 70, 3.5, 1e300, float("nan"), float("inf"), -0.0, None, True, False, (), ((),),
         ("a", (1, 2.5, None, True, Kind.A, Text.B)), tuple((f"k{i}", i, (i, "あ")) for i in range(50)),
+        [1, [2, (3,)]], {"b": [1], "a": {"c": None}}, {Kind.A: 1, 0: 2}, {Text.B: 1, "a": 2}, (shared, shared, [shared]),
     ]
     policy = json_encoding.JsonEncodingPolicy(ensure_ascii=ensure_ascii, item_separator=",", key_separator=":")
     for value in values:

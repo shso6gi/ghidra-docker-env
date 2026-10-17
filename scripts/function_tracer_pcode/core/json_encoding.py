@@ -1179,29 +1179,74 @@ class PreparedJson(_FixedOnceBuilt):
 _FROZEN_SCALARS = (str, int, float)
 
 
+def _frozen_key(key: Any) -> bool:
+    """凍結した値の dict の key として書けるか: `sort_keys` の並べ替えが key どうしを比べるので、比較が Python の code で
+    ない key だけ（組み込みの scalar そのもの・`None`・組み込みのままの enum の member）。"""
+
+    kind = type(key)
+    return (
+        kind is str or kind is int or key is None or kind is float or kind is bool
+        or live_values.builtin_enum(key)
+    )
+
+
 def _require_frozen(value: Any) -> None:
-    """`dumps_frozen` が書く値の形（組み込みの tuple そのものと、`None`・`str` / `int` / `float`（subclass を含む）の葉
-    だけ）。dict（`items()`・key の並べ替えの比較）・list・その他の object は書かずに `TypeError`。読みは型の identity と
-    組み込みの型への `issubclass`、tuple の C の反復だけ（値の code を呼ばない）。組み込みの型そのものの葉は identity
+    """`dumps_frozen` が書く値の形: 容器は組み込みの tuple / list / dict そのもの（`SnapshotFingerprintCodec` の写しと、
+    enum の値の `builtin_view`）で閉路を持たない、葉は `None`・`str` / `int` / `float`（subclass を含む）、dict の key は
+    `_frozen_key`。組み込みの `json` の C の encoder はこの形に Python の code を呼ばない（容器の subclass の `items()`・
+    反復、key の並べ替えの比較、`default` に渡る値が無い）。形が違えば書かずに `TypeError`、閉路は `json.dumps` と同じ
+    `ValueError`（書く encoder は閉路を確かめない）。読みは型の identity・組み込みの型への `issubclass`・組み込みの容器
+    の C の反復だけ（値の code を呼ばない）。
+
+    費用は書く量と同じ順（encoder と同じく共有された部分木は現れるたびに辿る）。閉路は変わる容器（list / dict）を
+    通るので、今辿っている list / dict の identity だけを持つ（tuple は数えない）。組み込みの型そのものの葉は identity
     だけで通す（並べ替えの key の小さい値が大半: 呼ぶたびの固定費を小さくする）。"""
 
     kind = type(value)
     if kind is str or kind is int or value is None or kind is float or kind is bool:
         return
-    if kind is not tuple:
-        if issubclass(kind, _FROZEN_SCALARS):
-            return
+    if kind is tuple or kind is list:
+        children = iter(value)
+    elif kind is dict:
+        children = _frozen_values(value)
+    elif issubclass(kind, _FROZEN_SCALARS):
+        return
+    else:
         raise TypeError(f"dumps_frozen writes only codec-frozen values, not {type_name(kind)}")
-    stack = [value]
+    mark = None if kind is tuple else id(value)
+    active = set() if mark is None else {mark}
+    stack = [(children, mark)]
     while stack:
-        for child in stack.pop():
+        children, mark = stack[-1]
+        for child in children:
             kind = type(child)
             if kind is str or kind is int or child is None or kind is float or kind is bool:
                 continue
             if kind is tuple:
-                stack.append(child)
-            elif not issubclass(kind, _FROZEN_SCALARS):
+                stack.append((iter(child), None))
+                break
+            if kind is list or kind is dict:
+                identity = id(child)
+                if identity in active:
+                    raise ValueError("Circular reference detected")
+                active.add(identity)
+                stack.append((iter(child) if kind is list else _frozen_values(child), identity))
+                break
+            if not issubclass(kind, _FROZEN_SCALARS):
                 raise TypeError(f"dumps_frozen writes only codec-frozen values, not {type_name(kind)}")
+        else:
+            stack.pop()
+            if mark is not None:
+                active.discard(mark)
+
+
+def _frozen_values(mapping: dict) -> Any:
+    """`_require_frozen` が辿る dict の値（key を先に確かめる）。"""
+
+    for key in mapping:
+        if not _frozen_key(key):
+            raise TypeError(f"dumps_frozen writes only codec-frozen keys, not {type_name(type(key))}")
+    return iter(mapping.values())
 
 
 def is_prepared_json(value: Any) -> bool:
@@ -1311,8 +1356,8 @@ class JsonEncodingPolicy:
             json.dumps, ensure_ascii=self.ensure_ascii, sort_keys=self.sort_keys,
             separators=(self.item_separator, self.key_separator),
         ))
-        # 凍結した値（`_require_frozen` の形: 閉路を作れない tuple と scalar の葉）を書く C の encoder（呼ぶたびに作らない）。
-        # `json.JSONEncoder.iterencode` が同じ引数で作るものから、閉路の検出（`markers`）だけを外したもの
+        # 凍結した値（`_require_frozen` の形）を書く C の encoder（呼ぶたびに作らない）。`json.JSONEncoder.iterencode` が
+        # 同じ引数で作るものから、閉路の検出（`markers`）だけを外したもの（閉路は `_require_frozen` が書く前に拒む）
         frozen = None
         if json.encoder.c_make_encoder is not None:
             frozen = json.encoder.c_make_encoder(
@@ -1382,9 +1427,9 @@ class JsonEncodingPolicy:
         return iterencode(value, 0)
 
     def dumps_frozen(self, value: Any) -> str:
-        """snapshot の codec が凍結した値（`SnapshotFingerprintCodec` の写し: 組み込みの tuple と scalar・int / str の enum
-        の member だけ）を書く。組み込みの `json` の C の encoder はその値に Python の code を呼ばない（scalar は C の slot
-        で書き、tuple は辿るだけ。dict も `default` も無い）: 区間を外さない。呼ぶのは `snapshot._fingerprint_json` だけ
+        """snapshot の codec が凍結した値（`SnapshotFingerprintCodec` の写し: `_require_frozen` の形）を書く。組み込みの
+        `json` の C の encoder はその形に Python の code を呼ばない（scalar は C の slot で書き、容器は組み込みの型そのもの、
+        key の比較は組み込みの比較、`default` に渡る値は無い）: 区間を外さない。呼ぶのは `snapshot._fingerprint_json` だけ
         （`test_issue242_audited_regions` が呼ぶ場所を固定する。J19 の監査の宣言した依存と同じ場所）。書く前に値の形を
         確かめる（`_require_frozen`: 呼ぶ場所の固定に頼らず、凍結していない値は Python の code を呼ばずに拒む）。"""
 
