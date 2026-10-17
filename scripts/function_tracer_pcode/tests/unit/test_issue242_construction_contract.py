@@ -92,8 +92,17 @@ def _observe(ref: Any) -> Any:
     return {
         "fields": _base(ref),
         "stable_key": _base(stable_key(ref)) if stable_key else None,
-        "json": json.dumps(materialize(ref), sort_keys=True),
+        "json": _json_text(ref),
     }
+
+
+def _json_text(ref: Any) -> Any:
+    """ref の JSON の文字列。JSON の値にならない ref（表現を持たない宣言の object）はその事実（双子と同じかを比べる）。"""
+
+    try:
+        return json.dumps(materialize(ref), sort_keys=True)
+    except TypeError as error:
+        return ("not a JSON value", type(error).__name__)
 
 
 @pytest.mark.parametrize("cls, name, label, make", list(_cases()))

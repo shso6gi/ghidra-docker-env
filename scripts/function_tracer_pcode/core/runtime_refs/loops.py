@@ -69,6 +69,7 @@ class LoopVariableIdentityRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class LoopBinderScope:
     """loop 変数の束縛の宣言: ``binders`` は ``scoped_fields`` を通って届く位置でだけ有効。
 

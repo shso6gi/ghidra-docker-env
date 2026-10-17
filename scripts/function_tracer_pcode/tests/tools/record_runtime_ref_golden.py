@@ -132,14 +132,31 @@ def observe(cls: type, kwargs: Dict[str, Any], twin: Any) -> Dict[str, Any]:
     return row
 
 
+#: 同じ入力から 2 度作った観測が違う項目の印（process の中だけの identity（object の id など）を写す表現。main の
+#: 表現そのものが決まらない: 比べない）
+UNSTABLE = "<unstable>"
+
+
+def _stable(variant: Any, make_kwargs: Callable[[], Dict[str, Any]], twin_ref: Any) -> Dict[str, Any]:
+    """`observe` を同じ入力から 2 度作って行い、2 度で違う不変の項目を `UNSTABLE` にする（golden に決まらない値を
+    書かない。どの class・項目かに依らない規則）。"""
+
+    first = observe(variant.cls, make_kwargs(), twin_ref)
+    second = observe(variant.cls, make_kwargs(), twin_ref)
+    for item in INVARIANT_ITEMS:
+        if item in first and first.get(item) != second.get(item):
+            first[item] = UNSTABLE
+    return first
+
+
 def record() -> Dict[str, Any]:
     cases: Dict[str, Any] = {}
     orders: Dict[str, Any] = {}
     by_class: Dict[str, List[Any]] = {}
     for variant in corpus.variants():
         twin_ref, _status, _calls = _construct(variant.cls, variant.twin_kwargs())
-        observed = observe(variant.cls, variant.kwargs(), twin_ref)
-        twin_observed = observe(variant.cls, variant.twin_kwargs(), twin_ref)
+        observed = _stable(variant, variant.kwargs, twin_ref)
+        twin_observed = _stable(variant, variant.twin_kwargs, twin_ref)
         cases[variant.case_id] = {"input": observed, "twin": twin_observed}
         by_class.setdefault(corpus.class_label(variant.cls), []).append(variant)
     # sort の site（`repr(stable_key())` で並べる）と同じ key で、class ごとの variant を並べた順

@@ -44,6 +44,7 @@ from scripts.function_tracer_pcode.core.runtime_refs.loops import (
     ComposedLoopSummaryRef,
     CountedLoopSummaryRef,
     CountedStateTransitionLoopSummaryRef,
+    LoopBinderScope,
     LoopBodyEffectRef,
     LoopCaseRef,
     LoopSideEffectProfileRef,
@@ -334,6 +335,8 @@ BASES: Dict[type, Callable[[], Dict[str, Any]]] = {
                                         lane_terms=((0, 4),)),
     LoopCaseRef: lambda: dict(path_conditions=("c", 1), body_effect=None, term_expr=None, case_kind="body",
                               source="method_b"),
+    # `scoped_fields` は 1 要素（複数の str の frozenset の並びは process の hash の seed に依る: golden を決められない）
+    LoopBinderScope: lambda: dict(binders=(_expr(5),), scoped_fields=frozenset({"term_expr"})),
     LoopSummaryRef: lambda: dict(start_expr=_expr(0), limit_expr=_expr(8), step_expr=_expr(1),
                                  term_descriptor=_term_descriptor(), seed_terms=(1, 2), seed_term_count=2,
                                  side_effect_profile=_profile(), guard_constraints=("g", 1),

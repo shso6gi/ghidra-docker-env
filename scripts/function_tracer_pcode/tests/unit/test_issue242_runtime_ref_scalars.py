@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Issue #242: runtime ref の scalar の field を組み込みの型そのものにする（`core/runtime_ref_record`）。
 
-- golden: 変更前（main `4317e592`）で録った観測（`tests/fixtures/runtime_ref_golden/baseline.json`）と、
+- golden: 変更前（main `5c1e8240`。#253 の merge 後）で録った観測（`tests/fixtures/runtime_ref_golden/baseline.json`）と、
   今の tree の観測を比べる。ref の表現・式の表現・fingerprint・構造 key は変わらず、差は意図した差
   D1〜D3（`intended_difference`）だけで、その値は main で双子（型規則で写した入力）から作った値と同じ。
   正規化そのもの（field の型・subclass の code の呼び出し・写せるか）は main の双子と同じになる（D4 を含む）。
@@ -55,7 +55,7 @@ from scripts.function_tracer_pcode.tests.tools import record_runtime_ref_golden 
 
 FIXTURE = pathlib.Path(__file__).resolve().parents[1] / "fixtures" / "runtime_ref_golden" / "baseline.json"
 #: golden を録った commit（ref の code が変わったら録り直し、ここも変える）
-RECORDED_AT = "4317e592600c6ee14ef5cbdb85a3da7b7156a636"
+RECORDED_AT = "5c1e82409f2f7009752e9f0cf678f331c2431aee"
 
 
 @pytest.fixture(scope="module")
@@ -226,7 +226,7 @@ def _package_ref_classes():
 
 def test_every_runtime_ref_class_goes_through_the_owner_and_is_in_the_corpus():
     classes = _package_ref_classes()
-    assert len(classes) == 35
+    assert len(classes) == 36  # PR #253 の `LoopBinderScope` を含む
     assert {cls for cls in classes if not is_runtime_ref_record(cls)} == set()
     # 新しい ref の class は corpus（golden）にも足す
     assert classes == set(corpus.REF_CLASSES)

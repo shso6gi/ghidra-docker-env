@@ -591,6 +591,21 @@ ENTRY_CASES.update({
         loops_module.CountedStateTransitionLoopSummaryRef, "semantic_key",
         lambda: _corpus_instance(loops_module.CountedStateTransitionLoopSummaryRef),
     ),
+    # 束縛の宣言（PR #253）: 束縛を持つ受け手で走る（持たなければ `None` の分岐だけになる）
+    "LoopCaseRef.loop_binder_scope": _zero_argument(
+        loops_module.LoopCaseRef, "loop_binder_scope",
+        lambda: dataclasses.replace(_corpus_instance(loops_module.LoopCaseRef), loop_binders=(_expr(7),)),
+    ),
+    "StateTransitionLoopSummaryRef.loop_binder_scope": _zero_argument(
+        loops_module.StateTransitionLoopSummaryRef, "loop_binder_scope",
+        lambda: dataclasses.replace(_corpus_instance(loops_module.StateTransitionLoopSummaryRef), loop_binders=(_expr(7),)),
+    ),
+    "CountedStateTransitionLoopSummaryRef.loop_binder_scope": _zero_argument(
+        loops_module.CountedStateTransitionLoopSummaryRef, "loop_binder_scope",
+        lambda: dataclasses.replace(
+            _corpus_instance(loops_module.CountedStateTransitionLoopSummaryRef), state_placeholder=_expr(7),
+        ),
+    ),
 })
 for _suffix, _pair in SUMMARY_PAIRS.items():
     for _name in ("semantic_key", "pairwise_semantic_key"):
