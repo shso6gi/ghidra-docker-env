@@ -321,11 +321,6 @@ _AMORTIZED = (
     "入れ子の上限で切った判定は残さないので、切られる形の型は問い合わせごとに辿り直す（既存の設計）"
 )
 
-_AMORTIZED_TABLE = (
-    "B(償却): 表が前回に辿ったときの 2 倍になったときだけ表を 1 度辿る（挿入 1 つにつき O(1) の償却。表の大きさは"
-    "生きている元の葉の数の 2 倍まで: `test_nan_copies_of_leaves_without_weakrefs_do_not_accumulate`）"
-)
-
 LIVE_VALUES_WORK_OWNERS = {
     "package_file": _A,
     "_package_type_uncached": _B,
@@ -418,8 +413,9 @@ LIVE_VALUES_WORK_OWNERS = {
     "_state_holds": _B,
     "_merged_watch": _B,
     "_accessors_hold": _B,
+    "_builtin_enum_type_checked": _A,
+    "outside_audit.__exit__": _A,
     "_lru_callee": _A,
-    "_sweep_nan_copies": _AMORTIZED_TABLE,
     # 判定が値から読む状態（書いた数の slot だけ）・記録した値の列（名前空間の上限の中: 呼ぶ側が比べた）
     "_watch": _B,
     "_watch_holds": _B,

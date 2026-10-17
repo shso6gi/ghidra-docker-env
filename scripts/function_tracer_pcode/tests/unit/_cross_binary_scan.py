@@ -33,6 +33,8 @@ COMPARISON_HELPERS = frozenset({
     "are_structurally_equivalent", "_cross_binary_call_effect_component_key", "semantic_key",
     "pairwise_semantic_key", "pairwise_exact_key", "loop_summary_method_b_key", "compare_loop_summaries",
     "_deferred_call_match_key",
+    # 比べる側の契約（`core/live_values`・`runtime_refs/_reading`: Issue #242）の比較。`==` / `!=` を置き換えた場所も数える
+    "equal", "unequal", "decided_equal", "_decided_equal", "same", "contains", "less",
 })
 
 

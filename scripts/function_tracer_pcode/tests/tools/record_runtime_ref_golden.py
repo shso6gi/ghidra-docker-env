@@ -98,8 +98,10 @@ def _construct(cls: type, kwargs: Dict[str, Any]) -> Any:
     return ref, "ok", dict(corpus.SUBCLASS_CALLS)
 
 
-def observe(cls: type, kwargs: Dict[str, Any], twin: Any) -> Dict[str, Any]:
+def observe(cls: type, kwargs: Dict[str, Any], twin: Any, keep: Any = None) -> Dict[str, Any]:
     ref, constructed, calls = _construct(cls, kwargs)
+    if keep is not None:
+        keep.append(ref)  # 作った object を生かす（2 度の観測の間で address を再利用させない: `_stable`）
     row: Dict[str, Any] = {"construct": constructed, "subclass_calls": sorted(calls.items())}
     if ref is None:
         return row
@@ -119,6 +121,8 @@ def observe(cls: type, kwargs: Dict[str, Any], twin: Any) -> Dict[str, Any]:
     row["materialize_json"] = _attempt(lambda: _digest(json.dumps(materialize(ref), sort_keys=True)))
     row["snapshot_digest"] = _attempt(lambda: _digest(SnapshotFingerprintCodec.digest(ref)))
     expression = _attempt(lambda: Expression.unknown("u", runtime_ref=ref))
+    if keep is not None:
+        keep.append(expression)
     if isinstance(expression, Expression):
         row["expression_to_dict"] = _attempt(lambda: _digest(json.dumps(expression.to_dict(), sort_keys=True)))
         row["expression_fingerprint"] = _attempt(lambda: _digest(SnapshotFingerprintCodec.digest(expression)))
@@ -141,8 +145,12 @@ def _stable(variant: Any, make_kwargs: Callable[[], Dict[str, Any]], twin_ref: A
     """`observe` を同じ入力から 2 度作って行い、2 度で違う不変の項目を `UNSTABLE` にする（golden に決まらない値を
     書かない。どの class・項目かに依らない規則）。"""
 
-    first = observe(variant.cls, make_kwargs(), twin_ref)
-    second = observe(variant.cls, make_kwargs(), twin_ref)
+    # 2 度の観測で作る object は全部生かしたまま比べる（先の object を捨てると、後の object が同じ address に置かれ、
+    # process の中の identity を写す表現が偶然同じになる）
+    keep: List[Any] = []
+    first_kwargs, second_kwargs = make_kwargs(), make_kwargs()
+    first = observe(variant.cls, first_kwargs, twin_ref, keep)
+    second = observe(variant.cls, second_kwargs, twin_ref, keep)
     for item in INVARIANT_ITEMS:
         if item in first and first.get(item) != second.get(item):
             first[item] = UNSTABLE

@@ -436,3 +436,30 @@ def test_slots_and_init_vars():
 
     _WithInitVar(JInt(1), "h")
     assert seen == [(int, "h")]
+
+
+#: golden の中で、同じ入力から 2 度作った観測が違った項目（main の LEGACY の表現が frozenset の object の id を写す:
+#: process ごとに変わる）。比べない項目はこれだけ: 増えれば（新しい非決定な表現・ref の比べ方の揺れ）落ちる
+KNOWN_UNSTABLE_ITEMS = [
+    ("loops.LoopBinderScope|base", "expression_fingerprint"),
+    ("loops.LoopBinderScope|base", "expression_to_dict"),
+    ("loops.LoopBinderScope|binders|mixed", "expression_fingerprint"),
+    ("loops.LoopBinderScope|binders|mixed", "expression_to_dict"),
+]
+
+
+def test_golden_items_left_uncompared_are_only_the_known_process_local_ones(golden, current):
+    """golden で比べない項目（`recorder.UNSTABLE`）は、process の中の identity を写すと分かっている項目だけ。今の観測でも
+    同じ項目だけが不安定（main と head の両方で決まらない表現）。"""
+
+    def unstable(record):
+        return sorted({
+            (case_id, item)
+            for case_id, sides in record["cases"].items()
+            for side in ("input", "twin")
+            for item, value in sides[side].items()
+            if value == recorder.UNSTABLE
+        })
+
+    assert unstable(golden) == KNOWN_UNSTABLE_ITEMS
+    assert unstable(current) == KNOWN_UNSTABLE_ITEMS

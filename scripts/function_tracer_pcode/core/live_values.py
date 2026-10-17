@@ -647,22 +647,26 @@ def _state_check(
         watches.append(objects_watch)  # 判定が型・中身を読んだ object（`_Nesting.objects`）
     watch = _merged_watch(watches)
     if watch is _NO_WATCH:
-        watch = ((),) * 12
-    heap_objects, heap_types, props, fgets, fsets, fdels, statics, static_funcs, methods, method_funcs, others, states = watch
+        watch = ((),) * _WATCH_COLUMNS
+    (
+        heap_objects, heap_types, props, fgets, fsets, fdels, statics, static_funcs, methods, method_funcs, others, states,
+        functions, codes,
+    ) = watch
     # 確かめる object と、読んで得るはずの object を 1 つの列に並べる（`_state_holds` が 1 度の C の反復で比べる）
     expected = (
         tuple(mros) + tuple(metas) + heap_types + tuple(keys) + tuple(values) + fgets + fsets + fdels + static_funcs
-        + method_funcs
+        + method_funcs + codes
     )
     # `_state_holds` は `expected` と読み直す列を 1 つの `map` で比べる（短い方で止まる）: 列の長さが揃うことをここで確かめる
     read_count = (
         len(owners) + len(classes) + len(heap_objects) + 2 * sum(lengths) + 3 * len(props) + len(statics) + len(methods)
+        + len(functions)
     )
     if read_count != tuple.__len__(expected):
         raise RuntimeError("type fact check columns are misaligned")
     return (
-        tuple(raws), tuple(lengths), tuple(owners), tuple(classes) + heap_objects, props, statics, methods, expected,
-        others, states,
+        tuple(raws), tuple(lengths), tuple(owners), tuple(classes) + heap_objects, props, statics, methods, functions,
+        expected, others, states,
     )
 
 
@@ -672,14 +676,14 @@ def _state_holds(check: Tuple[Any, ...]) -> bool:
     呼ばない。名前空間の storage は組み込みの `dict`）。大きさを先に比べる: 並べた列の長さは記録したときと同じ（途中で
     ずれない）。名前空間の数は記録したときに上限と比べた（大きさが同じなら辿る数も同じ）。"""
 
-    raws, lengths, owners, typed, props, statics, methods, expected, others, states = check
+    raws, lengths, owners, typed, props, statics, methods, functions, expected, others, states = check
     if not _within_scan(tuple.__len__(raws)) or tuple(map(dict.__len__, raws)) != lengths:
         return False
     if not all(map(_IS, itertools.chain(
         map(_TYPE_MRO.__get__, owners), map(type, typed),
         itertools.chain.from_iterable(map(dict.__iter__, raws)), itertools.chain.from_iterable(map(dict.values, raws)),
         map(_PROPERTY_FGET, props), map(_PROPERTY_FSET, props), map(_PROPERTY_FDEL, props),
-        map(_STATICMETHOD_FUNC, statics), map(_CLASSMETHOD_FUNC, methods),
+        map(_STATICMETHOD_FUNC, statics), map(_CLASSMETHOD_FUNC, methods), map(_FUNCTION_CODE, functions),
     ), expected)):
         return False
     return _accessors_hold(others, states)
@@ -716,9 +720,10 @@ def _watch(objects: Any) -> Any:
     - 組み込みの descriptor の中身（`property`（subclass を含む）の accessor・`staticmethod` / `classmethod` の関数:
       `__init__` を呼び直すと差し替わる）。heap type の descriptor（`types.DynamicClassAttribute`）の accessor（instance の
       属性）。
-    - 判定が中を辿った関数（`_OpenedFunction`: package の外の実行環境の関数の closure を辿った）の `__code__`
-      （代入できる）と、その closure の cell の中身（`cell_contents` は代入できる）。package の関数の code・closure の
-      書き換えは契約の外（呼ぶ code を書き換える操作）。
+    - 信頼していない関数（code が package の file のものでない: 外の関数・実行環境の関数・生成された関数）の `__code__`
+      （代入できる: 信頼しない判定（偽 / 中を辿る）は code に依る）と、判定が中を辿った closure の cell の中身
+      （`cell_contents` は代入できる）。信頼した関数（package の code）の code・closure の書き換えは契約の外（呼ぶ code を
+      書き換える操作）。
 
     状態は種類ごとの列（object の列と、その状態の列）にし、確かめは C の反復で identity だけを比べる（値・型の `__eq__` を
     呼ばない）。状態を持つ object が無ければ `_NO_WATCH`。読みは組み込みの descriptor の slot と型だけ。
@@ -732,6 +737,7 @@ def _watch(objects: Any) -> Any:
     statics: List[Any] = []
     classes: List[Any] = []
     others: List[Any] = []
+    functions: List[Any] = []
     for value in objects:
         kind = type(value)
         heap = flags(kind) & _HEAP_TYPE
@@ -743,14 +749,14 @@ def _watch(objects: Any) -> Any:
             statics.append(value)
         elif kind is classmethod:
             classes.append(value)
-        elif kind is types.DynamicClassAttribute:
-            others.append(value)
-        elif kind is _OpenedFunction or kind is types.CellType:
+        elif kind is types.DynamicClassAttribute or kind is types.CellType:
             others.append(value)  # 状態は `_object_state`
-    if not (heap_objects or props or statics or classes or others):
+        elif kind is types.FunctionType and not package_code(_FUNCTION_CODE(value)):
+            functions.append(value)  # 信頼していない関数: 判定は `__code__` に依る
+    if not (heap_objects or props or statics or classes or others or functions):
         return _NO_WATCH
-    heap_objects_t, props_t, statics_t, classes_t, others_t = (
-        tuple(heap_objects), tuple(props), tuple(statics), tuple(classes), tuple(others)
+    heap_objects_t, props_t, statics_t, classes_t, others_t, functions_t = (
+        tuple(heap_objects), tuple(props), tuple(statics), tuple(classes), tuple(others), tuple(functions)
     )
     return (
         heap_objects_t, tuple(map(type, heap_objects_t)),
@@ -758,11 +764,14 @@ def _watch(objects: Any) -> Any:
         statics_t, tuple(map(_STATICMETHOD_FUNC, statics_t)),
         classes_t, tuple(map(_CLASSMETHOD_FUNC, classes_t)),
         others_t, tuple(map(_object_state, others_t)),
+        functions_t, tuple(map(_FUNCTION_CODE, functions_t)),
     )
 
 
 #: 状態を持つ object が無い記録
 _NO_WATCH = ()
+#: `_watch` の記録の列の数（object と状態の組: heap の instance・property・staticmethod・classmethod・その他・関数）
+_WATCH_COLUMNS = 14
 
 
 def _object_state(value: Any) -> Tuple[Any, ...]:
@@ -770,14 +779,11 @@ def _object_state(value: Any) -> Tuple[Any, ...]:
     いつも偽: 判定し直す）。
 
     - `types.DynamicClassAttribute`（heap type の descriptor）: accessor（instance の属性）。
-    - `_OpenedFunction`: 判定が中を辿った関数の `__code__`。
     - closure の cell: 中身（空の cell は `_EMPTY_CELL`）。
     """
 
     kind = type(value)
     try:
-        if kind is _OpenedFunction:
-            return (_FUNCTION_CODE(value.function),)
         if kind is types.CellType:
             try:
                 return (_CELL_CONTENTS(value),)
@@ -786,15 +792,6 @@ def _object_state(value: Any) -> Tuple[Any, ...]:
         return tuple(instance_state(value, name, None) for name in ("fget", "fset", "fdel"))
     except TypeError:
         return (object(),)  # 読めない: 確かめはいつも偽（判定し直す）
-
-
-class _OpenedFunction:
-    """判定が中（closure）を辿った関数の印（`_Nesting.objects` に置く: 記録はその関数の `__code__` を確かめる）。"""
-
-    __slots__ = ("function",)
-
-    def __init__(self, function: Any) -> None:
-        self.function = function
 
 
 _FUNCTION_CODE = types.FunctionType.__dict__["__code__"].__get__
@@ -821,13 +818,16 @@ def _watch_holds(watch: Any) -> bool:
         return True
     (
         heap_objects, heap_types, props, fgets, fsets, fdels, statics, static_funcs, classes, class_funcs, others, states,
+        functions, codes,
     ) = watch
-    if not _within_scan(tuple.__len__(heap_objects) + tuple.__len__(props) + tuple.__len__(others)):
+    if not _within_scan(
+        tuple.__len__(heap_objects) + tuple.__len__(props) + tuple.__len__(others) + tuple.__len__(functions)
+    ):
         return False
     if not all(map(_IS, itertools.chain(
         map(type, heap_objects), map(_PROPERTY_FGET, props), map(_PROPERTY_FSET, props), map(_PROPERTY_FDEL, props),
-        map(_STATICMETHOD_FUNC, statics), map(_CLASSMETHOD_FUNC, classes),
-    ), heap_types + fgets + fsets + fdels + static_funcs + class_funcs)):
+        map(_STATICMETHOD_FUNC, statics), map(_CLASSMETHOD_FUNC, classes), map(_FUNCTION_CODE, functions),
+    ), heap_types + fgets + fsets + fdels + static_funcs + class_funcs + codes)):
         return False
     return _accessors_hold(others, states)
 
@@ -1008,6 +1008,7 @@ def _trusted_callables(pending: list, *, generated: bool, scan: Any) -> bool:
         holder = type(item)
         if holder is types.MethodType:
             item = item.__func__
+            _note_object(item)  # 包んだ関数の判定も記録が確かめる
             holder = type(item)
         if holder is types.FunctionType:
             verdict = _function_verdict(item, generated=generated)
@@ -1017,8 +1018,7 @@ def _trusted_callables(pending: list, *, generated: bool, scan: Any) -> bool:
                 cells = item.__closure__ or ()
                 if not _within_scan(scan.used + len(pending) + tuple.__len__(cells)):
                     return False
-                # 関数の中を辿る: その code と cell の中身も判定が読んだ状態（記録が確かめる: `_object_state`）
-                _note_object(_OpenedFunction(item))
+                # 関数の中を辿る: cell の中身も判定が読んだ状態（関数の code は上で記録した: `_watch`）
                 for cell in cells:
                     _note_object(cell)
                     try:
@@ -1520,56 +1520,37 @@ def plain_scalar(value: Any) -> Any:
     return NOT_PLAIN
 
 
-#: scalar の subclass の NaN の葉 → その写し（`id(元の葉)` → (元の葉の weakref か元の葉, 写し)）。NaN は identity で
-#: 比べ・hash する唯一の組み込みの値: 同じ元の葉はいつ読んでも同じ写しにする（写しの identity が元の葉の identity に
-#: 従う: 比べる・hash する・key にする読みが、呼び出しの間で双子と同じに振る舞う）。entry は元の葉が消えると消える
-#: （weakref の callback）。weakref を作れない型の葉は entry が生かし、表のほかに元の葉を指すものが無くなった entry を
-#: 掃く（`_sweep_nan_copies`: その葉はもう誰も読めない）: 表の大きさは生きている元の葉の数の 2 倍まで。lock は
-#: 再入できる（callback は GC が lock の中の割り当てで走らせることがある: 同じ thread で取り直す）
+#: scalar の subclass の NaN の葉 → その写し（`id(元の葉)` → (元の葉の weakref, 写し)）。NaN は identity で比べ・hash
+#: する唯一の組み込みの値: 同じ元の葉はいつ読んでも同じ写しにする（写しの identity が元の葉の identity に従う: 比べる・
+#: hash する・key にする読みが、呼び出しの間で双子と同じに振る舞う）。表は元の葉を持たない（weakref だけ）: entry は
+#: 元の葉が消えると消える（weakref の callback。循環の中の葉も GC が集めれば消える）。写しの寿命は「元の葉が生きている
+#: 間」で、その間だけ同じ写しを保てばよい。weakref を作れない型の葉はこの規則を持てない（寿命を知るには葉を持つしか
+#: ない: 持てば手放した後も残る）: 判定不能（`_canonical_nan`）。lock は再入できる（callback は GC が lock の中の割り当て
+#: で走らせることがある）
 _NAN_COPIES: Dict[int, Tuple[Any, float]] = {}
 _NAN_COPIES_LOCK = threading.RLock()
-_NAN_SWEEP = [_TYPE_FACTS_LIMIT]  # 次に掃く表の大きさ
 
 
 def _canonical_nan(source: Any, fresh: float) -> float:
-    """`source`（NaN の scalar の subclass）の写し。同じ `source` には同じ写しを返す（hook を呼ばない）。"""
+    """`source`（NaN の scalar の subclass）の写し。同じ `source` には、それが生きている間同じ写しを返す（hook を呼ばない）。
+
+    weakref を作れない型の `source` は判定不能（D20: 写しの identity を元の葉の寿命に結べない。元の葉を持ち続けずに同じ
+    写しを返す方法が無い）。production の JPype の浮動小数の型（`JDouble` / `JFloat`）は weakref を作れる。
+    """
 
     key = id(source)
     with _NAN_COPIES_LOCK:
         entry = _NAN_COPIES.get(key)
-        if entry is not None:
-            held = entry[0]
-            if (held() if type(held) is weakref.ref else held) is source:
-                return entry[1]
+        if entry is not None and entry[0]() is source:
+            return entry[1]
         try:
             held = weakref.ref(source, lambda gone, key=key: _forget_nan(key, gone))
         except TypeError:
-            held = source  # weakref を作れない型: 写しと一緒に生かす（`_sweep_nan_copies`）
-        if len(_NAN_COPIES) >= _NAN_SWEEP[0]:
-            _sweep_nan_copies()
+            raise undecidable(
+                f"a NaN leaf of {type_name(type(source))} has no weak reference: its copy cannot follow its lifetime"
+            ) from None
         _NAN_COPIES[key] = (held, fresh)
         return fresh
-
-
-def _sweep_nan_copies() -> None:
-    """表のほかに元の葉を指すものが無い entry（weakref を作れない型の葉）を捨てる（lock の中で呼ぶ）。次に掃くのは表が
-    今の 2 倍になったとき（償却して O(1)）。"""
-
-    for key in list(_NAN_COPIES):
-        entry = _NAN_COPIES.get(key)  # 同じ thread の weakref の callback が先に消していることがある
-        if entry is not None and type(entry[0]) is not weakref.ref and _held_count(entry) <= _HELD_ONLY_BY_ENTRY:
-            del _NAN_COPIES[key]
-    _NAN_SWEEP[0] = max(_TYPE_FACTS_LIMIT, 2 * len(_NAN_COPIES))
-
-
-def _held_count(entry: Tuple[Any, Any]) -> int:
-    """entry の元の葉の参照の数（`sys.getrefcount`。基準は同じ関数で測る: `_HELD_ONLY_BY_ENTRY`）。"""
-
-    return sys.getrefcount(entry[0])
-
-
-#: entry だけが指す object の `_held_count`（import のときに同じ形で測る）
-_HELD_ONLY_BY_ENTRY = _held_count((object(), 0.0))
 
 
 def _forget_nan(key: int, gone: Any) -> None:
@@ -2740,12 +2721,12 @@ def _exact_tree_read(value: Any, memo: Any = _ACTIVE) -> Tuple[Any, bool]:
 # |---|---|---|---|
 # | 葉の比較の分類（不活性・package の比較・外の code・不透明） | 次に外の code を呼ぶまで | class の名前空間・`__bases__`・instance の `__class__` の書き換え | 分類は使う時点で読む（`_ComparisonScope` の memo は外の code の呼び出しで捨てる）。不活性は比較と hash の dunder が全部 Python の code を呼ばないこと（`in`・set の引きは葉を hash する）。葉のどれかが Python の code を呼び得るなら、exact でない葉を全部包む |
 # | 名前空間の読みが hook を呼ばない | 確かめた名前空間は class が生きている間（書き換えは名前を組み込みの `str` にして置く: `_STR_KEYED_NAMESPACES`） | 組み込みでない key を持つ class を作る（`type()` の dict・`__prepare__`）。storage への直接の書き込みは前提の外 | key が全部組み込みの `str` かを使うたびに C の反復で確かめる。組み込みの `str` でない key（文字列に依らない: 引きは hash の等しい key の `__eq__` を呼ぶ）があればどの名前も決めない（不透明 / `TypeError`） |
-# | 型の事実の表（`package_type` など） | 型の状態が記録したときと同じ間 | 名前空間・`__bases__`・metaclass の書き換え、表の値の中身の書き換え | 引くたびに型の状態（identity の tuple、object は生かす）と、判定が読んだ key の型の MRO の外の class（値の型・入れ子の型: `_Nesting.reads`）の状態と、判定が型・中身を読んだ object（名前空間の値と、それが包む関数・accessor・判定が中を辿った実行環境の関数とその closure の cell・cell の中身・`lru_cache` が呼ぶ関数: `_Nesting.objects`）の identity の外の状態（`_watch`: heap type の instance の `__class__`・組み込みの descriptor の中身・辿った関数の `__code__`・cell の中身）を比べ、違えば判定し直す。判定の途中に引いた記録の依存は今の判定の依存へ足す。`lru_cache` の wrapper は C の struct が呼ぶ関数で判定する（`__wrapped__` は書き換えられる） |
+# | 型の事実の表（`package_type` など） | 型の状態が記録したときと同じ間 | 名前空間・`__bases__`・metaclass の書き換え、表の値の中身の書き換え | 引くたびに型の状態（identity の tuple、object は生かす）と、判定が読んだ key の型の MRO の外の class（値の型・入れ子の型: `_Nesting.reads`）の状態と、判定が型・中身を読んだ object（名前空間の値と、それが包む関数・accessor・判定が中を辿った実行環境の関数とその closure の cell・cell の中身・`lru_cache` が呼ぶ関数: `_Nesting.objects`）の identity の外の状態（`_watch`: heap type の instance の `__class__`・組み込みの descriptor の中身・信頼していない関数（判定が偽・中を辿る）の `__code__`・cell の中身）を比べ、違えば判定し直す。判定の途中に引いた記録の依存は今の判定の依存へ足す。`lru_cache` の wrapper は C の struct が呼ぶ関数で判定する（`__wrapped__` は書き換えられる） |
 # | 写しと元が同じ | 外の code が元を変えない間 | 写した容器の元・包まない値・基底型の値で比べる容器の subclass の元の、中身・`__class__`・型の名前空間の変更 | 外の code の呼び出しごとに確かめ（`_CopyFrame`）、変わっていれば判定不能 |
-# | hash が同じ値の間で変わらない | 値と値が持つ葉の object が変わらない間 | （読みが作る object の identity: NaN の hash） | NaN は identity で比べ・hash する: exact な NaN は読まずにその object、scalar の subclass の NaN は元の葉ごとに 1 つの写し（`_canonical_nan`: 同じ葉はいつ読んでも同じ写し）。比較・正規化・hash は同じ写しを見る |
+# | hash が同じ値の間で変わらない | 値と値が持つ葉の object が変わらない間 | （読みが作る object の identity: NaN の hash） | NaN は identity で比べ・hash する: exact な NaN は読まずにその object、scalar の subclass の NaN は元の葉ごとに 1 つの写し（`_canonical_nan`: 元の葉が生きている間は同じ写し。表は元の葉を weakref でだけ持ち、葉が消えれば entry も消える）。weakref を作れない型の NaN の葉は判定不能（D20: 写しを葉の寿命に結ぶには葉を持ち続けるしかない）。比較・正規化・hash は同じ写しを見る |
 # | 名前の引きだけで決まる型の事実（`lookup_fact`: `_BUILTIN_HASHED`・`_builtin_behaviour`・JSON の protocol） | 引いた名前が同じ object を引く間 | 名前空間・`__bases__` の書き換え、引いた object の `__class__`・descriptor の中身の書き換え | 引くたびに key の型の MRO の identity・引いた (storage, 名前, 見つけた object)・見つけた object 自身の identity の外の状態（`_watch`。計算は見つけた object の中身を読まない）を確かめ、違えば計算し直す。計算の途中に引いた記録の読みは外の計算の読みへ足す |
 # | 名前空間の storage の列（`_PLAIN_MROS`・`_STATIC_NAMESPACES`） | MRO の tuple が同じ object の間 | `__bases__` の書き換え（MRO を作り直す） | 引くたびに MRO の identity を比べる。storage は class が生きている間同じ dict・key は組み込みの `str` のまま（上の行の前提）・組み込みの型の名前空間は変わらない |
-# | JSON の walk の中の型の protocol（`json_encoding._WALK_PROTOCOLS`） | 最も外の walk の間 | （walk の間に class を書き換える code は走らない: walk が呼ぶのは owner の API と、J19 の監査が live な値に許した操作だけをする package の関数） | walk が終われば捨てる（例外でも）。walk の外は引くたびに上の行の確かめ |
+# | 監査済みの区間の記録（`audited_region` / `region_cache`: JSON の型の protocol の判定など） | 区間（最も外の `audited_region`）の間、監査の外の code が走っていない間（区間を開けた thread の中の code。他の thread は前提の外の段落） | 監査の外の code（identity key の method・宣言していない package の generator）。J19 の監査が辿る code が live な値を渡す owner の関数は値の code を呼ばない（呼ぶものは `value_code_boundary` で宣言し、その呼び出しを `outside_audit` の下に置く） | 監査の外の code は走る間ずっと区間の外（区間が無い: 入り直しても記録を見ない）。戻れば（例外・中断でも）記録を捨てる。区間を閉じれば捨てる。区間の外は引くたびに上の行の確かめ。開ける場所・境界・owner の関数の分類は static test が監査の結果と突き合わせる |
 # | instance の `__dict__` を読む descriptor（`_DICT_HOLDERS`） | MRO の tuple が同じ object の間 | `__bases__` の書き換え | metaclass が `type` の class の `__dict__` の entry は作った後に書けも消せもしない（`_fixed_dict_entries`: CPython 3.10 / 3.12 で確かめる test）。そうでない MRO は記録しない。引くたびに MRO の identity を比べる |
 # | 判定不能が確定判定にならない | いつも | helper・`except` の捕捉 | 普通の例外の派生でない。作るときに pair の台帳へ記録（登録した reason `comparison_undecidable`、`blocks_decision`）。名指しの捕捉は分類した場所だけ |
 # | ref の比べる field（owner `core/runtime_ref_record`） | 固定した後はずっと（class ごとに最初の使用で固定。自分の表を持たない subclass は親の表の固定を共有） | `__dataclass_fields__`・`Field.compare` / `repr` の書き換え | 書き換えは使わない（固定した表で比べ・hash し・写す: 同じ ref の比べ方と hash は使う間変わらない。PR の D17）。表は固定するときに hook を呼ばずに読み（`dataclass_field_specs`）、読めない表は決めない（比較・hash は判定不能、作るのは `TypeError`） |
@@ -2753,9 +2734,19 @@ def _exact_tree_read(value: Any, memo: Any = _ACTIVE) -> Tuple[Any, bool]:
 #
 # 前提の外（この契約が守らないもの。破られると分類の根拠が無くなる）: 信頼する関数（package の code・`Enum.__hash__`・
 # 登録した比較）の code object・closure の中身・module の global・interpreter の builtin を書き換えること（code を書いて
-# 実行できる側の操作: `trust_code_directory` の境界と同じ）。割り当ての時点で走る finalizer・weakref の callback、
+# 実行できる側の操作: `trust_code_directory` の境界と同じ）。実行環境（標準 library の file）の関数の module の global・
+# 既定値（`__defaults__` / `__kwdefaults__`）を書き換えること（interpreter の builtin と同じ実行環境の code: 判定は
+# 実行環境の関数を、closure の中身だけを確かめて信頼する）。owner の基盤の object（walker が仕事を数える相手・policy:
+# J19 の監査の `WORK`）の型の名前空間や、owner の object の状態を書き換えること（walker の source・`Tally`・`PreparedJson`
+# は作った後に field を変えない。作業量（budget）の状態は owner の code が数えるたびに変え、package の外の code は参照を
+# 持たない: 外の code がそれを書き換えるのは owner の code の書き換えと同じ。作業量・source を作る package の code は、
+# 構成子が上限などを組み込みの値へ写す。producer が渡す object（record・
+# `Reducer`）の型は前提の内: 呼ぶ時点で型から引いて確かめる）。割り当ての時点で走る finalizer・weakref の callback、
 # bytecode の境目で走る Python の signal handler が class を書き換えること（`_Nesting` と同じ: 解析の値は判定の途中に
-# code を実行しない。走れば分類の根拠が無くなる: その比較の答えは保証しない）。interpreter を `-b` で動かすこと（`bytes`
+# code を実行しない。走れば分類の根拠が無くなる: その比較の答えは保証しない）。他の thread が判定の途中・監査済みの区間の
+# 間に値の code を走らせて class・値を書き換えること（判定の記録・区間の記録・比較の memo は thread ごとで、外の code を
+# 呼んだことを同じ thread の中でだけ知る: 他の thread の書き換えは引くたびの確かめの外。製品の code が始める thread は
+# 値の code を走らせない場所だけ: `test_issue242_audited_regions.PRODUCTION_THREAD_STARTS` が始める場所を固定する）。interpreter を `-b` で動かすこと（`bytes`
 # と `str` の比較が warning の filter・`showwarning`（Python の code）を呼ぶ: `bytes` を自己完結の型に数える前提）。
 # 自己完結の型（`_SELF_CONTAINED`）は、比較と hash の C の実装が相手の protocol（`__buffer__`・`__index__` など）を呼ばない
 # 型だけ（`bytearray` は相手の buffer を読むので数えない）。
@@ -3292,6 +3283,86 @@ class _ForeignEpoch(threading.local):
 
 
 _FOREIGN_EPOCH = _ForeignEpoch()
+
+
+# ---------------------------------------------------------------------------
+# 監査済みの区間（第 10 回）: 区間の記録の所有と、区間の外の code の間の切り替えの唯一の owner
+# ---------------------------------------------------------------------------
+#
+# 区間（`audited_region`）の中で走るのは owner の code と、J19 の監査（`tests/unit/_live_flow_audit.py`）が live な値に
+# 許した操作だけをする package の code。その code が live な値を渡す owner の関数は、値の code を呼ばない関数か、区間を
+# 外す境界（`value_code_boundary`）だけ（`test_issue242_audited_regions` が監査の結果と突き合わせる）。だから区間の
+# 間は外の code が走らず、class は変わらない: 区間の記録（`region_cache`）を区間の間使ってよい。
+#
+# 区間の外の code（identity key の method・宣言していない package の generator）は、走る間ずっと区間の外
+# （`outside_audit`: 区間が無い）。その中から API に入り直せば、記録の無い状態で判定する（入り直した API が開く区間は
+# その中だけのもの）。外の code から戻れば（例外・generator の中断を含む）元の区間に戻り、記録を捨てる（外の code は
+# class を書き換えたかもしれない）。記録の持ち主は区間（最も外の `audited_region` が作り、閉じると捨てる）。
+
+#: 今の監査済みの区間の記録（slot → dict。区間の外・区間の外の code の間は `None`）
+_REGION: "contextvars.ContextVar[Optional[Dict[Any, dict]]]" = contextvars.ContextVar(
+    "live_values_audited_region", default=None,
+)
+
+
+class audited_region:
+    """監査済みの区間を開く（入れ子は外の区間を使う）。開けてよいのは walk と J19 の監査の entry root の本体だけ
+    （`test_issue242_assumptions` の static test が場所を固定する）。"""
+
+    __slots__ = ("token",)
+
+    def __enter__(self) -> "audited_region":
+        self.token = _REGION.set({}) if _REGION.get() is None else None
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        if self.token is not None:
+            _REGION.reset(self.token)
+
+
+class outside_audit:
+    """監査の外の code を走らせる間、区間を外す（区間の記録を見せない）。戻ると元の区間に戻り、その記録を捨てる。"""
+
+    __slots__ = ("token", "region")
+
+    def __enter__(self) -> "outside_audit":
+        self.region = _REGION.get()
+        self.token = _REGION.set(None)
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        _REGION.reset(self.token)
+        region = self.region
+        if region:
+            # 外の code は class を書き換えたかもしれない: 区間の記録は全部捨てる（slot の dict を持つ読み手にも見せない）
+            for cache in region.values():
+                cache.clear()
+            region.clear()
+
+
+def region_cache(slot: Any) -> Optional[dict]:
+    """今の区間の、`slot`（記録の持ち主が持つ object）ごとの記録（区間の外・区間の外の code の間は `None`）。"""
+
+    region = _REGION.get()
+    if region is None:
+        return None
+    cache = region.get(slot)
+    if cache is None:
+        cache = region[slot] = {}
+    return cache
+
+
+#: 区間を外す境界（`value_code_boundary` で宣言した owner の関数）。J19 の監査が辿る code が live な値を渡してよい owner
+#: の関数のうち、値の code（監査の外の code）を呼ぶもの: その呼び出しは関数の中で `outside_audit` の下だけ（本体が
+#: `outside_audit` を使うことは static test が確かめる。区間の記録を使う部分は区間の中に残せる）
+VALUE_CODE_BOUNDARIES: List[Any] = []
+
+
+def value_code_boundary(function: Any) -> Any:
+    """`function` を、値の code を `outside_audit` の下でだけ呼ぶ owner の関数として宣言する（包まない）。"""
+
+    VALUE_CODE_BOUNDARIES.append(function)
+    return function
 
 
 class _ComparisonScope:
@@ -4241,7 +4312,16 @@ def _builtin_enum_type_checked(kind: type) -> bool:
         and _one_of(type_attribute(kind, "__format__"), _BUILTIN_ENUM_FORMAT)
         and _one_of(type_attribute(kind, "__getattribute__"), _BUILTIN_GETATTRIBUTE)
         and type_attribute(kind, "__class__") is _OBJECT_CLASS
+        # 並べる比較（`sorted` / JSON の `sort_keys` が member を key にして呼ぶ）も組み込みの実装のまま
+        and all(_one_of(type_attribute(kind, name), _BUILTIN_ORDER[name]) for name in _ORDER_DUNDERS)
     )
+
+
+#: 並べる・比べる dunder（`builtin_enum` の member を sort / dict の key の整列に使うとき C が呼ぶ）
+_ORDER_DUNDERS = ("__lt__", "__le__", "__gt__", "__ge__", "__ne__")
+_BUILTIN_ORDER = {
+    name: frozenset(getattr(base, name) for base in (object, str, int, float)) for name in _ORDER_DUNDERS
+}
 
 
 _BUILTIN_EQ = frozenset({object.__eq__, str.__eq__, int.__eq__, float.__eq__})
@@ -5103,6 +5183,11 @@ def elements_of(values: Any) -> Iterator[Any]:
 
 
 __all__ = [
+    "audited_region",
+    "outside_audit",
+    "region_cache",
+    "value_code_boundary",
+    "VALUE_CODE_BOUNDARIES",
     "exact_scalar",
     "exact_tree",
     "scalar_bool",

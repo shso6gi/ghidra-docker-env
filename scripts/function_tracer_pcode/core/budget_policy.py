@@ -526,7 +526,7 @@ class SerializationWork:
         self._policy = active_budget_policy()
         #: 超えたときに pair terminal な限界にするか（`False` は診断: `JsonBudgetExhausted`）
         self.terminal = bool(terminal)
-        limit = self._policy.serialization_bytes if max_bytes is None else max_bytes
+        limit = self._policy.serialization_bytes if max_bytes is None else live_values.as_int(max_bytes)
         self.max_bytes = limit if self.enabled else None
         self.consumed = 0
         self._meter = SemanticGraphMeter()

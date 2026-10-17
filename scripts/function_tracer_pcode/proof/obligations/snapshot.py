@@ -7,7 +7,7 @@ import hashlib
 from types import MappingProxyType
 from typing import Any, Mapping, Tuple
 
-from scripts.function_tracer_pcode.core import json_encoding
+from scripts.function_tracer_pcode.core import json_encoding, live_values
 from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
 from scripts.function_tracer_pcode.core.json_encoding import (
     LEGACY,
@@ -17,7 +17,6 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     identity_key_of,
     is_json_record,
     materialize,
-    protocol_scope,
 )
 from scripts.function_tracer_pcode.core.live_values import (
     metered_storage_reads,
@@ -190,7 +189,7 @@ _FINGERPRINT_JSON = json_encoding.JsonEncodingPolicy(ensure_ascii=True, item_sep
 def _fingerprint_json(value: Any) -> str:
     """凍結した値の fingerprint の JSON（`json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=True)`）。"""
 
-    return json_encoding.JsonEncodingPolicy.dumps(_FINGERPRINT_JSON, value)
+    return json_encoding.JsonEncodingPolicy.dumps_frozen(_FINGERPRINT_JSON, value)
 
 
 def _enum_payload(value: Any) -> Any:
@@ -313,8 +312,8 @@ class SnapshotFingerprintCodec:
         は walker が同じ `budget` で数えながら作る（作ってから数えない）。
         """
 
-        # 型の protocol の判定は写す間 1 度（J19 の監査の entry root: `protocol_scope`）
-        with protocol_scope():
+        # J19 の監査の entry root: 写す間は監査済みの区間（型の protocol の判定は区間の間 1 度: `live_values.audited_region`）
+        with live_values.audited_region():
             if budget is None:
                 return cls._freeze_unmetered(value)
             # 値の storage の読みも固定の上限を超えた分は同じ予算へ（超えればその予算の超過）

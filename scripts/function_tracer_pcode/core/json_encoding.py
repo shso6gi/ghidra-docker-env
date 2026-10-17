@@ -43,9 +43,11 @@ from __future__ import annotations
 import contextvars
 import hashlib
 import functools
-import json
+import json.encoder
+import math
 import operator
 import re
+import threading
 import types
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -188,7 +190,81 @@ def exception_text(exc: BaseException, max_chars: int = 80) -> str:
     return (f"{name}: {', '.join(parts)}" if parts else name)[:max_chars + len(name) + 2]
 
 
-class _Source:
+class _Building(threading.local):
+    """thread ごとの、構成子が今 field を置いている object の stack（`_FixedOnceBuilt` の書き込みの唯一の許可）。"""
+
+    def __init__(self) -> None:
+        self.stack: List[Any] = []
+
+
+_BUILDING = _Building()
+
+
+class _FixedOnceBuilt:
+    """作った後は field を変えない owner の object: field を書くのは **その object の構成子の実行中だけ**、各 field は
+    1 度だけ（構成子の外の書き込みは名前によらず拒む: 後からの代入・`__class__` の代入・`__new__` だけで作った object
+    への書き込み・`copy` の写し（状態を `setattr` で置き直す）。walker・呼ぶ側は作るときに確かめた field を、後から
+    差し替えたものとして読まない。規則は class を作るときに 1 度だけ張る（`__init_subclass__`: 構成子を包み、`__slots__`
+    を求める。`__dict__` を持つ subclass は slot でない名前を置けてしまう）。`object.__setattr__` で直接書き換えるのは
+    owner の object の状態の書き換え（契約の外: `core/live_values` の前提の表）。中身を変える容器の field
+    （`Tally.counts`）は owner の code だけが変える。"""
+
+    __slots__ = ()
+
+    #: slot の名前 → その slot の member descriptor（class を作るときに MRO から 1 度だけ引く: `__init_subclass__`）
+    _fixed_members: Dict[str, Any] = {}
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if "__slots__" not in type.__dict__["__dict__"].__get__(cls):
+            raise TypeError(f"{cls.__name__} declares __slots__ (a fixed-once object has no instance __dict__)")
+        members: Dict[str, Any] = {}
+        for klass in reversed(type.__dict__["__mro__"].__get__(cls)):
+            for name, member in dict(type.__dict__["__dict__"].__get__(klass)).items():
+                if type(member) is types.MemberDescriptorType:
+                    members[name] = member
+        cls._fixed_members = members
+        init = type.__dict__["__dict__"].__get__(cls).get("__init__")
+        if init is not None:
+            cls.__init__ = _building(init)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        stack = _BUILDING.stack
+        if not stack or stack[-1] is not self:
+            raise TypeError(f"{type(self).__name__}.{name} is set only by its constructor")
+        # 置いたかは slot の member descriptor で読む（subclass が同じ名前に置いた descriptor の code を呼ばない）
+        member = type(self)._fixed_members.get(name)
+        if member is None:
+            raise TypeError(f"{type(self).__name__} has no field {name!r}")
+        try:
+            member.__get__(self, type(self))
+        except AttributeError:
+            member.__set__(self, value)  # 構成子が初めて置く
+        else:
+            raise TypeError(f"{type(self).__name__}.{name} is fixed once the object is built")
+
+    def __delattr__(self, name: str) -> None:
+        raise TypeError(f"{type(self).__name__}.{name} is fixed once the object is built")
+
+
+def _building(init: Any) -> Any:
+    """構成子の実行中だけ、その object の field の書き込みを許す包み（`_FixedOnceBuilt.__init_subclass__` が張る）。"""
+
+    @functools.wraps(init)
+    def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
+        stack = _BUILDING.stack
+        stack.append(self)
+        try:
+            init(self, *args, **kwargs)
+        finally:
+            stack.pop()
+
+    return __init__
+
+
+class _Source(_FixedOnceBuilt):
+    """walker が辿る遅延構成子（作った後は変えない: `_FixedOnceBuilt`）。"""
+
     __slots__ = ()
 
 
@@ -390,12 +466,12 @@ def _walkable_items(items: Any) -> bool:
 
 def _walk_iter(items: Any) -> Iterator[Any]:
     """walker が辿ってよい列の iterator（それ以外は `TypeError`。上書きした `__iter__` を呼ばない）。package の generator は
-    進めるたびに walk の protocol の記録を捨てる（`_forgetting`: generator の code は J19 の監査の root とは限らない）。"""
+    区間の外で進める（`_outside_the_region`: generator の code は J19 の監査の root とは限らない）。"""
 
     if not _walkable_items(items):
         raise TypeError(f"{type_name(type(items))} is not a builtin iterable")
     if package_generator(items) and not _audited(items):
-        return _forgetting(items)
+        return _outside_the_region(items)
     return iter(items)
 
 
@@ -436,16 +512,12 @@ def _record_protocols(kind: type) -> Tuple[Any, ...]:
     信頼は関数の code の file（書き換えられない）で決める。型の `__module__` は書き換えられるので使わない。型の信頼の判定
     （`package_type`）と名前の引きの記録（引くたびに引いた名前を確かめる）は型ごとに 1 度ずつ。
 
-    protocol の scope の中（`protocol_scope`: walk と、J19 の監査の entry root）は、最も外の scope の間、型ごとに 1 度だけ
-    判定する（`_WALK_PROTOCOLS`）。記録は scope の中で owner の API と、J19 の監査（`tests/unit/_live_flow_audit.py` の
-    `protocol_roots` / `ENTRY_ROOTS`）が live な値に許した操作だけをする package の関数（record の protocol・source
-    converter・reducer・entry root の本体と呼び先）だけが走る間だけ使う: その間は外の code が走らず class は変わらない
-    （`_Nesting` の判定と同じ前提。finalizer・signal handler が class を書き換えることは `core/live_values` の契約の外）。
-    監査の root でない package の code（`audited_generator` で宣言していない package の generator・identity key の
-    `stable_key()` / `to_key()`）を進めるたびに捨てる（`_forget_walk_protocols`）。scope の外は引くたびに確かめる。
+    監査済みの区間の中（`live_values.audited_region`: walk と J19 の監査の entry root）は、区間の間、型ごとに 1 度だけ
+    判定する（区間の記録 `live_values.region_cache(_PROTOCOL_SLOT)`。区間の外の code の間は区間が無く、戻れば記録は
+    捨てられている: 記録の持ち主と寿命は `live_values` の区間の規則）。区間の外は引くたびに確かめる。
     """
 
-    memo = _WALK_PROTOCOLS.get()
+    memo = live_values.region_cache(_PROTOCOL_SLOT)
     if memo is not None:
         known = memo.get(id(kind))
         if known is not None and known[0] is kind:
@@ -456,8 +528,41 @@ def _record_protocols(kind: type) -> Tuple[Any, ...]:
     else:
         found = live_values.lookup_fact(_RECORD_PROTOCOLS, kind, _protocols_of, kind)
     if memo is not None:
-        memo[id(kind)] = (kind, found)  # 型を生かす（walk の間 `id` を再利用させない）
+        memo[id(kind)] = (kind, found)  # 型を生かす（区間の間 `id` を再利用させない）
     return found
+
+
+def _exact_isinstance(value: Any, classes: Any) -> bool:
+    """`isinstance` の代わり（`encode_bounded`）: 型そのものが `classes` のどれかか（identity で比べる。値の `__class__`・
+    metaclass の `__eq__` を読まない）。"""
+
+    kind = type(value)
+    if type(classes) is not tuple:
+        return kind is classes
+    for candidate in classes:
+        if kind is candidate:
+            return True
+    return False
+
+
+def _exact_floatstr(value: float) -> str:
+    """`json` の float の書き方（`allow_nan`: `NaN` / `Infinity`）。値は組み込みの float そのもの（`_exact_isinstance`）。"""
+
+    if value != value:
+        return "NaN"
+    if value == math.inf:
+        return "Infinity"
+    if value == -math.inf:
+        return "-Infinity"
+    return float.__repr__(value)
+
+
+def _reject_json_default(value: Any) -> Any:
+    raise TypeError(f"Object of type {type_name(type(value))} is not JSON serializable")
+
+
+#: 区間の記録の中の、型ごとの `_record_protocols` の結果の slot（`id(型)` → (型, 結果)）
+_PROTOCOL_SLOT = object()
 
 
 def _record_protocol(kind: type, name: str) -> Any:
@@ -466,36 +571,9 @@ def _record_protocol(kind: type, name: str) -> Any:
     return _record_protocols(kind)[_PROTOCOL_INDEX[name]]
 
 
-class protocol_scope:
-    """型の protocol の判定を scope の間 1 度にする（`_record_protocols`）。入れ子は最も外の scope の記録を使う。
-
-    開けてよいのは walk（`_Walk.run`）と、J19 の監査の entry root（`_live_flow_audit.ENTRY_ROOTS`）の関数の本体だけ
-    （`test_issue242_assumptions` の static test が場所を固定する）: scope の中で走る package の code は監査が live な値に
-    許した操作だけをする。
-    """
-
-    __slots__ = ("token",)
-
-    def __enter__(self) -> "protocol_scope":
-        self.token = _WALK_PROTOCOLS.set({}) if _WALK_PROTOCOLS.get() is None else None
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        if self.token is not None:
-            _WALK_PROTOCOLS.reset(self.token)
-
-
-def _forget_walk_protocols() -> None:
-    """walk の protocol の記録を捨てる（J19 の監査の root でない package の code を呼んだ後: `_record_protocols`）。"""
-
-    memo = _WALK_PROTOCOLS.get()
-    if memo:
-        memo.clear()
-
-
 def audited_generator(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """`fn`（package の generator 関数）を、J19 の監査が本体を辿る関数として宣言する: walker はその generator を進めても
-    protocol の scope の記録を捨てない（`_forgetting`）。宣言した関数が監査の辿った関数（`_live_flow_audit.audit` の
+    """`fn`（package の generator 関数）を、J19 の監査が本体を辿る関数として宣言する: walker はその generator を監査済みの
+    区間の中で進める（宣言していない generator は区間の外で進める: `_outside_the_region`）。宣言した関数が監査の辿った関数（`_live_flow_audit.audit` の
     analyzed）にあることは `test_issue242_assumptions` が確かめる（監査の外の generator を宣言すれば落ちる）。"""
 
     code = getattr(fn, "__code__", None) if type(fn) is types.FunctionType else None
@@ -517,16 +595,22 @@ def _audited(generator: Any) -> bool:
     return _AUDITED_GENERATORS.get(id(code)) is code
 
 
-def _forgetting(generator: Any) -> Iterator[Any]:
-    """値の中の package の generator を 1 要素ずつ進め、進めるたびに walk の protocol の記録を捨てる（generator の code は
-    J19 の監査の root ではない）。"""
+def _outside_the_region(generator: Any) -> Iterator[Any]:
+    """宣言していない package の generator（J19 の監査の root でない code）を、1 要素ずつ区間の外で進める
+    （`live_values.outside_audit`: 進める間は区間の記録を見せず、戻れば捨てる）。止めるとき（walk が途中で抜けた・
+    使い切った）も、generator の後始末を区間の外で走らせる。"""
 
     try:
-        for child in generator:
-            _forget_walk_protocols()
+        while True:
+            with live_values.outside_audit():
+                try:
+                    child = next(generator)
+                except StopIteration:
+                    return
             yield child
     finally:
-        _forget_walk_protocols()
+        with live_values.outside_audit():
+            generator.close()
 
 
 def _protocols_of(kind: type) -> Tuple[Any, Any]:
@@ -538,7 +622,8 @@ def _protocols_of(kind: type) -> Tuple[Any, Any]:
 
 
 #: owner が型から引く protocol の名前（`_record_protocols` の組の順。先頭 2 つが record の判定に使う名前）: walker と
-#: sized leaf の protocol と、producer の identity key（`identity_key_of`）。protocol を足すときはここに足す
+#: sized leaf の protocol と、producer の identity key（`identity_key_of`）と、集計（`scan`）の `Reducer` の method。
+#: walker が producer の object の method を呼ぶときは、どれも呼ぶ時点でこの表から引く。protocol を足すときはここに足す
 _PROTOCOL_NAMES = (
     "json_items",
     "__json_tree__",
@@ -547,6 +632,8 @@ _PROTOCOL_NAMES = (
     "__json_identity__",
     "stable_key",
     "to_key",
+    "add",
+    "result",
 )
 _PROTOCOL_INDEX = {name: index for index, name in enumerate(_PROTOCOL_NAMES)}
 _NO_PROTOCOLS = (None,) * len(_PROTOCOL_NAMES)
@@ -651,7 +738,7 @@ def flatten(values: Any, attribute: Optional[str] = None) -> _Source:
     return _Flatten(values, attribute)
 
 
-class Tally(Reducer):
+class Tally(_FixedOnceBuilt, Reducer):
     """`scan` の reducer: 要素の属性 `attribute` の値ごとの件数（最初に現れた順）。
 
     key は属性を読むだけ（任意の key 関数は受けない）。key は scalar だけ（それ以外は JSON に
@@ -978,10 +1065,6 @@ def max_rows_within(max_bytes: int, row_min: int, policy: Optional["JsonEncoding
 # ---------------------------------------------------------------------------
 
 
-#: 最も外の `protocol_scope` の間の、型ごとの `_record_protocols` の結果（`id(型)` → (型, 結果)。scope の外は `None`）
-_WALK_PROTOCOLS: "contextvars.ContextVar[Optional[Dict[int, Tuple[type, Tuple[Any, ...]]]]]" = contextvars.ContextVar(
-    "json_encoding_walk_protocols", default=None,
-)
 #: いま走っている walk の作業量（`_Walk.run` の間だけ）。その間に作った `JsonBudget` は子になる
 _ACTIVE_WORK: "contextvars.ContextVar[Optional[JsonBudget]]" = contextvars.ContextVar(
     "json_encoding_active_work", default=None,
@@ -1070,7 +1153,7 @@ class JsonBudget:
 _PREPARED_TOKEN = object()
 
 
-class PreparedJson:
+class PreparedJson(_FixedOnceBuilt):
     """CANONICAL walker だけが作る canonical な JSON 値と、それを書いたときの byte 数。"""
 
     __slots__ = ("_value", "encoded_bytes", "policy")
@@ -1089,6 +1172,36 @@ class PreparedJson:
 
     def __repr__(self) -> str:  # pragma: no cover - debug 表示
         return f"PreparedJson({self.encoded_bytes} bytes)"
+
+
+
+#: 凍結した値の葉の型（subclass を含む: 組み込みの `json` の C の encoder は基底型の slot で書く。int / str の enum の member）
+_FROZEN_SCALARS = (str, int, float)
+
+
+def _require_frozen(value: Any) -> None:
+    """`dumps_frozen` が書く値の形（組み込みの tuple そのものと、`None`・`str` / `int` / `float`（subclass を含む）の葉
+    だけ）。dict（`items()`・key の並べ替えの比較）・list・その他の object は書かずに `TypeError`。読みは型の identity と
+    組み込みの型への `issubclass`、tuple の C の反復だけ（値の code を呼ばない）。組み込みの型そのものの葉は identity
+    だけで通す（並べ替えの key の小さい値が大半: 呼ぶたびの固定費を小さくする）。"""
+
+    kind = type(value)
+    if kind is str or kind is int or value is None or kind is float or kind is bool:
+        return
+    if kind is not tuple:
+        if issubclass(kind, _FROZEN_SCALARS):
+            return
+        raise TypeError(f"dumps_frozen writes only codec-frozen values, not {type_name(kind)}")
+    stack = [value]
+    while stack:
+        for child in stack.pop():
+            kind = type(child)
+            if kind is str or kind is int or child is None or kind is float or kind is bool:
+                continue
+            if kind is tuple:
+                stack.append(child)
+            elif not issubclass(kind, _FROZEN_SCALARS):
+                raise TypeError(f"dumps_frozen writes only codec-frozen values, not {type_name(kind)}")
 
 
 def is_prepared_json(value: Any) -> bool:
@@ -1198,6 +1311,16 @@ class JsonEncodingPolicy:
             json.dumps, ensure_ascii=self.ensure_ascii, sort_keys=self.sort_keys,
             separators=(self.item_separator, self.key_separator),
         ))
+        # 凍結した値（`_require_frozen` の形: 閉路を作れない tuple と scalar の葉）を書く C の encoder（呼ぶたびに作らない）。
+        # `json.JSONEncoder.iterencode` が同じ引数で作るものから、閉路の検出（`markers`）だけを外したもの
+        frozen = None
+        if json.encoder.c_make_encoder is not None:
+            frozen = json.encoder.c_make_encoder(
+                None, json.JSONEncoder().default,
+                json.encoder.c_encode_basestring_ascii if self.ensure_ascii else json.encoder.c_encode_basestring,
+                None, self.key_separator, self.item_separator, self.sort_keys, False, True,
+            )
+        object.__setattr__(self, "_frozen_encode", frozen)
 
     @property
     def separators(self) -> Tuple[str, str]:
@@ -1245,20 +1368,51 @@ class JsonEncodingPolicy:
             separators=self.separators,
         )
 
-    def dumps(self, value: Any, *, default: Optional[Callable[[Any], Any]] = None) -> str:
-        """上限なしで書く（大きさが既に分かっている小さい値だけに使う）。"""
+    def _exact_iterencode(self, value: Any) -> Iterator[str]:
+        """`json.JSONEncoder.iterencode` と同じ chunk（同じ区切り・escape・整列・`NaN`）を、**組み込みの型そのもの** の
+        JSON の木だけから作る。型の判定は型の identity（`isinstance` は値の `__class__` を読む）、容器の subclass・scalar の
+        subclass は JSON の値にしない（`TypeError`: dict の subclass の `items` などを呼ばない）。"""
 
-        if default is None:
-            # 引数を束ねた `json.dumps`（policy ごとに 1 度だけ作る。大量に呼ぶ fingerprint の経路）
-            text_value = self._bound_dumps(value)
-        else:
-            text_value = json.dumps(
-                value,
-                ensure_ascii=self.ensure_ascii,
-                sort_keys=self.sort_keys,
-                separators=self.separators,
-                default=default,
-            )
+        encoder = self._encoder()
+        iterencode = json.encoder._make_iterencode(
+            {}, _reject_json_default, json.encoder.encode_basestring_ascii if self.ensure_ascii else json.encoder.encode_basestring,
+            None, _exact_floatstr, encoder.key_separator, encoder.item_separator, self.sort_keys, False, False,
+            isinstance=_exact_isinstance,
+        )
+        return iterencode(value, 0)
+
+    def dumps_frozen(self, value: Any) -> str:
+        """snapshot の codec が凍結した値（`SnapshotFingerprintCodec` の写し: 組み込みの tuple と scalar・int / str の enum
+        の member だけ）を書く。組み込みの `json` の C の encoder はその値に Python の code を呼ばない（scalar は C の slot
+        で書き、tuple は辿るだけ。dict も `default` も無い）: 区間を外さない。呼ぶのは `snapshot._fingerprint_json` だけ
+        （`test_issue242_audited_regions` が呼ぶ場所を固定する。J19 の監査の宣言した依存と同じ場所）。書く前に値の形を
+        確かめる（`_require_frozen`: 呼ぶ場所の固定に頼らず、凍結していない値は Python の code を呼ばずに拒む）。"""
+
+        _require_frozen(value)
+        frozen = self._frozen_encode
+        text_value = self._bound_dumps(value) if frozen is None else "".join(frozen(value, 0))
+        return text_value if self.ensure_ascii else self._escape_surrogates(text_value)
+
+    @live_values.value_code_boundary
+    def dumps(self, value: Any, *, default: Optional[Callable[[Any], Any]] = None) -> str:
+        """上限なしで書く（大きさが既に分かっている小さい値だけに使う）。
+
+        組み込みの `json` の C の encoder は容器の subclass の `items()`・`default` を呼ぶ（値の code）: 監査済みの区間の
+        外で書く（`live_values.outside_audit`。区間の中の code が渡しても区間の記録を見せない）。
+        """
+
+        with live_values.outside_audit():
+            if default is None:
+                # 引数を束ねた `json.dumps`（policy ごとに 1 度だけ作る。大量に呼ぶ fingerprint の経路）
+                text_value = self._bound_dumps(value)
+            else:
+                text_value = json.dumps(
+                    value,
+                    ensure_ascii=self.ensure_ascii,
+                    sort_keys=self.sort_keys,
+                    separators=self.separators,
+                    default=default,
+                )
         # `ensure_ascii` の出力は ASCII（surrogate は escape 済み）
         return text_value if self.ensure_ascii else self._escape_surrogates(text_value)
 
@@ -1274,7 +1428,7 @@ class JsonEncodingPolicy:
 
         parts: List[str] = []
         written = 0
-        for chunk in self._encoder().iterencode(value):
+        for chunk in self._exact_iterencode(value):
             chunk = self._escape_surrogates(chunk)
             written += utf8_length(chunk)
             if max_bytes is not None and written > max_bytes:
@@ -1903,6 +2057,7 @@ def _plain_key_view(part: Any, work: "JsonBudget") -> Any:
     return root[0]
 
 
+@live_values.value_code_boundary
 def identity_key_of(value: Any, *, names: Tuple[str, ...] = ("stable_key", "to_key")) -> Tuple[bool, Any]:
     """producer の identity key（`names` の順: 既定は `stable_key()`、無ければ `to_key()`）。
 
@@ -1925,11 +2080,10 @@ def identity_key_of(value: Any, *, names: Tuple[str, ...] = ("stable_key", "to_k
             if not (live_values.package_function(method) and live_values.package_type(kind)):
                 method = None
         if method is not None:
-            try:
+            # identity の owner（#194）の code は J19 の監査の root でない: 走る間ずっと区間の外（入り直しても区間の
+            # 記録を見せない）。戻れば（例外でも）区間の記録を捨てる
+            with live_values.outside_audit():
                 return True, method(value)
-            finally:
-                # identity の owner（#194）の code を呼んだ（J19 の root ではない）: 返っても例外でも記録を捨てる
-                _forget_walk_protocols()
     return False, None
 
 
@@ -1939,7 +2093,9 @@ def _reread(reread: Reread) -> Any:
     value = live_values.attribute(reread.record, reread.attribute)
     if value is None or type(value) is BoundedEvidence or reread.converter is None:
         return value
-    return reread.converter(value)
+    converter = reread.converter
+    _require_converter(converter, "reread")  # 呼ぶ時点で確かめる（作った後に書き換えた converter を呼ばない）
+    return converter(value)
 
 
 def _unfingerprinted(kind: str, reason: str, over: int) -> BoundedEvidence:
@@ -2576,7 +2732,7 @@ class _Walk:
         if builtin_iterator(item) or package_generator(item):
             # 組み込みの容器の iterator・package の generator は遅延配列: 1 要素ずつ引き出す
             # （pure layer の record は source の構成子を import できないので、これで列を渡す。package の generator は
-            # walk の protocol の記録を捨てながら進める: `_forgetting`）
+            # 監査済みの区間の外で進める: `_walk_iter`）
             self.push("list", _walk_iter(item) if package_generator(item) else item, parent, key, item, build=build)
             return
         json_items, json_tree = _record_protocols(kind)[:2]
@@ -2597,9 +2753,9 @@ class _Walk:
             return
         if type(item) is BoundedEvidence:
             if self.mode == CANONICAL:
-                self.enter(item.summary(), parent, key, build)
+                self.enter(BoundedEvidence.summary(item), parent, key, build)  # 型の method（instance の属性を読まない）
             else:
-                self.count_only(item.summary(), raw_leaves=False)
+                self.count_only(BoundedEvidence.summary(item), raw_leaves=False)
                 self.place(parent, key, item, build)
             return
         mapping = builtin_mapping(item)
@@ -2777,7 +2933,7 @@ class _Walk:
             reducer = item.reducer
             # reducer の method は型の関数（`scan` が確かめた package の関数）を直接呼ぶ（instance の
             # 属性に置いた callable を呼ばない）
-            add = type_attribute(type(reducer), "add")
+            add, result = self._reducer_methods(reducer)
             values = item.values
             if _is_one_shot(values):
                 self.entered_iterator = True
@@ -2800,7 +2956,7 @@ class _Walk:
                 self.budget.exceeded()
                 raise
             try:
-                produced = type_attribute(type(reducer), "result")(reducer, work=self.effort)
+                produced = result(reducer, work=self.effort)
             except JsonBudgetExhausted:
                 self.budget.exceeded()
                 raise
@@ -2904,12 +3060,23 @@ class _Walk:
         try:
             # 値の storage の読み（key の検査・instance の状態）も固定の上限を超えた分はこの walk の作業量へ
             # 数える（組み込みのままの容器は要素ごとに数えて辿るので、検査の要る容器も同じ意味にする）
-            with live_values.metered_storage_reads(self.effort), protocol_scope():
+            with live_values.metered_storage_reads(self.effort), live_values.audited_region():
                 self.enter(source, holder, 0, self.build)
                 self.drain_to(0)
         finally:
             _ACTIVE_WORK.reset(active)
         return holder[0]
+
+    def _reducer_methods(self, reducer: Any) -> Tuple[Any, Any]:
+        """`Reducer` の `add` / `result`（呼ぶ時点で型から引く: package の型の package の関数だけ。`scan` を作った後に型が
+        書き換えられていれば拒む）。"""
+
+        kind = type(reducer)
+        protocols = _record_protocols(kind) if issubclass(kind, Reducer) else _NO_PROTOCOLS
+        add, result = protocols[_PROTOCOL_INDEX["add"]], protocols[_PROTOCOL_INDEX["result"]]
+        if add is None or result is None:
+            self.reject(f"{type_name(kind)} is not a package Reducer")
+        return add, result
 
     def producer_failed(self, exc: BaseException) -> None:
         """producer の失敗（`PRODUCER_FAILURES`）: その値は JSON にならない（`reject`）。
@@ -2981,6 +3148,9 @@ class _Walk:
             elif fn is _NESTED:
                 self.enter_nested(target, parent, out_key, frame.build)
             else:
+                if not _is_converter(fn):
+                    # 作った後に source の `fn` を書き換えた: 登録した converter だけを呼ぶ時点で確かめる
+                    self.reject(f"{type_name(type(fn))} is not a registered source_converter")
                 try:
                     converted = fn(target)
                 except PRODUCER_FAILURES as exc:
@@ -3001,7 +3171,8 @@ class JsonObjectBudget:
 
     def __init__(self, policy: JsonEncodingPolicy, max_bytes: Optional[int]) -> None:
         self.policy = policy
-        self.max_bytes = max_bytes
+        # 上限は組み込みの int にして持つ（比べるたびに scalar の subclass の比較を呼ばない）
+        self.max_bytes = None if max_bytes is None else live_values.as_int(max_bytes)
         self._count = 0
         self._members = 0
         #: 後で足す member のために空けておく byte（key → member の byte。`remaining_for` が
@@ -3086,7 +3257,8 @@ def scalar_record_dict(record: Any) -> dict:
     """
 
     out = {}
-    for key, value in record.json_items():
+    # protocol は package の型の package の関数だけ（record の属性を読まない: `__getattribute__` を呼ばない）
+    for key, value in protocol_method(record, "json_items")(record):
         if value is not None and not issubclass(type(value), _SCALAR_TYPES):
             raise TypeError(
                 f"{type_name(type(record))}.{key} is not a scalar; use materialize()"
@@ -3156,7 +3328,6 @@ __all__ = [
     "PreparedJson",
     "RESULT_JSON_POLICY",
     "identity_key_of",
-    "protocol_scope",
     "audited_generator",
     "bounded_repr",
     "builtin_str",

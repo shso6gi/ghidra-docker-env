@@ -1479,6 +1479,30 @@ def test_an_explicit_object_ne_is_a_derived_not_equal(how):
     assert dict(HOOK_CALLS) == {}
 
 
+
+@pytest.mark.parametrize("how", ["own", "inherit"])
+def test_an_inherited_ne_is_the_types_own_not_equal(how):
+    """MRO の上の class が持つ `__ne__` はその型の `!=` の実装（`_resolved_comparison` は MRO を `object` の手前まで辿る）:
+    自分の class に `__ne__` を持たない型も、`!=` が `__eq__` の戻り値の真偽を C で読む型と数えない（判定する）。"""
+
+    def ne(self, other):
+        return True
+
+    def eq(self, other):
+        return False
+
+    class Base:
+        pass
+
+    class Leaf(Base):
+        __hash__ = object.__hash__
+
+    (Leaf if how == "own" else Base).__ne__ = ne
+    Leaf.__eq__ = eq
+    assert live_values._resolved_comparison(Leaf, "__ne__") is ne
+    for operation in (lambda: live_values.unequal(Leaf(), 1), lambda: live_values.unequal(1, Leaf())):
+        assert _run(operation) != ("undecidable",)
+
 @pytest.mark.parametrize("kind", _ref_classes(), ids=lambda kind: kind.__qualname__)
 def test_production_refs_are_decided_by_not_equal(kind):
     """回帰（8d C6）: 製品の ref どうしの `!=`（登録した `__eq__` から `object.__ne__` が作る）は判定する（双子と同じ）。"""
@@ -2368,7 +2392,7 @@ def test_type_attribute_follows_bases_and_namespace_changes_through_the_mro_reco
 
 
 def test_json_protocols_are_judged_again_by_the_next_walk():
-    """walk の中の protocol の記録（`json_encoding._WALK_PROTOCOLS`）は最も外の walk の間だけ: walk が終われば捨てる
+    """walk の中の protocol の記録（監査済みの区間の記録）は最も外の walk の間だけ: walk が終われば捨てる
     （例外で終わっても）。次の walk は書き換えた型を今の状態で判定する（外の code が package の型の名前空間へ foreign な
     関数を入れれば、その型を record として辿らない）。"""
 
@@ -2380,15 +2404,15 @@ def test_json_protocols_are_judged_again_by_the_next_walk():
 
     kind = type("Record", (), {"__module__": __name__, "json_items": items})
     assert RESULT_JSON_POLICY.prepare(kind()).value() == {"a": 1}
-    assert json_encoding._WALK_PROTOCOLS.get() is None
+    assert live_values.region_cache(json_encoding._PROTOCOL_SLOT) is None
     foreign = eval("lambda self: iter(())", {})  # package の外の code（`<string>`）
     kind.json_items = foreign
     with pytest.raises(JsonValueRejected):
         RESULT_JSON_POLICY.prepare(kind()).value()
-    assert json_encoding._WALK_PROTOCOLS.get() is None
+    assert live_values.region_cache(json_encoding._PROTOCOL_SLOT) is None
     kind.json_items = items
     assert RESULT_JSON_POLICY.prepare([kind(), kind()]).value() == [{"a": 1}, {"a": 1}]
-    assert json_encoding._WALK_PROTOCOLS.get() is None
+    assert live_values.region_cache(json_encoding._PROTOCOL_SLOT) is None
 
 
 def test_a_walk_forgets_protocols_after_running_code_outside_the_audited_roots():
@@ -2411,7 +2435,7 @@ def test_a_walk_forgets_protocols_after_running_code_outside_the_audited_roots()
 
     with pytest.raises(JsonValueRejected):
         RESULT_JSON_POLICY.prepare([kind(), rewriting()]).value()
-    assert json_encoding._WALK_PROTOCOLS.get() is None
+    assert live_values.region_cache(json_encoding._PROTOCOL_SLOT) is None
     kind.json_items = items
 
     class Keyed:
@@ -2420,18 +2444,17 @@ def test_a_walk_forgets_protocols_after_running_code_outside_the_audited_roots()
             return ("keyed",)
 
     # identity key の method（#194 の owner の code）を呼んだ後は記録を捨てる
-    json_encoding._WALK_PROTOCOLS.set({})
     try:
-        assert json_encoding._record_protocols(kind)[0] is items
-        assert json_encoding.identity_key_of(Keyed()) == (True, ("keyed",))
-        assert json_encoding._record_protocols(kind)[0] is None
+        with live_values.audited_region():
+            assert json_encoding._record_protocols(kind)[0] is items
+            assert json_encoding.identity_key_of(Keyed()) == (True, ("keyed",))
+            assert json_encoding._record_protocols(kind)[0] is None
     finally:
-        json_encoding._WALK_PROTOCOLS.set(None)
         kind.json_items = items
 
 
 def test_protocol_scopes_are_opened_only_by_audited_roots():
-    """`json_encoding.protocol_scope`（型の protocol の判定を scope の間 1 度にする）を開ける場所は、walk と J19 の監査の
+    """`live_values.audited_region`（監査済みの区間: 型の protocol の判定を区間の間 1 度にする）を開ける場所は、walk と J19 の監査の
     entry root の本体だけ（scope の中で走る package の code は監査が live な値に許した操作だけをする: 記録の前提）。
     新しい場所で開けるなら、その関数を監査の root に足す。"""
 
@@ -2458,12 +2481,12 @@ def test_protocol_scopes_are_opened_only_by_audited_roots():
                 if isinstance(child, ast.Call):
                     func = child.func
                     name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-                    if name == "protocol_scope":
+                    if name == "audited_region":
                         opened.add((module, qual))
                 visit(child, qual)
 
         visit(tree, "")
-    assert opened, "protocol_scope is used"
+    assert opened, "audited_region is used"
     assert opened <= allowed, sorted(opened - allowed)
 
 
@@ -2511,8 +2534,8 @@ def test_only_declared_package_generators_keep_the_protocol_scope():
     def plain():
         yield 1
 
-    with json_encoding.protocol_scope():
-        memo = json_encoding._WALK_PROTOCOLS.get()
+    with live_values.audited_region():
+        memo = live_values.region_cache(json_encoding._PROTOCOL_SLOT)
         memo[0] = ("marker",)
         list(json_encoding._walk_iter(plain()))
         assert memo == {}
@@ -2577,7 +2600,7 @@ def test_identity_key_of_forgets_the_protocol_scope_when_the_key_method_raises()
             raise TypeError("boom")
 
     try:
-        with json_encoding.protocol_scope():
+        with live_values.audited_region():
             assert json_encoding.is_json_record(kind())
             with pytest.raises(TypeError):
                 json_encoding.identity_key_of(Keyed())
@@ -2624,20 +2647,55 @@ def test_each_over_an_undeclared_generator_forgets_the_protocol_scope():
         kind.json_items = items
 
 
-def test_nan_copies_of_leaves_without_weakrefs_do_not_accumulate():
-    """weakref を作れない NaN の葉の写しの entry は、元の葉がもう誰にも読めなくなれば掃く（表の大きさは生きている葉の
-    数で決まる）。生きている葉は同じ写しのまま。"""
+def test_a_nan_leaf_without_weak_references_is_undecidable_and_never_held():
+    """反例（第 10 回 指摘 2）: weakref を作れない float の subclass の NaN（`__slots__ = ("back",)`、`x.back = x` の循環）。
+    写しの identity を元の葉の寿命に結べない（結ぶには葉を持つしかない）: 判定不能（D20）。表は葉を持たない: 呼び出し元が
+    手放して GC すれば、全部解放される（cache を使わない対照と同じ）。"""
 
-    class Slotted(float):
-        __slots__ = ()
+    class Cyclic(float):
+        __slots__ = ("back",)
 
-    kept = Slotted("nan")
-    first = live_values.plain_scalar(kept)
-    for _ in range(3 * live_values._TYPE_FACTS_LIMIT):
-        live_values.plain_scalar(Slotted("nan"))
+    def alive():
+        gc.collect()
+        return sum(1 for item in gc.get_objects() if type(item) is Cyclic)
+
+    before = alive()
+    for _ in range(10_000):
+        leaf = Cyclic("nan")
+        leaf.back = leaf
+        with pytest.raises(UndecidableComparison):
+            live_values.plain_scalar(leaf)
+        del leaf
+    assert alive() == before
+    # 対照: 表を使わない読み（NaN でない値）でも同じだけ解放される
+    for _ in range(10_000):
+        leaf = Cyclic("1.5")
+        leaf.back = leaf
+        assert live_values.plain_scalar(leaf) == 1.5
+        del leaf
+    assert alive() == before
+
+
+def test_a_nan_copy_follows_its_source_and_does_not_keep_it_alive():
+    """weakref を作れる NaN の葉の写しは、元の葉が生きている間同じ object（比べる・hash する読みが呼び出しの間で揃う）。
+    表は元の葉を持たない: 循環の中の葉も、手放して GC すれば解放され、entry も消える。"""
+
+    import weakref as _weakref
+
+    class Linked(float):
+        __slots__ = ("back", "__weakref__")
+
+    leaf = Linked("nan")
+    leaf.back = leaf
+    first = live_values.plain_scalar(leaf)
+    assert live_values.plain_scalar(leaf) is first
+    assert type(first) is float and first != first
+    probe = _weakref.ref(leaf)
+    entries = len(live_values._NAN_COPIES)
+    del leaf
     gc.collect()
-    assert len(live_values._NAN_COPIES) <= 2 * live_values._TYPE_FACTS_LIMIT
-    assert live_values.plain_scalar(kept) is first
+    assert probe() is None
+    assert len(live_values._NAN_COPIES) == entries - 1
 
 
 def test_the_nan_copy_callback_can_run_while_the_table_is_locked():
@@ -2946,3 +3004,79 @@ def test_package_type_follows_the_code_and_closure_of_a_runtime_function_it_open
         helper.__code__ = namespace["outer"](*range(len(names))).__code__
     assert live_values.package_type(type("Fresh", (), {"__module__": __name__, "member": staticmethod(helper)})) is False
     assert live_values.package_type(kind) is False
+
+
+def test_package_type_follows_a_false_verdict_function_whose_code_becomes_trusted():
+    """反例（第 10 回 指摘 3）: 外の関数で偽と記録した後、その関数の `__code__` を package の関数の code にする（変える
+    のは信頼していない関数: 信頼した関数の code・global は変えない）。新しい判定は真: 記録も真になる（無関係な属性を足して
+    確かめ直す前に）。JSON の record の判定も同じ。"""
+
+    from scripts.function_tracer_pcode.core import json_encoding
+
+    def trusted(self):
+        yield "a", 1
+
+    foreign = eval(compile("lambda self: iter(())", "<foreign>", "eval"))  # noqa: S307
+    kind = type("Record", (), {"__module__": __name__, "json_items": foreign})
+    assert live_values.package_type(kind) is False
+    assert json_encoding.is_json_record(kind()) is False
+    foreign.__code__ = trusted.__code__
+    fresh = type("Fresh", (), {"__module__": __name__, "json_items": foreign})
+    assert live_values.package_type(fresh) is True
+    assert live_values.package_type(kind) is True
+    assert json_encoding.is_json_record(kind()) is True
+
+
+def test_a_lookup_fact_follows_the_code_of_an_untrusted_function_it_found():
+    """名前の引きだけの事実（`lookup_fact`）が見つけた信頼していない関数の `__code__` を変えれば、計算し直す。"""
+
+    def trusted(self):
+        return 1
+
+    foreign = eval(compile("lambda self: 2", "<foreign>", "eval"))  # noqa: S307
+    kind = type("Kind", (), {"member": foreign})
+    table = live_values.LookupFactTable()
+
+    def compute(klass):
+        return live_values.package_function(live_values.type_attribute(klass, "member"))
+
+    assert live_values.lookup_fact(table, kind, compute, kind) is False
+    foreign.__code__ = trusted.__code__
+    assert live_values.lookup_fact(table, kind, compute, kind) is True
+
+
+
+def test_a_lookup_fact_follows_the_accessor_of_a_dynamic_class_attribute_it_found():
+    """名前の引きだけの事実（`lookup_fact`）が見つけた `types.DynamicClassAttribute` の accessor（instance の属性:
+    identity は同じまま差し替わる）を変えれば、計算し直す（`_watch_holds` が accessor の状態を確かめる）。"""
+
+    import types as _types
+
+    def trusted(self):
+        return 1
+
+    found = _types.DynamicClassAttribute(trusted)
+    kind = type("Kind", (), {"member": found})
+    table = live_values.LookupFactTable()
+
+    def compute(klass):
+        return live_values.package_function(live_values.type_attribute(klass, "member").fget)
+
+    assert live_values.lookup_fact(table, kind, compute, kind) is True
+    found.fget = eval(compile("lambda self: 2", "<foreign>", "eval"))  # noqa: S307
+    assert live_values.lookup_fact(table, kind, compute, kind) is False
+
+def test_package_type_follows_a_bound_method_whose_function_code_changes():
+    """名前空間の bound method が包む信頼していない関数の `__code__` を変えれば、記録は判定し直す。"""
+
+    import types as _types
+
+    def trusted(self):
+        return 1
+
+    foreign = eval(compile("lambda self: 2", "<foreign>", "eval"))  # noqa: S307
+    holder = type("Holder", (), {})()
+    kind = type("Kind", (), {"__module__": __name__, "member": _types.MethodType(foreign, holder)})
+    assert live_values.package_type(kind) is False
+    foreign.__code__ = trusted.__code__
+    assert live_values.package_type(kind) is True

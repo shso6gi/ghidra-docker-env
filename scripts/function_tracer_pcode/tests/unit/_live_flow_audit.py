@@ -32,6 +32,8 @@ PKG = "scripts.function_tracer_pcode"
 #: 作業量か authority の event の契約が仕事を抑える authority の入口（その owner の表）
 from scripts.function_tracer_pcode.authority.event_contract import BOUNDED_ENTRY_POINTS  # noqa: E402
 OWNER_MODULES = frozenset({PKG + ".core.json_encoding", PKG + ".core.live_values", PKG + ".core.read_limits"})
+#: 直前の `audit` で、監査した code が live な値を渡して呼んだ owner の関数（`module.名前`）
+LAST_OWNER_CALLS: Set[str] = set()
 #: 外部の依存（D）: live な値を渡すこと自体を違反にする
 EXTERNAL_PREFIXES = (PKG + ".authority.", PKG + ".cli.")
 
@@ -75,7 +77,7 @@ VERIFYING_PREDICATES = frozenset({"builtin_sequence", "builtin_set", "builtin_it
 #: LEGACY の写しは `raw` の葉を live なまま持つ
 OWNER_RESULTS = {"_walk_iter": ITER, "materialize": CONT}
 #: owner の上限の無い API（大きさの分かった小さい値にだけ使う: live な値を渡さない）
-UNBOUNDED_OWNER_METHODS = frozenset({"dumps", "encode_bounded", "scalar_record_dict"})
+UNBOUNDED_OWNER_METHODS = frozenset({"dumps", "dumps_frozen", "encode_bounded", "scalar_record_dict"})
 
 _PLAIN_TYPES = frozenset({"str", "int", "float", "bool", "bytes", "NoneType"})
 _CONTAINER_TYPES = frozenset({"tuple", "list", "dict", "set", "frozenset"})
@@ -1145,6 +1147,8 @@ class _FunctionAudit:
                 self.v(node, f"method .{func.attr}() of a live value")
                 return LIVE
             if receiver == WORK or self._owner_object(receiver_node):
+                if live:
+                    LAST_OWNER_CALLS.add(f"{self._owner_receiver_name(receiver, receiver_node)}.{func.attr}")
                 if live and self._unbounded_owner_call(func.attr, node):
                     self.v(node, f"live value passed to the unbounded owner API .{func.attr}()")
                 return OWNER_RESULTS.get(func.attr) if func.attr == "materialize" else None
@@ -1206,6 +1210,9 @@ class _FunctionAudit:
                 elif owner and owner[0] == "class":
                     method = self.index.method(owner[1], owner[2], argument.attr)
                     target = ("func",) + method if method else None
+            if target and target[0] == "func" and target[1] in OWNER_MODULES and kind is not None:
+                # owner の関数を live な要素の callback として渡す（`each(values, live_values.as_int)` など）
+                LAST_OWNER_CALLS.add(f"{target[1].rsplit('.', 1)[-1]}.{target[2]}")
             if not target or target[0] != "func" or target[1] in OWNER_MODULES or target[1].startswith(EXTERNAL_PREFIXES):
                 return
             function = self.index.functions[(target[1], target[2])]
@@ -1217,6 +1224,11 @@ class _FunctionAudit:
                     if param.arg not in WORK_PARAMETER_NAMES and param.arg not in ("self", "cls")
                 },
             )
+
+    def _owner_receiver_name(self, receiver, receiver_node) -> str:
+        """owner の object の method の記録の名前（作業量の object は `work`、それ以外の owner の object は `owner`）。"""
+
+        return "work" if receiver == WORK else "owner"
 
     def _owner_object(self, receiver_node) -> bool:
         base = receiver_node
@@ -1306,6 +1318,9 @@ class _FunctionAudit:
                 return None
             return self.external_call(node, f"{module[len(PKG) + 1:]}.{name}", live)
         if module in OWNER_MODULES:
+            if live and kind in ("func", "class"):
+                # 監査済みの区間の中で live な値を渡す owner の関数・class（`test_issue242_audited_regions` が分類を確かめる）
+                LAST_OWNER_CALLS.add(f"{module[len(PKG) + 1:].rsplit('.', 1)[-1]}.{name}")
             if kind == "func" and name == "identity_key_of":
                 # #194: owner の identity key の読み（package の `stable_key()` / `to_key()` を呼ぶ）。
                 # 呼ぶ場所を記録する（test が集合を固定する）
@@ -1435,14 +1450,14 @@ def _is_eq_dataclass(decorator) -> bool:
 #: 宣言した作業量の外の依存（owner の Issue が引き継ぐ）: (module, qualname, 違反の文の先頭) → 理由。
 #: 監査はこの場所の違反だけを除き、除いた場所が 1 つでも使われなくなれば（stale）落ちる。
 DECLARED_DEPENDENCIES = {
-    ("proof.obligations.snapshot", "_fingerprint_json", "live value passed to the unbounded owner API .dumps()"):
+    ("proof.obligations.snapshot", "_fingerprint_json", "live value passed to the unbounded owner API .dumps_frozen()"):
         "#194: 凍結した値（snapshot の作成では `freeze(budget=)` が数えた写し）を書く。proof の obligation の"
         " digest（`SnapshotFingerprintCodec.digest` の解析時の呼び出し）は凍結を数えない（identity の owner）",
 }
 
 #: 宣言した依存の場所ごとの違反の数（それより多い同じ違反は宣言の外）
 DECLARED_DEPENDENCY_SITES = {
-    ("proof.obligations.snapshot", "_fingerprint_json", "live value passed to the unbounded owner API .dumps()"): 1,
+    ("proof.obligations.snapshot", "_fingerprint_json", "live value passed to the unbounded owner API .dumps_frozen()"): 1,
 }
 
 #: 宣言した作業量の外の依存の **呼び先**（(module, qualname) → 理由）。監査はここへ入らない
@@ -1504,6 +1519,7 @@ def protocol_roots(index: PackageIndex):
 def audit(package_root: pathlib.Path, entry_roots: Iterable[Tuple[str, str, Tuple[str, ...]]] = ENTRY_ROOTS):
     """(violations, analyzed, index)。`entry_roots` は (module, qualname, live な引数の名前)。"""
 
+    LAST_OWNER_CALLS.clear()
     index = PackageIndex(package_root)
     roots = list(protocol_roots(index))
     missing = []
@@ -1630,7 +1646,7 @@ def proportional_constructs(function) -> List[str]:
 
 #: 値全体を書く組み込み・method（書く量は値の大きさに比例する）
 WRITING_BUILTINS = frozenset({"repr"})
-WRITING_METHODS = frozenset({"dumps"})
+WRITING_METHODS = frozenset({"dumps", "dumps_frozen"})
 
 
 def _fixed_slice(node) -> bool:
