@@ -121,5 +121,5 @@ def test_static_checks_scan_at_least_the_expected_collaborators():
     names = {cls.name for _, cls in _collaborator_class_nodes()}
     assert {"EffectIntegrationService", "DivergenceProofService", "ReturnPathSelectionService", "BranchGuardedWhileProofService",
             "ExpressionCaseService", "PlaceholderAlgebraService", "ReturnNormalizationService", "BlockGraphService",
-            "ProgramAccessService", "ConditionLogicService", "StackProtectorService", "PcodeSiteService", "PhiOriginService",
+            "ProgramAccessService", "ConditionLogicService", "ConstantValueService", "PcodeSiteService", "PhiOriginService",
             "ParameterService", "RegionFacts", "LocalValueResolver", "DebugReporter"} <= names

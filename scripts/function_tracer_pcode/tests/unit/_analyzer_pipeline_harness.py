@@ -9,6 +9,12 @@ template が材料を持たない段（構造的な再帰の要約・bounded cal
 control flow の印・observable effect）と公開境界（``publish_raw_function_analysis``: 意味値の公開と
 入力領域の封印）は本物。
 
+``outcome_seed=True`` のときは outcome partition の段（``_apply_outcome_partition_summaries``: termination の
+証拠と outcome seed の構築）も本物で通し、CFG を要る要約（``_try_apply_*``）だけを「適用しない」にする。
+本番の解析器は解析ごとに seed を作り、seed のある解析は比較の前に outcome partition の段の cause を出す
+（plan v4 PR-C §7.3 の 3）。合成の CFG は無いので、seed のある解析は CFG の到達性を証明できず、比較は
+EQ にならない（``outcome_cfg_reachability_unproven``）。EQ の対照は既定（seed なし）で作る。
+
 ``run_production_check(..., analyze=analyze_through_pipeline)`` と組み合わせると、左右の解析がこの段を
 通った後に本物の checker・authority・cutover で判定される。
 """
@@ -88,7 +94,15 @@ class _ConditionTracker:
         return None
 
 
-def analyze_through_pipeline(template: Any) -> Any:
+_CFG_OUTCOME_SUMMARIES = (
+    "_try_apply_triangular_mod_caller_outcomes",
+    "_try_apply_triangular_mod_optimized_outcomes",
+    "_try_apply_branch_guarded_while_outcomes",
+    "_try_apply_single_guard_nonprogress_loop_outcomes",
+)
+
+
+def analyze_through_pipeline(template: Any, *, outcome_seed: bool = False) -> Any:
     """``template``（公開前の解析）の return から始めて、本物の解析の段と公開境界を通した解析。
 
     呼ぶたびに新しい解析器・新しい return の複製を使う（本番の再解析と同じく、毎回新しい解析を作る）。
@@ -148,5 +162,9 @@ def analyze_through_pipeline(template: Any) -> Any:
         )
         stack.enter_context(patch.object(analyzer, "_apply_structural_recurrence_summary", return_value=None))
         stack.enter_context(patch.object(analyzer, "_apply_bounded_call_refinement", return_value=None))
-        stack.enter_context(patch.object(analyzer, "_apply_outcome_partition_summaries", return_value=None))
+        if outcome_seed:
+            for name in _CFG_OUTCOME_SUMMARIES:
+                stack.enter_context(patch.object(analyzer, name, return_value=False))
+        else:
+            stack.enter_context(patch.object(analyzer, "_apply_outcome_partition_summaries", return_value=None))
         return analyzer.analyze_function_by_name(template.function_name)

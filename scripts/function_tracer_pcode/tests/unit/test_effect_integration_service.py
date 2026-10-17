@@ -21,7 +21,6 @@ DIRECT = {
         "count_phi_nodes", "count_opaque_unknowns", "count_object_centric_unknowns", "condition_lists_equivalent",
     },
     "return_normalization": {"rewrite_drops_composite_location_wrapper", "should_replay_canonicalized_return"},
-    "stack_protector": {"extract_indirect_probe"},
     "pcode_sites": {"varnode_location_key", "is_zero_constant_varnode"},
     "phi_origins": {"expression_contains_phi"},
     "divergence_proofs": {"recursive_scc_certificate"},
@@ -61,7 +60,7 @@ def test_collaborator_holds_only_its_dependencies():
 def test_every_delegator_forwards_to_the_collaborator():
     analyzer = _analyzer()
     names = [n for n, _ in inspect.getmembers(EffectIntegrationService, predicate=inspect.isfunction) if n != "__init__"]
-    assert len(names) == 29
+    assert len(names) == 28
     for name in names:
         sentinel = object()
         assert not isinstance(inspect.getattr_static(ReturnAnalyzer, "_" + name), (staticmethod, classmethod)), name

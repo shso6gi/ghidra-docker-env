@@ -21,7 +21,7 @@ from scripts.function_tracer_pcode.analysis.returns._api import (
     StructuralRecurrenceSummarizer,
 )
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
-from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
+from scripts.function_tracer_pcode.analysis.returns.constant_values import ConstantValueService
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import BlockGraphService
 from scripts.function_tracer_pcode.analysis.debug import summarize_condition
 
@@ -64,7 +64,7 @@ class DivergenceProofService:
         program_access: ProgramAccessService,
         condition_logic: ConditionLogicService,
         placeholder_algebra: "PlaceholderAlgebraService",
-        stack_protector: StackProtectorService,
+        constant_values: ConstantValueService,
         debug_reporter: DebugReporter,
         program_value: Callable[..., Any],
     ) -> None:
@@ -73,7 +73,7 @@ class DivergenceProofService:
         self.program_access = program_access
         self.condition_logic = condition_logic
         self.placeholder_algebra = placeholder_algebra
-        self.stack_protector = stack_protector
+        self.constant_values = constant_values
         self.debug_reporter = debug_reporter
         self.program_value = program_value
 
@@ -753,7 +753,7 @@ class DivergenceProofService:
         if getattr(current, "operator", None) != "INT_SLESS":
             return False
         operands = tuple(getattr(current, "operands", ()) or ())
-        if len(operands) != 2 or self.stack_protector.constant_int_value(operands[0]) != 0:
+        if len(operands) != 2 or self.constant_values.constant_int_value(operands[0]) != 0:
             return False
         right = operands[1]
         if self.placeholder_algebra.expression_is_placeholder_minus_one_under_conditions(

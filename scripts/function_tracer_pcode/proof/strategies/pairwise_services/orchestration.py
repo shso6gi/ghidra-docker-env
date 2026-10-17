@@ -42,7 +42,8 @@ from scripts.function_tracer_pcode.proof.obligations.pair_closure_producers impo
 import time
 from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
-from scripts.function_tracer_pcode.smt import SolverStatus
+from scripts.function_tracer_pcode.core.render_smt import SMT_SEMANTICS_REFUSALS
+from scripts.function_tracer_pcode.smt import ParallelResult, SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.smt.parallel import run_backend_query
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
@@ -286,6 +287,49 @@ def _extract_cases_under_authorization(strategy, analysis, input_correspondence,
     if authorization is not None and authorization.assumptions:
         return strategy._extract_return_cases(analysis, authorization=authorization)
     return strategy._extract_return_cases(analysis)
+
+
+def _impl_check_refusing_unsupported_smt_semantics(
+    self,
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+    save_formula: bool = False
+) -> StrategyResult:
+    """``PairwiseStrategy.check``: 比較の本体（``_impl_check``）と、正確な SMT の意味が無い式の扱い（plan v4 PR-C）。
+
+    条件・値・補助 query のどこかに正確な SMT の意味が無い演算（``INDIRECT`` など）があると、描画が型つきの
+    拒否（``SMT_SEMANTICS_REFUSALS``）を送出する。pairwise はそれを比較の外へ出さず、monolithic の同じ拒否と
+    同じ UNKNOWN（``expression_semantics_unsupported``）の結果にする。外へ出すと checker の互換の handler が
+    authority の event を持たない結果を作り、終了処理で ERROR になる。この結果は EQ も NOT_EQ も主張せず、
+    比較の終端（inconclusive の terminal）は後続の monolithic が自分の同じ拒否で封印する。
+    """
+
+    try:
+        return _impl_check(self, analysis1, analysis2, save_formula)
+    except SMT_SEMANTICS_REFUSALS as exc:
+        self._debug_print(f"Pairwise check blocked by unsupported SMT semantics: {exc}")
+        return StrategyResult(
+            is_equivalent=None,
+            solver_results=ParallelResult(results=[]),
+            smt_formula=None,
+            counterexample_raw=None,
+            return_var1=None,
+            return_var2=None,
+            constrained_fragments=[],
+            unknown_reasons=[
+                make_internal_v2_reason_diagnostic(
+                    "expression_semantics_unsupported",
+                    stage="S_PAIRWISE",
+                    evidence_refs=(exc.refusal_evidence_ref,),
+                    object_target_key=(
+                        *exc.refusal_target_fields(),
+                        tuple(analysis1.outcome_function_identity()),
+                        tuple(analysis2.outcome_function_identity()),
+                    ),
+                    detail=str(exc),
+                )
+            ],
+        )
 
 
 def _impl_check(

@@ -15,7 +15,7 @@ DIRECT = {
         "signed_positive_condition", "conditions_are_unsat", "condition_is_signed_nonpositive_of_param",
     },
     "placeholder_algebra": {"expression_is_placeholder_minus_one_under_conditions", "expression_is_one_under_conditions"},
-    "stack_protector": {"constant_int_value"},
+    "constant_values": {"constant_int_value"},
 }
 FACADE_CALLBACKS = ()
 SUPPLIERS = ("program_value",)

@@ -32,7 +32,7 @@ from scripts.function_tracer_pcode.analysis.returns.divergence_proofs import Div
 from scripts.function_tracer_pcode.analysis.returns.return_normalization import ReturnNormalizationService
 from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
 from scripts.function_tracer_pcode.analysis.returns.phi_origins import PhiOriginService
-from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
+from scripts.function_tracer_pcode.analysis.returns.constant_values import ConstantValueService
 from scripts.function_tracer_pcode.analysis.returns.placeholder_algebra import PlaceholderAlgebraService
 from scripts.function_tracer_pcode.analysis.returns.region_facts import (
     RegionFacts,
@@ -102,15 +102,9 @@ class ReturnAnalyzer:
         self._expression_cases = ExpressionCaseService(
             session=self._ensure_analysis_session,
         )
-        self._stack_protector = StackProtectorService(
-            extract_stack_protector_memory_probe=lambda *a, **kw: self._extract_stack_protector_memory_probe(*a, **kw),
-            return_site_metadata_from_info=lambda *a, **kw: self._return_site_metadata_from_info(*a, **kw),
-            make_return_info=lambda *a, **kw: self._make_return_info(*a, **kw),
-            debug_reporter=self._debug_reporter,
-            debug_flag=lambda: self.debug,
-        )
+        self._constant_values = ConstantValueService()
         self._condition_logic = ConditionLogicService(
-            stack_protector=self._stack_protector,
+            constant_values=self._constant_values,
             fold_constant_expression=lambda expr, **kw: self._fold_constant_expression(expr, **kw),
         )
         self._pcode_sites = PcodeSiteService(
@@ -140,7 +134,6 @@ class ReturnAnalyzer:
             return_paths=self._return_paths,
             expression_cases=self._expression_cases,
             condition_logic=self._condition_logic,
-            stack_protector=self._stack_protector,
             pcode_sites=self._pcode_sites,
             debug_reporter=self._debug_reporter,
             count_memory_reads=lambda *a, **kw: self._count_memory_reads(*a, **kw),
@@ -168,7 +161,7 @@ class ReturnAnalyzer:
         self._placeholder_algebra = PlaceholderAlgebraService(
             session=self._ensure_analysis_session,
             condition_logic=self._condition_logic,
-            stack_protector=self._stack_protector,
+            constant_values=self._constant_values,
             branch_guarded_expression_is_param_minus_one=lambda *a, **kw: self._branch_guarded_expression_is_param_minus_one(*a, **kw),
         )
         self._divergence_proofs = DivergenceProofService(
@@ -177,13 +170,13 @@ class ReturnAnalyzer:
             program_access=self._program_access,
             condition_logic=self._condition_logic,
             placeholder_algebra=self._placeholder_algebra,
-            stack_protector=self._stack_protector,
+            constant_values=self._constant_values,
             debug_reporter=self._debug_reporter,
             program_value=lambda: self.program,
         )
         self._phi_origins = PhiOriginService(
             condition_logic=self._condition_logic,
-            stack_protector=self._stack_protector,
+            constant_values=self._constant_values,
             pcode_sites=self._pcode_sites,
             return_normalization=self._return_normalization,
             debug_reporter=self._debug_reporter,
@@ -196,7 +189,7 @@ class ReturnAnalyzer:
             placeholder_algebra=self._placeholder_algebra,
             divergence_proofs=self._divergence_proofs,
             block_graph=self._block_graph,
-            stack_protector=self._stack_protector,
+            constant_values=self._constant_values,
             debug_reporter=self._debug_reporter,
             expression_cases=self._expression_cases,
             phi_origins=self._phi_origins,
@@ -219,7 +212,6 @@ class ReturnAnalyzer:
             program_access=self._program_access,
             expression_cases=self._expression_cases,
             return_normalization=self._return_normalization,
-            stack_protector=self._stack_protector,
             pcode_sites=self._pcode_sites,
             phi_origins=self._phi_origins,
             divergence_proofs=self._divergence_proofs,
@@ -857,8 +849,6 @@ class ReturnAnalyzer:
         return self._effect_integration.effect_summary_allows_pre_return_structural_summary(effect_summary, function=function, high_function=high_function, return_type=return_type, return_type_obj=return_type_obj)
     def _expression_contains_stale_effect_value_for_post_state(self, expr, target_post_state, conditions, effect_summary):
         return self._effect_integration.expression_contains_stale_effect_value_for_post_state(expr, target_post_state, conditions, effect_summary)
-    def _extract_stack_protector_memory_probe(self, expr):
-        return self._effect_integration.extract_stack_protector_memory_probe(expr)
     def _invoke_build_effect_summary(self, function, high_function, tracer, condition_tracker, parameters, active_functions, *, bound_parameter_values=None, bound_parameter_storage_values=None):
         return self._effect_integration.invoke_build_effect_summary(function, high_function, tracer, condition_tracker, parameters, active_functions, bound_parameter_values=bound_parameter_values, bound_parameter_storage_values=bound_parameter_storage_values)
     def _iter_effect_sensitive_rewrite_candidates(self, value, conditions, effect_summary):
@@ -1022,8 +1012,6 @@ class ReturnAnalyzer:
     @staticmethod
     def _condition_identity_key(condition):
         return DivergenceProofService.condition_identity_key(condition)
-    def _condition_looks_like_stack_protector_guard(self, condition):
-        return self._stack_protector.condition_looks_like_stack_protector_guard(condition)
     def _condition_mentions_param(self, condition, param_name):
         return self._condition_logic.condition_mentions_param(condition, param_name)
     def _conditional_progress_guard_keys_from_structural_proof(self, proof):
@@ -1036,7 +1024,7 @@ class ReturnAnalyzer:
     def _constant_expression_value(expr):
         return ConditionLogicService.constant_expression_value(expr)
     def _constant_int_value(self, expr):
-        return self._stack_protector.constant_int_value(expr)
+        return self._constant_values.constant_int_value(expr)
     _current_function_entry_address = _svc_lifecycle._impl__current_function_entry_address
     def _debug_available(self):
         return self._debug_reporter.debug_available()
@@ -1075,12 +1063,6 @@ class ReturnAnalyzer:
         return self._condition_logic.expression_is_zero_constant(expr)
     def _expression_is_zero_under_conditions(self, expr, conditions):
         return self._placeholder_algebra.expression_is_zero_under_conditions(expr, conditions)
-    def _extract_difference_pair(self, expr):
-        return self._stack_protector.extract_difference_pair(expr)
-    def _extract_indirect_probe(self, expr):
-        return self._stack_protector.extract_indirect_probe(expr)
-    def _extract_stack_protector_compare_pair(self, condition):
-        return self._stack_protector.extract_stack_protector_compare_pair(condition)
     @staticmethod
     def _field_value_from_structural_proof(proof, field_name):
         return DivergenceProofService.field_value_from_structural_proof(proof, field_name)
@@ -1089,8 +1071,6 @@ class ReturnAnalyzer:
     _function_entry_address = staticmethod(_svc_lifecycle._impl__function_entry_address)
     def _high_function_cyclic_sccs(self, blocks):
         return self._divergence_proofs.high_function_cyclic_sccs(blocks)
-    def _is_zero_constant(self, expr):
-        return self._stack_protector.is_zero_constant(expr)
     def _merge_parameter_descriptors(self, existing, candidate):
         return self._parameters.merge_parameter_descriptors(existing, candidate)
     def _negated_unit_condition_key_for_expression(self, expr, conditions):
@@ -1118,8 +1098,6 @@ class ReturnAnalyzer:
         return self._divergence_proofs.prove_scc_must_diverge_under_guard(scc, all_blocks=all_blocks, divergence_guard=divergence_guard, param=param, tracer=tracer)
     def _prove_single_guard_nonprogress_region_must_diverge(self, high_function, analysis, *, divergence_guard, param):
         return self._divergence_proofs.prove_single_guard_nonprogress_region_must_diverge(high_function, analysis, divergence_guard=divergence_guard, param=param)
-    def _reads_share_stack_protector_probe(self, left, right):
-        return self._stack_protector.reads_share_stack_protector_probe(left, right)
     def _recursive_scc_certificate(self, function_key):
         return self._divergence_proofs.recursive_scc_certificate(function_key)
     # RegionFacts collaborator (Phase 5): the facade keeps these names as thin
@@ -1140,8 +1118,6 @@ class ReturnAnalyzer:
         return self._divergence_proofs.single_guard_condition_matches(condition, divergence_guard, param)
     def _single_guard_conditions_are_contradictory(self, divergence_guard, edge_condition, param):
         return self._divergence_proofs.single_guard_conditions_are_contradictory(divergence_guard, edge_condition, param)
-    def _strip_stack_protector_only_conditions(self, return_infos):
-        return self._stack_protector.strip_stack_protector_only_conditions(return_infos)
     @staticmethod
     def _strip_transparent_unary(expr):
         return PlaceholderAlgebraService.strip_transparent_unary(expr)
