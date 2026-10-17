@@ -260,6 +260,8 @@ def run_obligation_branch_plan(
     accumulated_pairwise_debug_stats: Dict[str, int] = {}
     by_id = {spec.stage_id.value: spec for spec in checker.stage_plan}
     skipped_fallback_observations: List[Any] = []
+    # この runner が自分の raw pair について行った最後の比較の被覆の判定（前の段の比較の印は含まない）。
+    raw_pair_coverage_verdicts: Dict[str, Any] = {"notes": ()}
 
     def eligible(branch_id: str):
         if branch_id == "S_LOOP_TEMPLATE_ABSTRACTION":
@@ -274,7 +276,9 @@ def run_obligation_branch_plan(
                     unsealed_coverage_observations,
                 )
 
-                skipped_fallback_observations.extend(unsealed_coverage_observations(analysis1, analysis2))
+                skipped_fallback_observations.extend(unsealed_coverage_observations(
+                    analysis1, analysis2, raw_pair_coverage_verdicts["notes"],
+                ))
                 return False
             return monolithic_fallback_is_eligible
         return None
@@ -717,6 +721,14 @@ def run_obligation_branch_plan(
                     active_production_pilot_session(), receipt, dispatch_frame,
                 )
         last_result = result
+        result_frame = getattr(result, "_prepared_dispatch_frame", None)
+        result_source = getattr(result_frame, "source", None)
+        if (
+            result_source is not None
+            and getattr(result_source, "analysis1", None) is analysis1
+            and getattr(result_source, "analysis2", None) is analysis2
+        ):
+            raw_pair_coverage_verdicts["notes"] = tuple(getattr(result_frame, "coverage_verdict_notes", ()) or ())
         attempt_outcome, cutover_actions, continue_fallback = (
             _cutover_branch_policy(result)
         )

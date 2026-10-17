@@ -495,6 +495,17 @@ def _impl_check(
         record_comparison_annotation(analysis1, "return_case_coverage_inconclusive")
     if "function2:return_coverage_inconclusive" in sat_unsafety_reasons:
         record_comparison_annotation(analysis2, "return_case_coverage_inconclusive")
+    if dispatch_frame is not None:
+        # この比較自身の判定（raw analysis の印は前の比較の印も残るので、比較の観測は frame に持つ。plan v4 PR-C）。
+        dispatch_frame.coverage_verdict_notes = tuple(
+            (label, note)
+            for label in ("function1", "function2")
+            for reason, note in (
+                ("return_coverage_gap", "return_case_coverage_gap"),
+                ("return_coverage_inconclusive", "return_case_coverage_inconclusive"),
+            )
+            if f"{label}:{reason}" in sat_unsafety_reasons
+        )
     total_pairs = len(cases1) * len(cases2)
     active_runtime = getattr(self, "_obligation_runtime_session", None)
     successor_plan = (

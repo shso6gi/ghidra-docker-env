@@ -1541,6 +1541,9 @@ class PreparedDispatchFrame:
     shadow_receipt: Optional[ComparisonExecutionReceipt] = field(default=None, init=False)
     receipt_authority_policy: str = field(default="v3_authoritative_v2_shadow", init=False)
     pair_disposition_ledger: Any = field(default=None, init=False, repr=False)
+    #: この比較の return-coverage gate の判定（(側, 被覆の印) の組）。被覆の印は raw analysis にも書き戻されるが、
+    #: analysis は比較をまたいで使い回され印は追記だけなので、「この比較が観測した不足」はここを読む（plan v4 PR-C）。
+    coverage_verdict_notes: Tuple[Tuple[str, str], ...] = field(default=(), init=False, repr=False, compare=False)
     pair_quiescence_certificate: Any = field(default=None, init=False, repr=False)
     obligation_runtime: Any = field(default=None, init=False, repr=False)
     replan_successor_ledger: Any = field(default=None, init=False, repr=False)

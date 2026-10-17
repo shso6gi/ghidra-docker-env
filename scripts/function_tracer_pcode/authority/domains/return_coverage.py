@@ -13,9 +13,10 @@ terminal も無いまま終わり、終了処理が ERROR にしていた。
 責務は 3 つに分ける。
 
 1. 被覆を判定する: return-coverage gate（この domain は判定しない）。
-2. 不足がどの比較に適用されるかを記録する: runner が raw pair の被覆の印で monolithic fallback を止めたとき、
-   その runner の結果に ``UnsealedCoverageTerminal`` を付ける（``stage_runner``）。記録はその結果の比較
-   （dispatch frame）に束縛され、cause はまだ作らない。
+2. 不足がどの比較に適用されるかを記録する: runner が monolithic fallback を止めたとき、その runner が raw pair
+   について行った比較自身の判定（``PreparedDispatchFrame.coverage_verdict_notes``。analysis に追記される印では
+   ない）から不足を取り、runner の結果に ``UnsealedCoverageTerminal`` を付ける（``stage_runner``）。記録はその
+   結果の比較（dispatch frame）に束縛され、cause はまだ作らない。
 3. 採用する: どの結果が最終かを決めた後の authority の終了処理（``pilot.finish``）が、**最終の結果**に付いた
    記録だけを、最終の比較の frame と照合して cause にする（``observe_final_unsealed_coverage``）。
 
@@ -256,19 +257,24 @@ class UnsealedCoverageObservation:
         object.__setattr__(self, "function_identity", canonical_value(self.function_identity))
 
 
-def unsealed_coverage_observations(analysis1: Any, analysis2: Any) -> tuple[UnsealedCoverageObservation, ...]:
-    """runner の raw pair のうち、seed の無い側の被覆の印（fallback を止めた不足）。
+def unsealed_coverage_observations(
+    analysis1: Any, analysis2: Any, verdict_notes: tuple,
+) -> tuple[UnsealedCoverageObservation, ...]:
+    """runner の raw pair の比較が観測した被覆の不足のうち、seed の無い側のもの。
 
-    seed のある側の被覆は outcome partition の段が cause を持つので含めない。
+    ``verdict_notes`` はその比較の判定（``PreparedDispatchFrame.coverage_verdict_notes``: (側, 被覆の印)）。
+    raw analysis の ``analysis_notes`` は読まない: analysis は比較をまたいで使い回され（再解析しなかった側）、
+    印は追記だけなので、前の比較の不足を今の比較の不足と取り違える。seed のある側の被覆は outcome partition の
+    段が cause を持つので含めない。
     """
 
+    verdicts = set(tuple(item) for item in verdict_notes or ())
     observations = []
     for label, analysis in (("function1", analysis1), ("function2", analysis2)):
         if getattr(analysis, "outcome_seed", None) is not None:
             continue
-        notes = tuple(getattr(analysis, "analysis_notes", ()) or ())
         for note, reason_id in COVERAGE_NOTE_REASONS:
-            if note in notes:
+            if (label, note) in verdicts:
                 observations.append(UnsealedCoverageObservation(
                     label, reason_id, note, tuple(analysis.outcome_function_identity()),
                 ))

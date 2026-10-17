@@ -151,10 +151,14 @@ def _analysis(*, seeded: bool, notes=(), identity=_IDENTITY) -> Any:
     )
 
 
-def test_observations_are_the_seedless_sides_coverage_notes():
-    both = ("return_case_coverage_gap", "return_case_coverage_inconclusive")
+def test_observations_are_the_comparisons_own_verdicts_on_seedless_sides():
+    verdicts = (
+        ("function1", "return_case_coverage_gap"),
+        ("function1", "return_case_coverage_inconclusive"),
+        ("function2", "return_case_coverage_gap"),
+    )
     observed = unsealed_coverage_observations(
-        _analysis(seeded=False, notes=both), _analysis(seeded=False, notes=both[:1], identity=("right",)),
+        _analysis(seeded=False), _analysis(seeded=False, identity=("right",)), verdicts,
     )
     assert [(item.label, item.reason_id, item.function_identity) for item in observed] == [
         ("function1", RETURN_COVERAGE_GAP_REASON_ID, _IDENTITY),
@@ -163,11 +167,21 @@ def test_observations_are_the_seedless_sides_coverage_notes():
     ]
 
 
-def test_a_seeded_side_or_a_side_without_a_note_is_not_observed():
+def test_a_seeded_side_is_not_observed():
     assert unsealed_coverage_observations(
-        _analysis(seeded=True, notes=("return_case_coverage_gap",)),
-        _analysis(seeded=False, notes=("bounded_call_refinement",)),
+        _analysis(seeded=True), _analysis(seeded=True), (("function1", "return_case_coverage_gap"),),
     ) == ()
+
+
+def test_a_note_left_on_a_reused_analysis_by_an_earlier_comparison_is_not_this_comparisons_observation():
+    """review r4 m1: 再解析しなかった側の analysis は比較をまたいで使い回され、被覆の印は追記だけ。前の比較の
+    印を今の比較の不足として記録しない（記録は比較自身の判定だけを読む）。"""
+
+    reused = _analysis(seeded=False, notes=("return_case_coverage_gap", "return_case_coverage_inconclusive"))
+    assert unsealed_coverage_observations(reused, _analysis(seeded=False), ()) == ()
+    assert [item.label for item in unsealed_coverage_observations(
+        reused, _analysis(seeded=False), (("function2", "return_case_coverage_gap"),),
+    )] == ["function2"]
 
 
 def test_the_coverage_notes_are_the_registered_comparison_annotations():
@@ -323,8 +337,11 @@ def _template(name: str, shape: str):
     return _analysis(name, [_descriptor("param_1", 4, "int", True)], returns)
 
 
-def _run_with_a_p1_reanalysis(monkeypatch, case_id: str, p0: tuple, p1: tuple) -> dict:
-    """P0 は ``p0`` の形、P1 の再解析（両側とも変更ありとして再解析させる）は ``p1`` の形の解析を返す。"""
+def _run_with_a_p1_reanalysis(monkeypatch, case_id: str, p0: tuple, p1: tuple, changed=(True, True)) -> dict:
+    """P0 は ``p0`` の形、P1 は ``changed`` の側だけを再解析させ、再解析した側は ``p1`` の形の解析を返す。
+
+    再解析しなかった側は P0 の analysis がそのまま使い回される（``selective_reanalysis_and_check``）。
+    """
 
     from scripts.function_tracer_pcode.checker.phases import handler
     from scripts.function_tracer_pcode.tests.unit._analyzer_pipeline_harness import analyze_through_pipeline
@@ -341,13 +358,14 @@ def _run_with_a_p1_reanalysis(monkeypatch, case_id: str, p0: tuple, p1: tuple) -
     def execute_phase(self, spec, _ctx, *_args, **_kwargs):
         if spec.phase_id == handler.PhaseID.P1_SIGNEDNESS:
             return handler.PhaseResult(
-                spec.phase_id, applied=True, retry_name="p1-reanalysis", changed_binary1=True, changed_binary2=True,
+                spec.phase_id, applied=True, retry_name="p1-reanalysis",
+                changed_binary1=changed[0], changed_binary2=changed[1],
             )
         return handler.PhaseResult(spec.phase_id, applied=False, retry_name="none")
 
     monkeypatch.setattr(handler.PhaseHandler, "execute_phase", execute_phase)
     result = run_production_check(case_id, _template("l", p0[0]), _template("r", p0[1]), analyze=analyze)
-    assert calls == {"l": 2, "r": 2}, calls
+    assert calls == {"l": 1 + int(changed[0]), "r": 1 + int(changed[1])}, calls
     assert result.get("retry_count") == 1
     return result
 
@@ -427,3 +445,26 @@ def test_a_record_moved_onto_another_final_result_is_refused(emitted):
     with pytest.raises(ValueError):
         adopt_final_unsealed_coverage(final, Outcome.UNKNOWN)
     assert emitted == []
+
+
+@pytest.mark.parametrize(
+    "case_id, p0, p1, changed, outcome, active",
+    (
+        # review r4 A: 左だけ再解析して回復、右（使い回し）は partial のまま。
+        ("left-only-recovered", ("partial", "partial"), ("full", "partial"), (True, False), "UNKNOWN",
+         [RETURN_COVERAGE_GAP_REASON_ID]),
+        # review r4 B: 左は P0 から full、右だけ再解析して回復。
+        ("right-only-recovered", ("full", "partial"), ("full", "full"), (False, True), "EQUIVALENT", []),
+        # 左だけ再解析して inconclusive に、右（使い回し）は partial のまま。
+        ("left-only-turns-inconclusive", ("partial", "partial"), ("inconclusive", "partial"), (True, False),
+         "UNKNOWN", [RETURN_COVERAGE_GAP_REASON_ID, RETURN_COVERAGE_INCONCLUSIVE_REASON_ID]),
+    ),
+    ids=lambda value: value if isinstance(value, str) and "-" in value else None,
+)
+def test_a_one_sided_retry_adopts_the_coverage_of_its_own_comparison(
+    monkeypatch, case_id, p0, p1, changed, outcome, active,
+):
+    result = _run_with_a_p1_reanalysis(monkeypatch, "pr-c-" + case_id, p0, p1, changed)
+
+    assert result["final_outcome"] == outcome, (result.get("error_message"), result.get("failure_message"), _active(result))
+    assert _active(result) == active
