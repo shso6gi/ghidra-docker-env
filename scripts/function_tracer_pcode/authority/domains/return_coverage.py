@@ -13,10 +13,11 @@ terminal も無いまま終わり、終了処理が ERROR にしていた。
 責務は 3 つに分ける。
 
 1. 被覆を判定する: return-coverage gate（この domain は判定しない）。
-2. 不足がどの比較に適用されるかを記録する: runner が monolithic fallback を止めたとき、その runner が raw pair
-   について行った比較自身の判定（``PreparedDispatchFrame.coverage_verdict_notes``。analysis に追記される印では
-   ない）から不足を取り、runner の結果に ``UnsealedCoverageTerminal`` を付ける（``stage_runner``）。記録はその
-   結果の比較（dispatch frame）に束縛され、cause はまだ作らない。
+2. 不足がどの比較に適用されるかを記録する: pairwise の比較は自分の判定を自分の obligation runtime に記録する
+   （``ObligationRuntimeSession.coverage_verdict``。analysis に追記される印ではない）。runner が monolithic fallback
+   を止めたとき、runner の runtime（runner の raw pair の比較だけが書く。抽象化・promotion の比較は別の runtime）
+   の判定から不足を取り、runner の結果に ``UnsealedCoverageTerminal`` を付ける（``stage_runner``）。記録は、不足を
+   観測した比較の identity と、付けた結果の比較（dispatch frame）への束縛を分けて持ち、cause はまだ作らない。
 3. 採用する: どの結果が最終かを決めた後の authority の終了処理（``pilot.finish``）が、**最終の結果**に付いた
    記録だけを、最終の比較の frame と照合して cause にする（``observe_final_unsealed_coverage``）。
 
@@ -233,50 +234,60 @@ class ReturnCoveragePilotEncoder:
         return CauseOccurrenceAuthority(occurrence, bound)
 
 
-#: runner の raw analysis の被覆の印 → reason（``proof/obligations/snapshot.COMPARISON_ANNOTATION_NOTES`` と一致）。
-COVERAGE_NOTE_REASONS = (
-    ("return_case_coverage_gap", RETURN_COVERAGE_GAP_REASON_ID),
-    ("return_case_coverage_inconclusive", RETURN_COVERAGE_INCONCLUSIVE_REASON_ID),
-)
+def comparison_identity_of(frame: Any) -> tuple:
+    """比較（dispatch frame）の決定的な identity: (raw pair の digest, branch, generation)。取れなければ ``()``。"""
+
+    binding = getattr(frame, "comparison_binding", None)
+    identity = (
+        getattr(binding, "raw_pair_digest", None),
+        getattr(frame, "branch_id", None),
+        getattr(frame, "generation", None),
+    )
+    if (
+        type(identity[0]) is not str or not identity[0]
+        or type(identity[1]) is not str or not identity[1]
+        or type(identity[2]) is not int
+    ):
+        return ()
+    return (identity[0], identity[1], str(identity[2]))
 
 
 @dataclass(frozen=True)
 class UnsealedCoverageObservation:
-    """fallback を止めた被覆の印 1 つ（側・reason・関数）。"""
+    """runner の raw pair の比較が観測した被覆の不足 1 つ（側・reason・関数）。"""
 
     label: str
     reason_id: str
-    coverage_note: str
     function_identity: Any
 
     def __post_init__(self) -> None:
-        if (self.coverage_note, self.reason_id) not in COVERAGE_NOTE_REASONS:
-            raise ValueError("unsealed coverage observation is not a registered coverage note")
+        if self.reason_id not in RETURN_COVERAGE_REASON_IDS:
+            raise ValueError("unsealed coverage observation reason is not domain-owned")
         if type(self.label) is not str or not self.label:
             raise TypeError("unsealed coverage observation has no side label")
         object.__setattr__(self, "function_identity", canonical_value(self.function_identity))
 
 
 def unsealed_coverage_observations(
-    analysis1: Any, analysis2: Any, verdict_notes: tuple,
+    analysis1: Any, analysis2: Any, verdict: tuple,
 ) -> tuple[UnsealedCoverageObservation, ...]:
-    """runner の raw pair の比較が観測した被覆の不足のうち、seed の無い側のもの。
+    """runner の raw pair の比較の判定（``ObligationRuntimeSession.coverage_verdict`` の (側, reason id)）のうち、
+    seed の無い側の不足。
 
-    ``verdict_notes`` はその比較の判定（``PreparedDispatchFrame.coverage_verdict_notes``: (側, 被覆の印)）。
-    raw analysis の ``analysis_notes`` は読まない: analysis は比較をまたいで使い回され（再解析しなかった側）、
-    印は追記だけなので、前の比較の不足を今の比較の不足と取り違える。seed のある側の被覆は outcome partition の
-    段が cause を持つので含めない。
+    raw analysis の被覆の印（``analysis_notes``）は読まない: analysis は比較をまたいで使い回され（再解析しな
+    かった側）、印は追記だけなので、前の比較の不足を今の比較の不足と取り違える。seed のある側の被覆は outcome
+    partition の段が cause を持つので含めない。
     """
 
-    verdicts = set(tuple(item) for item in verdict_notes or ())
+    observed = set(tuple(item) for item in verdict or ())
     observations = []
     for label, analysis in (("function1", analysis1), ("function2", analysis2)):
         if getattr(analysis, "outcome_seed", None) is not None:
             continue
-        for note, reason_id in COVERAGE_NOTE_REASONS:
-            if (label, note) in verdicts:
+        for reason_id in RETURN_COVERAGE_REASON_IDS:
+            if (label, reason_id) in observed:
                 observations.append(UnsealedCoverageObservation(
-                    label, reason_id, note, tuple(analysis.outcome_function_identity()),
+                    label, reason_id, tuple(analysis.outcome_function_identity()),
                 ))
     return tuple(observations)
 
@@ -285,54 +296,47 @@ def unsealed_coverage_observations(
 class UnsealedCoverageTerminal:
     """runner の比較が被覆の欠けで inconclusive の terminal 無しに終わったことの記録（まだ cause ではない）。
 
-    その runner の結果の dispatch frame（比較）に束縛する。comparison receipt は要らない（SMT の意味の拒否で
-    pairwise が pair ledger を作る前に止まった比較にも receipt は無い）。終了処理は、最終の結果の frame と同じ
-    比較の記録だけを cause にする（``observe_final_unsealed_coverage``）。
+    2 つの比較を分けて持つ。
+
+    * ``observed_comparison``: 不足を観測した比較（runner の raw pair の比較）。cause の identity に入る。
+    * 束縛: runner の結果（最終の候補）の dispatch frame。runner の最後の結果が抽象化・promotion の比較でも、
+      記録はその結果に付き、その結果が最終のときだけ使える。
+
+    comparison receipt は要らない（SMT の意味の拒否で pairwise が pair ledger を作る前に止まった比較にも receipt
+    は無い）。終了処理は、最終の結果の frame と同じ比較に束縛された記録だけを cause にする
+    （``observe_final_unsealed_coverage``）。
     """
 
     observations: tuple[UnsealedCoverageObservation, ...]
-    comparison_identity: tuple[str, ...]
+    observed_comparison: tuple[str, ...]
+    bound_comparison: tuple[str, ...]
     _frame: Any = field(default=None, repr=False, compare=False)
 
-    @staticmethod
-    def _comparison_identity(frame: Any) -> tuple:
-        binding = getattr(frame, "comparison_binding", None)
-        identity = (
-            getattr(binding, "raw_pair_digest", None),
-            getattr(frame, "branch_id", None),
-            getattr(frame, "generation", None),
-        )
-        if (
-            type(identity[0]) is not str or not identity[0]
-            or type(identity[1]) is not str or not identity[1]
-            or type(identity[2]) is not int
-        ):
-            return ()
-        return (identity[0], identity[1], str(identity[2]))
-
     @classmethod
-    def issue(cls, frame: Any, observations: tuple) -> "UnsealedCoverageTerminal":
+    def issue(cls, frame: Any, observed_comparison: tuple, observations: tuple) -> "UnsealedCoverageTerminal":
         observations = tuple(observations)
         if not observations or any(type(item) is not UnsealedCoverageObservation for item in observations):
             raise ValueError("unsealed coverage terminal needs exact observations")
-        identity = cls._comparison_identity(frame)
-        if not identity:
+        observed = tuple(observed_comparison or ())
+        if len(observed) != 3 or any(type(item) is not str or not item for item in observed):
+            raise ValueError("unsealed coverage terminal needs the observing comparison")
+        bound = comparison_identity_of(frame)
+        if not bound:
             raise ValueError("unsealed coverage terminal is not bound to a comparison")
-        return cls(observations, identity, frame)
+        return cls(observations, observed, bound, frame)
 
     def binds(self, frame: Any) -> bool:
-        """``frame`` がこの記録を作った比較そのもの（同じ frame で、raw pair・branch・generation も同じ）か。"""
+        """``frame`` がこの記録を付けた結果の比較そのもの（同じ frame で、identity も同じ）か。"""
 
-        return frame is not None and frame is self._frame and self._comparison_identity(frame) == self.comparison_identity
+        return frame is not None and frame is self._frame and comparison_identity_of(frame) == self.bound_comparison
 
     def signals(self) -> tuple[ReturnCoverageBlockerSignal, ...]:
-        comparison = self.comparison_identity
         return tuple(
             ReturnCoverageBlockerSignal(
                 declared_reason_id=item.reason_id,
                 function_identity=item.function_identity,
-                coverage_check=item.coverage_note,
-                comparison_identity=comparison,
+                coverage_check="return_coverage_gate_verdict",
+                comparison_identity=self.observed_comparison,
                 evidence_refs=(f"coverage_label:{item.label}", "monolithic_fallback_skipped"),
             )
             for item in self.observations
@@ -386,12 +390,12 @@ __all__ = (
     "RETURN_COVERAGE_REASON_REGISTRY",
     "RETURN_COVERAGE_RECOVERY_REGISTRY",
     "RETURN_COVERAGE_SITE_ID",
-    "COVERAGE_NOTE_REASONS",
     "ReturnCoverageBlockerSignal",
     "ReturnCoveragePilotEncoder",
     "UnsealedCoverageObservation",
     "UnsealedCoverageTerminal",
     "adopt_final_unsealed_coverage",
+    "comparison_identity_of",
     "observe_final_unsealed_coverage",
     "unsealed_coverage_observations",
 )

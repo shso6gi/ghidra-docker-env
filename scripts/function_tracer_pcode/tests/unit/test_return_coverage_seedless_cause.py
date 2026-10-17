@@ -4,13 +4,15 @@
 責務は 3 つに分かれ、それぞれをここで固定する。
 
 * 判定: return-coverage gate（この file の対象外）が raw analysis に被覆の印を残す。
-* 記録: runner が monolithic fallback を止めたとき、seed の無い側の印を ``UnsealedCoverageObservation`` にし、
-  runner の結果の比較（dispatch frame）に束縛した ``UnsealedCoverageTerminal`` を結果に付ける（cause にしない）。
+* 記録: pairwise の比較は自分の gate の判定を自分の obligation runtime に書く（analysis に追記される印ではない）。
+  runner は monolithic fallback を止めたとき、自分の runtime の判定（自分の raw pair の比較だけが書く）から seed の
+  無い側の不足を取り、不足を観測した比較の identity と、runner の結果の比較（dispatch frame）への束縛を分けて持つ
+  ``UnsealedCoverageTerminal`` を結果に付ける（cause にしない）。
 * 採用: authority の終了処理が、最終の結果の記録だけを、最終の比較の frame と照合して cause にする
   （``observe_final_unsealed_coverage``）。
 
 production（本物の checker）で、型の再試行の段が被覆を回復したら EQ を採用し、回復しなければ UNKNOWN を保つ
-（review: P0 の cause が P1 の EQ を塞いだ反例）。cause の identity は比較（raw pair・comparison receipt）を含み、
+（review: P0 の cause が P1 の EQ を塞いだ反例）。cause の identity は不足を観測した比較（raw pair・branch・generation）を含み、
 別の比較の同じ関数の不足は別の cause。
 """
 
@@ -153,9 +155,9 @@ def _analysis(*, seeded: bool, notes=(), identity=_IDENTITY) -> Any:
 
 def test_observations_are_the_comparisons_own_verdicts_on_seedless_sides():
     verdicts = (
-        ("function1", "return_case_coverage_gap"),
-        ("function1", "return_case_coverage_inconclusive"),
-        ("function2", "return_case_coverage_gap"),
+        ("function1", RETURN_COVERAGE_GAP_REASON_ID),
+        ("function1", RETURN_COVERAGE_INCONCLUSIVE_REASON_ID),
+        ("function2", RETURN_COVERAGE_GAP_REASON_ID),
     )
     observed = unsealed_coverage_observations(
         _analysis(seeded=False), _analysis(seeded=False, identity=("right",)), verdicts,
@@ -169,7 +171,7 @@ def test_observations_are_the_comparisons_own_verdicts_on_seedless_sides():
 
 def test_a_seeded_side_is_not_observed():
     assert unsealed_coverage_observations(
-        _analysis(seeded=True), _analysis(seeded=True), (("function1", "return_case_coverage_gap"),),
+        _analysis(seeded=True), _analysis(seeded=True), (("function1", RETURN_COVERAGE_GAP_REASON_ID),),
     ) == ()
 
 
@@ -180,15 +182,8 @@ def test_a_note_left_on_a_reused_analysis_by_an_earlier_comparison_is_not_this_c
     reused = _analysis(seeded=False, notes=("return_case_coverage_gap", "return_case_coverage_inconclusive"))
     assert unsealed_coverage_observations(reused, _analysis(seeded=False), ()) == ()
     assert [item.label for item in unsealed_coverage_observations(
-        reused, _analysis(seeded=False), (("function2", "return_case_coverage_gap"),),
+        reused, _analysis(seeded=False), (("function2", RETURN_COVERAGE_GAP_REASON_ID),),
     )] == ["function2"]
-
-
-def test_the_coverage_notes_are_the_registered_comparison_annotations():
-    from scripts.function_tracer_pcode.proof.obligations.snapshot import COMPARISON_ANNOTATION_NOTES
-
-    assert {note for note, _reason in domain.COVERAGE_NOTE_REASONS} == set(COMPARISON_ANNOTATION_NOTES)
-    assert tuple(reason for _note, reason in domain.COVERAGE_NOTE_REASONS) == RETURN_COVERAGE_REASON_IDS
 
 
 # ---------------------------------------------------------------------------
@@ -203,12 +198,15 @@ def _frame(raw_pair: Any = "raw-pair-a", branch: Any = "S_PAIRWISE", generation:
 
 
 def _observation(label: str = "function1") -> UnsealedCoverageObservation:
-    return UnsealedCoverageObservation(label, RETURN_COVERAGE_GAP_REASON_ID, "return_case_coverage_gap", _IDENTITY)
+    return UnsealedCoverageObservation(label, RETURN_COVERAGE_GAP_REASON_ID, _IDENTITY)
+
+
+_OBSERVED = ("raw-pair-p0", "S_PAIRWISE", "1")
 
 
 def test_a_terminal_binds_only_the_comparison_it_was_issued_for():
     frame = _frame()
-    terminal = UnsealedCoverageTerminal.issue(frame, (_observation(),))
+    terminal = UnsealedCoverageTerminal.issue(frame, _OBSERVED, (_observation(),))
 
     assert terminal.binds(frame)
     assert not terminal.binds(None)
@@ -223,19 +221,29 @@ def test_a_terminal_binds_only_the_comparison_it_was_issued_for():
 )
 def test_a_terminal_needs_a_comparison_identity(frame):
     with pytest.raises(ValueError):
-        UnsealedCoverageTerminal.issue(frame, (_observation(),))
+        UnsealedCoverageTerminal.issue(frame, _OBSERVED, (_observation(),))
 
 
 def test_a_terminal_needs_observations():
     with pytest.raises(ValueError):
-        UnsealedCoverageTerminal.issue(_frame(), ())
+        UnsealedCoverageTerminal.issue(_frame(), _OBSERVED, ())
 
 
-def test_the_signals_are_bound_to_the_terminal_comparison():
-    (signal,) = UnsealedCoverageTerminal.issue(_frame(), (_observation(),)).signals()
-    assert signal.comparison_identity == ("raw-pair-a", "S_PAIRWISE", "1")
+def test_the_signals_name_the_comparison_that_observed_the_deficiency():
+    """cause の identity は不足を観測した比較。記録を付けた結果の比較（束縛）とは別に持つ。"""
+
+    terminal = UnsealedCoverageTerminal.issue(_frame(), _OBSERVED, (_observation(),))
+    (signal,) = terminal.signals()
+    assert signal.comparison_identity == _OBSERVED
+    assert terminal.bound_comparison == ("raw-pair-a", "S_PAIRWISE", "1")
     assert signal.declared_reason_id == RETURN_COVERAGE_GAP_REASON_ID
     assert signal.evidence_refs == ("coverage_label:function1", "monolithic_fallback_skipped")
+
+
+def test_a_terminal_needs_the_observing_comparison():
+    for observed in ((), ("raw-pair-p0", "S_PAIRWISE"), ("raw-pair-p0", "", "1")):
+        with pytest.raises(ValueError):
+            UnsealedCoverageTerminal.issue(_frame(), observed, (_observation(),))
 
 
 @pytest.fixture
@@ -255,14 +263,14 @@ def emitted(monkeypatch):
 
 def test_adoption_emits_the_final_comparisons_record(emitted):
     frame = _frame()
-    terminal = UnsealedCoverageTerminal.issue(frame, (_observation("function1"), _observation("function2")))
+    terminal = UnsealedCoverageTerminal.issue(frame, _OBSERVED, (_observation("function1"), _observation("function2")))
 
     assert observe_final_unsealed_coverage(terminal, frame) == 2
-    assert [item.comparison_identity for item in emitted] == [("raw-pair-a", "S_PAIRWISE", "1")] * 2
+    assert [item.comparison_identity for item in emitted] == [_OBSERVED] * 2
 
 
 def test_adoption_refuses_a_record_of_another_comparison(emitted):
-    terminal = UnsealedCoverageTerminal.issue(_frame(), (_observation(),))
+    terminal = UnsealedCoverageTerminal.issue(_frame(), _OBSERVED, (_observation(),))
 
     with pytest.raises(ValueError):
         observe_final_unsealed_coverage(terminal, _frame())
@@ -274,7 +282,7 @@ def test_adoption_refuses_a_record_of_another_comparison(emitted):
 def test_the_runner_attaches_the_record_to_its_result_and_emits_nothing(emitted):
     result = SimpleNamespace(_prepared_dispatch_frame=_frame())
 
-    stage_runner._attach_unsealed_coverage_terminal(result, (_observation(),))
+    stage_runner._attach_unsealed_coverage_terminal(result, _OBSERVED, (_observation(),))
 
     assert type(result._unsealed_coverage_terminal) is UnsealedCoverageTerminal
     assert result._unsealed_coverage_terminal.binds(result._prepared_dispatch_frame)
@@ -283,13 +291,13 @@ def test_the_runner_attaches_the_record_to_its_result_and_emits_nothing(emitted)
 
 def test_the_runner_records_nothing_without_a_comparison_frame():
     result = SimpleNamespace(_prepared_dispatch_frame=None)
-    stage_runner._attach_unsealed_coverage_terminal(result, (_observation(),))
+    stage_runner._attach_unsealed_coverage_terminal(result, _OBSERVED, (_observation(),))
     assert not hasattr(result, "_unsealed_coverage_terminal")
 
 
 def test_the_runner_records_nothing_without_observations():
     result = SimpleNamespace(_prepared_dispatch_frame=_frame())
-    stage_runner._attach_unsealed_coverage_terminal(result, ())
+    stage_runner._attach_unsealed_coverage_terminal(result, _OBSERVED, ())
     assert not hasattr(result, "_unsealed_coverage_terminal")
 
 
@@ -415,7 +423,7 @@ def test_only_an_undecided_final_result_adopts_its_record(emitted, outcome, adop
 
     frame = _frame()
     result = SimpleNamespace(_prepared_dispatch_frame=frame)
-    stage_runner._attach_unsealed_coverage_terminal(result, (_observation(),))
+    stage_runner._attach_unsealed_coverage_terminal(result, _OBSERVED, (_observation(),))
 
     assert adopt_final_unsealed_coverage(result, Outcome(outcome)) == adopted
     assert len(emitted) == adopted
@@ -436,7 +444,7 @@ def test_a_record_moved_onto_another_final_result_is_refused(emitted):
     from scripts.function_tracer_pcode.authority.domains.return_coverage import adopt_final_unsealed_coverage
 
     earlier = SimpleNamespace(_prepared_dispatch_frame=_frame())
-    stage_runner._attach_unsealed_coverage_terminal(earlier, (_observation(),))
+    stage_runner._attach_unsealed_coverage_terminal(earlier, _OBSERVED, (_observation(),))
     final = SimpleNamespace(
         _prepared_dispatch_frame=_frame(raw_pair="raw-pair-p1"),
         _unsealed_coverage_terminal=earlier._unsealed_coverage_terminal,
@@ -468,3 +476,152 @@ def test_a_one_sided_retry_adopts_the_coverage_of_its_own_comparison(
 
     assert result["final_outcome"] == outcome, (result.get("error_message"), result.get("failure_message"), _active(result))
     assert _active(result) == active
+
+
+# ---------------------------------------------------------------------------
+# 比較の判定の記録（runtime）と、runner がそれだけを読むこと
+# ---------------------------------------------------------------------------
+
+
+def test_a_runtime_holds_its_comparisons_last_coverage_verdict():
+    from scripts.function_tracer_pcode.proof.obligations.runtime import ObligationRuntimeSession
+
+    runtime = ObligationRuntimeSession.create(_analysis(seeded=False), _analysis(seeded=False, identity=("r",)))
+    assert runtime.coverage_verdict is None
+    runtime.record_coverage_verdict(_OBSERVED, [["function1", RETURN_COVERAGE_GAP_REASON_ID]])
+    assert runtime.coverage_verdict == (_OBSERVED, (("function1", RETURN_COVERAGE_GAP_REASON_ID),))
+    runtime.record_coverage_verdict(("raw-pair-p0", "S_PAIRWISE", "2"), ())  # 後の比較が「不足なし」と判定した
+    assert runtime.coverage_verdict == (("raw-pair-p0", "S_PAIRWISE", "2"), ())
+
+
+def test_the_runner_reads_only_its_runtimes_verdict():
+    """review r5 M1: runner の最後の結果が抽象化・promotion の比較（別の runtime）でも、不足は runner の runtime
+    （runner の raw pair の比較）の判定から取る。結果の frame も analysis の被覆の印も読まない。"""
+
+    runtime = SimpleNamespace(coverage_verdict=(_OBSERVED, (("function2", RETURN_COVERAGE_GAP_REASON_ID),)))
+    left = _analysis(seeded=False, notes=("return_case_coverage_inconclusive",))
+    right = _analysis(seeded=False, identity=("right",))
+
+    ((observed, observations),) = stage_runner._skipped_fallback_coverage(runtime, left, right)
+
+    assert observed == _OBSERVED
+    assert [(item.label, item.reason_id, item.function_identity) for item in observations] == [
+        ("function2", RETURN_COVERAGE_GAP_REASON_ID, ("right",)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    (
+        SimpleNamespace(coverage_verdict=None),  # この runner の比較では gate が判定していない
+        SimpleNamespace(coverage_verdict=(_OBSERVED, ())),  # 判定したが不足なし
+        SimpleNamespace(coverage_verdict=(_OBSERVED, (("function1", RETURN_COVERAGE_GAP_REASON_ID),))),  # seed あり
+    ),
+    ids=("not-judged", "judged-covered", "seeded-side"),
+)
+def test_the_runner_records_nothing_without_a_seedless_deficiency_of_its_own_comparison(runtime):
+    seeded = runtime.coverage_verdict is not None and runtime.coverage_verdict[1]
+    left = _analysis(seeded=bool(seeded), notes=("return_case_coverage_gap",))
+    assert stage_runner._skipped_fallback_coverage(runtime, left, _analysis(seeded=False)) == []
+
+
+class _Gate:
+    """``_record_comparison_coverage_verdict`` が strategy から読む面だけ。"""
+
+    def __init__(self, discharged=False):
+        self.discharged = discharged
+
+    def _make_blocking_unsafety_unknown_reason(self, reason, *_args, **_kwargs):
+        return reason
+
+    def _return_coverage_proof_is_complete(self, _record, *_args):
+        return self.discharged
+
+
+def _comparison_frame():
+    frame = _frame(raw_pair="raw-pair-p0")
+    frame.obligation_runtime = SimpleNamespace(coverage_verdict=None)
+    frame.obligation_runtime.record_coverage_verdict = (
+        lambda identity, verdict: setattr(frame.obligation_runtime, "coverage_verdict", (identity, verdict))
+    )
+    return frame
+
+
+def test_a_comparison_records_its_gate_verdict_on_its_runtime():
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services import orchestration
+
+    frame = _comparison_frame()
+    orchestration._record_comparison_coverage_verdict(
+        _Gate(), frame,
+        ["function1:return_coverage_gap", "function2:return_coverage_inconclusive", "function1:return_case_coverage_gap"],
+        None, None,
+    )
+    # gate の判定（``{側}:return_coverage_*``）だけ。analysis の印由来の綴り（return_case_coverage_*）は判定ではない。
+    assert frame.obligation_runtime.coverage_verdict == (
+        ("raw-pair-p0", "S_PAIRWISE", "1"),
+        (("function1", RETURN_COVERAGE_GAP_REASON_ID), ("function2", RETURN_COVERAGE_INCONCLUSIVE_REASON_ID)),
+    )
+
+
+def test_an_inconclusive_verdict_discharged_by_a_completed_proof_is_not_recorded():
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services import orchestration
+
+    frame = _comparison_frame()
+    orchestration._record_comparison_coverage_verdict(
+        _Gate(discharged=True), frame, ["function1:return_coverage_inconclusive", "function2:return_coverage_gap"],
+        None, None,
+    )
+    assert frame.obligation_runtime.coverage_verdict[1] == (("function2", RETURN_COVERAGE_GAP_REASON_ID),)
+
+
+def test_a_comparison_without_a_runtime_or_identity_records_nothing():
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_services import orchestration
+
+    no_identity = _comparison_frame()
+    no_identity.branch_id = ""
+    orchestration._record_comparison_coverage_verdict(_Gate(), no_identity, ["function1:return_coverage_gap"], None, None)
+    assert no_identity.obligation_runtime.coverage_verdict is None
+    orchestration._record_comparison_coverage_verdict(_Gate(), None, ["function1:return_coverage_gap"], None, None)
+
+
+def test_the_raw_comparisons_deficiency_survives_a_last_result_from_another_runtime(monkeypatch):
+    """review r5 M1（production）: runner の最後の結果の比較が別の runtime にあっても（抽象化・recurrence promotion の
+    比較と同じ）、fallback を止めた raw pair の比較の不足が cause になり、ERROR にならない。
+
+    raw pair の本物の比較の後で、その結果の比較を新しい runtime へ移す（promotion の ``self.check`` が後継の比較を
+    別の runtime で行うのと同じ形）。不足は runner の runtime の判定から取るので失われない。
+    """
+
+    from scripts.function_tracer_pcode.checker.recurrence_stage import RecurrenceStageMixin
+    from scripts.function_tracer_pcode.proof.call_effect import preflight
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+    from scripts.function_tracer_pcode.tests.unit._analyzer_pipeline_harness import analyze_through_pipeline
+    from scripts.function_tracer_pcode.tests.unit._production_check_harness import run_production_check
+
+    original_check = PairwiseStrategy.check
+    original_skip = RecurrenceStageMixin._should_skip_monolithic_fallback
+    frames, moved = [], []
+
+    def check_and_remember_the_comparison(self, analysis1, analysis2, save_formula=False):
+        stack = preflight._DISPATCH_STACK.get()
+        if stack:
+            frames.append(stack[-1])
+        return original_check(self, analysis1, analysis2, save_formula)
+
+    def skip_after_moving_the_last_comparison(self, analysis1, analysis2):
+        # 比較の仕事が終わった後で、最後の結果の比較を別の runtime（判定を持たない）に置く。
+        for frame in frames:
+            frame.obligation_runtime = SimpleNamespace(coverage_verdict=None)
+            moved.append(frame)
+        return original_skip(self, analysis1, analysis2)
+
+    monkeypatch.setattr(PairwiseStrategy, "check", check_and_remember_the_comparison)
+    monkeypatch.setattr(RecurrenceStageMixin, "_should_skip_monolithic_fallback", skip_after_moving_the_last_comparison)
+    result = run_production_check(
+        "pr-c-last-result-other-runtime", _template("l", "partial"), _template("r", "partial"),
+        analyze=analyze_through_pipeline,
+    )
+
+    assert moved, "the comparison frame was not reachable from the strategy"
+    assert result["final_outcome"] == "UNKNOWN", (result.get("failure_message"), _active(result))
+    assert _active(result) == [RETURN_COVERAGE_GAP_REASON_ID] * 2

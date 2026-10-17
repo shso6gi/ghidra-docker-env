@@ -219,7 +219,25 @@ def branch_comparison(
     )
 
 
-def _attach_unsealed_coverage_terminal(result: Any, observations: tuple) -> None:
+def _skipped_fallback_coverage(runtime: Any, analysis1: Any, analysis2: Any) -> List[Tuple[Tuple[str, ...], tuple]]:
+    """runner が monolithic fallback を止めたときの被覆の不足: ``[(観測した比較, observations)]`` か ``[]``。
+
+    不足は runner の runtime の判定（``ObligationRuntimeSession.coverage_verdict``）だけから取る。runner の raw pair
+    の比較だけがこの runtime に書き、抽象化・recurrence promotion の比較は自分の runtime に書くので、runner の
+    最後の結果がそれらの view の比較でも、不足を観測した raw pair の比較を失わず、view の比較と取り違えない。
+    結果の frame も raw analysis の被覆の印も読まない。
+    """
+
+    from scripts.function_tracer_pcode.authority.domains.return_coverage import unsealed_coverage_observations
+
+    verdict = getattr(runtime, "coverage_verdict", None)
+    if verdict is None:
+        return []
+    observations = unsealed_coverage_observations(analysis1, analysis2, verdict[1])
+    return [(verdict[0], observations)] if observations else []
+
+
+def _attach_unsealed_coverage_terminal(result: Any, observed_comparison: tuple, observations: tuple) -> None:
     """fallback を止めた被覆の不足を、この runner の結果の比較に束縛して記録する（cause にはしない）。
 
     cause にするかは、どの結果が最終かが決まった後に authority の終了処理が決める（最終の結果の比較の記録
@@ -232,7 +250,7 @@ def _attach_unsealed_coverage_terminal(result: Any, observations: tuple) -> None
     frame = getattr(result, "_prepared_dispatch_frame", None)
     if not observations or frame is None:
         return
-    result._unsealed_coverage_terminal = UnsealedCoverageTerminal.issue(frame, observations)
+    result._unsealed_coverage_terminal = UnsealedCoverageTerminal.issue(frame, observed_comparison, observations)
 
 
 def run_obligation_branch_plan(
@@ -260,8 +278,6 @@ def run_obligation_branch_plan(
     accumulated_pairwise_debug_stats: Dict[str, int] = {}
     by_id = {spec.stage_id.value: spec for spec in checker.stage_plan}
     skipped_fallback_observations: List[Any] = []
-    # この runner が自分の raw pair について行った最後の比較の被覆の判定（前の段の比較の印は含まない）。
-    raw_pair_coverage_verdicts: Dict[str, Any] = {"notes": ()}
 
     def eligible(branch_id: str):
         if branch_id == "S_LOOP_TEMPLATE_ABSTRACTION":
@@ -272,13 +288,7 @@ def run_obligation_branch_plan(
                     return True
                 # この runner の比較はここで終わる（monolithic は最後の branch。eligibility は判定がまだ無いとき
                 # だけ評価される）。被覆の不足は runner の結果に束縛して記録し、cause にするかは終了処理が決める。
-                from scripts.function_tracer_pcode.authority.domains.return_coverage import (
-                    unsealed_coverage_observations,
-                )
-
-                skipped_fallback_observations.extend(unsealed_coverage_observations(
-                    analysis1, analysis2, raw_pair_coverage_verdicts["notes"],
-                ))
+                skipped_fallback_observations[:] = _skipped_fallback_coverage(runtime, analysis1, analysis2)
                 return False
             return monolithic_fallback_is_eligible
         return None
@@ -721,14 +731,6 @@ def run_obligation_branch_plan(
                     active_production_pilot_session(), receipt, dispatch_frame,
                 )
         last_result = result
-        result_frame = getattr(result, "_prepared_dispatch_frame", None)
-        result_source = getattr(result_frame, "source", None)
-        if (
-            result_source is not None
-            and getattr(result_source, "analysis1", None) is analysis1
-            and getattr(result_source, "analysis2", None) is analysis2
-        ):
-            raw_pair_coverage_verdicts["notes"] = tuple(getattr(result_frame, "coverage_verdict_notes", ()) or ())
         attempt_outcome, cutover_actions, continue_fallback = (
             _cutover_branch_policy(result)
         )
@@ -762,8 +764,8 @@ def run_obligation_branch_plan(
     checker._last_obligation_branch_trace = InternalBranchTrace(
         controller.policy_version, tuple(records), terminal
     )
-    if last_result is not None:
-        _attach_unsealed_coverage_terminal(last_result, tuple(skipped_fallback_observations))
+    if last_result is not None and skipped_fallback_observations:
+        _attach_unsealed_coverage_terminal(last_result, *skipped_fallback_observations[0])
     if last_result is None:
         from scripts.function_tracer_pcode.smt import ParallelResult
         from scripts.function_tracer_pcode.checker.result import EquivalenceResult

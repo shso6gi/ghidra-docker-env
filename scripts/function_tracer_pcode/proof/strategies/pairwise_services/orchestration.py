@@ -289,6 +289,42 @@ def _extract_cases_under_authorization(strategy, analysis, input_correspondence,
     return strategy._extract_return_cases(analysis)
 
 
+def _record_comparison_coverage_verdict(self, dispatch_frame, sat_unsafety_reasons, analysis1, analysis2) -> None:
+    """この比較の return-coverage gate の判定を、この比較の obligation runtime に記録する（plan v4 PR-C）。
+
+    raw analysis への被覆の印（``record_comparison_annotation``）は前の比較の印も残る（analysis は比較をまたいで
+    使い回され、印は追記だけ）ので、「この比較が観測した不足」はここに持つ。完了した被覆の証明が解消した
+    inconclusive は不足に数えない。runner の raw pair の比較は runner の runtime に、抽象化・promotion の比較は
+    それぞれの runtime に書くので、runner は自分の raw pair の比較の判定だけを読む。
+    """
+
+    from scripts.function_tracer_pcode.authority.domains.return_coverage import (
+        RETURN_COVERAGE_INCONCLUSIVE_REASON_ID,
+        RETURN_COVERAGE_REASON_IDS,
+        comparison_identity_of,
+    )
+
+    runtime = getattr(dispatch_frame, "obligation_runtime", None)
+    identity = comparison_identity_of(dispatch_frame)
+    if runtime is None or not identity:
+        return
+    verdict = []
+    for label in ("function1", "function2"):
+        for reason_id in RETURN_COVERAGE_REASON_IDS:
+            if f"{label}:{reason_id}" not in sat_unsafety_reasons:
+                continue
+            if reason_id == RETURN_COVERAGE_INCONCLUSIVE_REASON_ID and self._return_coverage_proof_is_complete(
+                self._make_blocking_unsafety_unknown_reason(
+                    f"{label}:{reason_id}", analysis1, analysis2, stage="S_RETURN_COVERAGE_CHECK",
+                ),
+                analysis1,
+                analysis2,
+            ):
+                continue
+            verdict.append((label, reason_id))
+    runtime.record_coverage_verdict(identity, tuple(verdict))
+
+
 def _impl_check_refusing_unsupported_smt_semantics(
     self,
     analysis1: FunctionReturnAnalysis,
@@ -495,17 +531,7 @@ def _impl_check(
         record_comparison_annotation(analysis1, "return_case_coverage_inconclusive")
     if "function2:return_coverage_inconclusive" in sat_unsafety_reasons:
         record_comparison_annotation(analysis2, "return_case_coverage_inconclusive")
-    if dispatch_frame is not None:
-        # この比較自身の判定（raw analysis の印は前の比較の印も残るので、比較の観測は frame に持つ。plan v4 PR-C）。
-        dispatch_frame.coverage_verdict_notes = tuple(
-            (label, note)
-            for label in ("function1", "function2")
-            for reason, note in (
-                ("return_coverage_gap", "return_case_coverage_gap"),
-                ("return_coverage_inconclusive", "return_case_coverage_inconclusive"),
-            )
-            if f"{label}:{reason}" in sat_unsafety_reasons
-        )
+    _record_comparison_coverage_verdict(self, dispatch_frame, sat_unsafety_reasons, analysis1, analysis2)
     total_pairs = len(cases1) * len(cases2)
     active_runtime = getattr(self, "_obligation_runtime_session", None)
     successor_plan = (
