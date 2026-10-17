@@ -1,6 +1,6 @@
 {
  "header": {
-  "analysis_source_digest": "3277d206c84574c43d1de391ea8179b4deff8e916083808f6d9d1f4c4d9df26b",
+  "analysis_source_digest": "5f702f454556fdb844b238511ee4f65d4c5feb8cd1580f2c60a96a702f0d4a6e",
   "binary": {
    "binary_id": "B13",
    "eqbench_relative_path": "sine/mysin/Eq/source/newV-mips64-gcc-O0",
@@ -15,9 +15,9 @@
   "fixture_id": "mysin_doubleToRawLongBits_B5_B13",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-10-17T07:57:28+00:00",
+  "recorded_at_utc": "2026-10-17T10:08:10+00:00",
   "recorder_version": "2",
-  "recording_commit": "b1a75018e58c0028a86bda00c78cb8d5b8c42475",
+  "recording_commit": "de2bd2b6a3fac944d3227f03ad0aa795e894d6f8",
   "recording_dirty": false,
   "recording_mode": {
    "connector": "production",
