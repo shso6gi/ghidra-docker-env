@@ -372,10 +372,11 @@ def test_production_check_does_not_equate_the_vote_result_with_the_original():
     assert result["final_outcome"] == "NOT_EQ"
 
 
-def test_production_check_does_not_equate_two_mixed_sides_with_their_vote_result():
-    """plan §11.2 (c): 左右とも p211b の形。右は tail を ``s<`` で書いた同じ path の関数（混在なし）。
+def test_production_check_does_not_equate_a_mixed_side_with_a_signed_only_side():
+    """左は比較が混在する p211b、右は符号付きの比較だけ（tail を ``s<`` で書いた、同じ path の関数）。
 
-    撤去前は左が右と同じ式に書き換わり、誤った EQ になった（``value = -250`` で 3 と 2）。
+    右は左の多数決の結果と同じ式なので、撤去前は左だけが右と同じ式に書き換わり、誤った EQ になった
+    （``value = -250`` で左 3・右 2）。
     """
 
     assert _machine_value_at(_p211b("f"), -250) == 3
@@ -383,6 +384,41 @@ def test_production_check_does_not_equate_two_mixed_sides_with_their_vote_result
 
     result = _production("pr211-p211b-vs-signed", _p211b("f"), _signed_only("g"))
     assert result["final_outcome"] == "NOT_EQ"
+
+
+def _p211b_unsigned_spelling(name: str) -> FunctionReturnAnalysis:
+    """``_p211b`` と同じ関数を、path を主に符号なしの比較で書いた形（比較は混在する）。
+
+    1 本目の path は ``value s< -200 ∧ 0x7fffffff u< value ∧ value u< 0xffffff38``（後の 2 つは前の 1 つと
+    同じ集合）、残りは ``value u< 0x80000000``（0 以上）と ``0xffffff37 u< value``（-200〜-1）。符号なしの
+    score 5 が符号付きの 4 を上回るので、撤去前はこちらの ``value s< -200`` が ``u<`` に書き換わった
+    （この path の上では意味を保つ）。左の ``_p211b`` は符号付きが勝って tail が反転する（意味を変える）。
+    """
+
+    return _analysis(name, [
+        ReturnInfo(address="0x401010", value=_tail("INT_LESS"),
+                   conditions=[_cond("INT_SLESS", _value(), _k(-200)),
+                               _cond("INT_LESS", _k(0x7FFFFFFF), _value()),
+                               _cond("INT_LESS", _value(), _k(-200))], branch_index=1),
+        ReturnInfo(address="0x401020", value=_k(0),
+                   conditions=[_cond("INT_LESS", _value(), _k(0x80000000 - (1 << 32)))], branch_index=2),
+        ReturnInfo(address="0x401030", value=_k(0),
+                   conditions=[_cond("INT_LESS", _k(-201), _value())], branch_index=3),
+    ])
+
+
+def test_production_check_keeps_equivalent_mixed_sides_whose_votes_disagree():
+    """plan §11.2 (c): 左右とも比較が混在する、本当に等価な pair。多数決は左で符号付き、右で符号なしに倒れる。
+
+    同じ関数でも、どちらに倒れるかは比較の書き方の統計で決まる。撤去前は左だけが意味を変えて
+    （``value = -250`` で 3 → 2）、誤った NOT_EQ になった。
+    """
+
+    for witness in (-2**31, -250, -201, -200, -1, 0, 100, 101, 2**31 - 1):
+        assert _machine_value_at(_p211b("f"), witness) == _machine_value_at(_p211b_unsigned_spelling("g"), witness), witness
+
+    result = _production("pr211-mixed-both-votes-disagree", _p211b("f"), _p211b_unsigned_spelling("g"))
+    assert result["final_outcome"] == "EQUIVALENT"
 
 
 def test_production_check_keeps_identical_mixed_sides_equivalent():
