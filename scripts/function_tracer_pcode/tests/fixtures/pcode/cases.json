@@ -378,7 +378,7 @@
   "Exceeding it is a test-harness failure and never becomes a production",
   "UNKNOWN or TIMEOUT outcome.",
   "corpus_budget_seconds is the Issue #109 time acceptance criterion as",
-  "revised on 2026-09-17: 1200 s for ALL nine replays on a GitHub-hosted",
+  "revised on 2026-09-17: 1200 s for ALL replays (ten since plan v4 PR-C) on a GitHub-hosted",
   "runner.  It is the SUM of the measured replay times, never the wall clock",
   "of a parallel workflow -- running the corpus as a matrix shortens the",
   "workflow but changes nothing about the criterion.  The original 180 s was",

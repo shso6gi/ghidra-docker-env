@@ -2,7 +2,7 @@
 """記録済み corpus の replay（Issue #109）。**実行するだけの層**。
 
 1 件の検証は `tests/fixtures/pcode/replay_validation.validate_replay` が
-すべて持ち、この file はどれを走らせるかを決めて呼ぶだけ。PR gate の軽い 7
+すべて持ち、この file はどれを走らせるかを決めて呼ぶだけ。PR gate の軽い 8
 replay も、`recorded-full` workflow の 10 replay matrix も同じ関数を呼ぶので、
 fast 専用 / full 専用の soundness 実装は存在しない。
 
@@ -102,7 +102,7 @@ def test_the_replays_that_ran_are_reported_and_within_budget(pytestconfig):
     """走った replay の所要を報告し、通し実行なら corpus 契約も判定する。
 
     完全性と 1200 秒予算は corpus 全体に対する契約なので、10 replay をそろえて
-    走らせたときだけ適用する。PR gate（7 replay）や matrix の 1 shard で
+    走らせたときだけ適用する。PR gate（8 replay）や matrix の 1 shard で
     「合計が予算内だった」と言っても意味が無いし、部分集合の合計を AC の達成と
     読み替えてはいけない。matrix 実行の corpus 契約は aggregate job が
     **同じ** `validate_corpus` で判定する。

@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "5e13efd92aa1dc6963f75125abfe55dd3e8d77a9ba785bba77403559528364c3",
+  "manifest_digest": "b11b910b1b6f144e786e3e85c407cc15ca909390578d96594459a0239251ee89",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 34,
   "sites": [
@@ -971,10 +971,10 @@
         "return-coverage-seedless-gate-v1"
       ],
       "branch_or_attempt_contract_id": "return-coverage-seedless-blocker:invocation",
-      "column": 4,
+      "column": 12,
       "domain": "return_coverage",
       "emitter": "emit_return_coverage_signal",
-      "enclosing_function": "_observe_seedless_return_coverage_blocker",
+      "enclosing_function": "_observe_unsealed_seedless_return_coverage",
       "expected_cause_slots": [
         {
           "allowed_reason_ids": [
@@ -997,10 +997,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1048,
-      "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/return_coverage.py",
+      "line": 253,
+      "path": "scripts/function_tracer_pcode/proof/obligations/stage_runner.py",
       "producer_site_manifest_id": "return-coverage-seedless-blocker",
-      "source_sha256": "acdfd8e67edd869eb78934e8c1db8ee9049039abf4695829a1072e4ef71d4824"
+      "source_sha256": "d69e0a9ba103a9fa1baa6c2c8b528e50ae70fb942f8f640b4e6d0eff16baa3ea"
     },
     {
       "allowed_dispositions": [

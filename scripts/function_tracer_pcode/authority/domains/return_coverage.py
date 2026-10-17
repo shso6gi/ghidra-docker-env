@@ -8,16 +8,22 @@
 authority へ出る。seed の無い解析（``semantic_successor`` の view: 再帰の抽象化・conditional lane・
 recurrence promotion、pre-return counted loop の要約）では outcome partition の段が走らず、gate は
 条件の SMT による全域性の検査（``_check_return_case_coverage_gap``）で決める。その「覆わない（gap）」・
-「決められない（inconclusive）」は、この domain より前には authority の cause を持たなかった。被覆の印は
-monolithic fallback も止めるので、比較は cause も inconclusive の terminal も無いまま終わり、終了処理が
-ERROR にしていた。
+「決められない（inconclusive）」は、この domain より前には authority の cause を持たなかった。gate は判定を
+raw analysis の被覆の印（``return_case_coverage_*``）に残し、印は monolithic fallback を止めるので、比較は
+cause も inconclusive の terminal も無いまま終わり、終了処理が ERROR にしていた。
+
+producer は 1 つ: runner が runner の raw pair の被覆の印で monolithic fallback を止める判定
+（``proof/obligations/stage_runner._observe_unsealed_seedless_return_coverage``）。cause はその比較が被覆の欠けで
+終わったことを表す。view（抽象化・promotion）の被覆の判定は view に印が付くだけで cause にしない: cause は
+pair 全体の EQ を塞ぐので、view の判定で別の比較が示した EQ を塞がない。
 
 * reason は 2 つ: ``return_coverage_gap``（全域でない入力の領域がある）と ``return_coverage_inconclusive``
   （全域かどうか決められない: 条件を SMT へ訳せない、solver が答えない ...）。どちらも legacy の
   ``UnknownReasonId`` と同じ id で、``PILOT_TYPED_CAUSE_KINDS`` が以前から名前だけ宣言していた。
 * ``decision_effect`` は ``blocks_equivalence``。被覆の欠けは「全域で同じ値を返す」証明を塞ぐ。反例
   （NOT_EQ）の側は、被覆の欠けを SAT の安全性の理由として既に扱っている（``sat_safety``）。
-* identity scope は ``UNARY``（1 つの関数の被覆）。cause は関数の identity と reason で 1 つ。
+* identity scope は ``UNARY``（1 つの関数の被覆）。cause は関数の identity と reason で 1 つ（retry の段で
+  同じ関数をまた止めても 1 つ）。
 * 回復は被覆の証明で、ここでは requirement の枠だけを作る（seed を作り直して outcome partition に
   任せるのが本来の回復）。
 """
@@ -56,7 +62,9 @@ from scripts.function_tracer_pcode.authority.lifecycle.stream import (
 RETURN_COVERAGE_DOMAIN = "return_coverage"
 RETURN_COVERAGE_GAP_REASON_ID = "return_coverage_gap"
 RETURN_COVERAGE_INCONCLUSIVE_REASON_ID = "return_coverage_inconclusive"
-RETURN_COVERAGE_PROOF_KIND = "return_coverage_completion"
+#: 被覆の証明（legacy の ``UnknownRecoveryProofKind.RETURN_COVERAGE_COMPLETION`` とは別の名前: legacy の回復の
+#: 証明がこの requirement を満たしたことにならない）。
+RETURN_COVERAGE_PROOF_KIND = "seedless_return_coverage_proof"
 RETURN_COVERAGE_CONTRACT_ID = "return-coverage-recovery"
 RETURN_COVERAGE_TARGET_KIND = "function_return_coverage"
 RETURN_COVERAGE_PRODUCER_ID = "return-coverage-seedless-gate-v1"

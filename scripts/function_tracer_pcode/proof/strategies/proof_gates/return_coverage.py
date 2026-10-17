@@ -840,9 +840,6 @@ def _impl__collect_return_coverage_unsafety_reasons(
     analysis2: Optional[FunctionReturnAnalysis] = None,
 ) -> List[str]:
     reasons: List[str] = []
-    # outcome partition が決めなかった（SMT の全域性の検査で決めた）側の判定。seed の無い解析の
-    # gap / inconclusive は、ここで authority の cause にする（plan v4 PR-C）。
-    unpartitioned_verdicts: List[Tuple[str, Any, ReturnCoverageCheckResult]] = []
     outcome_covered_labels = self._outcome_partition_covered_labels(
         base_ctx,
         analysis1,
@@ -900,7 +897,6 @@ def _impl__collect_return_coverage_unsafety_reasons(
                 replace_fn,
                 label,
             )
-            unpartitioned_verdicts.append((label, analysis, coverage_result))
         if coverage_result.status == "gap":
             if coverage_result.detail:
                 self._debug_print(coverage_result.detail)
@@ -995,65 +991,7 @@ def _impl__collect_return_coverage_unsafety_reasons(
                 reasons.append(f"{label}:{blocker_reason.value}")
             if coverage_result.detail:
                 self._debug_print(coverage_result.detail)
-    for label, analysis, coverage_result in unpartitioned_verdicts:
-        _observe_seedless_return_coverage_blocker(
-            self, label, analysis, coverage_result, analysis1, analysis2,
-        )
     return reasons
-
-
-def _observe_seedless_return_coverage_blocker(
-    self,
-    label: str,
-    analysis: Optional[FunctionReturnAnalysis],
-    coverage_result: ReturnCoverageCheckResult,
-    analysis1: Optional[FunctionReturnAnalysis],
-    analysis2: Optional[FunctionReturnAnalysis],
-) -> None:
-    """seed の無い解析の被覆の gap / inconclusive を、``return_coverage`` domain の cause にする。
-
-    outcome seed のある解析の被覆は outcome partition の段が決め、決められなければその段が cause を出す。
-    seed の無い解析（``semantic_successor`` の view・pre-return counted loop の要約）は SMT の全域性の検査
-    だけで決まり、その欠けを示す authority の cause が他に無い（被覆の印は monolithic fallback も止める
-    ので、比較は cause も inconclusive の terminal も無いまま終わる）。完了の証明が inconclusive を
-    解消したとき（legacy の被覆の回復の証明）は出さない。判定は変えない（cause を出すだけ）。
-    """
-
-    from scripts.function_tracer_pcode.authority.domains.return_coverage import (
-        RETURN_COVERAGE_GAP_REASON_ID,
-        RETURN_COVERAGE_INCONCLUSIVE_REASON_ID,
-        ReturnCoverageBlockerSignal,
-    )
-    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
-        emit_return_coverage_signal,
-    )
-
-    if analysis is None or getattr(analysis, "outcome_seed", None) is not None:
-        return
-    if coverage_result.status == "gap":
-        reason_id = RETURN_COVERAGE_GAP_REASON_ID
-    elif coverage_result.status == "inconclusive":
-        reason_id = RETURN_COVERAGE_INCONCLUSIVE_REASON_ID
-        if analysis1 is not None and analysis2 is not None:
-            reason_record = self._make_blocking_unsafety_unknown_reason(
-                f"{label}:{UnknownReasonId.RETURN_COVERAGE_INCONCLUSIVE.value}",
-                analysis1,
-                analysis2,
-                stage="S_RETURN_COVERAGE_CHECK",
-            )
-            if self._return_coverage_proof_is_complete(reason_record, analysis1, analysis2):
-                return
-    else:
-        return
-    emit_return_coverage_signal(
-        ReturnCoverageBlockerSignal(
-            declared_reason_id=reason_id,
-            function_identity=tuple(analysis.outcome_function_identity()),
-            coverage_check=str(coverage_result.inconclusive_cause or coverage_result.status),
-            evidence_refs=(f"coverage_label:{label}",),
-        ),
-        producer_site_manifest_id="return-coverage-seedless-blocker",
-    )
 
 def _impl__record_completed_return_coverage_proof(
     self,

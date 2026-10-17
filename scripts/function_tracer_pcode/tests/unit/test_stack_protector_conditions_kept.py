@@ -338,7 +338,7 @@ _PARTIAL_SHAPES = (
     ), _GAP),
 )
 
-# (case id, (left, right) を作る関数, 解析の通し方, 期待する最終判定, 最終の reason に必ずある reason)
+# (case id, (left, right) を作る関数, 解析の通し方, 期待する最終判定, authority で active な cause に必ずある reason)
 _PRODUCTION_CASES = (
     # V0: 撤去前の除去の後の形（両側とも無条件）。対照。
     ("V0_unconditional", lambda: _canary_pair(kept=False, left_fail=False, right_fail=False, indirect=False),
@@ -385,11 +385,13 @@ def test_production_check_never_returns_not_equivalent_or_error_for_kept_conditi
     left, right = make_pair()
     result = run_production_check("pr-c-" + case_id, left, right, analyze=analyze)
     reasons = {reason.get("reason_id") for reason in result.get("unknown_reasons") or () if isinstance(reason, dict)}
+    active = {row.get("reason_id") for row in result.get("c_active_base") or () if isinstance(row, dict)}
 
     assert result["final_outcome"] == expected, (
         result.get("final_outcome"), result.get("error_message"), result.get("failure_message"), sorted(reasons),
     )
-    assert set(required_reasons) <= reasons, sorted(reasons)
+    # authority の active な cause（legacy の診断の同じ id ではなく）が判定を UNKNOWN にしている。
+    assert set(required_reasons) <= active, (sorted(active), sorted(reasons))
 
 
 def test_the_seeded_analyses_carry_an_outcome_seed_and_keep_the_canary_condition():
@@ -471,3 +473,37 @@ def test_pairwise_condition_with_indirect_is_an_unknown_strategy_result_not_an_e
 
     assert result.is_equivalent is None
     assert "expression_semantics_unsupported" in [reason.reason_id for reason in result.unknown_reasons]
+
+
+def test_a_derived_view_coverage_verdict_does_not_block_the_raw_pair_equivalence(monkeypatch):
+    """review r2 (R2-M1): 被覆の cause は pair 全体の EQ を塞ぐので、view の被覆の判定からは作らない。
+
+    比較の途中で、seed の無い view（抽象化・promotion の view と同じく ``semantic_successor`` で作る）が
+    被覆の gap の印を受けても（view の比較が gate を通ったときと同じ書き戻し）、印は view に付くだけで、
+    runner の raw pair が示す EQ（C5）は EQ のまま。
+    """
+
+    from scripts.function_tracer_pcode.proof.obligations.snapshot import record_comparison_annotation
+    from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
+    from scripts.function_tracer_pcode.tests.unit._production_check_harness import run_production_check
+
+    original = PairwiseStrategy.check
+    views: List[Any] = []
+
+    def check_after_a_view_verdict(self, analysis1, analysis2, save_formula=False):
+        if not views:
+            view = analysis1.semantic_successor(returns=[ReturnInfo("0x10", _p4(), [_positive()])])
+            assert view.outcome_seed is None
+            record_comparison_annotation(view, "return_case_coverage_gap")
+            views.append(view)
+        return original(self, analysis1, analysis2, save_formula)
+
+    monkeypatch.setattr(PairwiseStrategy, "check", check_after_a_view_verdict)
+    left, right = tuple(
+        _side(name, _full_cover(Expression.binary_op("INT_SLESS", _k(0), _p4()), _p4())) for name in ("l", "r")
+    )
+
+    result = run_production_check("pr-c-view-verdict", left, right, analyze=_PIPELINE)
+
+    assert views and "return_case_coverage_gap" in views[0].analysis_notes
+    assert result["final_outcome"] == "EQUIVALENT", result.get("c_active_base")

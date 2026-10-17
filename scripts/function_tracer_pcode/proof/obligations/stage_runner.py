@@ -219,6 +219,48 @@ def branch_comparison(
     )
 
 
+#: 被覆の印（``snapshot.COMPARISON_ANNOTATION_NOTES``）→ ``return_coverage`` domain の reason。
+_SEEDLESS_COVERAGE_NOTE_REASONS = (
+    ("return_case_coverage_gap", "return_coverage_gap"),
+    ("return_case_coverage_inconclusive", "return_coverage_inconclusive"),
+)
+
+
+def _observe_unsealed_seedless_return_coverage(analysis1: Any, analysis2: Any) -> None:
+    """runner の raw pair の被覆の印が monolithic fallback を止めたとき、seed の無い側の被覆の欠けを cause にする。
+
+    seed のある解析の被覆は outcome partition の段が決め、決められなければその段の cause が authority にある。
+    seed の無い raw pair（pre-return counted loop の要約・合成の解析）の被覆は SMT の全域性の検査だけで決まり、
+    その gap / inconclusive の印（``return_case_coverage_*``）が fallback を止めると、比較は cause も
+    inconclusive の terminal も無いまま終わる（終了処理が ERROR にしていた。plan v4 PR-C §7.3）。ここは
+    fallback を止める判定そのものなので、cause は「この pair の比較が被覆の欠けで終わった」ことだけを表す。
+    抽象化などの view の被覆の印は view に付き、runner の raw pair に無いので、ここへ来ない（view の判定で
+    別の比較の EQ を塞がない）。
+    """
+
+    from scripts.function_tracer_pcode.authority.domains.return_coverage import ReturnCoverageBlockerSignal
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        emit_return_coverage_signal,
+    )
+
+    for label, analysis in (("function1", analysis1), ("function2", analysis2)):
+        if getattr(analysis, "outcome_seed", None) is not None:
+            continue
+        notes = tuple(getattr(analysis, "analysis_notes", ()) or ())
+        for note, reason_id in _SEEDLESS_COVERAGE_NOTE_REASONS:
+            if note not in notes:
+                continue
+            emit_return_coverage_signal(
+                ReturnCoverageBlockerSignal(
+                    declared_reason_id=reason_id,
+                    function_identity=tuple(analysis.outcome_function_identity()),
+                    coverage_check=note,
+                    evidence_refs=(f"coverage_label:{label}", "monolithic_fallback_skipped"),
+                ),
+                producer_site_manifest_id="return-coverage-seedless-blocker",
+            )
+
+
 def run_obligation_branch_plan(
     checker: Any,
     analysis1: Any,
@@ -248,7 +290,13 @@ def run_obligation_branch_plan(
         if branch_id == "S_LOOP_TEMPLATE_ABSTRACTION":
             return lambda _outcomes: checker._should_try_loop_template_stage(last_result)
         if branch_id == "S_MONOLITHIC_FALLBACK":
-            return lambda _outcomes: not checker._should_skip_monolithic_fallback(analysis1, analysis2)
+            def monolithic_fallback_is_eligible(_outcomes):
+                if not checker._should_skip_monolithic_fallback(analysis1, analysis2):
+                    return True
+                # 比較はここで終わる（monolithic は最後の branch。eligibility は判定がまだ無いときだけ評価される）。
+                _observe_unsealed_seedless_return_coverage(analysis1, analysis2)
+                return False
+            return monolithic_fallback_is_eligible
         return None
 
     controller = BranchActivationController(tuple(
