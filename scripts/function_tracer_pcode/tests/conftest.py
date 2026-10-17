@@ -138,6 +138,21 @@ def _pair_condition_cache_scope(request):
         yield
 
 
+@pytest.fixture(autouse=True)
+def _pair_certificate_session():
+    """test 1 つを、pair の比較の実行 1 回と同じ寿命の、左右の同一視の証明書の session で包む（plan v4 PR-P）。
+
+    production では比較の実行（workflow・stage runner・strategy の branch）が session を開き、抜けると
+    全ての証明書が失効する。unit test は部品をその外で直接呼ぶので、test ごとに session を開いて捨てる。
+    session の外・寿命そのものを確かめる test は ``entered_certificate_session(None)`` で外へ出る。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import certificate_session
+
+    with certificate_session() as session:
+        yield session
+
+
 #: 壁時計を読む関数の名前（module の path ごとに 1 回だけ求める）
 _WALL_CLOCK_FUNCTIONS: Dict[str, frozenset] = {}
 _WALL_CLOCK_NAMES = frozenset({"perf_counter", "perf_counter_ns", "monotonic", "monotonic_ns"})

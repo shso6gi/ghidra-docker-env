@@ -22,6 +22,13 @@ from scripts.function_tracer_pcode.authority.domains.analysis_limitation import 
     ANALYSIS_LIMITATION_PRODUCER_SITE_SPECS,
 )
 from scripts.function_tracer_pcode.authority.domains.call_effect import CALL_EFFECT_REASON_SPECS
+from scripts.function_tracer_pcode.authority.domains.cross_side_identity import (
+    CROSS_SIDE_IDENTITY_DOMAIN,
+    CROSS_SIDE_IDENTITY_IDENTITY_SCOPE,
+    CROSS_SIDE_IDENTITY_PRODUCER_ID,
+    CROSS_SIDE_IDENTITY_REASON_ID,
+    CROSS_SIDE_IDENTITY_SITE_ID,
+)
 from scripts.function_tracer_pcode.authority.domains.call_effect_sites import (
     CALL_EFFECT_PROOF_BATCH_SITE,
     CALL_EFFECT_PRODUCER_SITE_SPECS,
@@ -54,6 +61,7 @@ EMITTERS = frozenset({
     "_emit_return_width_signal_once",
     "emit_operational_extraction_signal",
     "emit_comparison_closure_signal",
+    "emit_cross_side_identity_signal",
     "emit_identical_function_identity_signal",
 })
 
@@ -68,6 +76,7 @@ _DOMAIN_BY_EMITTER = {
     "_emit_return_width_signal_once": "return_width",
     "emit_operational_extraction_signal": "operational_extraction",
     "emit_comparison_closure_signal": "comparison_closure",
+    "emit_cross_side_identity_signal": CROSS_SIDE_IDENTITY_DOMAIN,
     "emit_identical_function_identity_signal": "identical_function_identity",
 }
 
@@ -163,6 +172,7 @@ _PRODUCER_IDS_BY_SITE = {
         "subordinate-parent-authority-producer-v2",
     ),
     "comparison-inconclusive-terminal": ("comparison-closure-producer-v1",),
+    CROSS_SIDE_IDENTITY_SITE_ID: (CROSS_SIDE_IDENTITY_PRODUCER_ID,),
     "checker-identical-function-identity": (
         "identical-function-identity-producer-v1",
     ),
@@ -207,6 +217,7 @@ _DISPOSITIONS_BY_SITE = {
         for spec in SAT_SAFETY_PRODUCER_SITE_SPECS
     },
     "comparison-inconclusive-terminal": ("ELIGIBLE",),
+    CROSS_SIDE_IDENTITY_SITE_ID: ("ELIGIBLE",),
     "checker-identical-function-identity": ("DECISIVE",),
 }
 
@@ -223,6 +234,7 @@ _CAUSE_REASON_IDS_BY_SITE = {
     "comparison-inconclusive-terminal": (
         "comparison_equivalence_closure_unproven",
     ),
+    CROSS_SIDE_IDENTITY_SITE_ID: (CROSS_SIDE_IDENTITY_REASON_ID,),
     "call-effect-producer-blocker": ("pure_call_semantics_unproven",),
     "call-effect-producer-prerequisite": (
         "abi_argument_relation_unproven",
@@ -320,6 +332,7 @@ _REASON_IDENTITY_SCOPES = {
     },
     **{reason_id: "RELATIONAL" for reason_id in SAT_SAFETY_REASON_RESOLUTION},
     "comparison_equivalence_closure_unproven": "RELATIONAL",
+    CROSS_SIDE_IDENTITY_REASON_ID: CROSS_SIDE_IDENTITY_IDENTITY_SCOPE.value,
     ANALYSIS_BUDGET_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,
     EXPRESSION_SIZE_BUDGET_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,
     COMPARISON_UNDECIDABLE_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,

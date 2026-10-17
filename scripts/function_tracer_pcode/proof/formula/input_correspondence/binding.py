@@ -60,7 +60,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 import hashlib
-from typing import Any, Callable, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Tuple
+from typing import Any, Callable, Iterable, Iterator, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core.evidence_authority import (
     AUTHORITY_SCOPE_KEY,
@@ -69,6 +69,12 @@ from scripts.function_tracer_pcode.core.evidence_authority import (
     FUNCTION_UNARY,
     evidence_authority_scope,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import (
+    certificate_attests,
+    current_certificate_session,
+    entered_certificate_session,
+    issued_certificate,
+)
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.model import (
     InputCorrespondenceSet,
 )
@@ -76,6 +82,24 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence.model impo
 
 #: 比較の外で作った comparison record の印（どの binding の digest とも一致しない）。
 OUTSIDE_COMPARISON = "outside_comparison"
+
+#: 比較の証拠が左右の値をどう同一視したか（``gate.CrossSideIdentification`` の値）。書いた
+#: producer が申告する。申告の無い record・知らない値の record は採用しない（plan v4 PR-P）。
+CROSS_SIDE_IDENTIFICATION_KEY = "cross_side_identification"
+#: owner を含まない証拠が持つ、検査の証明書（``certificates.CrossSideIdentityCertificate``）の id。
+CROSS_SIDE_IDENTITY_CERTIFICATE_KEY = "cross_side_identity_certificate"
+
+
+def comparison_evidence_subject(object_target_key: Any) -> Tuple[Any, ...]:
+    """対象 ``object_target_key`` の証拠の左右の同一視を検査した証明書が指す値。"""
+
+    return ("comparison_evidence", object_target_key)
+
+
+def evidence_identity_subject(record: Mapping[str, Any]) -> Tuple[Any, ...]:
+    """証拠 ``record`` の左右の同一視を検査した証明書が指す値（record の対象）。"""
+
+    return comparison_evidence_subject(record.get("object_target_key"))
 
 
 def _is_digest(value: Any) -> bool:
@@ -147,13 +171,18 @@ def comparison_scope(binding: Optional[ComparisonAuthorityBinding]) -> Iterator[
 
 
 class ComparisonBoundCallable:
-    """登録した比較の範囲の下で実行する callable（``run_in_current_comparison``）。"""
+    """登録した比較の範囲の下で実行する callable（``run_in_current_comparison``）。
 
-    __slots__ = ("_callback", "_scope")
+    比較の範囲と一緒に、登録したときの証明書の session（``certificates``）も運ぶ。後で実行する仕事が
+    発行・照合する証明書は、登録した実行の証明書と同じ owner に属する（閉じていれば失効している）。
+    """
+
+    __slots__ = ("_callback", "_scope", "_certificate_session")
 
     def __init__(self, callback: Callable[..., Any], scope: Optional[_ComparisonScope]) -> None:
         self._callback = callback
         self._scope = scope
+        self._certificate_session = current_certificate_session()
 
     @property
     def binding(self) -> Optional[ComparisonAuthorityBinding]:
@@ -162,7 +191,8 @@ class ComparisonBoundCallable:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         token = _CURRENT_COMPARISON.set(self._scope)
         try:
-            return self._callback(*args, **kwargs)
+            with entered_certificate_session(self._certificate_session):
+                return self._callback(*args, **kwargs)
         finally:
             _CURRENT_COMPARISON.reset(token)
 
@@ -222,26 +252,90 @@ def comparison_authority_digest() -> str:
     return OUTSIDE_COMPARISON if binding is None else binding.digest
 
 
+def _identification_value(identification: Any) -> Optional[str]:
+    if identification is None:
+        return None
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
+        CrossSideIdentification,
+    )
+
+    if type(identification) is not CrossSideIdentification:
+        raise TypeError("comparison evidence identification must be a CrossSideIdentification")
+    return identification.value
+
+
 def bind_evidence_to_comparison(
     record: MutableMapping[str, Any],
     binding: Optional[ComparisonAuthorityBinding] = None,
+    *,
+    identification: Any = None,
+    certificate: Any = None,
+    checked_values: Any = None,
 ) -> MutableMapping[str, Any]:
-    """比較の中で作った証拠 ``record`` を、その比較（既定は現在の比較）に束縛する。"""
+    """比較の中で作った証拠 ``record`` を、その比較（既定は現在の比較）に束縛する。
+
+    ``identification``（``gate.CrossSideIdentification``）は record が左右の値をどう同一視
+    したかの申告。``None`` は申告なしで、採用されない（関数単体の事実は ``mark_function_unary``）。
+    ``OWNER_FREE`` は、この比較で record の対象（``evidence_identity_subject``）を検査した証明書
+    （``certificate``）と、record を作った値（``checked_values`` = ``(left, right)``）を必須にし、
+    証明書がその値そのものを検査したか（``attests``）を照合する。
+    """
 
     if record.get(AUTHORITY_SCOPE_KEY) == FUNCTION_UNARY:
         raise ValueError("a function-unary record cannot be bound to a comparison")
     binding = binding if binding is not None else current_comparison()
+    value = _identification_value(identification)
+    certificate_id = _certificate_id_for(record, binding, value, certificate, checked_values)
     record[AUTHORITY_SCOPE_KEY] = COMPARISON
     record[COMPARISON_AUTHORITY_KEY] = OUTSIDE_COMPARISON if binding is None else binding.digest
+    record.pop(CROSS_SIDE_IDENTIFICATION_KEY, None)
+    record.pop(CROSS_SIDE_IDENTITY_CERTIFICATE_KEY, None)
+    if value is not None:
+        record[CROSS_SIDE_IDENTIFICATION_KEY] = value
+    if certificate_id is not None:
+        record[CROSS_SIDE_IDENTITY_CERTIFICATE_KEY] = certificate_id
     return record
 
 
-def store_comparison_evidence(analysis: Any, records: Iterable[Any]) -> None:
+def _certificate_id_for(
+    record: Mapping[str, Any],
+    binding: Optional[ComparisonAuthorityBinding],
+    value: Optional[str],
+    certificate: Any,
+    checked_values: Any,
+) -> Optional[str]:
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
+        CrossSideIdentification,
+    )
+
+    if value != CrossSideIdentification.OWNER_FREE.value:
+        if certificate is not None or checked_values is not None:
+            raise ValueError("only owner-free comparison evidence carries a cross-side identity certificate")
+        return None
+    if binding is None or not certificate_attests(
+        certificate, evidence_identity_subject(record), checked_values,
+        comparison_digest=binding.digest, relation_digest=binding.input_correspondence_digest,
+    ):
+        raise ValueError("owner-free comparison evidence requires the certificate of its own subject and values")
+    return certificate.certificate_id
+
+
+def store_comparison_evidence(
+    analysis: Any, records: Iterable[Any], *, identification: Any, certificate: Any = None,
+    checked_values: Any = None,
+) -> None:
     """比較の中で ``analysis`` の証拠列を ``records`` に置き換える（proof 層の唯一の書き込み口）。
 
     それまでの列に無かった record で authority scope を持たないものは、現在の比較に
     束縛する（producer が束縛を忘れても、比較の中で増えた証拠は必ず束縛される）。
     それまでの列にあった record（関数単体の事実や、別の比較の証拠）はそのまま残す。
+
+    ``identification`` は producer の申告（必須の引数。新しく束縛する record にだけ付く）。
+    左右の値を owner を含まない key で比べて作った証拠は ``OWNER_FREE`` で、その比較で
+    ``certify_owner_free_identity`` が record の対象に発行した ``certificate`` と、record を作った値
+    ``checked_values`` を必須にする（証明書がその値を検査していなければ束縛せずに ``ValueError``）。片側だけの証明や relation の premise の下の SMT は
+    ``CORRESPONDENCE``。別の場所で作った record を運ぶだけの呼び手は ``None``（申告なし ⇒ 採用
+    されない）を明示する。
     """
 
     existing = tuple(getattr(analysis, "completed_recovery_proof_evidence", ()) or ())
@@ -252,7 +346,9 @@ def store_comparison_evidence(analysis: Any, records: Iterable[Any]) -> None:
             and evidence_authority_scope(record) is None
             and record not in existing
         ):
-            bind_evidence_to_comparison(record)
+            bind_evidence_to_comparison(
+                record, identification=identification, certificate=certificate, checked_values=checked_values,
+            )
         stored.append(record)
     analysis.completed_recovery_proof_evidence = tuple(stored)
 
@@ -268,8 +364,67 @@ def evidence_authority_holds(record: Any) -> bool:
     if scope == FUNCTION_UNARY:
         return True
     if scope == COMPARISON:
-        return comparison_digest_is_current(record.get(COMPARISON_AUTHORITY_KEY))
+        if not comparison_digest_is_current(record.get(COMPARISON_AUTHORITY_KEY)):
+            return False
+        return _identification_is_justified(record)
     return False
+
+
+def _identification_is_justified(record: Mapping[str, Any]) -> bool:
+    """比較の証拠の左右の同一視が、現在の比較の relation の下で、読む側の値について成り立つか。
+
+    relation の premise の下の証拠（``CORRESPONDENCE``）はそのまま採用する。owner を含まない
+    証拠は、この比較・この relation の下で record の対象を検査した、発行済みの証明書を持ち、
+    **読む側が示した値**（``owner_free_evidence_values``）を証明書が検査したときだけ採用する。
+    値を示さない読み手（集約・stage の gate）は owner を含まない証拠を採用しない（fail-closed）。
+    同じ ``object_target_key`` でも、別の pair・別の branch の値で作った証拠は使えない。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
+        CrossSideIdentification,
+        positional_identity_gate,
+    )
+
+    value = record.get(CROSS_SIDE_IDENTIFICATION_KEY)
+    if value == CrossSideIdentification.CORRESPONDENCE.value:
+        return True
+    if value != CrossSideIdentification.OWNER_FREE.value:
+        return False
+    current = current_comparison()
+    certificate = issued_certificate(record.get(CROSS_SIDE_IDENTITY_CERTIFICATE_KEY))
+    return bool(
+        current is not None
+        and certificate is not None
+        and certificate.covers(
+            evidence_identity_subject(record),
+            comparison_digest=current.digest,
+            relation_digest=current.input_correspondence_digest,
+        )
+        and positional_identity_gate(current.relation).passed
+        and any(certificate.attests(left, right) for left, right in _OWNER_FREE_EVIDENCE_VALUES.get())
+    )
+
+
+_OWNER_FREE_EVIDENCE_VALUES: ContextVar[Tuple[Tuple[Any, Any], ...]] = ContextVar(
+    "owner_free_evidence_values", default=()
+)
+
+
+@contextmanager
+def owner_free_evidence_values(left_values: Sequence[Any], right_values: Sequence[Any]) -> Iterator[None]:
+    """この範囲で読む owner を含まない証拠は、``left_values`` / ``right_values`` について作ったものに限る。
+
+    証拠で pair を閉じる検証（Method-B・readonly identity）はその pair の case を、call effect の
+    証拠を読む側は両側の call の面を示す。入れ子にすると、どれかの値について作った証拠を採用する。
+    """
+
+    token = _OWNER_FREE_EVIDENCE_VALUES.set(
+        _OWNER_FREE_EVIDENCE_VALUES.get() + ((tuple(left_values), tuple(right_values)),)
+    )
+    try:
+        yield
+    finally:
+        _OWNER_FREE_EVIDENCE_VALUES.reset(token)
 
 
 def comparison_evidence(records: Iterable[Any]) -> Tuple[Mapping[str, Any], ...]:

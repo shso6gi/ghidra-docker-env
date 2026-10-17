@@ -295,7 +295,6 @@ class PairwiseStrategy(CheckStrategy):
     _unsupported_ops_include_memory_or_effect = staticmethod(_svc_opaque_unknowns._impl__unsupported_ops_include_memory_or_effect)
     check = _svc_orchestration._impl_check
     # pairwise_services.orchestration (continued)
-    _cases_are_contradictory = _svc_pair_cases._impl__cases_are_contradictory
     _clear_pairwise_extra_assertions = _svc_pair_cases._impl__clear_pairwise_extra_assertions
     _collect_case_unknown_expression_nodes = _svc_pair_cases._impl__collect_case_unknown_expression_nodes
     _collect_unknown_expression_nodes = _svc_pair_cases._impl__collect_unknown_expression_nodes

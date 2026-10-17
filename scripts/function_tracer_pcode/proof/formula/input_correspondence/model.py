@@ -141,13 +141,18 @@ class InputCorrespondenceSet:
 
     @property
     def digest(self) -> str:
+        # 両側の表も入れる: SMT 式の parameter 名と owner を含まない key（index・名前）は表の行で
+        # 解決されるので、表（名前を含む）が違えば組の (index, 幅) が同じでも別の比較。組の名前は
+        # 表の行の名前なので、表を入れれば組の名前も区別される（plan v4 PR-P）。
         return _digest(
             (
-                "input_correspondence_set_v1",
+                "input_correspondence_set_v2",
                 int(self.left_parameter_count),
                 int(self.right_parameter_count),
                 tuple(item.stable_key() for item in self.correspondences),
                 tuple(self.structural_defects),
+                tuple(_parameter_row_key(row) for row in self.left_parameters),
+                tuple(_parameter_row_key(row) for row in self.right_parameters),
             )
         )
 
@@ -291,6 +296,22 @@ class InputCorrespondenceSet:
             f"Input correspondence: status={self.status.value} digest={self.digest[:16]} "
             f"relations=[{relations}] insufficiency={list(self.insufficiency_evidence())}"
         )
+
+
+def _parameter_row_key(row: ParameterInfo) -> Tuple[Any, ...]:
+    extension = row.entailed_extension
+    return (
+        int(row.index),
+        str(row.original_name),
+        str(row.smt_name),
+        int(row.bit_width),
+        bool(row.is_signed),
+        None if extension is None else extension.stable_key(),
+        row.type_class,
+        row.abi_register_name,
+        row.abi_bank,
+        row.abi_bank_ordinal,
+    )
 
 
 def _bound_smt_name(side: Optional[SideParameter], by_index: Mapping[int, ParameterInfo]) -> Optional[str]:

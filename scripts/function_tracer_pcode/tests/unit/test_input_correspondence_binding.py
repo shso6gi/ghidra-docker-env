@@ -33,13 +33,15 @@ from scripts.function_tracer_pcode.core.evidence_authority import (
 from scripts.function_tracer_pcode.proof.cause_identity import ProofRequirementContract, ProofRequirementId
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     OUTSIDE_COMPARISON,
-    bind_evidence_to_comparison,
+    CrossSideIdentification,
+    bind_evidence_to_comparison as _bind_evidence_to_comparison,
     build_input_correspondence_set,
     comparison_evidence,
+    certify_owner_free_identity,
     comparison_scope,
     current_comparison,
     merge_new_evidence,
-    store_comparison_evidence,
+    store_comparison_evidence as _store_comparison_evidence,
 )
 from scripts.function_tracer_pcode.proof.obligations.model import FunctionProofOutcome
 from scripts.function_tracer_pcode.proof.obligations.runtime import (
@@ -48,7 +50,21 @@ from scripts.function_tracer_pcode.proof.obligations.runtime import (
 )
 from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
 from scripts.function_tracer_pcode.proof.obligations.stage_runner import branch_comparison
-from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_binding_of
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import (
+    comparison_binding_of,
+    open_cross_side_gate,
+)
+
+
+# この file は Issue #167 の束縛（raw pair と relation の組）だけを見る。証拠の左右の同一視の
+# 申告（plan v4 PR-P）は relation の premise の下の証拠として固定し、申告ごとの採用規則は
+# ``test_cross_side_identity_gate.py`` が見る。
+def bind_evidence_to_comparison(record, binding=None, *, identification=CrossSideIdentification.CORRESPONDENCE):
+    return _bind_evidence_to_comparison(record, binding, identification=identification)
+
+
+def store_comparison_evidence(analysis, records, *, identification=CrossSideIdentification.CORRESPONDENCE):
+    return _store_comparison_evidence(analysis, records, identification=identification)
 
 
 def _analysis(name, sizes, entry="0x1000"):
@@ -382,7 +398,7 @@ def test_run_strategy_branch_runs_the_strategy_in_the_frames_comparison():
     assert current_comparison() is None
 
 
-def test_a_producer_validated_closure_is_sealed_to_its_ledgers_comparison():
+def test_a_producer_validated_closure_is_sealed_to_its_ledgers_comparison(monkeypatch):
     from scripts.function_tracer_pcode.proof.obligations import pair_disposition
     from scripts.function_tracer_pcode.proof.obligations.pair_disposition import (
         PairLedgerBinding,
@@ -398,15 +414,29 @@ def test_a_producer_validated_closure_is_sealed_to_its_ledgers_comparison():
 
     ledger_a = ledger(cmp.a)
     digest = hashlib.sha256(b"x").hexdigest()
-    payload = (
-        ReadonlyIdentityClosureArtifact.PRODUCER_KIND, digest, digest, ledger_a.derived_view_id,
-        ledger_a.premise_digest, ledger_a.graph_generation, ledger_a.comparison_authority_digest,
-        "validated", ReadonlyIdentityClosureArtifact.schema_version,
-    )
-    artifact = ReadonlyIdentityClosureArtifact(
-        digest, digest, ledger_a.derived_view_id, ledger_a.premise_digest, ledger_a.graph_generation,
-        ledger_a.comparison_authority_digest, pair_disposition._closure_artifact_seal(payload),
-    )
+    with monkeypatch.context() as patched:
+        # 封印と比較の束縛だけを見る（左右の同一視の検査は test_cross_side_identity_gate が見る）。
+        open_cross_side_gate(patched)
+        with comparison_scope(cmp.a):
+            certificate = certify_owner_free_identity((), (), subject=("pair", "(0,0)")).certificate
+    assert certificate is not None
+
+    def sealed(comparison_digest, identity_certificate):
+        payload = (
+            ReadonlyIdentityClosureArtifact.PRODUCER_KIND, digest, digest, ledger_a.derived_view_id,
+            ledger_a.premise_digest, ledger_a.graph_generation, comparison_digest,
+            "validated", ReadonlyIdentityClosureArtifact.schema_version,
+            None if identity_certificate is None else identity_certificate.certificate_id,
+        )
+        return ReadonlyIdentityClosureArtifact(
+            digest, digest, ledger_a.derived_view_id, ledger_a.premise_digest, ledger_a.graph_generation,
+            comparison_digest, pair_disposition._closure_artifact_seal(payload),
+            identity_certificate=identity_certificate,
+        )
+
+    artifact = sealed(ledger_a.comparison_authority_digest, certificate)
+    # 封印が正しくても、証明書の無い artifact は検証を通らない。
+    assert sealed(ledger_a.comparison_authority_digest, None).validates(ledger_a) is False
     assert artifact.validates(ledger_a) is True
     for other in (cmp.b, cmp.c):
         assert artifact.validates(ledger(other)) is False

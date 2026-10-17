@@ -161,7 +161,6 @@ def _run_pairwise(monkeypatch, analysis1, analysis2, *, sat: bool, builder):
     )
     monkeypatch.setattr(strategy, "_extract_return_cases", lambda analysis: [case1] if analysis is analysis1 else [case2])
     monkeypatch.setattr(strategy, "_prune_unreachable_cases", lambda cases, *_a, **_k: cases)
-    monkeypatch.setattr(strategy, "_cases_are_contradictory", lambda *_a, **_k: False)
     monkeypatch.setattr(strategy, "_case_contains_unresolved_expression", lambda *_a, **_k: False)
     monkeypatch.setattr(
         "scripts.function_tracer_pcode.proof.strategies.pairwise.validate_counterexample_across_cases",

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable, Dict, FrozenSet, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, bounded_repr, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
 from scripts.function_tracer_pcode.core.live_values import (
@@ -66,6 +66,20 @@ class LoopVariableIdentityRef:
 
     def to_dict(self) -> Dict[str, Any]:
         return materialize(self)
+
+
+@dataclass(frozen=True)
+class LoopBinderScope:
+    """loop 変数の束縛の宣言: ``binders`` は ``scoped_fields`` を通って届く位置でだけ有効。
+
+    束縛を持つ ref（loop の case・状態遷移の summary）が ``loop_binder_scope()`` で返す。走査
+    （``core/semantic_freeze``）は宣言した field にだけ束縛の文脈を渡し、外側の文脈は内側でも有効
+    （lexical）。binder は consumer が置き換える placeholder そのもの（一致は ``Expression.equals``）。
+    宣言の field 自身も scope に入れる（宣言した binder は束縛された変数）。
+    """
+
+    binders: Tuple[Any, ...]
+    scoped_fields: FrozenSet[str]
 
 
 @dataclass(frozen=True)
@@ -858,6 +872,17 @@ class LoopCaseRef:
     term_expr: Any = None
     case_kind: str = "body_term"
     source: str = "recurrence_summary"
+    #: この case の中で束縛された loop 変数（帰納変数・accumulator の placeholder）。producer が宣言する。
+    #: identity・直列化には入れない（束縛の範囲を示すだけ）。
+    loop_binders: Tuple[Any, ...] = field(default=(), compare=False)
+
+    def loop_binder_scope(self) -> Optional[LoopBinderScope]:
+        if not self.loop_binders:
+            return None
+        return LoopBinderScope(
+            tuple(self.loop_binders),
+            frozenset({"path_conditions", "body_effect", "term_expr", "loop_binders"}),
+        )
 
     @runtime_ref_key(proven=True)
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
@@ -1995,6 +2020,17 @@ class StateTransitionLoopSummaryRef:
     transition_cases: Any = None
     side_effect_profile: LoopSideEffectProfileRef = LoopSideEffectProfileRef()
     source: str = "state_transition_loop_summary"
+    #: 状態と accumulator の placeholder（producer が宣言する）。guard・遷移・accumulator の更新の中でだけ
+    #: 束縛される（``accumulator_init`` は loop に入る前の値なので束縛の外）。identity・直列化には入れない。
+    loop_binders: Tuple[Any, ...] = field(default=(), compare=False)
+
+    def loop_binder_scope(self) -> Optional[LoopBinderScope]:
+        if not self.loop_binders:
+            return None
+        return LoopBinderScope(
+            tuple(self.loop_binders),
+            frozenset({"state_guard", "transition_expr", "transition_cases", "accumulator_delta", "loop_binders"}),
+        )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "result_size", max(1, scalar_int(self.result_size or 0)))
@@ -2144,6 +2180,19 @@ class CountedStateTransitionLoopSummaryRef:
     def __post_init__(self) -> None:
         object.__setattr__(self, "state_size", max(1, scalar_int(self.state_size or self.result_size or 0)))
         object.__setattr__(self, "result_size", max(1, scalar_int(self.result_size or self.state_size or 0)))
+
+    def loop_binder_scope(self) -> Optional[LoopBinderScope]:
+        """状態の placeholder は遷移の中でだけ束縛される（初期値・開始・上限・歩幅・guard は loop の外の値）。
+
+        consumer（``loop_lowering_semantics``・遷移の展開）が置き換えるのも遷移の中の placeholder だけ。
+        """
+
+        if self.state_placeholder is None:
+            return None
+        return LoopBinderScope(
+            (self.state_placeholder,),
+            frozenset({"transition_expr", "transition_cases", "state_placeholder"}),
+        )
 
     @runtime_ref_key
     def stable_key(self) -> Optional[Tuple[Any, ...]]:

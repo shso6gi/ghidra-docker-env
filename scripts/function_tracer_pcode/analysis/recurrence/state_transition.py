@@ -217,7 +217,9 @@ def _impl__recover_proved_multiplicative_state_transition_base(
         loop_base_expr,
         preferred=multiplier,
     ):
-        state_placeholder = Expression.variable("__loop_state", size=result_size)
+        state_placeholder = self._synthesized_loop_state_placeholder(
+            "proved_multiplicative_state_transition_base", result_size,
+        )
         transition_expr = Expression.binary_op(
             "INT_MULT",
             state_placeholder,
@@ -1006,6 +1008,11 @@ def _impl__try_summarize_state_transition_loop(
         side_effect_profile=side_effect_profile,
         state_size=state_size,
         result_size=result_size,
+        loop_binders=tuple(
+            placeholder
+            for placeholder in (model.state_placeholder, model.accumulator_placeholder)
+            if placeholder is not None
+        ),
     )
     transition_evidence_key = self._state_transition_loop_transition_evidence_key(summary_ref)
     if transition_evidence_key is None:

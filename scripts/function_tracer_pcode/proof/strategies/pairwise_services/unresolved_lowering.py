@@ -7,8 +7,11 @@ import json
 from scripts.function_tracer_pcode.core import Condition, ExpressionType, FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.render_smt import expression_contains_unsupported_smt_ops, expression_smt_bit_width
 from scripts.function_tracer_pcode.core.structural import provenance_key_view
+from scripts.function_tracer_pcode.proof.obligations.pair_disposition import pair_identity_subject
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     ReturnCase,
+    certify_owner_free_identity,
+    derive_owner_free_pair_assertions,
     UnknownRecoveryActionStatus,
     UnknownRecoveryProofKind,
     UnknownRecoveryProofObligation,
@@ -1161,6 +1164,17 @@ def _impl__try_build_unresolved_deferred_call_lowering(
     analysis2 = base_ctx.get("analysis2")
     if analysis1 is None or analysis2 is None:
         return None
+    # 左右の deferred call は index に正規化した target / 引数の key で対応づける。relation が
+    # 位置どおり・全幅の等式で、case と両側の call の面の読みが全幅でなければ lowering しない:
+    # unknown は未解決のまま、解析の不安全の gate を受ける（等式だけを外すと、gate を免除された
+    # unknown が左右で自由になる。plan v4 PR-P）。等式はこの証明書と一緒にだけ query へ入る。
+    checked = (
+        (case1, self._call_effect_comparison_surface(analysis1)),
+        (case2, self._call_effect_comparison_surface(analysis2)),
+    )
+    certification = certify_owner_free_identity(*checked, subject=pair_identity_subject(pair_id))
+    if not certification.passed:
+        return None
     value1 = getattr(case1, "value_expr", None)
     value2 = getattr(case2, "value_expr", None)
     if self._expression_has_unsupported_smt_op_excluding_unknowns(value1):
@@ -1281,8 +1295,12 @@ def _impl__try_build_unresolved_deferred_call_lowering(
         "left": tuple(lowered_left_unknown_keys),
         "right": tuple(lowered_right_unknown_keys),
     }
+    # 等式は上で検査した case と両側の call の面（``checked``）から組み立てた。derive は証明書がその値を
+    # 検査したことを確かめる。
     return _UnresolvedDeferredCallLowering(
-        assertions=tuple(assertions),
+        assertions=derive_owner_free_pair_assertions(
+            certification.certificate, *checked, lambda _left, _right: tuple(assertions),
+        ),
         evidence=tuple(evidence),
     )
 

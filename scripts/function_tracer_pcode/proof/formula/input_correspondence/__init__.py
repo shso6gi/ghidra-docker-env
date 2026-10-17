@@ -21,6 +21,8 @@ authority flow（v5 §4.3、一方向）::
 * ``relation.py``: 1 pair にどの relation（R0〜R5）を与えるか。raw だけを受け付ける。
 * ``model.py``: relation の値と、そこから導出される全ての値（consumer はここだけ読む）。
 * ``binding.py``: 比較に依存する authority の identity（raw pair と relation の組）と照合。
+* ``gate.py``: owner を含まない key（index・名前）で左右を同一視してよい条件（plan v4 PR-P）。
+* ``certificates.py``: 左右の同一視の検査の証明書（何を検査したか・持ち主・失効。plan v4 PR-P）。
 
 Names are resolved lazily on first access so importing a submodule never
 pulls in the whole layer (and cannot create import cycles).
@@ -83,9 +85,36 @@ _LAZY = {
             "current_relation",
             "evidence_authority_holds",
             "merge_new_evidence",
+            "owner_free_evidence_values",
             "relation_digest_is_current",
             "run_in_current_comparison",
             "store_comparison_evidence",
+        )
+    },
+    **{
+        name: (f"{_PACKAGE}.gate", name)
+        for name in (
+            "CROSS_SIDE_IDENTITY_REF",
+            "CrossSideIdentification",
+            "CrossSideIdentityGate",
+            "certify_owner_free_identity",
+            "checked_surface",
+            "closure_reads_are_full",
+            "final_equivalence_identity_gate",
+            "owner_free_identity_gate",
+            "positional_identity_gate",
+            "positional_pairing_gate",
+            "positional_parameter_identity_gate",
+        )
+    },
+    **{
+        name: (f"{_PACKAGE}.certificates", name)
+        for name in (
+            "CertificateSession",
+            "CrossSideIdentityCertificate",
+            "certificate_session",
+            "current_certificate_session",
+            "issued_certificate",
         )
     },
     "build_parameter_pairs": (f"{_PACKAGE}.pairing", "build_parameter_pairs"),

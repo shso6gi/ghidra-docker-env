@@ -2,6 +2,8 @@
 """Tests for solver-proven rewrite fallback in pairwise execution."""
 
 import hashlib
+
+import pytest
 import sys
 from pathlib import Path
 
@@ -37,6 +39,7 @@ from scripts.function_tracer_pcode.proof.obligations import (
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType, ReturnInfo
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 from scripts.function_tracer_pcode.tests.unit._publication import published
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import positional_comparison
 
 
 def _unsat_query_result(query: str, pair_id: str, stage: str) -> QueryResult:
@@ -62,8 +65,25 @@ def _unsat_query_result(query: str, pair_id: str, stage: str) -> QueryResult:
     return result
 
 
+_PARAMETER_INDEX = {"param_1": 0, "param_2": 1}
+
+
 def _param(name: str) -> Expression:
-    return Expression(ExpressionType.PARAMETER, name=name, size=8)
+    return Expression(ExpressionType.PARAMETER, name=name, value=_PARAMETER_INDEX[name], size=8)
+
+
+#: 両側の parameter 表（構造の一致は名前で左右を同一視するので、位置どおりの relation の下で
+#: だけ使える。plan v4 PR-P）。
+_PARAMETERS = tuple(
+    {"name": name, "index": index, "size": 8, "data_type": "long", "is_signed": True}
+    for name, index in _PARAMETER_INDEX.items()
+)
+
+
+@pytest.fixture(autouse=True)
+def _positional_comparison():
+    with positional_comparison(_PARAMETERS):
+        yield
 
 
 def _const(value: int) -> Expression:

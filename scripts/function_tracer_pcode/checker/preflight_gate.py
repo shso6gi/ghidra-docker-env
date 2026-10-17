@@ -281,6 +281,9 @@ class PreflightGateMixin:
         if receipt_valid and getattr(strategy_result, "is_equivalent", None) is False and not decisive_not_eq_receipt:
             blockers.append("decisive_counterexample_receipt_incomplete")
 
+        if getattr(strategy_result, "is_equivalent", None) is True:
+            self._veto_unproven_cross_side_identity(strategy_result, frame)
+
         if blockers:
             if getattr(strategy_result, "is_equivalent", None) in {True, False}:
                 strategy_result.is_equivalent = None
@@ -300,6 +303,28 @@ class PreflightGateMixin:
                         detail=f"Call/effect preflight veto: {blocker}",
                     )
                 )
+
+    def _veto_unproven_cross_side_identity(
+        self,
+        strategy_result: Any,
+        frame: PreparedDispatchFrame,
+    ) -> None:
+        """最終の EQ gate の backstop（plan v4 PR-P）。実装は proof 層の 1 つ
+        （``orchestration.veto_unproven_cross_side_identity``）で、ここは frame の ledger・relation・
+        比較の identity を渡すだけ。"""
+
+        from scripts.function_tracer_pcode.proof.strategies.pairwise_services.orchestration import (
+            veto_unproven_cross_side_identity,
+        )
+
+        veto_unproven_cross_side_identity(
+            strategy_result,
+            frame.pair_disposition_ledger,
+            frame.prepared.input_correspondence,
+            comparison_session_id=frame.comparison_session_id,
+            branch_id=frame.branch_id,
+            generation=frame.generation,
+        )
 
     def _call_effect_shadow_manifest(
         self,
@@ -623,8 +648,20 @@ class PreflightGateMixin:
         ):
             gate["failure_cause"] = "caller_relational_return_proof_incomplete"
             return
+        discharged_reasons = list(getattr(strategy_result, "unknown_reasons", ()) or ())
         strategy_result.is_equivalent = True
         strategy_result.unknown_reasons = []
+        # 昇格は pair の数だけを見るので、pairwise の最終 gate が止めた EQ（owner を含まない同一視を
+        # 最終 relation が正当化しない）もここへ来る。同じ backstop をもう一度課す（plan v4 PR-P）。
+        # 止めたときは昇格しなかったので、昇格が消すはずだった reason も残す。
+        from scripts.function_tracer_pcode.proof.strategies.pairwise_services.orchestration import (
+            reapply_cross_side_identity_veto,
+        )
+
+        if reapply_cross_side_identity_veto(strategy_result):
+            strategy_result.unknown_reasons = discharged_reasons + list(strategy_result.unknown_reasons)
+            gate["failure_cause"] = "cross_side_identity_unproven"
+            return
         coupling = manifest.get("coupling")
         if isinstance(coupling, dict):
             coupling["semantic_proof_status"] = "proven"

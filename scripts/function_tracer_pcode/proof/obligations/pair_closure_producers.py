@@ -20,6 +20,13 @@ from typing import Any, Mapping, Optional, Tuple
 from scripts.function_tracer_pcode.analysis.condition.smt_oracle import ConditionSMTOracle
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
     comparison_digest_is_current,
+    owner_free_evidence_values,
+)
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import (
+    CrossSideIdentityCertificate,
+)
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import (
+    certify_owner_free_identity,
 )
 
 from scripts.function_tracer_pcode.proof.obligations.pair_disposition import (
@@ -29,6 +36,7 @@ from scripts.function_tracer_pcode.proof.obligations.pair_disposition import (
     MethodBClosureArtifact,
     PairLedgerBinding,
     ReadonlyIdentityClosureArtifact,
+    pair_identity_subject,
     RuntimeReductionClosureArtifact,
     issue_producer_validated_closure,
     register_producer_closure_validator,
@@ -439,6 +447,22 @@ def _fixed_proof_implementation(strategy: Any, method_name: str) -> Any:
     return implementation if callable(implementation) else None
 
 
+def _owner_free_identity_certificate(
+    candidate: PairClosureCandidate, left_values: Tuple[Any, ...], right_values: Tuple[Any, ...],
+) -> Optional[CrossSideIdentityCertificate]:
+    """この種類の closure は owner を含まない key で左右を同一視する（plan v4 PR-P）。
+
+    現在の比較の relation が位置どおり・全幅の等式で、closure が比べる値の読みが全幅で自由な入力が
+    無いときだけ、この pair の証明書を返して検証へ進む。拒否（None）は「この closure を発行しない」で、
+    orchestration は通常の SMT の経路か型付きの UNKNOWN へ戻る。証明書は closure に封印され、ledger と
+    最終の EQ gate がもう一度照合する。
+    """
+
+    return certify_owner_free_identity(
+        left_values, right_values, subject=pair_identity_subject(candidate.pair_id),
+    ).certificate
+
+
 def validate_runtime_reduction_candidate(
     strategy: Any,
     binding: PairLedgerBinding,
@@ -448,6 +472,10 @@ def validate_runtime_reduction_candidate(
     semantic_parameter_sources: Any,
 ) -> Optional[RuntimeReductionClosureArtifact]:
     if not candidate.is_current_for(binding):
+        return None
+    checked = ((case1,), (case2,))
+    certificate = _owner_free_identity_certificate(candidate, *checked)
+    if certificate is None:
         return None
     implementation = _fixed_proof_implementation(
         strategy, "_cases_have_equivalent_runtime_reductions"
@@ -462,6 +490,8 @@ def validate_runtime_reduction_candidate(
     return issue_producer_validated_closure(
         RuntimeReductionClosureArtifact, binding,
         (candidate.pair_id, candidate.proposition), candidate.evidence,
+        identity_certificate=certificate,
+        checked_values=checked,
     )
 
 
@@ -475,6 +505,10 @@ def validate_counted_loop_closed_expression_candidate(
 ) -> Optional[CountedLoopClosedExpressionArtifact]:
     if not candidate.is_current_for(binding):
         return None
+    checked = ((case1,), (case2,))
+    certificate = _owner_free_identity_certificate(candidate, *checked)
+    if certificate is None:
+        return None
     implementation = _fixed_proof_implementation(
         strategy, "_case_pair_counted_loop_summary_matches_closed_expression"
     )
@@ -486,6 +520,8 @@ def validate_counted_loop_closed_expression_candidate(
     return issue_producer_validated_closure(
         CountedLoopClosedExpressionArtifact, binding,
         (candidate.pair_id, candidate.proposition), candidate.evidence,
+        identity_certificate=certificate,
+        checked_values=checked,
     )
 
 
@@ -496,18 +532,28 @@ def validate_method_b_candidate(
     reason: Any,
     analysis1: Any,
     analysis2: Any,
+    case1: Any,
+    case2: Any,
 ) -> Optional[MethodBClosureArtifact]:
     if not candidate.is_current_for(binding):
         return None
+    checked = ((case1,), (case2,))
+    certificate = _owner_free_identity_certificate(candidate, *checked)
+    if certificate is None:
+        return None
     implementation = _fixed_proof_implementation(strategy, "_method_b_closure_proof_is_complete")
-    executed, valid = _execute_pinned_proof(
-        implementation, reason, analysis1, analysis2
-    )
+    # 証明は証拠を読む: owner を含まない証拠は、この pair の case について作ったものだけを使う。
+    with owner_free_evidence_values(*checked):
+        executed, valid = _execute_pinned_proof(
+            implementation, reason, analysis1, analysis2
+        )
     if not executed or not valid:
         return None
     return issue_producer_validated_closure(
         MethodBClosureArtifact, binding,
         (candidate.pair_id, candidate.proposition), candidate.evidence,
+        identity_certificate=certificate,
+        checked_values=checked,
     )
 
 
@@ -518,18 +564,28 @@ def validate_readonly_identity_candidate(
     reason: Any,
     analysis1: Any,
     analysis2: Any,
+    case1: Any,
+    case2: Any,
 ) -> Optional[ReadonlyIdentityClosureArtifact]:
     if not candidate.is_current_for(binding):
         return None
+    checked = ((case1,), (case2,))
+    certificate = _owner_free_identity_certificate(candidate, *checked)
+    if certificate is None:
+        return None
     implementation = _fixed_proof_implementation(strategy, "_readonly_identity_proof_is_complete")
-    executed, valid = _execute_pinned_proof(
-        implementation, reason, analysis1, analysis2
-    )
+    # 証明は証拠を読む: owner を含まない証拠は、この pair の case について作ったものだけを使う。
+    with owner_free_evidence_values(*checked):
+        executed, valid = _execute_pinned_proof(
+            implementation, reason, analysis1, analysis2
+        )
     if not executed or not valid:
         return None
     return issue_producer_validated_closure(
         ReadonlyIdentityClosureArtifact, binding,
         (candidate.pair_id, candidate.proposition), candidate.evidence,
+        identity_certificate=certificate,
+        checked_values=checked,
     )
 
 
@@ -543,6 +599,10 @@ def validate_counted_loop_value_candidate(
     semantic_parameter_sources: Any,
 ) -> Optional[CountedLoopValueRelationArtifact]:
     if not candidate.is_current_for(binding):
+        return None
+    checked = ((case1,), (case2,))
+    certificate = _owner_free_identity_certificate(candidate, *checked)
+    if certificate is None:
         return None
     closed_values = _fixed_proof_implementation(
         strategy, "_case_pair_counted_loop_summaries_match_by_closed_values"
@@ -567,6 +627,8 @@ def validate_counted_loop_value_candidate(
     return issue_producer_validated_closure(
         CountedLoopValueRelationArtifact, binding,
         (candidate.pair_id, candidate.proposition), candidate.evidence,
+        identity_certificate=certificate,
+        checked_values=checked,
     )
 
 
@@ -582,6 +644,17 @@ def validate_aggregate_partition_candidate(
     resolved_pairs: Any,
 ) -> Optional[AggregatePartitionClosureArtifact]:
     if not candidate.is_current_for(binding):
+        return None
+    # 左右を同一視するのは pending の pair の case どうしだけ（証明書はそれを検査する）。証明は resolved の
+    # pair の case も読むが、それは同じ側の case の被覆（左の case を左の case で覆う）で、左右を結ばない:
+    # parameter は ``("parameter_index", i, 幅)`` の記号なので狭い読みは別の記号になり、自由な入力
+    # VARIABLE は検査した pending の側にしか相手が無い（PR #253 review 3）。
+    checked = (
+        tuple(pending.left_case for pending in pending_pairs),
+        tuple(pending.right_case for pending in pending_pairs),
+    )
+    certificate = _owner_free_identity_certificate(candidate, *checked)
+    if certificate is None:
         return None
     normalized = tuple(sorted(set(tuple(pair) for pair in partition_witness)))
     implementation = _fixed_proof_implementation(
@@ -605,6 +678,8 @@ def validate_aggregate_partition_candidate(
     return issue_producer_validated_closure(
         AggregatePartitionClosureArtifact, binding,
         (candidate.pair_id, candidate.proposition), candidate.evidence,
+        identity_certificate=certificate,
+        checked_values=checked,
     )
 
 

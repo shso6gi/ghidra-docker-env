@@ -27,7 +27,11 @@ from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.smt import SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.smt.parallel import run_backend_query
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import comparison_evidence_subject
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
+    CrossSideIdentification,
+    certify_owner_free_identity,
+    owner_free_identity_gate,
     ConditionSMTOracle,
     ParameterInfo,
     QueryResult,
@@ -39,6 +43,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared im
     build_single_case_condition_query,
     build_unknown_recovery_actions,
     comparison_evidence,
+    owner_free_evidence_values,
     merge_new_evidence,
     parameter_identity_key_from_descriptor,
     parameter_identity_key_from_expression,
@@ -65,7 +70,7 @@ def _impl__merge_completed_recovery_proofs_from_solver_analyses(
             getattr(source, "completed_recovery_proof_evidence", ()) or (),
         )
         if merged is not None:
-            store_comparison_evidence(target, merged)
+            store_comparison_evidence(target, merged, identification=None)
 
 def _impl__solve_query_twostage(
     self,
@@ -94,6 +99,15 @@ def _impl__record_completed_method_b_dual_summary_solver_proof_if_safe(
     case2: ReturnCase,
 ) -> None:
     if not self.enable_completed_recovery_proofs:
+        return
+    # 左右を owner を含まない key で比べて作る証拠。比べる値の読み（runtime ref の中を含む）が全幅で、
+    # relation が位置どおり・全幅の等式のときだけ作り、その検査の証明書と一緒に記録する（plan v4
+    # PR-P。採用の規則は証明書を照合する）。
+    certification = certify_owner_free_identity(
+        (case1,), (case2,),
+        subject=comparison_evidence_subject(self._normalize_nested_tuple(reason_record.object_target_key)),
+    )
+    if not certification.passed:
         return
     from scripts.function_tracer_pcode.authority.domains.loop_recurrence import LOOP_REASON_SPECS
 
@@ -131,10 +145,12 @@ def _impl__record_completed_method_b_dual_summary_solver_proof_if_safe(
         for item in getattr(analysis, "completed_recovery_proof_evidence", ()) or ()
         if isinstance(item, Mapping)
     ]
-    existing_ids = {
-        self._normalize_nested_tuple(item.get("proof_obligation_id"))
-        for item in comparison_evidence(records)
-    }
+    # 既にある証拠は、この pair の値について作ったもの（と relation の premise の下の証拠）だけを数える。
+    with owner_free_evidence_values((case1,), (case2,)):
+        existing_ids = {
+            self._normalize_nested_tuple(item.get("proof_obligation_id"))
+            for item in comparison_evidence(records)
+        }
     changed = False
     for action in actions:
         proof_id = self._normalize_nested_tuple(action.proof_obligation_id)
@@ -167,7 +183,11 @@ def _impl__record_completed_method_b_dual_summary_solver_proof_if_safe(
         existing_ids.add(proof_id)
         changed = True
     if changed:
-        store_comparison_evidence(analysis, records)
+        store_comparison_evidence(
+            analysis, records, identification=CrossSideIdentification.OWNER_FREE,
+            certificate=certification.certificate,
+            checked_values=((case1,), (case2,)),
+        )
 
 def _impl__method_b_dual_summary_solver_proof_content(
     self,
@@ -464,6 +484,12 @@ def _impl__collect_intrinsic_parameter_specs(
     *exprs: Expression,
     semantic_parameter_sources: Sequence[ParameterInfo] = (),
 ) -> Optional[List[Dict[str, Any]]]:
+    # 左右の parameter を index（``parameter_identity_key_*``）で 1 つの ``aux_param_k`` にする。
+    # この同一視は relation を通らないので、relation が位置どおり・全幅の等式のときだけ作る
+    # （plan v4 PR-P）。作れなければ補助 query は「証明できない」。読みの幅は数えない: 記号は
+    # index ごとの全幅の値で、狭い読みは ``extract`` で描く（``_clone_auxiliary_expression_for_smt``）。
+    if not owner_free_identity_gate((), ()).passed:
+        return None
     specs: Dict[Tuple[object, ...], Dict[str, Any]] = {}
     unresolved_symbol = False
     extensions_by_index = self._auxiliary_entailed_extensions_by_index(semantic_parameter_sources)

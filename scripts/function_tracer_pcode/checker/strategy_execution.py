@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict
 from scripts.function_tracer_pcode.checker.arch.input_extension import (
     provide_input_extension_evidence,
 )
+from scripts.function_tracer_pcode.proof.formula.input_correspondence.certificates import certificate_session
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
     comparison_scope,
 )
@@ -216,6 +217,35 @@ def run_strategy_branch(
     debug_print: Callable[[str], None],
     apply_preflight_final_gate: Callable[..., None],
 ) -> StrategyBranchOutcome:
+    """strategy と最終 gate を 1 つの証明書の session の中で実行する（plan v4 PR-P）。
+
+    stage runner・workflow の中なら外側の session を使う（再入）。checker を直接呼ぶ互換の経路では、
+    strategy が発行した証明書を最終 gate が照合し終えるまで、この呼び出しが session の持ち主。
+    """
+
+    with certificate_session():
+        return _run_strategy_branch_in_session(
+            ctx, dispatch_frame, obligation_runtime, analysis1, analysis2, save_formula,
+            locally_issued_branch_authority=locally_issued_branch_authority,
+            call_effect_shadow_manifest=call_effect_shadow_manifest,
+            debug_print=debug_print,
+            apply_preflight_final_gate=apply_preflight_final_gate,
+        )
+
+
+def _run_strategy_branch_in_session(
+    ctx: BranchCheckContext,
+    dispatch_frame: PreparedDispatchFrame,
+    obligation_runtime,
+    analysis1,
+    analysis2,
+    save_formula: bool,
+    *,
+    locally_issued_branch_authority: Any,
+    call_effect_shadow_manifest: Dict[str, Any],
+    debug_print: Callable[[str], None],
+    apply_preflight_final_gate: Callable[..., None],
+) -> StrategyBranchOutcome:
     strategy = ctx.strategy
     replan_plan = ctx.replan_plan
     cleanup_complete = True
@@ -344,7 +374,9 @@ def run_legacy_strategy(
     apply_phase2_relational_call_discharge: Callable[..., None],
 ) -> LegacyStrategyOutcome:
     debug_print(f"Using strategy: {strategy.__class__.__name__}")
-    strategy_result = strategy.check(analysis1, analysis2, save_formula)
-    manifest = call_effect_shadow_manifest(analysis1, analysis2, binary1_name, binary2_name)
-    apply_phase2_relational_call_discharge(strategy_result, analysis1, analysis2, manifest)
+    # strategy の証明書を、後の昇格の再 veto（``reapply_cross_side_identity_veto``）が照合し終えるまで保つ。
+    with certificate_session():
+        strategy_result = strategy.check(analysis1, analysis2, save_formula)
+        manifest = call_effect_shadow_manifest(analysis1, analysis2, binary1_name, binary2_name)
+        apply_phase2_relational_call_discharge(strategy_result, analysis1, analysis2, manifest)
     return LegacyStrategyOutcome(strategy_result=strategy_result, call_effect_shadow_manifest=manifest)
