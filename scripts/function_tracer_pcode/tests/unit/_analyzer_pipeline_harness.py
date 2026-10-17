@@ -94,12 +94,32 @@ class _ConditionTracker:
         return None
 
 
-_CFG_OUTCOME_SUMMARIES = (
-    "_try_apply_triangular_mod_caller_outcomes",
-    "_try_apply_triangular_mod_optimized_outcomes",
-    "_try_apply_branch_guarded_while_outcomes",
-    "_try_apply_single_guard_nonprogress_loop_outcomes",
-)
+def _cfg_outcome_summaries() -> tuple:
+    """outcome partition の段が呼ぶ、CFG を要る要約（``self._try_apply_*``）の名前。
+
+    一覧を手で持たず、段の本体（``_impl__apply_outcome_partition_summaries``）が呼ぶ名前を読む: 要約が
+    増えても「適用しない」に差し替え漏れが出ない。
+    """
+
+    import ast
+    import inspect
+    import textwrap
+
+    from scripts.function_tracer_pcode.analysis.returns import return_extraction
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(return_extraction._impl__apply_outcome_partition_summaries)))
+    names = sorted({
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+        and node.func.attr.startswith("_try_apply_")
+    })
+    if not names:
+        raise AssertionError("the outcome partition stage calls no CFG summary; the harness premise changed")
+    return tuple(names)
 
 
 def analyze_through_pipeline(template: Any, *, outcome_seed: bool = False) -> Any:
@@ -163,7 +183,7 @@ def analyze_through_pipeline(template: Any, *, outcome_seed: bool = False) -> An
         stack.enter_context(patch.object(analyzer, "_apply_structural_recurrence_summary", return_value=None))
         stack.enter_context(patch.object(analyzer, "_apply_bounded_call_refinement", return_value=None))
         if outcome_seed:
-            for name in _CFG_OUTCOME_SUMMARIES:
+            for name in _cfg_outcome_summaries():
                 stack.enter_context(patch.object(analyzer, name, return_value=False))
         else:
             stack.enter_context(patch.object(analyzer, "_apply_outcome_partition_summaries", return_value=None))

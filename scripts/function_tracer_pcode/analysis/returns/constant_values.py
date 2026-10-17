@@ -12,7 +12,7 @@ class ConstantValueService:
 
     状態も依存も持たない。ConditionLogicService / PlaceholderAlgebraService ほかが直接依存として使う。
 
-    以前この service（旧 ``ConstantValueService``）は、base の key・定数・大きさの一致だけで比較を
+    以前この service（旧 ``StackProtectorService``）は、base の key・定数・大きさの一致だけで比較を
     stack protector の照合と認め、return の条件から外していた（plan v4 PR-C で撤去）。形だけでは canary
     の照合と分からず（ふつうのコードの比較も一致する）、外すと機械語と違う関数を表すので、条件は残す。
     """

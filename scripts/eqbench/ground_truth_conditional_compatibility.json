@@ -102,6 +102,17 @@
    "note": "See airy/MAX.",
    "verified_by": null,
    "verified_at": null
+  },
+  {
+   "sample": "sine/mysin/Eq/newV",
+   "function": "doubleToRawLongBits",
+   "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+   "subject": "*",
+   "status": "unverified",
+   "evidence": "none",
+   "note": "plan v4 PR-C (#247) corpus case.  The compiled gcc -O0 binaries call __stack_chk_fail on the stack-protector failure branch; the source also calls memcpy.  No premise about either callee has been checked.",
+   "verified_by": null,
+   "verified_at": null
   }
  ]
 }

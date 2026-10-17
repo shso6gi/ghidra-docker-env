@@ -12,7 +12,7 @@ permissions:
 # The per-PR gate is two independent jobs so they start together: the ordinary
 # suite and the light recorded replays. The two heavy replays (wood,
 # barthe2big) dominate the corpus wall clock and run in the recorded-full
-# workflow, which covers all nine with the same validator -- keeping them off
+# workflow, which covers all ten with the same validator -- keeping them off
 # the critical path is a scheduling decision, not a coverage one.
 jobs:
   unit-fast:
@@ -133,6 +133,6 @@ jobs:
               len(outside), ", ".join(outside)))
           print("this job also runs the PR-109-A recorded E2Es, which are not "
                 "corpus replays and are not counted here")
-          assert len(gate) == 7, gate
-          assert len(ALL_REPLAYS) == 9, ALL_REPLAYS
+          assert len(gate) == 8, gate
+          assert len(ALL_REPLAYS) == 10, ALL_REPLAYS
           PY

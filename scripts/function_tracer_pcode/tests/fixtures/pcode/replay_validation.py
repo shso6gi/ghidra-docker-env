@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """記録済み pair 1 件の実行と検証（Issue #109）。**唯一の validator**。
 
-PR gate（軽い 7 replay）も full corpus（9 replay の matrix）も、この
+PR gate（軽い 8 replay）も full corpus（10 replay の matrix）も、この
 :func:`validate_replay` を呼ぶだけで、fast 専用 / full 専用の soundness 実装は
 存在しない。片方だけ緩い検査になる余地を構造で消しておく。
 

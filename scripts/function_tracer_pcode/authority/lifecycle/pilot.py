@@ -57,6 +57,9 @@ from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
 from scripts.function_tracer_pcode.authority.domains.cross_side_identity import (
     CROSS_SIDE_IDENTITY_REASON_REGISTRY,
 )
+from scripts.function_tracer_pcode.authority.domains.return_coverage import (
+    RETURN_COVERAGE_REASON_REGISTRY,
+)
 from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
     ANALYSIS_LIMITATION_REASON_REGISTRY,
     AnalysisLimitationBlockerSignal,
@@ -67,13 +70,14 @@ from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
 
 
 PILOT_TYPED_CAUSE_KINDS = frozenset({
-    "return_coverage_gap",
-    "return_coverage_inconclusive",
     "outcome_partition_residual_sat",
     "comparison_equivalence_closure_unproven",
     "pair_process_completion_unavailable",
 }) | frozenset(
     item.reason_id for item in CROSS_SIDE_IDENTITY_REASON_REGISTRY.snapshot()
+) | frozenset(
+    # plan v4 PR-C: seed の無い解析の被覆（以前はここに名前だけを書いていた）。
+    item.reason_id for item in RETURN_COVERAGE_REASON_REGISTRY.snapshot()
 ) | frozenset(SAT_SAFETY_REASON_RESOLUTION) | frozenset(
     reason_id for reason_id in OUTCOME_STAGE_REASON_MATRIX.values()
     if reason_id is not None

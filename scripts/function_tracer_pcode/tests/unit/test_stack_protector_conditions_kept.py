@@ -13,9 +13,10 @@
   公開前の段と公開境界（``analyze_through_pipeline``）を通っても残る（C-M2）。撤去前は外れた。
 * (b) 対照: 同じ値の return を相補な条件で併合する一般の規則は残る（形の照合なしに、意味を変えない併合）。
 * (c) production（C-M1）: 本物の checker の最終判定は、計画 §4.8 の V0〜V3・``INDIRECT`` の形・対照 C1〜C5 と
-  反例の形で EQ か UNKNOWN（NOT_EQ も ERROR も無い）。一部の領域だけを覆う形（V1・C1・C2 と、条件に
-  ``INDIRECT`` を持つ形）は、解析器が outcome seed を作る段（``outcome_seed=True``）を通す: 本番の解析器は
-  解析ごとに seed を作り、比較の前に outcome partition の段の cause を出す（§7.3 の 3 の切り分け）。
+  反例の形で EQ か UNKNOWN（NOT_EQ も ERROR も無い）。一部の領域だけを覆う形と条件に ``INDIRECT`` を持つ形は、
+  seed の無い解析（``semantic_successor`` の view と同じ。被覆の欠けは ``return_coverage`` domain の cause）と、
+  本番の解析器と同じく outcome seed のある解析（``outcome_seed=True``。outcome partition の段の cause）の両方で
+  通す（§7.3 の 2・3）。撤去前、seed の無い V1_indirect と反例 user_code_partial は誤った EQ だった。
 * (d) pairwise は、正確な SMT の意味が無い演算（条件の中の ``INDIRECT`` など）を比較の外へ出さず、monolithic と
   同じ ``expression_semantics_unsupported`` の UNKNOWN の結果にする（§7.3 の 2）。
 
@@ -305,74 +306,90 @@ def _seeded(template: Any) -> Any:
     return analyze_through_pipeline(template, outcome_seed=True)
 
 
-# (case id, (left, right) を作る関数, 解析の通し方, 期待する最終判定)
-_PRODUCTION_CASES = (
-    # V0: 撤去前の除去の後の形（両側とも無条件）。対照。
-    ("V0_unconditional", lambda: _canary_pair(kept=False, left_fail=False, right_fail=False, indirect=False),
-     _PIPELINE, "EQUIVALENT"),
-    # V2・V3: 失敗の branch が return に見える（全域を覆う）。V3 の canary の項は側ごとに独立なので、
-    # (左は無傷, 右は失敗) の組は SAT だが、SAT は replay で曖昧として UNKNOWN（誤った NOT_EQ ではない）。
-    ("V2_right_fail_branch", lambda: _canary_pair(kept=True, left_fail=False, right_fail=True, indirect=False),
-     _PIPELINE, "UNKNOWN"),
-    ("V3_both_fail_branches", lambda: _canary_pair(kept=True, left_fail=True, right_fail=True, indirect=False),
-     _PIPELINE, "UNKNOWN"),
+_GAP = ("return_coverage_gap",)
+_INCONCLUSIVE = ("return_coverage_inconclusive",)
+
+# 一部だけを覆う形と、条件に SMT の意味の無い演算を持つ形。seed の無い解析（``semantic_successor`` の
+# view と同じ）と、本番の解析器と同じく seed のある解析の両方で通す。seed の無い解析では、被覆の欠けは
+# ``return_coverage`` domain の cause になる（撤去前・この domain の前は ERROR か誤った EQ だった）。
+_PARTIAL_SHAPES = (
     # V1: 失敗の branch は noreturn として刈られ、return は canary の無傷の領域だけを覆う（ふつうの形）。
-    ("V1_fail_branch_pruned", lambda: _canary_pair(kept=True, left_fail=False, right_fail=False, indirect=False),
-     _seeded, "UNKNOWN"),
-    # 実際の Ghidra の形（canary の読みに INDIRECT）。条件に SMT の意味の無い演算が入る。
-    ("V1_indirect", lambda: _canary_pair(kept=True, left_fail=False, right_fail=False, indirect=True),
-     _seeded, "UNKNOWN"),
-    ("V3_indirect", lambda: _canary_pair(kept=True, left_fail=True, right_fail=True, indirect=True),
-     _seeded, "UNKNOWN"),
+    ("V1_fail_branch_pruned", lambda: _canary_pair(kept=True, left_fail=False, right_fail=False, indirect=False), _GAP),
+    # 実際の Ghidra の形（canary の読みに INDIRECT）。撤去前は条件が外れて誤った EQ だった。
+    ("V1_indirect", lambda: _canary_pair(kept=True, left_fail=False, right_fail=False, indirect=True), _INCONCLUSIVE),
+    ("V3_indirect", lambda: _canary_pair(kept=True, left_fail=True, right_fail=True, indirect=True), _INCONCLUSIVE),
     # 対照 C1・C2: canary でない条件・同じ memory の条件で一部だけ覆う（両側同じ）。
     ("C1_partial_parameter_guard", lambda: (_side("l", [ReturnInfo("0x10", _p4(), [_positive()])]),
-                                           _side("r", [ReturnInfo("0x10", _p4(), [_positive()])])),
-     _seeded, "UNKNOWN"),
+                                           _side("r", [ReturnInfo("0x10", _p4(), [_positive()])])), _GAP),
     ("C2_partial_same_memory_guard", lambda: tuple(
         _side(name, [ReturnInfo("0x10", _p4(), [Condition(_int_add_canary("G", 0x1000, 8), True)])])
         for name in ("l", "r")
-    ), _seeded, "UNKNOWN"),
-    # 対照 C3: 値の中の INDIRECT（両側同じ、無条件）。
-    ("C3_indirect_value", lambda: tuple(_side(name, [ReturnInfo("0x10", _indirect_read(), [])]) for name in ("l", "r")),
-     _PIPELINE, "UNKNOWN"),
-    # 対照 C4: 全域を覆う条件の中の INDIRECT。
+    ), _GAP),
+    # 対照 C4: 全域を覆う条件の中の INDIRECT（被覆を決められない）。
     ("C4_indirect_condition", lambda: tuple(
         _side(name, _full_cover(Expression.binary_op("INT_NOTEQUAL", _indirect_read(), _p4()), _p4()))
         for name in ("l", "r")
-    ), _seeded, "UNKNOWN"),
-    # 対照 C5: 全域を覆うふつうの条件。
-    ("C5_full_cover_plain_condition", lambda: tuple(
-        _side(name, _full_cover(Expression.binary_op("INT_SLESS", _k(0), _p4()), _p4())) for name in ("l", "r")
-    ), _PIPELINE, "EQUIVALENT"),
-    # 反例（§4.8 の誤認）: 左はふつうのコードの比較で 1 / 0、右は常に 1。撤去前は左の条件が両方外れた。
-    ("user_code_full_cover_vs_constant", lambda: (
-        _side("l", _two_way(_user_compare(), 1, 0), pointer=True),
-        _side("r", [ReturnInfo("0x10", _k(1), [])], pointer=True),
-    ), _PIPELINE, "UNKNOWN"),
+    ), _INCONCLUSIVE),
     # 反例: 左は「比較が成り立てば 1」だけを return する（他の領域は return しない）、右は常に 1。
     # 撤去前は左の条件が外れて無条件の 1 になり、本物の checker は EQ を出した（誤った EQ）。
     ("user_code_partial_vs_constant", lambda: (
         _side("l", [ReturnInfo("0x10", _k(1), [Condition(_user_compare(), False)])], pointer=True),
         _side("r", [ReturnInfo("0x10", _k(1), [])], pointer=True),
-    ), _seeded, "UNKNOWN"),
+    ), _GAP),
+)
+
+# (case id, (left, right) を作る関数, 解析の通し方, 期待する最終判定, 最終の reason に必ずある reason)
+_PRODUCTION_CASES = (
+    # V0: 撤去前の除去の後の形（両側とも無条件）。対照。
+    ("V0_unconditional", lambda: _canary_pair(kept=False, left_fail=False, right_fail=False, indirect=False),
+     _PIPELINE, "EQUIVALENT", ()),
+    # V2・V3: 失敗の branch が return に見える。V3 の canary の項は側ごとに独立なので、(左は無傷, 右は失敗)
+    # の組は SAT だが、SAT は replay で曖昧として UNKNOWN（誤った NOT_EQ ではない）。
+    ("V2_right_fail_branch", lambda: _canary_pair(kept=True, left_fail=False, right_fail=True, indirect=False),
+     _PIPELINE, "UNKNOWN", ()),
+    ("V3_both_fail_branches", lambda: _canary_pair(kept=True, left_fail=True, right_fail=True, indirect=False),
+     _PIPELINE, "UNKNOWN", ()),
+    # 対照 C3: 値の中の INDIRECT（両側同じ、無条件）。
+    ("C3_indirect_value", lambda: tuple(_side(name, [ReturnInfo("0x10", _indirect_read(), [])]) for name in ("l", "r")),
+     _PIPELINE, "UNKNOWN", ()),
+    # 対照 C5: 全域を覆うふつうの条件。
+    ("C5_full_cover_plain_condition", lambda: tuple(
+        _side(name, _full_cover(Expression.binary_op("INT_SLESS", _k(0), _p4()), _p4())) for name in ("l", "r")
+    ), _PIPELINE, "EQUIVALENT", ()),
+    # 反例（§4.8 の誤認）: 左はふつうのコードの比較で 1 / 0、右は常に 1。撤去前は左の条件が両方外れた。
+    ("user_code_full_cover_vs_constant", lambda: (
+        _side("l", _two_way(_user_compare(), 1, 0), pointer=True),
+        _side("r", [ReturnInfo("0x10", _k(1), [])], pointer=True),
+    ), _PIPELINE, "UNKNOWN", ()),
+    *(
+        (case_id + "_seedless", make_pair, _PIPELINE, "UNKNOWN", reasons)
+        for case_id, make_pair, reasons in _PARTIAL_SHAPES
+    ),
+    *(
+        (case_id + "_seeded", make_pair, _seeded, "UNKNOWN", ())
+        for case_id, make_pair, _reasons in _PARTIAL_SHAPES
+    ),
 )
 
 
 @pytest.mark.parametrize(
-    "case_id, make_pair, analyze, expected",
+    "case_id, make_pair, analyze, expected, required_reasons",
     _PRODUCTION_CASES,
     ids=[case[0] for case in _PRODUCTION_CASES],
 )
-def test_production_check_never_returns_not_equivalent_or_error_for_kept_conditions(case_id, make_pair, analyze, expected):
+def test_production_check_never_returns_not_equivalent_or_error_for_kept_conditions(
+    case_id, make_pair, analyze, expected, required_reasons,
+):
     from scripts.function_tracer_pcode.tests.unit._production_check_harness import run_production_check
 
     left, right = make_pair()
     result = run_production_check("pr-c-" + case_id, left, right, analyze=analyze)
+    reasons = {reason.get("reason_id") for reason in result.get("unknown_reasons") or () if isinstance(reason, dict)}
 
     assert result["final_outcome"] == expected, (
-        result.get("final_outcome"), result.get("error_message"), result.get("failure_message"),
-        [reason.get("reason_id") for reason in result.get("unknown_reasons") or () if isinstance(reason, dict)],
+        result.get("final_outcome"), result.get("error_message"), result.get("failure_message"), sorted(reasons),
     )
+    assert set(required_reasons) <= reasons, sorted(reasons)
 
 
 def test_the_seeded_analyses_carry_an_outcome_seed_and_keep_the_canary_condition():

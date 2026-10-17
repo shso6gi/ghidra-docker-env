@@ -30,6 +30,9 @@ from scripts.function_tracer_pcode.authority.domains.analysis_limitation import 
 from scripts.function_tracer_pcode.authority.domains.cross_side_identity import (
     CrossSideIdentityBlockerSignal,
 )
+from scripts.function_tracer_pcode.authority.domains.return_coverage import (
+    ReturnCoverageBlockerSignal,
+)
 from scripts.function_tracer_pcode.authority.domains.comparison_closure import (
     ComparisonClosureProductionSignal,
 )
@@ -1379,6 +1382,34 @@ def emit_cross_side_identity_signal(
         raise TypeError("cross-side identity emission requires an exact signal")
     session = active_production_pilot_session()
     if session is None:
+        return 0
+    if getattr(session, "phase7_runtime", None) is not None:
+        session.record_phase7_pre_emission_activation(
+            producer_site_manifest_id, signal
+        )
+    emit = getattr(session, "emit_domain_signal", None)
+    if not callable(emit):
+        raise TypeError("active production pilot session lacks signal authority")
+    return int(emit(signal))
+
+
+def emit_return_coverage_signal(
+    signal: ReturnCoverageBlockerSignal,
+    *, producer_site_manifest_id: Optional[str] = None,
+) -> int:
+    """plan v4 PR-C: seed の無い解析の被覆の gap / inconclusive を cause として 1 つ出す。
+
+    pilot が無効なら厳密に no-op（0）。判定は置かない（被覆は return-coverage gate が決める）。
+    同じ関数・reason の再観測は新しい producer の起動ではない（Phase 7 の発見の記録を開かない）。
+    """
+
+    if type(signal) is not ReturnCoverageBlockerSignal:
+        raise TypeError("return-coverage emission requires an exact signal")
+    session = active_production_pilot_session()
+    if session is None:
+        return 0
+    already_observed = getattr(session.domain_signal_encoder, "has_observed", None)
+    if callable(already_observed) and already_observed(session, signal):
         return 0
     if getattr(session, "phase7_runtime", None) is not None:
         session.record_phase7_pre_emission_activation(

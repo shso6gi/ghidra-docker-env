@@ -7,7 +7,7 @@
    test 名の文字列一致や `-k` の羅列に依存しない）。
 2. **corpus 全体としての完全性と時間予算**（欠落・重複・予算超過の判定）。
 
-(2) の実装はここ 1 箇所しかない。1 process で 9 replay を回す実行でも、
+(2) の実装はここ 1 箇所しかない。1 process で 10 replay を回す実行でも、
 matrix で 1 shard 1 replay に割った実行でも、同じ
 :func:`validate_corpus` が同じ規則で判定する。serial 用と matrix 用で
 別々に書くと、片方だけ緩い完全性検査になりうる。

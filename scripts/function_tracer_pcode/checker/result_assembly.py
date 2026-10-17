@@ -7,7 +7,7 @@ module-level の関数に移す。トップレベルの ``try/except`` 自体、
 - :func:`assemble_equivalence_result` — 通常経路。identity 計算 → debug の SMT 出力 → total_time → 反例整形 →
   completed proof payload / completion contexts → ``EquivalenceResult(...)`` → 私的付帯 3 つ
   （``_prepared_dispatch_frame`` / ``_strategy_result`` / ``_inconclusive_comparison_authority``）を旧順序で行う。
-- :func:`unsupported_smt_result` — ``UnknownSmtExtensionWidthError`` / ``UnsupportedSmtOperatorError`` handler の本体。
+- :func:`unsupported_smt_result` — 正確な SMT の意味が無い式の型つきの拒否（``SMT_SEMANTICS_REFUSALS``）の handler の本体。
 - :func:`canonical_abi_error_result` — ``ReturnAbiAuthorityInvalid`` 用の canonical error result。
 - :func:`analysis_limitation_result` — ``AnalysisLimitation`` handler の本体（Issue #125）。
   帰属できた限界は UNKNOWN、帰属できなければ ``limitation_unattributed`` /
@@ -40,7 +40,6 @@ from scripts.function_tracer_pcode.checker.result_factory import create_error_re
 from scripts.function_tracer_pcode.checker.unknown_reason import make_internal_v2_reason_diagnostic
 from scripts.function_tracer_pcode.core import FunctionSignature, live_values
 from scripts.function_tracer_pcode.core import read_limits
-from scripts.function_tracer_pcode.core.render_smt import UnknownSmtExtensionWidthError
 from scripts.function_tracer_pcode.smt import ParallelResult
 
 
@@ -243,11 +242,9 @@ def assemble_equivalence_result(
 
 
 def unsupported_smt_diagnostic_kind(exc: Exception) -> str:
-    return (
-        "unknown_smt_extension_width"
-        if isinstance(exc, UnknownSmtExtensionWidthError)
-        else "unsupported_smt_operator"
-    )
+    """拒否の種類（evidence ref）。拒否の identity は例外の型が持つ（``refusal_evidence_ref``）。"""
+
+    return exc.refusal_evidence_ref
 
 
 def unsupported_smt_result(
@@ -293,10 +290,7 @@ def unsupported_smt_result(
                 stage="S_PAIRWISE",
                 evidence_refs=(diagnostic_kind,),
                 object_target_key=(
-                    diagnostic_kind,
-                    exc.operator,
-                    exc.operand_bits,
-                    getattr(exc, "result_bits", 0),
+                    *exc.refusal_target_fields(),
                     tuple(analysis1.outcome_function_identity()),
                     tuple(analysis2.outcome_function_identity()),
                 ),

@@ -300,8 +300,11 @@ def _impl_check_refusing_unsupported_smt_semantics(
     条件・値・補助 query のどこかに正確な SMT の意味が無い演算（``INDIRECT`` など）があると、描画が型つきの
     拒否（``SMT_SEMANTICS_REFUSALS``）を送出する。pairwise はそれを比較の外へ出さず、monolithic の同じ拒否と
     同じ UNKNOWN（``expression_semantics_unsupported``）の結果にする。外へ出すと checker の互換の handler が
-    authority の event を持たない結果を作り、終了処理で ERROR になる。この結果は EQ も NOT_EQ も主張せず、
-    比較の終端（inconclusive の terminal）は後続の monolithic が自分の同じ拒否で封印する。
+    authority の event を持たない結果を作り、終了処理で ERROR になる。この結果は EQ も NOT_EQ も主張しない
+    （pair の数は 0 のままで、EQ への昇格の対象にならない）。比較を UNKNOWN に終える authority の根拠は、
+    monolithic fallback が走ればその同じ拒否で封印する inconclusive の terminal、被覆の印で fallback が
+    止まるときは被覆の cause（seed のある解析は outcome partition の段、seed の無い解析は
+    ``return_coverage`` domain）である。
     """
 
     try:
@@ -316,6 +319,7 @@ def _impl_check_refusing_unsupported_smt_semantics(
             return_var1=None,
             return_var2=None,
             constrained_fragments=[],
+            pairwise_debug_stats={exc.refusal_evidence_ref: 1},
             unknown_reasons=[
                 make_internal_v2_reason_diagnostic(
                     "expression_semantics_unsupported",

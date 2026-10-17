@@ -312,6 +312,45 @@
    "variants": [
     "default"
    ]
+  },
+  {
+   "budget_seconds": 40,
+   "case_id": "mysin_doubleToRawLongBits_B5_B13",
+   "dataset_label": "Eq",
+   "function_confirmed_by": "--list-functions @ b1a75018e58c0028a86bda00c78cb8d5b8c42475",
+   "function_name": "doubleToRawLongBits",
+   "ground_truth_file": "ground_truth/mysin_doubleToRawLongBits_B5_B13.json",
+   "issue_refs": [
+    "#109",
+    "#247"
+   ],
+   "left": {
+    "binary_id": "B5",
+    "eqbench_relative_path": "sine/mysin/Eq/source/newV-arm64-gcc-O0",
+    "fixture": "left.json",
+    "sha256": "28208a3f69a9ac15d9a035eaf5ead5ef95c17df41c677e565780d5daedf05b44"
+   },
+   "measured_seconds": {
+    "container": 1.7,
+    "github_hosted_runner": 4.6
+   },
+   "pr_gate": true,
+   "recording": {
+    "analysis_source_digest": "3277d206c84574c43d1de391ea8179b4deff8e916083808f6d9d1f4c4d9df26b",
+    "commit": "b1a75018e58c0028a86bda00c78cb8d5b8c42475",
+    "dirty": false,
+    "identical_fast_path": false
+   },
+   "right": {
+    "binary_id": "B13",
+    "eqbench_relative_path": "sine/mysin/Eq/source/newV-mips64-gcc-O0",
+    "fixture": "right.json",
+    "sha256": "292bde103db7e9ec2947f2610f47f42fe45d226889ed4eb0271886c50f447808"
+   },
+   "sample_identity": "sine/mysin/Eq/newV",
+   "variants": [
+    "default"
+   ]
   }
  ],
  "corpus_budget_seconds": 1200,
