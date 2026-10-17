@@ -1756,6 +1756,20 @@ class ProductionDualWritePilotConnector:
                     session.domain_signal_error_details,
                 )))
             )
+        # plan v4 PR-C: 最終の結果の比較が被覆の欠けで inconclusive の terminal 無しに終わったなら、その
+        # 記録（runner が比較に束縛した ``UnsealedCoverageTerminal``）だけを cause にする。前の段・別の比較
+        # の記録は最終の結果に付かないので cause にならない。
+        if getattr(result, "_unsealed_coverage_terminal", None) is not None:
+            from scripts.function_tracer_pcode.authority.domains.return_coverage import (
+                adopt_final_unsealed_coverage,
+            )
+            from scripts.function_tracer_pcode.authority.lifecycle.production_context import (
+                production_pilot_session_scope,
+            )
+
+            with production_pilot_session_scope(session):
+                adopt_final_unsealed_coverage(result, before_outcome)
+            session.ensure_event_contract_limitation()
         provisional_projection = session.preview_lifecycle_projection()
         provenance = getattr(result, "call_proof_terminal_provenance", None)
         if (

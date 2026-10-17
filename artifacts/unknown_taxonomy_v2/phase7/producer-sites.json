@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "04d6f50e54696ac3fc485bc7feb89d71b9e305cab07b2765544a415bb8c06566",
+  "manifest_digest": "e27c485e6bcad89e3871a50b0357164aae604d0a65640a59042394bc279c59aa",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 34,
   "sites": [
@@ -237,10 +237,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1814,
+      "line": 1828,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/pilot.py",
       "producer_site_manifest_id": "comparison-inconclusive-terminal",
-      "source_sha256": "cac5e9600258050e6e34369f1ab1b50bbb4367eade6998fb1fd446ce1e6f39af"
+      "source_sha256": "f1ed28f5e1a95a79951c0f82901ade31d1293417693a31484a5535b24b28028f"
     },
     {
       "allowed_dispositions": [
@@ -968,22 +968,22 @@
         "ELIGIBLE"
       ],
       "allowed_producer_ids": [
-        "return-coverage-seedless-runner-v1"
+        "return-coverage-final-terminal-v1"
       ],
-      "branch_or_attempt_contract_id": "return-coverage-seedless-blocker:invocation",
-      "column": 12,
+      "branch_or_attempt_contract_id": "return-coverage-final-terminal:invocation",
+      "column": 19,
       "domain": "return_coverage",
       "emitter": "emit_return_coverage_signal",
-      "enclosing_function": "_observe_unsealed_seedless_return_coverage",
+      "enclosing_function": "observe_final_unsealed_coverage",
       "expected_cause_slots": [
         {
           "allowed_reason_ids": [
             "return_coverage_gap"
           ],
           "expected_domain": "return_coverage",
-          "expected_identity_scope": "UNARY",
+          "expected_identity_scope": "RELATIONAL",
           "expected_target_kind": "function_return_coverage",
-          "slot_id": "return-coverage-seedless-blocker:return_coverage_gap",
+          "slot_id": "return-coverage-final-terminal:return_coverage_gap",
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         },
         {
@@ -991,16 +991,16 @@
             "return_coverage_inconclusive"
           ],
           "expected_domain": "return_coverage",
-          "expected_identity_scope": "UNARY",
+          "expected_identity_scope": "RELATIONAL",
           "expected_target_kind": "function_return_coverage",
-          "slot_id": "return-coverage-seedless-blocker:return_coverage_inconclusive",
+          "slot_id": "return-coverage-final-terminal:return_coverage_inconclusive",
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 253,
-      "path": "scripts/function_tracer_pcode/proof/obligations/stage_runner.py",
-      "producer_site_manifest_id": "return-coverage-seedless-blocker",
-      "source_sha256": "d69e0a9ba103a9fa1baa6c2c8b528e50ae70fb942f8f640b4e6d0eff16baa3ea"
+      "line": 351,
+      "path": "scripts/function_tracer_pcode/authority/domains/return_coverage.py",
+      "producer_site_manifest_id": "return-coverage-final-terminal",
+      "source_sha256": "69bf5e1d5bc536b9d3dd61aa2e9107198f0c900f58b1388c0e40578bb39140db"
     },
     {
       "allowed_dispositions": [

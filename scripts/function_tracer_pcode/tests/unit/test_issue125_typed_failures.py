@@ -511,8 +511,8 @@ PRODUCER_SITES_ADDED_AFTER_ISSUE125 = (
     "checker-identical-function-identity",
     # plan v4 PR-P (#247): 最終の EQ gate が owner を含まない同一視を止めた cause。
     "pairwise-cross-side-identity-veto",
-    # plan v4 PR-C (#247): seed の無い解析の被覆の gap / inconclusive の cause。
-    "return-coverage-seedless-blocker",
+    # plan v4 PR-C (#247): 最終の比較の、seed の無い解析の被覆の gap / inconclusive の cause。
+    "return-coverage-final-terminal",
 )
 
 #: PR-125-A の後に別 Issue が **既存 site** へ足した cause slot（site は増えない）。
