@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "b11b910b1b6f144e786e3e85c407cc15ca909390578d96594459a0239251ee89",
+  "manifest_digest": "04d6f50e54696ac3fc485bc7feb89d71b9e305cab07b2765544a415bb8c06566",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 34,
   "sites": [
@@ -968,7 +968,7 @@
         "ELIGIBLE"
       ],
       "allowed_producer_ids": [
-        "return-coverage-seedless-gate-v1"
+        "return-coverage-seedless-runner-v1"
       ],
       "branch_or_attempt_contract_id": "return-coverage-seedless-blocker:invocation",
       "column": 12,

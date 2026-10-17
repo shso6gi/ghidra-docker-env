@@ -476,11 +476,12 @@ def test_pairwise_condition_with_indirect_is_an_unknown_strategy_result_not_an_e
 
 
 def test_a_derived_view_coverage_verdict_does_not_block_the_raw_pair_equivalence(monkeypatch):
-    """review r2 (R2-M1): 被覆の cause は pair 全体の EQ を塞ぐので、view の被覆の判定からは作らない。
+    """review r2 (R2-M1) / r3 (m3): 被覆の cause は pair 全体の EQ を塞ぐので、view の被覆の判定からは作らない。
 
-    比較の途中で、seed の無い view（抽象化・promotion の view と同じく ``semantic_successor`` で作る）が
-    被覆の gap の印を受けても（view の比較が gate を通ったときと同じ書き戻し）、印は view に付くだけで、
-    runner の raw pair が示す EQ（C5）は EQ のまま。
+    比較の途中で、seed の無い view の pair（抽象化・promotion の view と同じく ``semantic_successor`` で作る、
+    一部だけを覆う return）を本物の return-coverage gate に通し、その判定（gap / inconclusive）を
+    orchestration と同じく view に書き戻す。判定と印は view に付くだけで、runner の raw pair（C5）が示す
+    EQ は EQ のまま。gate が判定ごとに cause を出す設計（de2bd2b6）では、ここが UNKNOWN になった。
     """
 
     from scripts.function_tracer_pcode.proof.obligations.snapshot import record_comparison_annotation
@@ -488,14 +489,23 @@ def test_a_derived_view_coverage_verdict_does_not_block_the_raw_pair_equivalence
     from scripts.function_tracer_pcode.tests.unit._production_check_harness import run_production_check
 
     original = PairwiseStrategy.check
-    views: List[Any] = []
+    verdicts: List[Any] = []
 
     def check_after_a_view_verdict(self, analysis1, analysis2, save_formula=False):
-        if not views:
-            view = analysis1.semantic_successor(returns=[ReturnInfo("0x10", _p4(), [_positive()])])
-            assert view.outcome_seed is None
-            record_comparison_annotation(view, "return_case_coverage_gap")
-            views.append(view)
+        if not verdicts:
+            views = tuple(
+                analysis.semantic_successor(returns=[ReturnInfo("0x10", _p4(), [_positive()])])
+                for analysis in (analysis1, analysis2)
+            )
+            assert all(view.outcome_seed is None for view in views)
+            cases = tuple(self._extract_return_cases(view) for view in views)
+            reasons = self._collect_return_coverage_unsafety_reasons({}, *cases, None, None, *views)
+            verdicts.append(reasons)
+            for label, view in zip(("function1", "function2"), views):
+                for reason in reasons:
+                    if reason.startswith(label + ":return_coverage_"):
+                        note = "return_case_coverage_" + reason.split(":return_coverage_", 1)[1]
+                        record_comparison_annotation(view, note)
         return original(self, analysis1, analysis2, save_formula)
 
     monkeypatch.setattr(PairwiseStrategy, "check", check_after_a_view_verdict)
@@ -505,5 +515,5 @@ def test_a_derived_view_coverage_verdict_does_not_block_the_raw_pair_equivalence
 
     result = run_production_check("pr-c-view-verdict", left, right, analyze=_PIPELINE)
 
-    assert views and "return_case_coverage_gap" in views[0].analysis_notes
+    assert verdicts and any(":return_coverage_" in reason for reason in verdicts[0]), verdicts
     assert result["final_outcome"] == "EQUIVALENT", result.get("c_active_base")

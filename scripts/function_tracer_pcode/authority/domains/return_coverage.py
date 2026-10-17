@@ -5,8 +5,8 @@
 比較の前に、各側の return の条件が入力の全域を覆うか（被覆）を return-coverage gate
 （``proof/strategies/proof_gates/return_coverage.py``）が決める。outcome seed のある解析（本番の解析器の
 出力）では、被覆は outcome partition の段が決め、決められなければその段の cause（``outcome_*``）が
-authority へ出る。seed の無い解析（``semantic_successor`` の view: 再帰の抽象化・conditional lane・
-recurrence promotion、pre-return counted loop の要約）では outcome partition の段が走らず、gate は
+authority へ出る。seed の無い解析（pre-return counted loop の要約・``semantic_successor`` の view）では
+outcome partition の段が走らず、gate は
 条件の SMT による全域性の検査（``_check_return_case_coverage_gap``）で決める。その「覆わない（gap）」・
 「決められない（inconclusive）」は、この domain より前には authority の cause を持たなかった。gate は判定を
 raw analysis の被覆の印（``return_case_coverage_*``）に残し、印は monolithic fallback を止めるので、比較は
@@ -17,6 +17,7 @@ producer は 1 つ: runner が runner の raw pair の被覆の印で monolithic
 終わったことを表す。view（抽象化・promotion）の被覆の判定は view に印が付くだけで cause にしない: cause は
 pair 全体の EQ を塞ぐので、view の判定で別の比較が示した EQ を塞がない。
 
+* cause を作るのは runner の raw pair だけ（下の producer）。view の被覆の判定は cause にしない。
 * reason は 2 つ: ``return_coverage_gap``（全域でない入力の領域がある）と ``return_coverage_inconclusive``
   （全域かどうか決められない: 条件を SMT へ訳せない、solver が答えない ...）。どちらも legacy の
   ``UnknownReasonId`` と同じ id で、``PILOT_TYPED_CAUSE_KINDS`` が以前から名前だけ宣言していた。
@@ -67,7 +68,7 @@ RETURN_COVERAGE_INCONCLUSIVE_REASON_ID = "return_coverage_inconclusive"
 RETURN_COVERAGE_PROOF_KIND = "seedless_return_coverage_proof"
 RETURN_COVERAGE_CONTRACT_ID = "return-coverage-recovery"
 RETURN_COVERAGE_TARGET_KIND = "function_return_coverage"
-RETURN_COVERAGE_PRODUCER_ID = "return-coverage-seedless-gate-v1"
+RETURN_COVERAGE_PRODUCER_ID = "return-coverage-seedless-runner-v1"
 #: producer site（Phase 7 manifest の site id。``emit_return_coverage_signal`` の呼び手は 1 つ）。
 RETURN_COVERAGE_SITE_ID = "return-coverage-seedless-blocker"
 RETURN_COVERAGE_IDENTITY_SCOPE = IdentityScope.UNARY
