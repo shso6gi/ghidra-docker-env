@@ -12,10 +12,9 @@ from scripts.function_tracer_pcode.core.expression import Expression
 
 DIRECT = {
     "pcode_sites": {"coerce_optional_int"},
-    "return_normalization": {"rewrite_expression_signedness"},
 }
 FACADE_CALLBACKS = ( "target_active_key", "should_synthesize_implicit_passthrough_for_call",
-    "return_site_metadata_from_info", "make_tracked_return_value", "make_return_info",
+    "make_tracked_return_value",
     "get_freshest_callee_parameters",
 )
 SUPPLIERS = ("program_value", "debug_flag")
@@ -37,7 +36,7 @@ def test_collaborator_holds_only_its_dependencies():
 def test_every_delegator_forwards_to_the_collaborator():
     analyzer = _analyzer()
     names = [n for n, _ in inspect.getmembers(ParameterService, predicate=inspect.isfunction) if n != "__init__"]
-    assert len(names) == 26
+    assert len(names) == 23
     for name in names:
         sentinel = object()
         assert not isinstance(inspect.getattr_static(ReturnAnalyzer, "_" + name), (staticmethod, classmethod)), name

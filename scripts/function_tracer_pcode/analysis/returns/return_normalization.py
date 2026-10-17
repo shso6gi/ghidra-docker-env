@@ -5,17 +5,13 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
-from scripts.function_tracer_pcode.core.structural import StructuralKey
 from scripts.function_tracer_pcode.analysis.returns._shared import (
-    ConditionSimplifier,
     ConditionTracker,
     PcodeTracer,
     _PCODE_CALL_OPCODES,
     _PCODE_OPCODE_BY_MNEMONIC,
     _PCODE_VALUE_PASSTHROUGH_OPCODES,
-    _SIGNED_COMPARE_TO_UNSIGNED,
     _TrackedReturnValue,
-    _UNSIGNED_COMPARE_TO_SIGNED,
     _expressions_equivalent,
     _reduce_expression_under_conditions,
     canonicalize_expr_read_location,
@@ -35,7 +31,7 @@ from scripts.function_tracer_pcode.analysis.returns.phi_origins import expressio
 
 
 class ReturnNormalizationService:
-    """ReturnAnalyzer から切り出した return 値正規化（分割正規化・符号書き換え・tracked value 書き換え）の collaborator。
+    """ReturnAnalyzer から切り出した return 値正規化（分割正規化・tracked value 書き換え）の collaborator。
 
     per-analysis state: ``AnalysisSession`` を返す ``session`` supplier を 1 本保持し、呼び出し時に
     ``self.session().parameters`` / ``self.session().effect_summary`` を読む（nested ``_analysis_context`` の
@@ -92,68 +88,6 @@ class ReturnNormalizationService:
         if "control_region_return_recovery" not in analysis.analysis_notes:
             analysis.returns = self.exclusivize_return_regions(analysis.returns)
         analysis.returns = self.merge_equivalent_return_infos(analysis.returns)
-
-    def rewrite_expression_signedness(
-        self,
-        expr: Optional[Expression],
-        preferred: Dict[Tuple[StructuralKey, int], str],
-    ) -> Tuple[Optional[Expression], bool]:
-        if expr is None:
-            return None, False
-
-        changed = False
-        rebuilt = expr
-
-        if expr.expr_type == ExpressionType.PHI and expr.value:
-            rewritten_branches = []
-            branch_changed = False
-            for cond, value in expr.value:
-                rewritten_cond = cond
-                if cond is not None:
-                    cond_expr, cond_changed = self.rewrite_expression_signedness(
-                        cond.expression,
-                        preferred,
-                    )
-                    rewritten_cond = Condition(cond_expr, cond.negated)
-                    branch_changed = branch_changed or cond_changed
-                rewritten_value, value_changed = self.rewrite_expression_signedness(
-                    value,
-                    preferred,
-                )
-                branch_changed = branch_changed or value_changed
-                rewritten_branches.append((rewritten_cond, rewritten_value))
-            if branch_changed:
-                rebuilt = expr.clone_with(value=rewritten_branches)
-                changed = True
-        elif getattr(expr, "operands", None):
-            rewritten_operands = []
-            operand_changed = False
-            for operand in expr.operands:
-                rewritten_operand, child_changed = self.rewrite_expression_signedness(
-                    operand,
-                    preferred,
-                )
-                rewritten_operands.append(rewritten_operand)
-                operand_changed = operand_changed or child_changed
-            if operand_changed:
-                rebuilt = expr.clone_with(operands=rewritten_operands)
-                changed = True
-
-        if (
-            rebuilt.expr_type == ExpressionType.BINARY_OP
-            and rebuilt.operator in set(_UNSIGNED_COMPARE_TO_SIGNED) | set(_SIGNED_COMPARE_TO_UNSIGNED)
-        ):
-            fact = ConditionSimplifier.extract_scalar_constraint(Condition(rebuilt, False))
-            if fact is not None:
-                desired = preferred.get(fact.key)
-                if desired == "signed" and rebuilt.operator in _UNSIGNED_COMPARE_TO_SIGNED:
-                    rebuilt = rebuilt.clone_with(operator=_UNSIGNED_COMPARE_TO_SIGNED[rebuilt.operator])
-                    changed = True
-                elif desired == "unsigned" and rebuilt.operator in _SIGNED_COMPARE_TO_UNSIGNED:
-                    rebuilt = rebuilt.clone_with(operator=_SIGNED_COMPARE_TO_UNSIGNED[rebuilt.operator])
-                    changed = True
-
-        return rebuilt, changed
 
     def rewrite_tracked_return_values_for_op(
         self,

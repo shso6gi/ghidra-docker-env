@@ -590,8 +590,14 @@ def test_effect_sensitive_rewrite_does_not_treat_nontrivial_wrapper_as_location_
     assert all(kind != "final object-state symbolic" for kind, _candidate in candidates)
 
 
-def test_return_analyzer_repairs_mixed_scalar_signedness_from_scalar_evidence():
-    analyzer = ReturnAnalyzer(program=None, debug=False)
+def test_return_analyzer_keeps_mixed_scalar_signedness_as_decompiled():
+    """Issue #211: 比較の符号を多数決で書き換えない（旧 test は書き換えを assert していた。fixture は同じ）。
+
+    2 本目の path（``-101 s< value ∧ value != 0``）は ``value = -50`` を許し、そこで ``100 u< value`` は真、
+    書き換えた ``100 s< value`` は偽になる。解析の公開前の段を本物で通しても比較は ``u<`` のまま。
+    """
+    from scripts.function_tracer_pcode.tests.unit._analyzer_pipeline_harness import analyze_through_pipeline
+
     analysis = create_mock_analysis(
         function_name="branch_sign_bucket",
         parameters=[
@@ -619,9 +625,9 @@ def test_return_analyzer_repairs_mixed_scalar_signedness_from_scalar_evidence():
         ],
     )
 
-    analyzer._repair_mixed_scalar_signedness(analysis)
+    published = analyze_through_pipeline(analysis)
 
-    repaired_value = analysis.returns[1].value
-    assert repaired_value.operands[0].operator == "INT_ZEXT"
-    assert repaired_value.operands[0].operands[0].operator == "INT_SLESS"
-    assert "object_centric_scalar_signedness_repair" in analysis.analysis_notes
+    tail_value = next(info.value for info in published.returns if str(info.address) == "0x1008")
+    assert tail_value.operands[0].operator == "INT_ZEXT"
+    assert tail_value.operands[0].operands[0].operator == "INT_LESS"
+    assert "object_centric_scalar_signedness_repair" not in published.analysis_notes

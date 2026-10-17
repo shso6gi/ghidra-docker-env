@@ -156,13 +156,10 @@ class ReturnAnalyzer:
         )
         self._parameters = ParameterService(
             pcode_sites=self._pcode_sites,
-            return_normalization=self._return_normalization,
             debug_reporter=self._debug_reporter,
             target_active_key=lambda *a, **kw: self._target_active_key(*a, **kw),
             should_synthesize_implicit_passthrough_for_call=lambda *a, **kw: self._should_synthesize_implicit_passthrough_for_call(*a, **kw),
-            return_site_metadata_from_info=lambda *a, **kw: self._return_site_metadata_from_info(*a, **kw),
             make_tracked_return_value=lambda *a, **kw: self._make_tracked_return_value(*a, **kw),
-            make_return_info=lambda *a, **kw: self._make_return_info(*a, **kw),
             get_freshest_callee_parameters=lambda *a, **kw: self._get_freshest_callee_parameters(*a, **kw),
             program_value=lambda: self.program,
             debug_flag=lambda: self.debug,
@@ -995,8 +992,6 @@ class ReturnAnalyzer:
         return self._return_normalization.normalize_return_partition(analysis)
     def _rewrite_drops_composite_location_wrapper(self, original, rewritten, conditions):
         return self._return_normalization.rewrite_drops_composite_location_wrapper(original, rewritten, conditions)
-    def _rewrite_expression_signedness(self, expr, preferred):
-        return self._return_normalization.rewrite_expression_signedness(expr, preferred)
     def _rewrite_single_tracked_return_value_for_op(self, tracked, pcode_op, *, tracer, condition_tracker, path_conditions=None, current_function=None):
         return self._return_normalization.rewrite_single_tracked_return_value_for_op(tracked, pcode_op, tracer=tracer, condition_tracker=condition_tracker, path_conditions=path_conditions, current_function=current_function)
     def _rewrite_tracked_return_values_for_op(self, tracked_values, pcode_op, *, tracer, condition_tracker, path_conditions=None, current_function=None):
@@ -1022,8 +1017,6 @@ class ReturnAnalyzer:
         return self._parameters.collect_parameter_descriptors_from_expression(expr, discovered)
     def _collect_referenced_parameter_descriptors(self, return_infos):
         return self._parameters.collect_referenced_parameter_descriptors(return_infos)
-    def _collect_scalar_signedness_profiles(self, return_infos):
-        return self._parameters.collect_scalar_signedness_profiles(return_infos)
     def _condition_for_identity_key(self, key, conditions):
         return self._divergence_proofs.condition_for_identity_key(key, conditions)
     @staticmethod
@@ -1127,8 +1120,6 @@ class ReturnAnalyzer:
         return self._divergence_proofs.prove_single_guard_nonprogress_region_must_diverge(high_function, analysis, divergence_guard=divergence_guard, param=param)
     def _reads_share_stack_protector_probe(self, left, right):
         return self._stack_protector.reads_share_stack_protector_probe(left, right)
-    def _record_scalar_signedness_from_expression(self, expr, profiles):
-        return self._parameters.record_scalar_signedness_from_expression(expr, profiles)
     def _recursive_scc_certificate(self, function_key):
         return self._divergence_proofs.recursive_scc_certificate(function_key)
     # RegionFacts collaborator (Phase 5): the facade keeps these names as thin
@@ -1143,8 +1134,6 @@ class ReturnAnalyzer:
 
     _region_input_is_nondata_operand = staticmethod(input_is_nondata_operand)
     _region_parameter_index_for_location = staticmethod(parameter_index_for_location)
-    def _repair_mixed_scalar_signedness(self, analysis):
-        return self._parameters.repair_mixed_scalar_signedness(analysis)
     def _scc_preserves_guard_dependencies(self, scc_set):
         return self._divergence_proofs.scc_preserves_guard_dependencies(scc_set)
     def _single_guard_condition_matches(self, condition, divergence_guard, param):

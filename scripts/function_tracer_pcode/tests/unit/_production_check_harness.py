@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import shutil
-from typing import Any, Callable, Dict, Iterator
+from typing import Any, Callable, Dict, Iterator, Optional
 
 import pytest
 
@@ -75,10 +75,13 @@ def run_production_check(
     right_architecture: str = "x86:LE:64:default",
     retry_with_type_fix: bool = True,
     debug: bool = False,
+    analyze: Optional[Callable[[Any], Any]] = None,
 ) -> Dict[str, Any]:
     """``left`` / ``right``（公開前の解析）を比べた production の結果（``to_dict()``）。
 
     ``retry_with_type_fix`` の既定は CLI と同じ（``--no-retry-phases`` を付けない実行）。
+    ``analyze``（template → 公開した解析）の既定は ``publish_like_the_analyzer``（公開境界だけを通す）。
+    解析器の公開前の段も本物で通すときは ``_analyzer_pipeline_harness.analyze_through_pipeline`` を渡す。
     """
 
     from scripts.function_tracer_pcode.tests.conftest import MockProgram
@@ -87,13 +90,15 @@ def run_production_check(
     _require_unpublished(left, right)
     _activate_execution_authority(case_id)
     table = {"left": left, "right": right}
+    if analyze is None:
+        analyze = publish_like_the_analyzer
 
     class FakeReturnAnalyzer:
         def __init__(self, program: Any, **_kwargs: Any) -> None:
             self._program = program
 
         def analyze_function_by_name(self, _name: str, _timeout: Any) -> Any:
-            return publish_like_the_analyzer(table[self._program.getName()])
+            return analyze(table[self._program.getName()])
 
         def refresh_structural_recurrence_summary(self, analysis: Any, **_kwargs: Any) -> Any:
             return analysis
