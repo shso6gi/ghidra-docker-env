@@ -462,7 +462,6 @@ def _impl_analyze_function(
         self._clear_resolved_call_effect_blockers(result)
 
         self._synchronize_parameters_with_referenced_parameter_expressions(result)
-        self._repair_mixed_scalar_signedness(result)
         recurrence_proposal_open = bool(
             result.quarantined_recurrence_proposals
         )
