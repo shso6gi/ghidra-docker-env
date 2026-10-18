@@ -37,6 +37,7 @@ from scripts.function_tracer_pcode.core.runtime_refs._reading import items as _i
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
 )
+from scripts.function_tracer_pcode.core.live_values import package_instance
 
 
 @dataclass(frozen=True)
@@ -70,7 +71,7 @@ class DeferredCallRef:
         target_name = _call_target_display_name(target) if target is not None else "unknown"
         op = self.pcode_op_ref
         if op is not None:
-            offset = op.address_offset if type(op) is PcodeOpRef else attribute(op, "address_offset")
+            offset = op.address_offset if package_instance(op, PcodeOpRef) else attribute(op, "address_offset")
             if offset is not None:
                 return f"{builtin_str(target_name)}@0x{as_int(offset):x}"
         return target_name
@@ -91,7 +92,7 @@ class DeferredCallRef:
 def _call_target_display_name(target: Any) -> Any:
     """`target.display_name()`（`__post_init__` が正規化した `CallTargetRef` だけ。それ以外は `TypeError`）。"""
 
-    if type(target) is CallTargetRef:
+    if package_instance(target, CallTargetRef):
         return target.display_name()
     raise TypeError(f"{type_name(type(target))} is not a CallTargetRef")
 
@@ -99,7 +100,7 @@ def _call_target_display_name(target: Any) -> Any:
 def _deferred_call_display_name(ref: Any) -> Any:
     """`ref.display_name()`（`DeferredCallRef` だけ。それ以外は `TypeError`。live な値の method を呼ばない）。"""
 
-    if type(ref) is DeferredCallRef:
+    if package_instance(ref, DeferredCallRef):
         return ref.display_name()
     raise TypeError(f"{type_name(type(ref))} is not a DeferredCallRef")
 

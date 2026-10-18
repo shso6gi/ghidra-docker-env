@@ -359,6 +359,32 @@ class _Scan(_Source):
         self.reducer = reducer
 
 
+class _ReceiverItems(_Source):
+    """`receiver_items` の source: record の宣言した監査済みの generator method を walker が呼び、record を receiver として
+    進める（再開の前に型と method を確かめ直す）。"""
+
+    __slots__ = ("record", "name", "options")
+
+    def __init__(self, record: Any, name: str, options: Tuple[Tuple[str, Any], ...]) -> None:
+        self.record = record
+        self.name = name
+        self.options = options
+
+
+def receiver_items(record: Any, name: str, **options: Any) -> _Source:
+    """record の (key, source) の組を、record の宣言した監査済みの generator method（`audited_generator`）`name` で作る
+    object（`json_items` と別の組: `to_dict` の版など）。walker は method を呼ぶ時点で型から引き、record を receiver として
+    1 歩ずつ進める（外の code の後は再開の前に、record の型・型の信頼・method を確かめ直す）。`options` は組み込みの
+    scalar だけ（method の keyword 引数）。"""
+
+    if type(name) is not str:
+        raise TypeError("receiver_items names the method")
+    for value in options.values():
+        if not (value is None or type(value) is bool or type(value) is int or type(value) is str):
+            raise TypeError("receiver_items options are builtin scalars")
+    return _ReceiverItems(record, name, tuple(options.items()))
+
+
 class _Flatten(_Source):
     """`values` の要素ごとに、その属性 `attribute`（組み込みの振る舞いの列）の要素を順に並べた列。"""
 
@@ -465,23 +491,126 @@ def _walkable_items(items: Any) -> bool:
 
 
 def _walk_iter(items: Any) -> Iterator[Any]:
-    """walker が辿ってよい列の iterator（それ以外は `TypeError`。上書きした `__iter__` を呼ばない）。package の generator は
-    区間の外で進める（`_outside_the_region`: generator の code は J19 の監査の root とは限らない）。"""
+    """walker が辿ってよい列の iterator（それ以外は `TypeError`。上書きした `__iter__` を呼ばない）。package の generator は、
+    宣言した（J19 の監査が本体を辿る）ものは監査済みの code として 1 歩ずつ（`_AuditedSteps`）、宣言していないものは
+    外の code として区間の外で（`_outside_the_region`）進める。"""
 
     if not _walkable_items(items):
         raise TypeError(f"{type_name(type(items))} is not a builtin iterable")
-    if package_generator(items) and not _audited(items):
-        return _outside_the_region(items)
+    if package_generator(items):
+        return _AuditedSteps(items) if _audited(items) else _outside_the_region(items)
     return iter(items)
 
 
 def _record_items(json_items: Any, item: Any) -> Iterator[Any]:
-    """record の `json_items(item)` の列。`json_items` 自身の generator（J19 の監査の root の code）はそのまま進める。"""
+    """record の `json_items(item)` の列。`json_items` 自身の generator（J19 の監査の root の code）は、record を
+    receiver とする監査済みの code として 1 歩ずつ進める（`_AuditedSteps`: 再開の前に record の型を確かめ直す）。"""
 
-    items = json_items(item)
-    if type(items) is types.GeneratorType and items.gi_code is json_items.__code__:
-        return items
+    kind = type(item)
+    state = live_values.begin_activation(item, kind)
+    try:
+        items = json_items(item)
+    finally:
+        live_values.end_activation(state)
+    if _receiver_bound(items, json_items):
+        return _AuditedSteps(items, item, kind, "json_items", json_items)
     return _walk_iter(items)
+
+
+def _receiver_bound(items: Any, json_items: Any) -> bool:
+    """`json_items` が返した列を、record を receiver とする監査済みの code として進めるか: `json_items` 自身の generator と、
+    `json_items` が返した宣言した監査済みの generator（record を受け取って止まり得る: 再開の前に record を確かめる）。"""
+
+    return type(items) is types.GeneratorType and (
+        items.gi_code is json_items.__code__ or (package_generator(items) and _audited(items))
+    )
+
+
+class _AuditedSteps:
+    """監査済みの code の generator（record の `json_items`・宣言した package の generator）を 1 歩ずつ進める唯一の
+    再開の仕組み（walker の frame・`scalar_record_dict`）。
+
+    外の code をまたいで止まっている generator は、止まる前に確かめた前提（record の型が package の型で、その型の
+    protocol がこの generator の関数）を、外の code が走った後（`live_values.reliance().count` が変わった）なら再開の
+    **前に** 確かめ直す（落ちれば判定不能: 再開しない）。1 歩の間は receiver に頼ることを activation に記録する（その
+    歩の中で外の code が走れば、戻るときに `outside_audit` が確かめ直す）。generator の中の `package_instance` の絞り
+    込みはその歩の activation に入り、歩が終われば捨てる（`yield` の後に使わない: J19 の規則）。"""
+
+    __slots__ = ("iterator", "receiver", "kind", "protocol", "method", "epoch", "state")
+
+    def __init__(
+        self, iterator: Any, receiver: Any = None, kind: Optional[type] = None,
+        protocol: Optional[str] = None, method: Any = None,
+    ) -> None:
+        self.iterator = iterator
+        self.receiver = receiver
+        self.kind = kind
+        self.protocol = protocol
+        self.method = method
+        self.state = live_values.reliance()
+        self.epoch = self.state.count
+
+    def __iter__(self) -> "_AuditedSteps":
+        return self
+
+    def __next__(self) -> Any:
+        state = self.state
+        kind = self.kind
+        if kind is None:
+            activation: List[Any] = []
+        else:
+            if self.epoch != state.count:
+                _require_receiver(self.receiver, kind, self.protocol, self.method)
+            activation = [(self.receiver, kind)]
+        active = state.active
+        active.append(activation)
+        try:
+            return next(self.iterator)
+        finally:
+            active.pop()
+            if not active:  # `live_values.end_activation` と同じ（walk の中は walk の activation が残る）
+                state.trusted.clear()
+            self.epoch = state.count
+
+
+def _require_receiver(receiver: Any, kind: type, protocol: Optional[str], method: Any) -> None:
+    """外の code の後に監査済みの code を続ける前の確かめ: receiver の型がまだ `kind` で、`kind` がまだ package の型で、
+    その protocol がまだ同じ関数（`_record_protocols` は引くたびに型の信頼を確かめる）。落ちれば判定不能。"""
+
+    if type(receiver) is not kind:
+        raise live_values.undecidable(f"a {type_name(kind)} receiver changed its class in foreign code")
+    if protocol in _PROTOCOL_INDEX:
+        if _record_protocols(kind)[_PROTOCOL_INDEX[protocol]] is not method:
+            raise live_values.undecidable(f"{type_name(kind)}.{protocol} changed or lost trust in foreign code")
+    elif protocol is not None:
+        if _receiver_generator(kind, protocol) is not method:
+            raise live_values.undecidable(f"{type_name(kind)}.{protocol} changed or lost trust in foreign code")
+    elif not live_values.package_type(kind):
+        raise live_values.undecidable(f"{type_name(kind)} lost trust in foreign code")
+
+
+def _receiver_generator(kind: type, name: str) -> Any:
+    """`receiver_items` が呼んでよい method: package の型（今）の、宣言した監査済みの generator 関数（`audited_generator`）。
+    それ以外は `None`。"""
+
+    if not live_values.package_type(kind):
+        return None
+    method = type_attribute(kind, name)
+    if type(method) is not types.FunctionType or _AUDITED_GENERATORS.get(id(method.__code__)) is not method.__code__:
+        return None
+    return method
+
+
+def call_protocol(value: Any, name: str, *args: Any, **kwargs: Any) -> Any:
+    """package の型の protocol（`_PROTOCOL_NAMES`）を呼ぶ唯一の入口: 呼ぶ時点で型から引き（`protocol_method`）、呼ぶ
+    間は値を receiver とする監査済みの code として activation を積む（中で外の code が走れば戻るときに確かめ直す）。"""
+
+    method = protocol_method(value, name)
+    state = live_values.begin_activation(value)
+    try:
+        return method(value, *args, **kwargs)
+    finally:
+        live_values.end_activation(state)
 
 
 def _is_one_shot(source: Any) -> bool:
@@ -1132,17 +1261,15 @@ class JsonBudget:
         # sized leaf の protocol は package の型の関数を直接呼ぶ（instance の属性を引かない）
         # 見積もりの作業量は今の walk の作業量（walk の外ならこの予算）へ数える（byte と分ける）
         active = _ACTIVE_WORK.get()
-        size = protocol_method(leaf, "__json_tree_bytes__")(
-            leaf, RESULT_JSON_POLICY, remaining, self if active is None else active,
-        )
+        size = call_protocol(leaf, "__json_tree_bytes__", RESULT_JSON_POLICY, remaining, self if active is None else active)
         if size is None:
             # DAG のまま見積もれない形（閉路。未凍結の式の中だけ）: node を 1 つ作るたびに
             # 数えながら作る（作ってから数えない）
             before = self.consumed
-            built = protocol_method(leaf, "__json_tree_metered__")(leaf, RESULT_JSON_POLICY, self)
+            built = call_protocol(leaf, "__json_tree_metered__", RESULT_JSON_POLICY, self)
             return (built if build else None), self.consumed - before
         self.charge(size)
-        return (protocol_method(leaf, "__json_tree__")(leaf) if build else None), size
+        return (call_protocol(leaf, "__json_tree__") if build else None), size
 
 
 # ---------------------------------------------------------------------------
@@ -1850,6 +1977,14 @@ def _stringified_key(key: Any, work: "JsonBudget") -> str:
     raise TypeError(f"mapping key {type_name(kind)} is not stringified without its own __str__")
 
 
+def _stringified_pairs(pairs: Iterator[Any], work: "JsonBudget") -> Iterator[Tuple[str, Any]]:
+    """`mapping_of(stringify_keys=True)` の組（key を `_stringified_key` で文字列にする。組は `read_pair` で読む）。"""
+
+    for pair in pairs:
+        key, child = live_values.read_pair(pair)
+        yield _stringified_key(key, work), child
+
+
 def stringify_plain_key(key: Any, work: "JsonBudget") -> str:
     """mapping の key の `str(key)`（scalar と scalar の tuple だけ。作る前に長さを `work` へ数える）。
 
@@ -2140,7 +2275,8 @@ def _reread(reread: Reread) -> Any:
         return value
     converter = reread.converter
     _require_converter(converter, "reread")  # 呼ぶ時点で確かめる（作った後に書き換えた converter を呼ばない）
-    return converter(value)
+    with live_values.relying_on():  # 監査済みの code（converter）の 1 回の呼び出し
+        return converter(value)
 
 
 def _unfingerprinted(kind: str, reason: str, over: int) -> BoundedEvidence:
@@ -2778,7 +2914,7 @@ class _Walk:
             # 組み込みの容器の iterator・package の generator は遅延配列: 1 要素ずつ引き出す
             # （pure layer の record は source の構成子を import できないので、これで列を渡す。package の generator は
             # 監査済みの区間の外で進める: `_walk_iter`）
-            self.push("list", _walk_iter(item) if package_generator(item) else item, parent, key, item, build=build)
+            self.push("list", _walk_iter(item), parent, key, item, build=build)
             return
         json_items, json_tree = _record_protocols(kind)[:2]
         if json_items is not None:
@@ -2788,7 +2924,7 @@ class _Walk:
         if json_tree is not None:
             built, size = self.budget.tree(item, build=build)
             if self.token_sink is not None:
-                self.token("t" + protocol_method(item, "__json_identity__")(item))
+                self.token("t" + call_protocol(item, "__json_identity__"))
             if build:
                 if self.mode == CANONICAL:
                     # 大きさは作る前に数え済み。canonical な複製は予算の外（同じ大きさ）
@@ -2941,12 +3077,21 @@ class _Walk:
                 self.reject(f"{type_name(type(mapping))} is not a builtin mapping")
             pairs: Iterator[Any] = mapping.items() if type(mapping) is _PairsView else items_of(mapping)
             if item.stringify_keys:
-                effort = self.effort
-                pairs = ((_stringified_key(child_key, effort), child) for child_key, child in pairs)
+                pairs = _stringified_pairs(pairs, self.effort)
             self.push(
                 "dict", pairs, parent, key, item, build=build,
                 fn=item.fn, preserve_keys=(self.mode == LEGACY),
             )
+        elif kind is _ReceiverItems:
+            record = item.record
+            record_kind = type(record)
+            method = _receiver_generator(record_kind, item.name)
+            if method is None:
+                self.reject(f"{type_name(record_kind)}.{item.name} is not a declared audited generator of a package type")
+            with live_values.relying_on(record, record_kind):
+                generator = method(record, **dict(item.options))
+            steps = _AuditedSteps(generator, record, record_kind, item.name, method)
+            self.push("dict", steps, parent, key, item, build=build, preserve_keys=(self.mode == LEGACY))
         elif kind is _Inline:
             self.push("dict", iter(item.pairs), parent, key, item, build=build)
         elif kind is _Nested:
@@ -2977,8 +3122,12 @@ class _Walk:
         elif kind is _Scan:
             reducer = item.reducer
             # reducer の method は型の関数（`scan` が確かめた package の関数）を直接呼ぶ（instance の
-            # 属性に置いた callable を呼ばない）
+            # 属性に置いた callable を呼ばない）。呼ぶたびに、前に引いた後で外の code が走っていれば引き直して確かめ
+            # （`_reducer_methods`）、呼ぶ間は reducer を receiver とする activation を積む
+            kind = type(reducer)
             add, result = self._reducer_methods(reducer)
+            state = live_values.reliance()
+            epoch = state.count
             values = item.values
             if _is_one_shot(values):
                 self.entered_iterator = True
@@ -2993,15 +3142,25 @@ class _Walk:
                     # 引き出した要素を畳み込む前に数える（上限を超えれば残りを引き出さない）。
                     # 要素の中の仕事は reducer が同じ作業量へ数える
                     effort.charge(1)
-                    add(reducer, element, work=effort)
+                    if state.count != epoch:
+                        add, result = self._reducer_methods_again(reducer, kind, add, result)
+                        epoch = state.count
+                    state_ = live_values.begin_activation(reducer, kind)
+                    try:
+                        add(reducer, element, work=effort)
+                    finally:
+                        live_values.end_activation(state_)
             except PRODUCER_FAILURES as exc:
                 self.producer_failed(exc)
             except JsonBudgetExhausted:
                 # 集計を途中で止めた値は別の値: この walk の予算の超過として扱う
                 self.budget.exceeded()
                 raise
+            if state.count != epoch:
+                add, result = self._reducer_methods_again(reducer, kind, add, result)
             try:
-                produced = result(reducer, work=self.effort)
+                with live_values.relying_on(reducer, kind):
+                    produced = result(reducer, work=self.effort)
             except JsonBudgetExhausted:
                 self.budget.exceeded()
                 raise
@@ -3105,7 +3264,9 @@ class _Walk:
         try:
             # 値の storage の読み（key の検査・instance の状態）も固定の上限を超えた分はこの walk の作業量へ
             # 数える（組み込みのままの容器は要素ごとに数えて辿るので、検査の要る容器も同じ意味にする）
-            with live_values.metered_storage_reads(self.effort), live_values.audited_region():
+            # walk の間は監査済みの code（walk 自身の activation: 中の activation が降りても型の確かめの記録が続く。外の
+            # code の区間を抜けると確かめ直す）
+            with live_values.metered_storage_reads(self.effort), live_values.audited_region(), live_values.relying_on():
                 self.enter(source, holder, 0, self.build)
                 self.drain_to(0)
         finally:
@@ -3121,6 +3282,17 @@ class _Walk:
         add, result = protocols[_PROTOCOL_INDEX["add"]], protocols[_PROTOCOL_INDEX["result"]]
         if add is None or result is None:
             self.reject(f"{type_name(kind)} is not a package Reducer")
+        return add, result
+
+    def _reducer_methods_again(self, reducer: Any, kind: type, add: Any, result: Any) -> Tuple[Any, Any]:
+        """外の code が走った後に reducer の method を引き直す: 型・method が変わっていれば判定不能（引いておいた method
+        も、書き換えた後の型の method も、双子の値を作らない）。"""
+
+        if type(reducer) is not kind:
+            raise live_values.undecidable(f"a {type_name(kind)} reducer changed its class in foreign code")
+        protocols = _record_protocols(kind)
+        if protocols[_PROTOCOL_INDEX["add"]] is not add or protocols[_PROTOCOL_INDEX["result"]] is not result:
+            raise live_values.undecidable(f"{type_name(kind)} reducer methods changed or lost trust in foreign code")
         return add, result
 
     def producer_failed(self, exc: BaseException) -> None:
@@ -3160,7 +3332,13 @@ class _Walk:
             separator = self.item_separator if frame.count else 0
             frame.count += 1
             if frame.kind == "dict":
-                child_key, target = child
+                if type(child) is tuple and tuple.__len__(child) == 2:
+                    child_key, target = child  # exact な tuple の unpack は Python の code を呼ばない（`read_pair` の速い経路）
+                else:
+                    try:
+                        child_key, target = live_values.read_pair(child)
+                    except (TypeError, ValueError) as exc:
+                        self.reject(exception_text(exc))
                 if type(child_key) is str:
                     text_key = child_key
                 else:
@@ -3196,10 +3374,13 @@ class _Walk:
                 if not _is_converter(fn):
                     # 作った後に source の `fn` を書き換えた: 登録した converter だけを呼ぶ時点で確かめる
                     self.reject(f"{type_name(type(fn))} is not a registered source_converter")
+                state = live_values.begin_activation()  # 監査済みの code（converter）の 1 回の呼び出し
                 try:
                     converted = fn(target)
                 except PRODUCER_FAILURES as exc:
                     self.producer_failed(exc)
+                finally:
+                    live_values.end_activation(state)
                 self.enter(converted, parent, out_key, frame.build)
 
 
@@ -3303,7 +3484,16 @@ def scalar_record_dict(record: Any) -> dict:
 
     out = {}
     # protocol は package の型の package の関数だけ（record の属性を読まない: `__getattribute__` を呼ばない）
-    for key, value in protocol_method(record, "json_items")(record):
+    kind = type(record)
+    read_pair = live_values.read_pair
+    count = 0
+    # 列は walker と同じ規則（`_record_items`）、組は exact な tuple ならそのまま・それ以外は `read_pair`。list を作らずに
+    # 1 組ずつ読む（walker の外で record の組を読む唯一の入口）
+    for pair in _record_items(protocol_method(record, "json_items"), record):
+        count += 1
+        if count > live_values.SCAN_LIMIT:
+            raise TypeError(f"{type_name(kind)}.json_items has more items than a fixed record")
+        key, value = pair if type(pair) is tuple and tuple.__len__(pair) == 2 else read_pair(pair)
         if value is not None and not issubclass(type(value), _SCALAR_TYPES):
             raise TypeError(
                 f"{type_name(type(record))}.{key} is not a scalar; use materialize()"

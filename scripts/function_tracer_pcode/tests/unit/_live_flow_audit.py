@@ -42,7 +42,11 @@ ITER = "ITER"  # 組み込みの iterator（要素が live）
 CONT = "CONT"  # package が作った組み込みの容器（要素が live）
 SELF = "SELF"  # package の object 自身の状態（record でない method の self）
 WORK = "WORK"  # 作業量 / 予算 / policy（owner の object）
-REC = "REC"    # "REC:<module>:<class>": 型を確かめた package の object（field は live）
+REC = "REC"    # "REC:<module>:<class>": 監査済みの code が live な引数で作った package の object（field は live）
+RECR = "RECR"  # "RECR:<module>:<class>": walker が渡す receiver（record・reducer・property の持ち主）。型は呼ぶ時点と
+#               外の code の後に owner が確かめる（`json_encoding._AuditedSteps` / `live_values.relying_on`）: yield をまたいでよい
+RECN = "RECN"  # "RECN:<module>:<class>": `live_values.package_instance(x, C)` で絞り込んだ値。外の code の後は owner が
+#               確かめ直す（activation）。generator の `yield` をまたがない（再開の後は live: 絞り込み直す）
 OBJ = "OBJ"    # "OBJ:<module>:<class>": package が plain な引数で作った object（field は自身の状態）
 VER = "VER"    # live だが組み込みの振る舞いを確かめた容器（反復・`len`・真偽は組み込みの slot）
 TYPE = "TYPE"  # live な値の型（`type(x)`）: `is` / `issubclass` / owner の関数にだけ渡してよい
@@ -63,6 +67,7 @@ LIVE_VALUES_RESULTS = {
     "values_of": ITER,
     "elements_of": ITER,
     "builtin_mapping": VER,
+    "read_pair": CONT,
 }
 #: `core/read_limits`（作業量を受け取らない読みの固定の上限）の関数の戻り値の種類（書いていない関数は plain）
 READ_LIMITS_RESULTS = {
@@ -96,8 +101,14 @@ def is_rec(kind) -> bool:
     return isinstance(kind, str) and kind.startswith(REC)
 
 
-def rec(module: str, cls: str) -> str:
-    return f"{REC}:{module}:{cls}"
+def rec(module: str, cls: str, prefix: str = REC) -> str:
+    return f"{prefix}:{module}:{cls}"
+
+
+def rec_prefix(kind) -> Optional[str]:
+    """REC / RECR / RECN のどれか（package の object の種類でなければ None）。"""
+
+    return kind.split(":", 1)[0] if is_rec(kind) else None
 
 
 def obj(module: str, cls: str) -> str:
@@ -449,12 +460,15 @@ class _FunctionAudit:
                 self.v(s, "augmented assignment with a live value")
         elif isinstance(s, (ast.For, ast.AsyncFor)):
             element = self.iterate(s.iter, s)
-            self.assign(s.target, element, None, element_of_iteration=True)
-            self.block(s.body)
+            for _pass in range(2 if _suspends(s.body) else 1):
+                # 本体が止まる（yield）なら、次の繰り返しは止まった後の種類で辿り直す（絞り込みが yield をまたがない）
+                self.assign(s.target, element, None, element_of_iteration=True)
+                self.block(s.body)
             self.block(s.orelse)
         elif isinstance(s, ast.While):
-            self.test(s.test)
-            self.block(s.body)
+            for _pass in range(2 if _suspends(s.body) else 1):
+                self.test(s.test)
+                self.block(s.body)
             self.block(s.orelse)
         elif isinstance(s, ast.If):
             self.test(s.test)
@@ -642,13 +656,25 @@ class _FunctionAudit:
             self.v(where, "iterating a live value")
             return LIVE
         if kind in (ITER, CONT):
-            self._pairs = True
+            # 要素を unpack してよいのは、要素が組み込みの tuple だと分かる列だけ（`items_of` などの読み・組み込みの
+            # 容器の `.items()`・`enumerate` / `zip`）。それ以外の要素（live な値）の unpack は値の `__iter__` を呼ぶ
+            self._pairs = _yields_builtin_tuples(self, node)
             return LIVE
         return None
 
     # -- 型の絞り込み ------------------------------------------------------
     def narrowing(self, test):
-        """`type(x) is C` / `type(x) in (A, B)` / `kind is C`（kind = type(x)）→ (真のとき, 偽のとき)。"""
+        """`type(x) is C` / `type(x) in (A, B)` / `kind is C`（kind = type(x)）→ (真のとき, 偽のとき)。条件の式の中で
+        generator が止まる（`yield`）なら、絞り込みは止まった後の読みに使えない（`package_instance` の絞り込みを数えない）。"""
+
+        positive, negative = self._narrowing(test)
+        if any(isinstance(node, (ast.Yield, ast.YieldFrom)) for node in ast.walk(test)):
+            positive = {name: kind for name, kind in positive.items() if rec_prefix(kind) != RECN}
+            negative = {name: kind for name, kind in negative.items() if rec_prefix(kind) != RECN}
+        return positive, negative
+
+    def _narrowing(self, test):
+        """`narrowing` の本体（`yield` の扱いの前）。"""
 
         positive: Dict[str, object] = {}
         negative: Dict[str, object] = {}
@@ -672,6 +698,15 @@ class _FunctionAudit:
                     positive[subject] = CONT if CONT in kinds else None
                 elif len(kinds) == 1:
                     positive[subject] = kinds.pop()
+            return positive, negative
+        if (
+            isinstance(test, ast.Call) and len(test.args) == 2 and isinstance(test.args[0], ast.Name)
+            and self._live_values_function(test.func) == "package_instance"
+        ):
+            # 型の信頼を確かめた絞り込み（Issue #242 第 11 回: 外の code の後と yield の後は確かめ直す）
+            kind = self._narrowed_kind(test.args[1], checked=True)
+            if is_rec(kind):
+                positive[test.args[0].id] = rec(*rec_class(kind), prefix=RECN)
             return positive, negative
         if isinstance(test, ast.Call) and len(test.args) == 1 and isinstance(test.args[0], ast.Name):
             if self._live_values_function(test.func) in VERIFYING_PREDICATES:
@@ -699,6 +734,10 @@ class _FunctionAudit:
         # 型の絞り込みは identity（`is`）だけ: `==` / `in` は metaclass の `__eq__` を呼び得る
         if isinstance(op, (ast.Is, ast.IsNot)):
             kinds = [self._narrowed_kind(right)]
+            if is_rec(kinds[0]) and tainted(self.env.get(subject)):
+                # live な値の `type(x) is C`（C は package の型）は C の今の信頼を確かめない: 絞り込みに数えない
+                self.v(test, "narrowing to a package class without checking its trust (use live_values.package_instance)")
+                return positive, negative
         if not kinds or any(k == "?" for k in kinds):
             return positive, negative
         kind = kinds[0] if len(set(kinds)) == 1 else (CONT if all(k in (None, CONT) for k in kinds) else "?")
@@ -731,7 +770,7 @@ class _FunctionAudit:
         for name, kind in updates.items():
             current = self.env.get(name)
             if is_rec(kind) and not tainted(current):
-                kind = OBJ + kind[len(REC):]
+                kind = obj(*rec_class(kind))
             elif kind == VER and not tainted(current):
                 kind = None
             out[name] = kind
@@ -744,7 +783,7 @@ class _FunctionAudit:
             return self.type_of[node.id]
         return None
 
-    def _narrowed_kind(self, node):
+    def _narrowed_kind(self, node, checked: bool = False):
         """`type(x) is <node>` のとき x の種類。分からなければ "?"。"""
 
         if isinstance(node, ast.Constant) and node.value is None:
@@ -978,22 +1017,43 @@ class _FunctionAudit:
     def e_Yield(self, node):
         if node.value is not None:
             self.returns.add(self.expr(node.value))
+        self._suspended()
         return None
 
     def e_YieldFrom(self, node):
-        kind = self.expr(node.value)
+        self._delegated = node.value
+        try:
+            kind = self.expr(node.value)
+        finally:
+            self._delegated = None
         if bad(kind):
             self.v(node, "yield from a live value")
         self.returns.add(LIVE if tainted(kind) else None)
+        self._suspended()
         return None
 
+    _delegated = None
+
+    def _suspended(self) -> None:
+        """generator が止まる（`yield`）: 止まっている間に外の code が走り得る。`package_instance` の絞り込みは再開の後に
+        使わない（live に戻す: 絞り込み直す）。walker の receiver（RECR）は再開の前に owner が確かめる。"""
+
+        for name, kind in list(self.env.items()):
+            if rec_prefix(kind) == RECN:
+                self.env[name] = LIVE
     def e_Await(self, node):
         return self.expr(node.value)
 
     def _comprehension(self, node, elements):
         saved = dict(self.env)
-        for generator in node.generators:
+        for index, generator in enumerate(node.generators):
             element = self.iterate(generator.iter, node)
+            if index == 0 and isinstance(node, ast.GeneratorExp):
+                # generator 式は最初の iterable だけを作る時点で評価し、残り（条件・本体・後の iterable）は消費されるときに
+                # 走る: その間に外の code が走り得るので、外で絞り込んだ値は live
+                for name, kind in list(self.env.items()):
+                    if rec_prefix(kind) == RECN:
+                        self.env[name] = LIVE
             self.assign(generator.target, element, None, element_of_iteration=True)
             for condition in generator.ifs:
                 self.test(condition)
@@ -1379,6 +1439,10 @@ class _FunctionAudit:
             args = list(args[1:])
             bound = False
         taint: Dict[str, object] = {}
+        if node is not self._delegated and any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in _own_nodes(function)):
+            # 新しい generator（`yield from` で今の generator が委ねるのでない）は walker の receiver の再開の確かめの
+            # 外で進む: 受け取る receiver は絞り込んだ値と同じ（yield をまたがない）
+            args = [rec(*rec_class(k), prefix=RECN) if rec_prefix(k) == RECR else k for k in args]
         for index, arg_kind in enumerate(args):
             if index < len(params):
                 if arg_kind is not None and arg_kind != SELF:
@@ -1489,6 +1553,45 @@ def _exits(body) -> bool:
     return bool(body) and isinstance(body[-1], (ast.Return, ast.Raise, ast.Continue, ast.Break))
 
 
+#: 要素が組み込みの tuple の組である列を作る owner の読み（live_values / read_limits の関数の名前）
+_PAIR_READERS = frozenset({"items_of", "items_within_limit", "prefix_items_within_limit"})
+#: 要素が組み込みの tuple の組である list を返す json_encoding の読み（今は無い）
+_OWNER_PAIR_READERS: frozenset = frozenset()
+
+
+def _yields_builtin_tuples(audit, node) -> bool:
+    """`node`（反復する式）の要素が組み込みの tuple か: owner の組の読み・package が作った容器の `.items()`・
+    `enumerate(...)` / `zip(...)`。"""
+
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name) and func.id in ("enumerate", "zip") and audit.index.resolve(audit.module, func.id) is None:
+        return True
+    if isinstance(func, ast.Attribute) and func.attr == "items" and not node.args:
+        return audit.expr(func.value) == CONT
+    name = audit._live_values_function(func)
+    if name in _PAIR_READERS:
+        return True
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.attr in _OWNER_PAIR_READERS:
+        resolved = audit.index.resolve(audit.module, func.value.id)
+        if resolved and resolved[0] == "module" and resolved[1] == PKG + ".core.json_encoding":
+            return True
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.attr in _PAIR_READERS:
+        resolved = audit.index.resolve(audit.module, func.value.id)
+        return bool(resolved and resolved[0] == "module" and resolved[1] == PKG + ".core.read_limits")
+    if isinstance(func, ast.Name) and func.id in _PAIR_READERS:
+        resolved = audit.index.resolve(audit.module, func.id)
+        return bool(resolved and resolved[1] == PKG + ".core.read_limits")
+    return False
+
+
+def _suspends(body) -> bool:
+    """文の列が（入れ子の関数の外で）generator を止めるか（`yield` / `yield from`）。"""
+
+    return any(isinstance(node, (ast.Yield, ast.YieldFrom)) for node in _own_nodes(ast.Module(body=list(body), type_ignores=[])))
+
+
 def protocol_roots(index: PackageIndex):
     """walker が live な値を渡して呼ぶ package の callback（record の protocol・converter・reducer）。"""
 
@@ -1499,20 +1602,23 @@ def protocol_roots(index: PackageIndex):
         last = qual.split(".")[-1]
         cls = qual.split(".")[0] if "." in qual else None
         params = node.args.posonlyargs + node.args.args
+        # receiver（record・reducer・property / state setter の持ち主）は RECR: 型は owner が呼ぶ時点と外の code の後に確かめる
         if cls and last in RECORD_METHODS:
-            yield (module, qual), {params[0].arg: rec(module, cls)}
+            yield (module, qual), {params[0].arg: rec(module, cls, RECR)}
         elif any(isinstance(d, ast.Name) and d.id == "source_converter" for d in node.decorator_list):
             yield (module, qual), {params[0].arg: LIVE}
         elif cls and index.subclass_of(module, cls, reducer) and last == "add":
+            # reducer の self は自分の状態（SELF: 自分で作った容器）。型は walker が呼ぶたびに確かめ、呼ぶ間は receiver
+            # として activation に記録する（`json_encoding._Walk` の `_Scan`）
             yield (module, qual), {params[1].arg: LIVE}
         elif cls and index.subclass_of(module, cls, reducer) and last == "result":
             yield (module, qual), {}
         elif cls and index.is_readable_property((module, qual)) and params:
             # `live_values.attribute` が呼ぶ property（`readable_property` で宣言したものだけ。field は live）
-            yield (module, qual), {params[0].arg: rec(module, cls)}
+            yield (module, qual), {params[0].arg: rec(module, cls, RECR)}
         elif cls and last == "__setattr__" and len(params) >= 3 and index.is_state_setter((module, qual)):
             # `live_values.set_state` が呼ぶ `state_setter` で宣言した `__setattr__`（書く値は live）
-            yield (module, qual), {params[0].arg: rec(module, cls), params[2].arg: LIVE}
+            yield (module, qual), {params[0].arg: rec(module, cls, RECR), params[2].arg: LIVE}
 
 
 

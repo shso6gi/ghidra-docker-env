@@ -47,7 +47,7 @@ def _witness_count(witness: Any) -> int:
 def _location_base_display_name(ref: Any) -> Any:
     """`ref.display_name()`（`LocationBaseRef` だけ。それ以外は `TypeError`。live な値の method を呼ばない）。"""
 
-    if type(ref) is LocationBaseRef:
+    if package_instance(ref, LocationBaseRef):
         return ref.display_name()
     raise TypeError(f"{type_name(type(ref))} is not a LocationBaseRef")
 
@@ -1408,3 +1408,4 @@ from scripts.function_tracer_pcode.core.runtime_refs.loops import (
     _normalize_storage_identity_key,
     loop_summary_method_b_key_at_result_size,
 )
+from scripts.function_tracer_pcode.core.live_values import package_instance

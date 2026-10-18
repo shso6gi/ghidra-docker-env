@@ -55,6 +55,8 @@ from scripts.function_tracer_pcode.proof.unknown_reason import (  # noqa: F401
     register_unknown_reason,
     register_unknown_recovery_plan,
 )
+from scripts.function_tracer_pcode.core.live_values import package_instance
+from scripts.function_tracer_pcode.core.live_values import audited_entry
 
 
 # ---------------------------------------------------------------------------
@@ -706,7 +708,7 @@ def finitize_unknown_reason_record(record: UnknownReasonRecord, *, work: Any) ->
     `dataclasses.replace` と同じ record を、field を instance の値だけで読んで作る（exact な型だけ）。
     """
 
-    if type(record) is not UnknownReasonRecord:
+    if not package_instance(record, UnknownReasonRecord):
         raise TypeError(f"{live_values.type_name(type(record))} is not an unknown reason record")
     values = _field_values(record, _UNKNOWN_REASON_FIELDS)
     values["stage"] = _bounded_text(record.stage, LABEL_MAX_CHARS, work=work)
@@ -726,7 +728,7 @@ def finitize_unknown_reason_record(record: UnknownReasonRecord, *, work: Any) ->
 def finitize_unknown_recovery_action(action: UnknownRecoveryAction, *, work: Any) -> UnknownRecoveryAction:
     """recovery action 1 件の重い field を有界な表現へ置き換える（`dataclasses.replace` と同じ record）。"""
 
-    if type(action) is not UnknownRecoveryAction:
+    if not package_instance(action, UnknownRecoveryAction):
         raise TypeError(f"{live_values.type_name(type(action))} is not an unknown recovery action")
     values = _field_values(action, _UNKNOWN_RECOVERY_ACTION_FIELDS)
     values["stage"] = _bounded_text(action.stage, LABEL_MAX_CHARS, work=work)
@@ -769,6 +771,7 @@ def projection_diagnostic_work() -> Any:
 PROJECTION_DIAGNOSTIC_LEGACY_ROWS = 8
 
 
+@audited_entry
 def build_projection_diagnostic(
     receipt: Any,
     *,
@@ -981,6 +984,7 @@ def _inline_canonical(value: Any, *, work: Any) -> Any:
     return canonical
 
 
+@audited_entry
 def legacy_reason_index(legacy_reasons: Any, *, work: Any, overflow: Any = 0) -> LegacyReasonIndex:
     """legacy reason を reason id ごとに 1 回だけ振り分け、照合の key を 1 回だけ求める。
 
@@ -1007,7 +1011,7 @@ def legacy_reason_index(legacy_reasons: Any, *, work: Any, overflow: Any = 0) ->
             position = len(group.records)
             group.records.append(record)
             target = live_values.attribute(record, "object_target_key")
-            if type(target) is BoundedEvidence:
+            if package_instance(target, BoundedEvidence):
                 # 要約の field は構築時に exact な str と確かめ済み（`BoundedEvidence.__post_init__`）
                 fingerprint_kind = target.fingerprint_kind
                 fingerprint = target.fingerprint
@@ -1019,7 +1023,7 @@ def legacy_reason_index(legacy_reasons: Any, *, work: Any, overflow: Any = 0) ->
                 if canonical is not None:
                     group.by_target.setdefault(canonical, []).append(position)
             obligation = live_values.attribute(record, "proof_obligation_id")
-            if obligation is not None and type(obligation) is not BoundedEvidence:
+            if obligation is not None and not package_instance(obligation, BoundedEvidence):
                 canonical = _inline_canonical(obligation, work=work)
                 if canonical is not None:
                     group.by_obligation.setdefault(str(canonical), []).append(position)
@@ -1153,15 +1157,15 @@ def _match_legacy_reasons(
         JsonBudgetExhausted,
     )
 
-    if type(legacy_reasons) is LegacyReasonIndex:
+    if package_instance(legacy_reasons, LegacyReasonIndex):
         index = legacy_reasons
     else:
         index = legacy_reason_index(legacy_reasons, work=work)
-    if type(index) is not LegacyReasonIndex:
+    if not package_instance(index, LegacyReasonIndex):
         raise TypeError(f"{live_values.type_name(type(index))} is not a legacy reason index")
     key = _group_key(reason_id)
     group = index.group(reason_id)
-    if type(group) is not _LegacyReasonGroup:
+    if not package_instance(group, _LegacyReasonGroup):
         return (), None
     records = group.records
     if type(records) is not list:
@@ -1323,7 +1327,7 @@ def _first_legacy_field(diagnostic: Optional[Mapping[str, Any]], field_name: str
 def coerce_unknown_reason_record(value: Any) -> UnknownReasonRecord:
     # 型は `type(x)` で決める（`isinstance` は上書きした `__class__` を読む）。reason id は
     # `_enum_value` と同じ文字列にしてから渡す（pure layer に live な値を渡さない）
-    if type(value) is UnknownReasonRecord:
+    if package_instance(value, UnknownReasonRecord):
         return value
     if live_values.builtin_mapping(value) is not None:
         return UnknownReasonRecord.from_dict(value)
@@ -1498,7 +1502,7 @@ def _record_actions(record: "UnknownReasonRecord", work: Any):
     pure layer（`proof.unknown_reason`）へは正規化した文字列だけを渡す。
     """
 
-    if type(record) is not UnknownReasonRecord:
+    if not package_instance(record, UnknownReasonRecord):
         raise TypeError(f"{live_values.type_name(type(record))} is not an unknown reason record")
     none_kind = UnknownRecoveryProofKind.NONE.value
     obligations = record.recovery_proof_obligations
@@ -1533,6 +1537,9 @@ def _record_actions(record: "UnknownReasonRecord", work: Any):
         return
     for obligation in live_values.elements_of(obligations):
         work.charge(1)
+        # 前の繰り返しの `yield` の後: record の型を絞り込み直す（止まっている間に外の code が走り得る）
+        if not package_instance(record, UnknownReasonRecord):
+            raise TypeError(f"{live_values.type_name(type(record))} is not an unknown reason record")
         obligation_kind, obligation_stage, required_evidence, description = _obligation_fields(obligation)
         proof_stage = _or(record.proof_stage, obligation_stage)
         if (
@@ -1595,7 +1602,7 @@ def _obligation_fields(obligation: Any) -> Tuple[Any, Any, Any, Any]:
     exact な `UnknownRecoveryProofObligation` は field をそのまま、それ以外は live_values の規則で読む。
     """
 
-    if type(obligation) is UnknownRecoveryProofObligation:
+    if package_instance(obligation, UnknownRecoveryProofObligation):
         return obligation.proof_kind, obligation.proof_stage, obligation.required_evidence, obligation.description
     return (
         live_values.attribute(obligation, "proof_kind"),
@@ -1700,7 +1707,7 @@ class _PrimaryFilter:
     def admit(self, record: UnknownReasonRecord, *, work: Any) -> bool:
         from scripts.function_tracer_pcode.core.json_encoding import hashable_key
 
-        if type(record) is not UnknownReasonRecord:
+        if not package_instance(record, UnknownReasonRecord):
             raise TypeError(f"{live_values.type_name(type(record))} is not an unknown reason record")
         # 真偽は live_values の規則で読む（上書きした `__bool__` / `__len__` を呼ばない）
         aggregation_key = builtin_str(_or(record.aggregation_unit, UnknownAggregationUnit.RESULT.value))
@@ -1735,7 +1742,7 @@ def _coerce_record_within(value: Any, *, work: Any) -> UnknownReasonRecord:
     else:
         record = value
     # 型は `type(x)` で決める（`isinstance` は上書きした `__class__` を読む）
-    if type(record) is not UnknownReasonRecord:
+    if not package_instance(record, UnknownReasonRecord):
         raise TypeError(f"{live_values.type_name(type(record))} is not an unknown reason record")
     return record
 
@@ -1813,7 +1820,7 @@ class _BacklogEntryView:
         self._distinct_keys: set = set()
 
     def add(self, record: UnknownReasonRecord, *, work: Any) -> None:
-        if type(record) is not UnknownReasonRecord:
+        if not package_instance(record, UnknownReasonRecord):
             raise TypeError(f"{live_values.type_name(type(record))} is not an unknown reason record")
         obligations = record.recovery_proof_obligations
         # 辿る obligation の数を先に数える（record の列は組み込みの振る舞いの列だけ）

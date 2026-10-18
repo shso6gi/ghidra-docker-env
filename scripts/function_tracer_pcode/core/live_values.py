@@ -26,6 +26,7 @@ J19（`tests/unit/_live_flow_audit.py`）が bounded path の関数からそれ�
 
 from __future__ import annotations
 
+import functools
 import gc
 import itertools
 import math
@@ -2726,13 +2727,15 @@ def _exact_tree_read(value: Any, memo: Any = _ACTIVE) -> Tuple[Any, bool]:
 # | hash が同じ値の間で変わらない | 値と値が持つ葉の object が変わらない間 | （読みが作る object の identity: NaN の hash） | NaN は identity で比べ・hash する: exact な NaN は読まずにその object、scalar の subclass の NaN は元の葉ごとに 1 つの写し（`_canonical_nan`: 元の葉が生きている間は同じ写し。表は元の葉を weakref でだけ持ち、葉が消えれば entry も消える）。weakref を作れない型の NaN の葉は判定不能（D20: 写しを葉の寿命に結ぶには葉を持ち続けるしかない）。比較・正規化・hash は同じ写しを見る |
 # | 名前の引きだけで決まる型の事実（`lookup_fact`: `_BUILTIN_HASHED`・`_builtin_behaviour`・JSON の protocol） | 引いた名前が同じ object を引く間 | 名前空間・`__bases__` の書き換え、引いた object の `__class__`・descriptor の中身の書き換え | 引くたびに key の型の MRO の identity・引いた (storage, 名前, 見つけた object)・見つけた object 自身の identity の外の状態（`_watch`。計算は見つけた object の中身を読まない）を確かめ、違えば計算し直す。計算の途中に引いた記録の読みは外の計算の読みへ足す |
 # | 名前空間の storage の列（`_PLAIN_MROS`・`_STATIC_NAMESPACES`） | MRO の tuple が同じ object の間 | `__bases__` の書き換え（MRO を作り直す） | 引くたびに MRO の identity を比べる。storage は class が生きている間同じ dict・key は組み込みの `str` のまま（上の行の前提）・組み込みの型の名前空間は変わらない |
-# | 監査済みの区間の記録（`audited_region` / `region_cache`: JSON の型の protocol の判定など） | 区間（最も外の `audited_region`）の間、監査の外の code が走っていない間（区間を開けた thread の中の code。他の thread は前提の外の段落） | 監査の外の code（identity key の method・宣言していない package の generator）。J19 の監査が辿る code が live な値を渡す owner の関数は値の code を呼ばない（呼ぶものは `value_code_boundary` で宣言し、その呼び出しを `outside_audit` の下に置く） | 監査の外の code は走る間ずっと区間の外（区間が無い: 入り直しても記録を見ない）。戻れば（例外・中断でも）記録を捨てる。区間を閉じれば捨てる。区間の外は引くたびに上の行の確かめ。開ける場所・境界・owner の関数の分類は static test が監査の結果と突き合わせる |
+# | 監査済みの区間の記録（`audited_region` / `region_cache`: JSON の型の protocol の判定など） | 区間（最も外の `audited_region`）の間、外の code が走っていない間（区間を開けた thread の中の code。他の thread は前提の外の段落） | 外の code（監査の外の code: identity key の method・宣言していない package の generator・値の code を呼ぶ境界・比べる側の契約が呼ぶ外の比較と hash）。J19 の監査が辿る code が live な値を渡す owner の関数は値の code を呼ばない（呼ぶものは `value_code_boundary` で宣言し、その呼び出しを `outside_audit` の下に置く） | 外の code が走るのは外の code の区間（`outside_audit`）の中だけ: 走る間ずっと区間の外（入り直しても記録を見ない）。抜ければ（例外・中断でも）記録を捨てる。区間を閉じれば捨てる。区間の外は引くたびに上の行の確かめ。開ける場所・境界・owner の関数の分類は static test が監査の結果と突き合わせる |
+# | 監査済みの code が頼る値の型（walker の receiver: record・reducer・sized leaf・property / state setter の持ち主、`package_instance` で絞り込んだ値。第 11 回） | 頼り始めてから外の code の区間を抜けるまで。generator の中の絞り込みは次の `yield` まで | 外の code（区間の中）が型の名前空間・`__bases__`・値の `__class__`・protocol の method を書き換える。監査済みの code の外（activation の無い間）の書き換え | 頼る事実は activation（`relying_on` / `audited_entry` / walker の 1 歩）に記録し、外の code の区間を抜けるときに走っている activation を全部確かめ直す（`_recheck_reliance`）。止まっている監査済みの generator（record の `json_items`・`receiver_items`・宣言した generator）は再開の前にreceiver の型・型の信頼・method を確かめ直す（`json_encoding._AuditedSteps`）。`package_instance` は絞り込むたびに型の信頼を確かめる（activation のstack が続き、外の code の数が同じ間だけ記録を使い回す）。落ちればその型の code を呼ぶ前に判定不能。J19 の監査は `type(x) is C`（C は package の型）を絞り込みに数えず、絞り込みが `yield` をまたぐ読みと、receiver を新しい generator へ渡して yield の後に読む形を拒む。絞り込む entry root は`audited_entry` の宣言が要る（test が辿る関数から決める） |
+# | 組（(key, 値)。`inline` / `pairs_of` / record の `json_items` / `mapping_of`）の中の構造 | いつも | tuple / list の subclass の `__iter__` / `__getitem__` / `__len__`（unpack・添字が呼ぶ） | 組は `read_pair` で読む（基底型の slot。exact な tuple はそのまま）。組でない値・長さが 2 でない組は値の code を呼ぶ前に拒む。J19 の監査は、要素が組み込みの tuple と分かる列（owner の組の読み・package の容器の `.items()`・`enumerate` / `zip`）の要素だけの unpack を許す |
 # | instance の `__dict__` を読む descriptor（`_DICT_HOLDERS`） | MRO の tuple が同じ object の間 | `__bases__` の書き換え | metaclass が `type` の class の `__dict__` の entry は作った後に書けも消せもしない（`_fixed_dict_entries`: CPython 3.10 / 3.12 で確かめる test）。そうでない MRO は記録しない。引くたびに MRO の identity を比べる |
 # | 判定不能が確定判定にならない | いつも | helper・`except` の捕捉 | 普通の例外の派生でない。作るときに pair の台帳へ記録（登録した reason `comparison_undecidable`、`blocks_decision`）。名指しの捕捉は分類した場所だけ |
 # | ref の比べる field（owner `core/runtime_ref_record`） | 固定した後はずっと（class ごとに最初の使用で固定。自分の表を持たない subclass は親の表の固定を共有） | `__dataclass_fields__`・`Field.compare` / `repr` の書き換え | 書き換えは使わない（固定した表で比べ・hash し・写す: 同じ ref の比べ方と hash は使う間変わらない。PR の D17）。表は固定するときに hook を呼ばずに読み（`dataclass_field_specs`）、読めない表は決めない（比較・hash は判定不能、作るのは `TypeError`） |
 # | dataclass の field の名前（`dataclass_field_names`: owner の外の読み手） | 記録した表の中身と同じ間 | 同上 | 引くたびに表の中身（key・`Field`・種類の slot）を確かめ（`_dataclass_table_state`）、違えば読み直す（今の表に従う） |
 #
-# 前提の外（この契約が守らないもの。破られると分類の根拠が無くなる）: 信頼する関数（package の code・`Enum.__hash__`・
+# 前提の外（この契約が守らないもの。破られると分類の根拠が無くなる）: 監査済みの code が **自分で作った** package の object（名前で呼んだ package の class の instance と、その method の self: J19 の監査の OBJ / SELF / 構築した REC）の型の名前空間を外の code が書き換えること（監査済みの code が名前で呼ぶ code の書き換え: module の global の書き換えと同じ。値として受け取った object の型は上の行の確かめの内。作った object の型まで外の code の後に確かめ直すと、型の確かめ 1 つ 4〜6 µs × 外の code の区間の数 2 千〜1 万 3 千（replay のprocess ごと）× 型の数 約 60 の費用になる: 第 11 回の決定、PR の本文に選択肢と根拠）。信頼する関数（package の code・`Enum.__hash__`・
 # 登録した比較）の code object・closure の中身・module の global・interpreter の builtin を書き換えること（code を書いて
 # 実行できる側の操作: `trust_code_directory` の境界と同じ）。実行環境（標準 library の file）の関数の module の global・
 # 既定値（`__defaults__` / `__kwdefaults__`）を書き換えること（interpreter の builtin と同じ実行環境の code: 判定は
@@ -2844,9 +2847,9 @@ def trusted_comparison(function: Any) -> Any:
                 # 渡し、元の値どうしの比較（`value == self`）で同じ順にする
                 return NotImplemented
             other = value  # 包みでなく元の値と比べる（双子と同じ相手）
-        epoch = _FOREIGN_EPOCH.count
+        epoch = _FOREIGN_EPOCH.s.count
         result = function(self, other)
-        if result is NotImplemented and _FOREIGN_EPOCH.count != epoch:
+        if result is NotImplemented and _FOREIGN_EPOCH.s.count != epoch:
             # 外の code を呼んだ後に断ると、反射で後から呼ばれる相手の実装はその code が書き換えた型のもの（`object.__ne__`
             # の真偽の読みを含む）: 判定しない。登録した比較は外の code を呼ぶ前に断る
             raise undecidable("a registered comparison declined after running foreign code")
@@ -3156,7 +3159,7 @@ class _Comparand:
             return _READ_COPY  # 写す前の容器が無い（`exact_tree` の写し）: 渡してよいかは `_operands` が決める
         return found[1]
 
-    def _operands(self, other: Any) -> Tuple[Any, Any]:
+    def _operands(self, other: Any) -> Tuple[Any, Any, bool]:
         other_value = self._other(other)
         scope = self.scope
         trust = scope.trust(self.value)
@@ -3167,37 +3170,41 @@ class _Comparand:
                 raise undecidable("a foreign callback would receive a read copy instead of the twin's container")
             # 不活性な比較・登録した比較は相手の容器を外の code に渡さない（型の違う相手は `NotImplemented`）
             other_value = other
-        if trust == _OPAQUE or scope.trust(other_value) == _OPAQUE:
+        other_trust = scope.trust(other_value)
+        if trust == _OPAQUE or other_trust == _OPAQUE:
             raise undecidable("a value that compares what it holds inside builtin code is compared")
-        return self.value, other_value
+        return self.value, other_value, trust == _FOREIGN or other_trust == _FOREIGN
 
     def __eq__(self, other: Any) -> bool:
-        x, y = self._operands(other)
-        return _checked(truth(x == y))
+        x, y, foreign = self._operands(other)
+        return _checked(truth(_compare(foreign, operator.eq, x, y)))
 
     def __ne__(self, other: Any) -> bool:
-        x, y = self._operands(other)
+        x, y, foreign = self._operands(other)
         _require_explicit_ne(x, y)
-        return _checked(truth(x != y))
+        return _checked(truth(_compare(foreign, operator.ne, x, y)))
 
     def __lt__(self, other: Any) -> bool:
-        x, y = self._operands(other)
-        return _checked(truth(x < y))
+        x, y, foreign = self._operands(other)
+        return _checked(truth(_compare(foreign, operator.lt, x, y)))
 
     def __le__(self, other: Any) -> bool:
-        x, y = self._operands(other)
-        return _checked(truth(x <= y))
+        x, y, foreign = self._operands(other)
+        return _checked(truth(_compare(foreign, operator.le, x, y)))
 
     def __gt__(self, other: Any) -> bool:
-        x, y = self._operands(other)
-        return _checked(truth(x > y))
+        x, y, foreign = self._operands(other)
+        return _checked(truth(_compare(foreign, operator.gt, x, y)))
 
     def __ge__(self, other: Any) -> bool:
-        x, y = self._operands(other)
-        return _checked(truth(x >= y))
+        x, y, foreign = self._operands(other)
+        return _checked(truth(_compare(foreign, operator.ge, x, y)))
 
     def __hash__(self) -> int:
         _require_named_lookup(self.value, "__hash__")
+        if self.scope.trust(self.value) == _FOREIGN:
+            with outside_audit():
+                return _checked(hash(self.value))
         return _checked(hash(self.value))
 
 
@@ -3275,11 +3282,26 @@ def _require_named_lookup(value: Any, name: str) -> None:
         raise undecidable(f"the type's {name} is looked up through a namespace key that runs code") from None
 
 
-class _ForeignEpoch(threading.local):
-    """thread ごとの、外の code を呼んだ回数（`_checked` が数える）。分類の memo は数が変わると捨てる。"""
+class _Reliance:
+    """thread ごとの、外の code の区間を抜けた回数（`outside_audit` だけが数える: 外の code は区間でだけ走る）と、今走っている
+    監査済みの code が頼る事実（`active`: activation の stack。activation は (値, 型) の list）と、`package_instance` の
+    型の確かめの記録（`trusted`: `id(型)` → (型, 数)。activation の stack が空になれば捨てる: 監査済みの code の外では
+    外の code の区間を通らずに class を書き換えられる）。分類の memo・止まっている監査済みの code は、数が変わると
+    確かめ直す。thread ごとの object を 1 度引いて使う（属性は普通の slot: hot path で thread local を何度も引かない）。"""
+
+    __slots__ = ("count", "active", "trusted")
 
     def __init__(self) -> None:
         self.count = 0
+        self.active: List[List[Tuple[Any, type]]] = []
+        self.trusted: Dict[int, Tuple[type, int]] = {}
+
+
+class _ForeignEpoch(threading.local):
+    """thread ごとの `_Reliance`（`.s`）。"""
+
+    def __init__(self) -> None:
+        self.s = _Reliance()
 
 
 _FOREIGN_EPOCH = _ForeignEpoch()
@@ -3321,7 +3343,14 @@ class audited_region:
 
 
 class outside_audit:
-    """監査の外の code を走らせる間、区間を外す（区間の記録を見せない）。戻ると元の区間に戻り、その記録を捨てる。"""
+    """外の code（監査の外の code: identity key の method・宣言していない package の generator・値の code を呼ぶ境界・
+    比べる側の契約が呼ぶ外の比較と hash）を走らせる区間。外の code が走るのはこの区間の中だけ（唯一の境界）。
+
+    走る間は監査済みの区間を外す（区間の記録を見せない）。抜けるとき（例外・generator の中断でも）は、外の code が
+    class・値の型を書き換えたかもしれないので: 元の区間に戻して記録を全部捨て、外の code の回数を数え、今走っている
+    監査済みの code が頼る事実（`_FOREIGN_EPOCH.s.active`: walker の receiver・`package_instance` の絞り込み）を確かめ
+    直す。落ちれば、頼った型の code を呼ぶ前に判定不能（監査済みの code はそのまま続けない）。止まっている監査済みの
+    code（walker の frame の generator）は、再開する前に再開する側が確かめる（`audited_steps`）。"""
 
     __slots__ = ("token", "region")
 
@@ -3338,6 +3367,150 @@ class outside_audit:
             for cache in region.values():
                 cache.clear()
             region.clear()
+        state = _FOREIGN_EPOCH.s
+        state.count += 1
+        if state.active:
+            _recheck_reliance(state)
+
+
+#: activation の (値, 型) の値の欄が「型だけに頼る」ことを表す印
+_NO_RECEIVER = object()
+
+
+def _recheck_reliance(state: "_Reliance") -> None:
+    """外の code の後: 走っている監査済みの code が頼る事実（値の型がまだその型で、その型がまだ package の型）を確かめる。
+    落ちれば判定不能（記録してから投げる）。型の確かめは型ごとに 1 回（`package_type` の記録の確かめ）。"""
+
+    seen: Dict[int, type] = {}
+    for activation in state.active:
+        if not activation:
+            continue
+        # 値の型は C の反復で比べる（1 つの値につき Python の frame を作らない）。型の確かめは型ごとに 1 回
+        if not all(map(_IS, map(type, map(_FIRST, activation)), map(_SECOND, activation))):
+            raise undecidable("a value audited code relies on changed its class in foreign code")
+        seen.update(zip(map(id, map(_SECOND, activation)), map(_SECOND, activation)))
+    trusted = state.trusted
+    count = state.count
+    for kind in seen.values():
+        if not package_type(kind):
+            raise undecidable(f"{type_name(kind)}, which audited code relies on, was changed by foreign code")
+        trusted[id(kind)] = (kind, count)  # 確かめた型: 次の絞り込みは確かめ直さない（数が同じ間）
+
+
+_FIRST = operator.itemgetter(0)
+_SECOND = operator.itemgetter(1)
+
+
+def reliance() -> "_Reliance":
+    """今の thread の、外の code の回数（`.count`）と、監査済みの code が頼る事実の stack（`.active`）。walker の
+    hot path が 1 度だけ引いて使う（owner の API: 監査済みの code を走らせる owner だけが activation を積む）。"""
+
+    return _FOREIGN_EPOCH.s
+
+
+class relying_on:
+    """監査済みの code（package の code）を 1 回走らせる間の activation。`value` を渡せば、その値と型（`kind`、省けば
+    `type(value)`）に頼ることを記録する（呼ぶ側は呼ぶ前に型を確かめ済み）。中の `package_instance` の絞り込みも
+    この activation に入る。抜ければ捨てる（中断した generator の絞り込みは再開の後に使わない: J19 の規則）。"""
+
+    __slots__ = ("activation",)
+
+    def __init__(self, value: Any = _NO_RECEIVER, kind: Optional[type] = None) -> None:
+        self.activation = [] if value is _NO_RECEIVER else [(value, type(value) if kind is None else kind)]
+
+    def __enter__(self) -> "relying_on":
+        _FOREIGN_EPOCH.s.active.append(self.activation)
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        end_activation(_FOREIGN_EPOCH.s)
+
+
+def begin_activation(receiver: Any = _NO_RECEIVER, kind: Optional[type] = None) -> "_Reliance":
+    """activation を 1 つ積む（`relying_on` の hot path 版: 呼ぶ側が `end_activation(state)` を finally で呼ぶ）。"""
+
+    state = _FOREIGN_EPOCH.s
+    state.active.append([] if receiver is _NO_RECEIVER else [(receiver, type(receiver) if kind is None else kind)])
+    return state
+
+
+def end_activation(state: "_Reliance") -> None:
+    """activation を 1 つ降ろす（唯一の降ろし方）。stack が空になれば `package_instance` の型の確かめの記録を捨てる。"""
+
+    active = state.active
+    active.pop()
+    if not active:
+        state.trusted.clear()
+
+
+def audited_entry(function: Any) -> Any:
+    """J19 の監査の entry root（`tests/unit/_live_flow_audit.ENTRY_ROOTS`）を宣言する: 呼ぶ間 activation を積む（中の
+    `package_instance` の絞り込みを、外の code の後に確かめ直す対象にする）。宣言した関数と `ENTRY_ROOTS` が同じ集合で
+    あることは `test_issue242_continuations` が確かめる。"""
+
+    @functools.wraps(function)
+    def entry(*args: Any, **kwargs: Any) -> Any:
+        state = _FOREIGN_EPOCH.s
+        state.active.append([])
+        try:
+            return function(*args, **kwargs)
+        finally:
+            end_activation(state)
+
+    entry.__audited_entry__ = True
+    return entry
+
+
+def read_pair(value: Any) -> Tuple[Any, Any]:
+    """組（(key, 値)）の読み: 組み込みの tuple / list（subclass を含む）を基底型の slot で読む（Issue #242 第 11 回）。
+
+    読み方: 長さと要素は `tuple` / `list` の slot（`__len__` / `__getitem__`）で読む。subclass の `__iter__` /
+    `__getitem__` / `__len__`（unpack・添字が呼ぶ）を呼ばない: 読んだ値は基底の tuple の双子と同じ。exact な tuple は
+    そのまま返す（呼ぶ側の unpack は組み込みの tuple の速い経路で、Python の code を呼ばない）。
+    返す値の保証: 組み込みの tuple（長さ 2）。組み込みの tuple / list でない値は `TypeError`、長さが 2 でない組は
+    `ValueError`（unpack と同じ種類）: どちらも値の code を呼ぶ前。"""
+
+    kind = type(value)
+    if kind is tuple:
+        if tuple.__len__(value) != 2:
+            raise ValueError(f"a pair has 2 items, not {tuple.__len__(value)}")
+        return value
+    if issubclass(kind, tuple):
+        size, item = tuple.__len__, tuple.__getitem__
+    elif issubclass(kind, list):
+        size, item = list.__len__, list.__getitem__
+    else:
+        raise TypeError(f"a pair is a builtin tuple or list, not {type_name(kind)}")
+    if size(value) != 2:
+        raise ValueError(f"a pair has 2 items, not {size(value)}")
+    return item(value, 0), item(value, 1)
+
+
+def package_instance(value: Any, kind: type) -> bool:
+    """`type(value) is kind` で、`kind` が今 package の型（`package_type`）か。監査済みの code が値を package の型へ絞り
+    込む唯一の判定（J19 の監査は `type(x) is C` を絞り込みに数えない）: 絞り込んだ値の field・method を使ってよいのは、
+    次に外の code が走るまで（外の code から戻るときに確かめ直す: 今の activation に記録する）と、generator なら次の
+    `yield` まで（J19 の規則）。`kind` が package の型でなくなっていれば判定不能（その型の code を呼ぶ前に止める）。"""
+
+    if type(value) is not kind:
+        return False
+    state = _FOREIGN_EPOCH.s
+    active = state.active
+    if active:
+        # 監査済みの code の間（activation がある）は、外の code は外の code の区間でだけ走り、区間を抜けると数が変わる:
+        # 型の確かめは、数が同じ間は使い回す（activation の stack が空になれば捨てる: `end_activation`）
+        known = state.trusted.get(id(kind))
+        if known is None or known[0] is not kind or known[1] != state.count:
+            if not package_type(kind):
+                raise undecidable(f"{type_name(kind)} is relied on by audited code but is not a package type now")
+            state.trusted[id(kind)] = (kind, state.count)
+        activation = active[-1]
+        if not activation or activation[-1][0] is not value:  # 続けて同じ値を絞り込む形（loop の中）は 1 度だけ
+            activation.append((value, kind))
+        return True
+    if not package_type(kind):
+        raise undecidable(f"{type_name(kind)} is relied on by audited code but is not a package type now")
+    return True
 
 
 def region_cache(slot: Any) -> Optional[dict]:
@@ -3378,7 +3551,7 @@ class _ComparisonScope:
     def __init__(self) -> None:
         self.origins: Dict[int, Tuple[Any, Any]] = {}
         self.memo: Dict[int, Tuple[type, str]] = {}
-        self.epoch = _FOREIGN_EPOCH.count
+        self.epoch = _FOREIGN_EPOCH.s.count
 
     def trust(self, value: Any) -> str:
         kind = type(value)
@@ -3387,9 +3560,9 @@ class _ComparisonScope:
             or kind is tuple or kind is list or kind is dict or kind is set or kind is frozenset
         ):
             return _TRUSTED
-        if self.epoch != _FOREIGN_EPOCH.count:
+        if self.epoch != _FOREIGN_EPOCH.s.count:
             self.memo.clear()
-            self.epoch = _FOREIGN_EPOCH.count
+            self.epoch = _FOREIGN_EPOCH.s.count
         if issubclass(kind, _VALUE_CONDITIONED_BASES):
             return _leaf_trust(value)  # 分類が値の状態に依る: 型ごとに覚えない
         found = self.memo.get(id(kind))
@@ -3460,11 +3633,20 @@ class _CopyFrames(threading.local):
 _COPY_FRAMES = _CopyFrames()
 
 
+def _compare(foreign: bool, operation: Any, left: Any, right: Any) -> Any:
+    """比較 1 つ（`operation(left, right)`）。外の code で比べる葉があれば外の code の区間で走らせる（`outside_audit`:
+    区間の記録を見せず、戻るときに監査済みの code が頼る事実を確かめ直す）。"""
+
+    if foreign:
+        with outside_audit():
+            return operation(left, right)
+    return operation(left, right)
+
+
 def _checked(result: Any) -> Any:
     """外の code の直後: 進行中の比較（入れ子を含む全部）の元の容器が変わっていれば判定不能。変わっていなければ
     `result`。外の code の呼び出しの中だけの変化（呼び出しが返る前に戻した変化）は組み込みの比較から見えない（双子も同じ）。"""
 
-    _FOREIGN_EPOCH.count += 1  # 外の code を呼んだ: 分類の memo を捨てさせる
     stack = _COPY_FRAMES.stack
     _admit_storage(len(stack), _COMPARISON_NODES, traversal=True)  # 入れ子の比較の数（Python の再帰の上限まで）
     if stack and not all([frame.unchanged() for frame in stack]):
@@ -3923,21 +4105,23 @@ def equal(left: Any, right: Any) -> bool:
 
     leaves = _leaf_operands(left, right)
     if leaves is not None:
-        return _checked(truth(leaves[0] == leaves[1]))
+        return _checked(truth(_compare(leaves[2], operator.eq, leaves[0], leaves[1])))
     if _plain_operands(left, right):
         return left == right
     (x, y), frame, _read = _covered((left, right))
     return _guarded(frame, lambda: truth(x == y))
 
 
-def _leaf_operands(left: Any, right: Any) -> Optional[Tuple[Any, Any]]:
-    """比べる 2 つの値が両方とも容器でない葉なら、読んだ葉の組（scalar の subclass は基底型の値）。容器なら `None`。
+def _leaf_operands(left: Any, right: Any) -> Optional[Tuple[Any, Any, bool]]:
+    """比べる 2 つの値が両方とも容器でない葉なら、読んだ葉の組（scalar の subclass は基底型の値）と、どちらかが外の code
+    で比べる葉か（比べる間は外の code の区間: `_compare`）。容器なら `None`。
 
     葉どうしの比較は写しも確かめも要らない: 組み込みの演算（反射を含む Python の手順）が元の値どうしを比べ、戻り値を
     `truth` で読めば `bool(双子の左 op 双子の右)` と同じ（外の code は双子と同じ相手を受け取る）。不透明な葉（中の比較の
     戻り値を C が読む）は `UndecidableComparison`。外の code の後は、進行中の比較の写しを確かめる（`_checked`）。"""
 
     out = []
+    foreign = False
     for value in (left, right):
         kind = type(value)
         if value is None or kind is int or kind is str or kind is bool or kind is float:
@@ -3952,10 +4136,12 @@ def _leaf_operands(left: Any, right: Any) -> Optional[Tuple[Any, Any]]:
         if issubclass(kind, _SCALAR_BASES) and not issubclass(kind, Enum):
             out.append(exact_scalar(value))
             continue
-        if _leaf_trust(value) == _OPAQUE:
+        trust = _leaf_trust(value)
+        if trust == _OPAQUE:
             raise undecidable(f"{type_name(kind)} compares what it holds inside builtin code")
+        foreign = foreign or trust == _FOREIGN
         out.append(value)
-    return out[0], out[1]
+    return out[0], out[1], foreign
 
 
 def unequal(left: Any, right: Any) -> bool:
@@ -3964,7 +4150,7 @@ def unequal(left: Any, right: Any) -> bool:
     leaves = _leaf_operands(left, right)
     if leaves is not None:
         _require_explicit_ne(leaves[0], leaves[1])
-        return _checked(truth(leaves[0] != leaves[1]))
+        return _checked(truth(_compare(leaves[2], operator.ne, leaves[0], leaves[1])))
     if _plain_operands(left, right):
         return left != right
     (x, y), frame, _read = _covered((left, right))
@@ -3999,7 +4185,7 @@ def less(left: Any, right: Any) -> bool:
 
     leaves = _leaf_operands(left, right)
     if leaves is not None:
-        return _checked(truth(leaves[0] < leaves[1]))
+        return _checked(truth(_compare(leaves[2], operator.lt, leaves[0], leaves[1])))
     if _plain_operands(left, right):
         return truth(left < right)
     (x, y), frame, _read = _covered((left, right))
@@ -4044,7 +4230,12 @@ def hash_tree(value: Any) -> int:
     if tree is not value:
         _comparison_shape(value)  # hash を変えた容器の subclass を基底型の値で hash しない
     _require_hashed_lookups(tree)  # 組み込みの `hash` が葉の型の `__hash__` を名前で引く: 引きが hook を呼ばないこと
-    return hash(tree)
+    if _plain_tree(tree):
+        return hash(tree)
+    # 葉の `__hash__` が Python の code（外の code・登録した hash）: 外の code の区間で走らせる（区間の記録を見せず、
+    # 抜けるときに監査済みの code が頼る事実を確かめ直す）
+    with outside_audit():
+        return hash(tree)
 
 
 def _flat_exact(tree: tuple) -> bool:
@@ -4552,7 +4743,11 @@ def attribute(value: Any, name: str, default: Any = None) -> Any:
         # package の型の、package の code が `readable_property` で宣言した property（record の API と
         # して読んでよい値。静的な監査の root）だけを呼ぶ
         if type(getter) is types.FunctionType and package_code(getter.__code__) and package_type(kind):
-            return getter(value)
+            state = begin_activation(value, kind)  # 監査済みの code（J19 の root）: 外の code の後に型を確かめ直す
+            try:
+                return getter(value)
+            finally:
+                end_activation(state)
         return default
     if descriptor_kind is property:
         # 宣言していない property は呼ばない（その getter は bounded path の能力ではない）
@@ -4579,7 +4774,8 @@ def set_state(value: Any, name: str, new: Any) -> None:
             and setter.__code__ in _STATE_SETTERS and package_type(kind)
         ):
             # `state_setter` で宣言した package の `__setattr__`（record の不変条件の検査）だけを呼ぶ
-            setter(value, name, new)
+            with relying_on(value, kind):  # 監査済みの code（J19 の root）: 外の code の後に型を確かめ直す
+                setter(value, name, new)
             return
         if type(setter) is types.WrapperDescriptorType and not (_TYPE_FLAGS.__get__(setter.__objclass__) & _HEAP_TYPE):
             # C で定義した組み込みの型の `__setattr__`（`types.SimpleNamespace` など。上書きできない）
@@ -4873,11 +5069,18 @@ def _same_behaviour(kind: type, base: type, names: Tuple[str, ...]) -> bool:
 
 
 def builtin_iterator(item: Any) -> bool:
-    """組み込みの容器の iterator / dict の view か（中身を辿るのは組み込みの実装だけ）。"""
+    """組み込みの容器の iterator / dict の view か（中身を辿るのは組み込みの実装だけ）。`zip` そのものは、包んだ iterator が
+    全部組み込みの容器の iterator のとき（`zip` の C の実装が組み込みの tuple を作るだけ。包んだ iterator は `zip` の
+    `__reduce__`（C の実装）で読む: 値の code を呼ばない）。"""
 
     kind = type(item)
     if kind is range:
         return True
+    if kind is zip:
+        parts = zip.__reduce__(item)[1]
+        return tuple.__len__(parts) <= SCAN_LIMIT and all(
+            type(part) is not zip and builtin_iterator(part) for part in tuple.__iter__(parts)
+        )
     return _plain_metatype(kind) and (kind in _BUILTIN_ITERATOR_TYPES or kind in _BUILTIN_VIEW_TYPES)
 
 
@@ -5188,6 +5391,13 @@ __all__ = [
     "region_cache",
     "value_code_boundary",
     "VALUE_CODE_BOUNDARIES",
+    "reliance",
+    "relying_on",
+    "begin_activation",
+    "end_activation",
+    "audited_entry",
+    "package_instance",
+    "read_pair",
     "exact_scalar",
     "exact_tree",
     "scalar_bool",

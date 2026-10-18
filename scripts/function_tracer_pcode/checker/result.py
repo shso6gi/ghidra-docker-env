@@ -25,6 +25,7 @@ from scripts.function_tracer_pcode.checker.unknown_reason import (
 from scripts.function_tracer_pcode.proof.unknown_reason import (
     UnknownRecoveryActionStatus,
 )
+from scripts.function_tracer_pcode.core.live_values import package_instance
 
 
 def _format_stage_seconds(diagnostics: Any) -> str:
@@ -596,7 +597,7 @@ def decided_outcome_of(result: Any) -> Any:
     from scripts.function_tracer_pcode.authority.decision.decision import DecisionReceipt
 
     receipt = live_values.attribute(result, "decision_receipt")
-    if type(receipt) is not DecisionReceipt:
+    if not package_instance(receipt, DecisionReceipt):
         raise ValueError("canonical result lacks its DecisionReceipt authority")
     return outcome_from_projection(receipt, final_outcome=declared, is_equivalent=equivalent)
 

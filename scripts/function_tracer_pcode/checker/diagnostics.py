@@ -52,6 +52,8 @@ from scripts.function_tracer_pcode.core.stage_journal import (  # noqa: F401
     journal_stage_start,
     set_active_stage_journal,
 )
+from scripts.function_tracer_pcode.core.live_values import package_instance
+from scripts.function_tracer_pcode.core.live_values import audited_entry
 
 DIAGNOSTICS_SCHEMA = "result-diagnostics-v1"
 
@@ -616,6 +618,7 @@ def _elapsed(row: Any) -> float:
         return 0.0
 
 
+@audited_entry
 def result_diagnostics_payload(result: Any, *, lazy: bool = False) -> Any:
     """結果 JSON の `diagnostics`（解析時の記録と結果の統計）。
 
@@ -704,7 +707,7 @@ class TraceTimingsView:
         if name == "phase_usage":
             # 人向けの text の phase 利用状況（debug trace を出力へ添付しないときも使う）
             trace = self._trace
-            if type(trace) is _AttemptTrace:
+            if package_instance(trace, _AttemptTrace):
                 return trace.phase_usage_source()
             return None
         raise KeyError(name)
@@ -740,6 +743,7 @@ class _SolverTotals(Reducer):
         return round(self.seconds, 6) if self.what == "seconds" else self.invocations
 
 
+@audited_entry
 def trace_timings_payload(result: Any) -> Any:
     """trace 由来の時間の行（準備済みならその値、無ければ今の pair の上限で trace から作る）。"""
 
@@ -757,7 +761,7 @@ def _prepared_trace_timings(result: Any) -> Any:
     prepared = live_values.attribute(result, "prepared_semantic_payload")
     timings = live_values.attribute(prepared, "trace_timings")
     # 準備済みの値（出力の準備が作った `PreparedJson`）だけを読む
-    if type(timings) is not json_encoding.PreparedJson:
+    if not package_instance(timings, json_encoding.PreparedJson):
         return None
     value = timings.value()
     return value if isinstance(value, dict) and "attempts" in value else {
@@ -787,7 +791,7 @@ class _ResultDiagnosticsView:
 
     def _timing(self, name: str) -> Any:
         view = self._view
-        if type(view) is TraceTimingsView:
+        if package_instance(view, TraceTimingsView):
             return view.source(name)
         timings = self._timings
         return timings.get(name) if type(timings) is dict else None

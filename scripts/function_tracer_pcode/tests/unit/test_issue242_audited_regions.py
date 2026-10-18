@@ -253,6 +253,9 @@ VALUE_CODE_FREE = {
     "json_encoding.nested": lambda v: _walked(json_encoding.nested(v)),
     "json_encoding.pairs_of": lambda v: _walked(json_encoding.pairs_of(v)),
     "json_encoding.protocol_method": lambda v: json_encoding.protocol_method(v, "json_items"),
+    "json_encoding.call_protocol": lambda v: json_encoding.call_protocol(v, "__json_tree__"),
+    "live_values.read_pair": lambda v: live_values.read_pair(v),
+    "live_values.package_instance": lambda v: live_values.package_instance(v, type(v)),
     "json_encoding.raw": lambda v: _walked(json_encoding.raw(v)),
     "json_encoding.row_items": lambda v: list(json_encoding.row_items((), v)),
     "json_encoding.scalar_record_dict": lambda v: json_encoding.scalar_record_dict(v),
@@ -287,7 +290,9 @@ def _idle_reducer():
 
 
 #: adversarial な値を読んで投げてよい例外（読めない値は拒む。値の code を呼んだかは数で確かめる）
-_REFUSALS = (TypeError, ValueError, LookupError, AttributeError, RuntimeError, JsonValueRejected)
+_REFUSALS = (
+    TypeError, ValueError, LookupError, AttributeError, RuntimeError, JsonValueRejected, live_values.UndecidableComparison,
+)
 
 
 @pytest.mark.parametrize("name", sorted(VALUE_CODE_FREE))

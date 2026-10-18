@@ -8,6 +8,7 @@ from types import MappingProxyType
 from typing import Any, Mapping, Tuple
 
 from scripts.function_tracer_pcode.core import json_encoding, live_values
+from scripts.function_tracer_pcode.core.live_values import package_instance
 from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
 from scripts.function_tracer_pcode.core.json_encoding import (
     LEGACY,
@@ -40,6 +41,7 @@ from scripts.function_tracer_pcode.core.live_values import (
     type_name,
 )
 from scripts.function_tracer_pcode.proof.obligations.model import SemanticFactProvenance
+from scripts.function_tracer_pcode.core.live_values import audited_entry
 
 
 SEMANTIC_ANALYSIS_NOTES = frozenset({
@@ -240,7 +242,7 @@ def _frozen_repr(value: Any) -> str:
     while pending:
         item = pending.pop()
         kind = type(item)
-        if kind is _Text:
+        if package_instance(item, _Text):
             pieces.append(as_str(item.text))
         elif kind is tuple:
             count = size(item)
@@ -304,6 +306,7 @@ class SnapshotFingerprintCodec:
     """
 
     @classmethod
+    @audited_entry
     def freeze(cls, value: Any, *, budget: Any = None) -> Any:
         """値の canonical な写し。`budget` を渡すと、写す値の byte を写しながら足す。
 
@@ -460,7 +463,11 @@ class SnapshotFingerprintCodec:
         keyed = []
         # 位置は数えながら持つ（組ごとに列の長さを読み直さない）
         count = 0
-        for key, _item in items:
+        for pair in items:
+            if type(pair) is tuple:
+                key, _item = pair  # 凍結した組（exact な tuple の unpack は Python の code を呼ばない。長さの違いは ValueError）
+            else:
+                key, _item = live_values.read_pair(pair)
             keyed.append((_fingerprint_json(key), count))
             count += 1
         keyed.sort()
@@ -474,6 +481,7 @@ class SnapshotFingerprintCodec:
         return _fingerprint_json(value)
 
     @classmethod
+    @audited_entry
     def digest(cls, value: Any) -> str:
         frozen = cls.freeze(value)
         payload = _fingerprint_json(frozen)

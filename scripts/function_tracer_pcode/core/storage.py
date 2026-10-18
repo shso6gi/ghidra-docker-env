@@ -308,7 +308,7 @@ class FrozenStorageRecord(NamedTuple):
             raise TypeError("FrozenStorageRecord.values must be a tuple")
         if len(keys) != len(values):
             raise TypeError("FrozenStorageRecord must hold one value per key")
-        return zip(keys, values)
+        return zip(keys, values)  # 確かめた tuple どうしの zip（組み込みの iterator: `live_values.builtin_iterator`）
 
     def to_dict(self) -> Dict[str, Any]:
         # 固定個数の scalar だけの record（`StorageInfo.to_dict` と同じ規則）

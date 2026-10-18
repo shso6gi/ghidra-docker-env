@@ -568,19 +568,20 @@ class SerializationWork:
     def tree(self, leaf: Any, *, build: bool) -> Tuple[Any, int]:
         """sized leaf（式の木）の大きさを **作る前に** 求めて足し、`build` なら作る。"""
 
-        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, protocol_method
+        from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, call_protocol
 
-        # sized leaf の protocol は package の型の関数を直接呼ぶ（instance の属性を引かない）
+        # sized leaf の protocol は package の型の関数を直接呼ぶ（instance の属性を引かない。呼ぶ間は leaf を receiver
+        # とする監査済みの code: `call_protocol`）
         if not self.enabled:
-            return (protocol_method(leaf, "__json_tree__")(leaf) if build else None), 0
+            return (call_protocol(leaf, "__json_tree__") if build else None), 0
         # 見積もりの作業量（runtime ref を辿る分）もこの作業量へ数える（byte の大きさとは分ける）
-        size = protocol_method(leaf, "__json_tree_bytes__")(leaf, RESULT_JSON_POLICY, self.remaining(), self)
+        size = call_protocol(leaf, "__json_tree_bytes__", RESULT_JSON_POLICY, self.remaining(), self)
         built = None
         if size is None:
             # DAG のまま見積もれない形（閉路。未凍結の式の中だけ）: node を 1 つ作るたびに
             # 数えながら作る（作ってから数えない）
             before = self.consumed
-            built = protocol_method(leaf, "__json_tree_metered__")(leaf, RESULT_JSON_POLICY, self)
+            built = call_protocol(leaf, "__json_tree_metered__", RESULT_JSON_POLICY, self)
             size = self.consumed - before
         else:
             self.charge(size)
@@ -602,7 +603,7 @@ class SerializationWork:
                 limit=self._policy.serialization_nodes,
             )
         if build and built is None:
-            built = protocol_method(leaf, "__json_tree__")(leaf)
+            built = call_protocol(leaf, "__json_tree__")
         return (built if build else None), size
 
     # -- 勘定 ----------------------------------------------------------------

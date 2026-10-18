@@ -321,6 +321,11 @@ _AMORTIZED = (
     "入れ子の上限で切った判定は残さないので、切られる形の型は問い合わせごとに辿り直す（既存の設計）"
 )
 
+_RELIANCE = (
+    "R: 走っている監査済みの code が記録した頼る事実（walker の receiver と `package_instance` の絞り込み。1 つの値は "
+    "activation に 1 度だけ）だけを辿る: 量は監査済みの code が数え済みの自分の仕事（絞り込んだ値の数）の中"
+)
+
 LIVE_VALUES_WORK_OWNERS = {
     "package_file": _A,
     "_package_type_uncached": _B,
@@ -415,6 +420,11 @@ LIVE_VALUES_WORK_OWNERS = {
     "_accessors_hold": _B,
     "_builtin_enum_type_checked": _A,
     "outside_audit.__exit__": _A,
+    # Issue #242 第 11 回: 走っている監査済みの code が頼る事実（activation の記録）だけを辿る
+    "_recheck_reliance": _RELIANCE,
+    # `zip` が包む iterator の数を `SCAN_LIMIT` と比べてから辿る
+    "builtin_iterator": _B,
+    "audited_entry": _A,
     "_lru_callee": _A,
     # 判定が値から読む状態（書いた数の slot だけ）・記録した値の列（名前空間の上限の中: 呼ぶ側が比べた）
     "_watch": _B,

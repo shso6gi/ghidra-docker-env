@@ -45,7 +45,7 @@ import hashlib
 import json
 import types
 from collections import OrderedDict
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.live_values import (
     metered_storage_reads,
@@ -192,26 +192,31 @@ class _Sink:
             raise TypeError(f"unsupported authority leaf: {type_name(type(value))}")
 
 
-class _End:
-    """容器を閉じる action（閉路の判定から外す。閉じ括弧はこの直前に積んだ byte 列が流す）。
-
-    容器そのものを持つ: 固定の形の要約（`BoundedEvidence.summary`）が作った一時的な容器が、
-    子を辿り終える前に解放されて `id` が別の容器に再利用されると、閉路でない値を閉路と誤る。
-    """
-
-    __slots__ = ("container",)
-
-    def __init__(self, container: Any) -> None:
-        self.container = container
+#: action の種類（`_Actions` の `ops` の値）。値（live かもしれない）と walker 自身の印を同じ stack に混ぜない: 値を印と
+#: 見分けるために値の型を調べない（値が印の型の instance でも・bytes でも、値として扱う）
+_VALUE = 0      # 値（正規化して流す）
+_BYTES = 1      # 流す byte 列
+_END = 2        # 容器の終わり（payload は容器そのもの: 子を辿り終える前に解放されて `id` が再利用されないよう持つ）
+_KEY = 3        # 文字列にした key
+_RAW_ITEM = 4   # 正規化しない値（enum の容器の値の要素: `json.dumps` の形）
 
 
-class _Raw:
-    """canonical_value が正規化せずに返す値（容器の値を持つ enum）: `json.dumps` の形で流す。"""
+#: `_normalize` が値を積み直した印（値として流さない）
+_PUSHED = object()
 
-    __slots__ = ("value",)
 
-    def __init__(self, value: Any) -> None:
-        self.value = value
+class _Actions:
+    """後入れ先出しの action の stack（種類と payload を別の list に持つ: 種類は組み込みの int だけ）。"""
+
+    __slots__ = ("ops", "payloads")
+
+    def __init__(self) -> None:
+        self.ops: List[int] = []
+        self.payloads: List[Any] = []
+
+    def push(self, op: int, payload: Any) -> None:
+        self.ops.append(op)
+        self.payloads.append(payload)
 
 
 def canonical_fingerprint(value: Any, *, work: Any) -> str:
@@ -224,12 +229,12 @@ def canonical_fingerprint(value: Any, *, work: Any) -> str:
     return sink.hasher.hexdigest()
 
 
-def _normalize(item: Any, work: Any) -> Any:
+def _normalize(item: Any, work: Any, actions: _Actions) -> Any:
     """canonical_value と同じ正規化（容器以外）。1 歩ごとに数える。
 
     scalar（subclass を含む）は基底型の値（`live_values.plain_scalar`）、enum は `_value_`
     （`live_values.enum_value`。`value` を上書きした property は producer なので呼ばない）、
-    容器の値を持つ enum は `_Raw`、それ以外は値そのもの。
+    容器の値を持つ enum はその値を正規化しない値として積み直して `_PUSHED`（`json.dumps` の形で流す）、それ以外は値そのもの。
     """
 
     while True:
@@ -244,7 +249,8 @@ def _normalize(item: Any, work: Any) -> Any:
             scalar = plain_scalar(raw)
             if scalar is not NOT_PLAIN:
                 return scalar
-            return _Raw(raw)
+            actions.push(_RAW_ITEM, raw)
+            return _PUSHED
         if kind is _bounded_evidence_type():
             from scripts.function_tracer_pcode.core.json_encoding import BoundedEvidence
 
@@ -262,21 +268,26 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
     # 辿っている容器の identity（set の要素を流す入れ子の呼び出しも同じ集合を共有する）
     if active is None:
         active = set()
-    # 後入れ先出しの action: 値 / byte 列 / 容器の終わり
-    actions: list = [value]
-    while actions:
-        action = actions.pop()
-        if type(action) is bytes:
+    # 後入れ先出しの action: 値 / byte 列 / 容器の終わり / key / 正規化しない値（種類は `ops`、中身は `payloads`）
+    actions = _Actions()
+    actions.push(_VALUE, value)
+    ops = actions.ops
+    payloads = actions.payloads
+    while ops:
+        op = ops.pop()
+        action = payloads.pop()
+        if op == _BYTES:
+            if type(action) is not bytes:  # pragma: no cover - byte 列は walker が積む
+                raise TypeError("a byte action holds bytes")
             sink.emit(action)
             continue
-        if type(action) is _End:
-            active.discard(id(action.container))
+        if op == _END:
+            active.discard(id(action))
             continue
-        if type(action) is _Key:
-            text = action.text
-            if type(text) is not str:  # pragma: no cover - `_Key` は文字列にした key だけを持つ
+        if op == _KEY:
+            if type(action) is not str:  # pragma: no cover - key は文字列にしてから積む
                 raise TypeError("a mapping key was not converted to text")
-            sink.emit_string(text)
+            sink.emit_string(action)
             continue
         # 速い経路: 組み込みの型そのものの scalar と列（正規化も producer の確認も要らない）
         if (type(action) is str or type(action) is int or type(action) is float or type(action) is bool):
@@ -293,22 +304,21 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
             work.charge(count + 1)
             active.add(identity)
             sink.emit(b"[")
-            actions.append(b"]")
-            actions.append(_End(action))
+            actions.push(_BYTES, b"]")
+            actions.push(_END, action)
             for index in range(count - 1, -1, -1):
-                actions.append(action[index])
+                actions.push(_VALUE, action[index])
                 if index:
-                    actions.append(b",")
+                    actions.push(_BYTES, b",")
             continue
-        if type(action) is _RawItem:
-            item = action.value
+        if op == _RAW_ITEM:
+            item = action
             raw_json = True
         else:
-            item = _normalize(action, work)
+            item = _normalize(action, work, actions)
+            if item is _PUSHED:
+                continue
             raw_json = False
-        if type(item) is _Raw:
-            item = item.value
-            raw_json = True
         scalar = json_scalar(item) if raw_json else plain_scalar(item)
         if scalar is not NOT_PLAIN:
             sink.emit_leaf(scalar)
@@ -334,12 +344,12 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
             children = list(elements_of(item))
             active.add(identity)
             sink.emit(b"[")
-            actions.append(b"]")
-            actions.append(_End(item))
+            actions.push(_BYTES, b"]")
+            actions.push(_END, item)
             for index in range(count - 1, -1, -1):
-                actions.append(children[index])
+                actions.push(_VALUE, children[index])
                 if index:
-                    actions.append(b",")
+                    actions.push(_BYTES, b",")
             continue
         if builtin_set(item):
             work.charge(size(item) + 1)
@@ -366,21 +376,7 @@ def _emit(sink: _Sink, value: Any, active: Optional[set] = None) -> None:
         raise TypeError(f"{type_name(type(item))} has no bounded canonical form")
 
 
-class _Key:
-    __slots__ = ("text",)
-
-    def __init__(self, text: str) -> None:
-        self.text = text
-
-
-class _RawItem:
-    __slots__ = ("value",)
-
-    def __init__(self, value: Any) -> None:
-        self.value = value
-
-
-def _pairs(actions: list, item: Any, work: Any) -> bool:
+def _pairs(actions: _Actions, item: Any, work: Any) -> bool:
     """mapping / dataclass の (key, 子) を、幅を数えてから key で並べて積む（容器の終わりを含む）。
 
     mapping / dataclass でなければ何も積まずに `False`。
@@ -405,21 +401,21 @@ def _pairs(actions: list, item: Any, work: Any) -> bool:
         keyed.sort()
         texts = [text for text, _position in keyed]
         children = [values[position] for _text, position in keyed]
-    actions.append(b"]")
-    actions.append(_End(item))
+    actions.push(_BYTES, b"]")
+    actions.push(_END, item)
     for index in range(len(texts) - 1, -1, -1):
         # [key,value] の組（canonical_value の mapping / dataclass の形）
-        actions.append(b"]")
-        actions.append(children[index])
-        actions.append(b",")
-        actions.append(_Key(texts[index]))
-        actions.append(b"[")
+        actions.push(_BYTES, b"]")
+        actions.push(_VALUE, children[index])
+        actions.push(_BYTES, b",")
+        actions.push(_KEY, texts[index])
+        actions.push(_BYTES, b"[")
         if index:
-            actions.append(b",")
+            actions.push(_BYTES, b",")
     return True
 
 
-def _push_raw_container(actions: list, item: Any, work: Any, *, in_set: bool) -> None:
+def _push_raw_container(actions: _Actions, item: Any, work: Any, *, in_set: bool) -> None:
     """enum の値（正規化されない値）を `json.dumps(sort_keys=True)` と同じ形で積む。"""
 
     mapping = builtin_mapping(item) if _exact_mapping_type(item) else None
@@ -440,28 +436,28 @@ def _push_raw_container(actions: list, item: Any, work: Any, *, in_set: bool) ->
             texts.append(text)
             values.append(child)
         order = sorted(keyed)
-        actions.append(b"}")
-        actions.append(_End(item))
+        actions.push(_BYTES, b"}")
+        actions.push(_END, item)
         for index in range(len(order) - 1, -1, -1):
             position = order[index][1]
-            actions.append(_RawItem(values[position]))
-            actions.append(b":")
-            actions.append(_Key(texts[position]))
+            actions.push(_RAW_ITEM, values[position])
+            actions.push(_BYTES, b":")
+            actions.push(_KEY, texts[position])
             if index:
-                actions.append(b",")
-        actions.append(b"{")
+                actions.push(_BYTES, b",")
+        actions.push(_BYTES, b"{")
         return
     if builtin_sequence(item):
         count = size(item)
         work.charge(count + 1)
         children = list(elements_of(item))
-        actions.append(b"]")
-        actions.append(_End(item))
+        actions.push(_BYTES, b"]")
+        actions.push(_END, item)
         for index in range(count - 1, -1, -1):
-            actions.append(_RawItem(children[index]))
+            actions.push(_RAW_ITEM, children[index])
             if index:
-                actions.append(b",")
-        actions.append(b"[")
+                actions.push(_BYTES, b",")
+        actions.push(_BYTES, b"[")
         return
     raise TypeError(f"unsupported enum value: {type_name(type(item))}")
 
