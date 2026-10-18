@@ -236,9 +236,13 @@ def forced_digest_collision(monkeypatch):
 
 def test_beyond_budget_values_differ_under_a_forced_digest_collision(forced_digest_collision):
     # 予算（256）を超えた式: 構造の違う 2 つは別の identity、同じ構造は同じ identity（暗号の仮定を置かない）
-    left = _deep_chain(Expression.parameter("p", 0, "int", size=4), 400, "INT_ADD")
-    right = _deep_chain(Expression.parameter("p", 0, "int", size=4), 400, "INT_SUB")
-    same = _deep_chain(Expression.parameter("p", 0, "int", size=4), 400, "INT_ADD")
+    # 根の形・葉（旧 key の root と source atoms）は同じで、底の 1 つの演算だけが違う
+    def deep(inner_operator):
+        inner = Expression.binary_op(inner_operator, Expression.parameter("p", 0, "int", size=4),
+                                     Expression.constant(7, size=4))
+        return _deep_chain(inner, 400, "INT_ADD")
+
+    left, right, same = deep("INT_SUB"), deep("INT_XOR"), deep("INT_SUB")
     assert expression_key_safe(left) is None
     assert value_identity(left)[0] == "expression_exact"
     assert value_identity(left) != value_identity(right)
