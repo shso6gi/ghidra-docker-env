@@ -458,29 +458,38 @@ def _rendered_runtime_label(read: "_LabelReader", node: Expression, expr_type: E
         return ()
     if expr_type is ExpressionType.UNKNOWN:
         projection = semantic_projection(node)
-        return _declared_ref_identity(read, projection) if projection.has_runtime_ref else ()
+        if not projection.has_runtime_ref:
+            return ()
+        # UNKNOWN の label は ref の stable key の atom を既に持つ: 描画が読むそれ以外（semantic・origin）だけ
+        return _declared_ref_identity(read, projection, include_stable=False)
     if expr_type is ExpressionType.INTRINSIC:
         projection = semantic_projection(node)
         if projection.loop_lowering.kind is LoweringKind.NONE:
             return ()
-        return _declared_ref_identity(read, projection)
+        return _declared_ref_identity(read, projection, include_stable=True)
     return ()
 
 
-def _declared_ref_identity(read: "_LabelReader", projection: Any) -> tuple:
-    """ref が宣言した identity（stable / semantic / origin の atom）の label 成分。"""
+def _declared_ref_identity(read: "_LabelReader", projection: Any, *, include_stable: bool) -> tuple:
+    """ref が宣言した identity（stable / semantic / origin の atom）のうち label に無いものの成分。
+
+    固定できない ref は識別不能（ref を持たない式とも別の ref とも等しくしない）。足す成分が無ければ何も
+    足さない（stable key だけの UNKNOWN の key は旧 provenance key の予算内の経路と byte 一致のまま）。
+    """
 
     if projection.runtime_identity_unfixable:
         return (read._reject("unfixable_runtime_identity"),)
     parts = tuple(
         (tag, value)
         for tag, value in (
-            ("stable", projection.runtime_stable_key),
+            ("stable", projection.runtime_stable_key if include_stable else None),
             ("semantic", projection.runtime_semantic_key),
             ("origin", projection.runtime_stable_origin),
         )
         if value is not None
     )
+    if not parts:
+        return ()
     component, identified, comparable = _classify_atom(("rendered_ref_identity", parts))
     read._merge(identified, comparable)
     return (component,)

@@ -398,6 +398,29 @@ def test_values_rendered_to_different_terms_never_share_a_value_identity(name):
     assert _monolithic_case_identity(_case(left)) != _monolithic_case_identity(_case(right))
 
 
+def test_the_unknown_label_already_holds_the_refs_stable_key():
+    # UNKNOWN の値の identity に足すのは semantic / origin だけ。stable key は構造 key の ref の意味 key が
+    # 既に持つ（同じ `canonical_atom(stable_key())`）ことを固定する
+    from scripts.function_tracer_pcode.core.semantic_snapshot import semantic_projection
+
+    projection = semantic_projection(publish(_ref_unknown(_StableAndSemanticRef(1))))
+    assert projection.runtime_structural_key == ("stable_runtime_ref", projection.runtime_stable_key)
+
+
+def test_the_d1_deviation_covers_only_refs_with_more_than_a_stable_key():
+    # 境界: stable key だけの ref の UNKNOWN は旧 key と同じ bytes、semantic key を持つ ref は成分が増える
+    stable_only = publish(Expression.binary_op("INT_ADD", _ref_unknown(_StableOnlyRef()), Expression.constant(1, size=4)))
+    assert value_identity(stable_only) == _old_budget_key(stable_only)
+    with_semantic = publish(Expression.binary_op("INT_ADD", _ref_unknown(_StableAndSemanticRef(1)),
+                                                 Expression.constant(1, size=4)))
+    assert value_identity(with_semantic) != _old_budget_key(with_semantic)
+
+
+class _StableOnlyRef:
+    def stable_key(self):
+        return ("stable_unknown", 1)
+
+
 RENDER_IGNORED_REF_PAIRS = {
     # 描画が ref を読まない node は ref が違っても同じ値（値の共有を失わない）
     "parameter_ref_program": lambda: (_param(ref=_param_ref(0, 1)), _param(ref=_param_ref(0, 2))),
