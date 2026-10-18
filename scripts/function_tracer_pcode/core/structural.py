@@ -437,13 +437,15 @@ def _rendered_runtime_label(read: "_LabelReader", node: Expression, expr_type: E
 
     * CONSTANT: 名前付き global object のアドレス（`address_object_identity` → `gaddr_*`）
     * VARIABLE: 定数アドレスを指す ref（address の文脈で `address_offset` / `gaddr_*`）
-    * INTRINSIC: loop summary の lowering（`loop_lowering`。関数名と厳密 lowering は ref から来る）
+    * UNKNOWN: 記号（`rtunk_*`）の名前は ref の semantic key、無ければ stable key と origin から来る
+    * INTRINSIC: loop summary の lowering（関数名と厳密 lowering は ref から来る）
 
-    通常の構造 key はこれらを見ない（UNKNOWN / MEMORY は ref の意味 key を既に持つ）。値の identity は
-    「同じ値 ⇒ 同じ項」でなければならないので、描画が読む成分を label に足す。描画が ref を読まない
-    node（PARAMETER・ふつうの VARIABLE・PTRADD など）には何も足さない（足すと値の共有を失うだけ）。
-    INTRINSIC は lowering の値でなく ref の意味 key を足す: lowering の関数名は証明の要る loop で
-    object identity を含み、Method-B key は ref より粗い（PR-L の範囲）。ref の意味 key はそれより細かい。
+    通常の構造 key はこれらを見ない（UNKNOWN / MEMORY の ref の意味 key は stable key だけから作る）。
+    旧 provenance key の根の早期 return はこれらを ref の key で区別していたので、値の identity から
+    落とすと値の違う式が同じ identity になる。描画が ref を読まない node（PARAMETER・ふつうの VARIABLE・
+    PTRADD など）には何も足さない（足すと値の共有を失うだけ）。UNKNOWN と loop の INTRINSIC は、ref が
+    宣言した identity（stable / semantic / origin。描画の記号名と lowering の関数名はこれから作る）を
+    足し、固定できない ref は識別不能にする。宣言型の signedness など他の成分は PR-I（計画 v4 §6.6）。
     """
 
     if expr_type is ExpressionType.CONSTANT:
@@ -454,11 +456,34 @@ def _rendered_runtime_label(read: "_LabelReader", node: Expression, expr_type: E
         if projection.is_address_value_ref and projection.address_offset is not None:
             return (("rendered_address_value", projection.address_offset, projection.address_object_identity),)
         return ()
+    if expr_type is ExpressionType.UNKNOWN:
+        projection = semantic_projection(node)
+        return _declared_ref_identity(read, projection) if projection.has_runtime_ref else ()
     if expr_type is ExpressionType.INTRINSIC:
-        if semantic_projection(node).loop_lowering.kind is LoweringKind.NONE:
+        projection = semantic_projection(node)
+        if projection.loop_lowering.kind is LoweringKind.NONE:
             return ()
-        return read.runtime_metadata(node)
+        return _declared_ref_identity(read, projection)
     return ()
+
+
+def _declared_ref_identity(read: "_LabelReader", projection: Any) -> tuple:
+    """ref が宣言した identity（stable / semantic / origin の atom）の label 成分。"""
+
+    if projection.runtime_identity_unfixable:
+        return (read._reject("unfixable_runtime_identity"),)
+    parts = tuple(
+        (tag, value)
+        for tag, value in (
+            ("stable", projection.runtime_stable_key),
+            ("semantic", projection.runtime_semantic_key),
+            ("origin", projection.runtime_stable_origin),
+        )
+        if value is not None
+    )
+    component, identified, comparable = _classify_atom(("rendered_ref_identity", parts))
+    read._merge(identified, comparable)
+    return (component,)
 
 
 class _Redirect:
@@ -599,7 +624,7 @@ def _key_view(node: Expression, options: ExactTailOptions):
         name = read.text(current.name)
         atom = read.atom(current.value)
         runtime_metadata = read.runtime_metadata(current) if options.include_semantic_runtime_refs else ()
-        return read.view("leaf", ("unknown", name, atom, size, *runtime_metadata))
+        return read.view("leaf", ("unknown", name, atom, size, *runtime_metadata, *rendered))
 
     first = operands[0] if operands else None
 
@@ -1324,6 +1349,18 @@ def _process_object_identity(expr: Any) -> StructuralKey:
 # 一致だけで同じとした。今は exact identity（record の bytes を厳密比較する intern の token）を使う。
 # token は process の中でだけ意味を持つ（`PROCESS_SCOPED_TAGS`）。結果に残った key を run の間で
 # 比べる consumer は `checker/cause_aggregate.freeze_identity` を通し、識別不能になる（Gate A）。
+#
+# digest で一致を決めていた箇所の分類（計画 v4 §7.5。PR-D で決めた）:
+#
+#   厳密比較へ移した  readonly の値の記号（`abi_width_readonly`: key の canonical な文字列で引く）、
+#                     guard overlap の node（描画した条件・query の `ExactRecordIntern` の token）、
+#                     exact query の attempt cache（hit は query の文字列の一致）、書き換えの operand の
+#                     照合（値の identity）、証拠の fingerprint（digest の無い式は fingerprint を付けない）
+#   封印・束縛のまま  InputCorrespondence の digest（束縛した artifact が同じ relation の下で作られたか
+#                     の確認と receipt の封印。値どうしを同じとはしない）、receipt の evidence digest、
+#                     artifact の seal
+#   範囲外（記録）    function 単位の unary artifact cache と ProofCache の key（snapshot / premise の
+#                     fingerprint の一致で再利用する。#219 の snapshot 再利用の identity と同じ族）
 
 #: `value_identity` の option（予算内の key と、超えたときの exact identity が同じ T_o を見る）
 _VALUE_IDENTITY_OPTIONS = {
@@ -1345,8 +1382,11 @@ def value_identity(expr: Optional[Expression]) -> StructuralKey:
       含めば識別不能 token（何とも、自分の再計算とも等しくならない）
     * 早期 return は無い（ref・storage が同じでも値の違う式は別の identity）
 
-    label には、描画が runtime ref から読む成分（`_rendered_runtime_label`）を足す: 値が同じ ⇒ 同じ
-    項（計画 v4 I1）。それ以外の式の key は、旧 provenance key の早期 return の無い経路と byte 一致。
+    label には、描画が runtime ref から読む成分（`_rendered_runtime_label`: global address・address 値・
+    UNKNOWN の記号・loop の lowering）を足す。旧 provenance key が根の早期 return で区別していた値を、
+    早期 return を外しても区別するため（I1 の全体、たとえば宣言型の signedness は PR-I の範囲で、
+    ここでは主張しない）。それらの成分を持たない式の key は、旧 provenance key の早期 return の無い
+    経路と byte 一致（D1）。
     """
 
     if expr is None:

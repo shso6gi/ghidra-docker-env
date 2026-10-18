@@ -37,7 +37,7 @@ EXACT_TAIL_TAG = "exact_tail"
 UNIDENTIFIED_TAG = "exact_tail_unidentified"
 #: object identity fallback の token の tag（`expression_key_or_identity`）
 PROCESS_OBJECT_TAG = "process_object"
-#: record の bytes を厳密比較で intern した token の tag（`core.structural.exact_record_token`）
+#: record の bytes を厳密比較で intern した token の tag（`core.structural.ExactRecordIntern`）
 EXACT_RECORD_TAG = "exact_record"
 
 #: 比較に使ってはいけない（どこまで見えているかを表す）key の tag（C-K3）

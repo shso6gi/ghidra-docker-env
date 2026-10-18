@@ -53,6 +53,8 @@ from scripts.function_tracer_pcode.proof.strategies.monolithic_support import _m
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
+#: main `44e25245` で `expression_provenance_key` が D1 の対照に出した key（記録した golden）
+D1_GOLDEN = Path(__file__).resolve().parents[1] / "fixtures" / "pr_d" / "provenance_keys_44e25245.json"
 
 
 # ---------------------------------------------------------------------------
@@ -278,8 +280,8 @@ D1_CONTROLS = {
     "arith": lambda: Expression.binary_op(
         "INT_ADD", Expression.parameter("a", 0, "int", size=4), Expression.constant(5, size=4)
     ),
-    "unknown_with_ref": lambda: Expression.binary_op(
-        "INT_MULT", _unknown(4), Expression.parameter("a", 0, "int", size=4)
+    "unknown_without_ref": lambda: Expression.binary_op(
+        "INT_MULT", _with_ref(Expression.unknown("u"), None, size=4), Expression.parameter("a", 0, "int", size=4)
     ),
     "memory_with_ref": lambda: Expression.unary_op("INT_ZEXT", _memory("p", 4, 3)),
     "nested_param_with_ref": lambda: Expression.binary_op("INT_SUB", _param(), Expression.constant(1, size=4)),
@@ -294,7 +296,9 @@ def test_budget_values_without_rendered_refs_keep_the_old_key_bytes(name, frozen
     if frozen:
         expr = publish(expr)
     assert value_identity(expr) == _old_budget_key(expr)
-    assert json.dumps(value_identity(expr)) == json.dumps(_old_budget_key(expr))
+    # main `44e25245` の `expression_provenance_key` が出した key（`tests/fixtures/pr_d/` に記録）と byte 一致
+    golden = json.loads((D1_GOLDEN).read_text(encoding="utf-8"))[name]["frozen" if frozen else "unfrozen"]
+    assert json.dumps(value_identity(expr), sort_keys=True) == json.dumps(golden, sort_keys=True)
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +318,54 @@ def _global_constant():
     )
 
 
+class _SemanticOnlyLoop(CountedLoopSummaryRef):
+    """stable key を出さず semantic key だけを出す loop ref（`_loop_object_key` が None の形）。"""
+
+    def stable_key(self):
+        return None
+
+
+class _SemanticOnlyRef:
+    def __init__(self, key):
+        self.key = key
+
+    def stable_key(self):
+        return None
+
+    def semantic_key(self):
+        return ("semantic_unknown", self.key)
+
+
+class _StableAndSemanticRef(_SemanticOnlyRef):
+    def stable_key(self):
+        return ("stable_unknown", 1)
+
+
+def _ref_unknown(ref):
+    expr = Expression.unknown("u", runtime_ref=ref)
+    expr.size = 4
+    return expr
+
+
+def _semantic_only_loop(residue):
+    ref = _SemanticOnlyLoop(induction_step=1, result_size=4, signed_loop=True, residue_cases=residue)
+    return Expression.intrinsic(
+        "COUNTED_LOOP_SUM",
+        [Expression.constant(0, size=4), Expression.constant(0, size=4), Expression.parameter("param_1", 0, "int", size=4)],
+        size=4, runtime_ref=ref, opcode=COUNTED_LOOP_SUM_OPCODE,
+    )
+
+
 RENDERED_REF_PAIRS = {
+    # 記号の名前が semantic key から来る UNKNOWN（review r1 M1）
+    "unknown_semantic_only": lambda: (_ref_unknown(_SemanticOnlyRef(1)), _ref_unknown(_SemanticOnlyRef(2))),
+    "unknown_same_stable_other_semantic": lambda: (
+        _ref_unknown(_StableAndSemanticRef(1)), _ref_unknown(_StableAndSemanticRef(2)),
+    ),
+    # stable key を出さない loop（lowering の関数名は semantic key から来る。review r1 M1）
+    "loop_semantic_only_root": lambda: (
+        _semantic_only_loop(((2, 0, 1, 0), (2, 1, -1, 0))), _semantic_only_loop(((2, 0, 1, 0), (2, 1, 1, 0))),
+    ),
     # 名前付き global のアドレス（`gaddr_*`）と同じ値のふつうの定数
     "global_address_constant": lambda: (
         _global_constant(), Expression(ExpressionType.CONSTANT, value=0x1000, size=8),
