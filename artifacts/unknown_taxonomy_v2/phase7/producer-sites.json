@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "6303e252e35626cd54e29e4daa4fcd8f957884a7951d6c44505949fbc3fba791",
+  "manifest_digest": "1189df6b72d60a12eaf6fd1d3e4f4d7844f25b7d6cd5770eba1133ec96c1ba64",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 34,
   "sites": [
@@ -997,10 +997,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 361,
+      "line": 368,
       "path": "scripts/function_tracer_pcode/authority/domains/return_coverage.py",
       "producer_site_manifest_id": "return-coverage-final-terminal",
-      "source_sha256": "3b6502e099d382a8cfe49136bb00e80a807c387a50f87dc332410aad2cdd8275"
+      "source_sha256": "9da5e61467114cdd496daf41ba4a419b3ac5b835cf23f37e2470f675c8a27f29"
     },
     {
       "allowed_dispositions": [

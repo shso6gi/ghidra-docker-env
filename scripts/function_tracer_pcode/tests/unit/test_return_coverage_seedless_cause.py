@@ -3,7 +3,8 @@
 
 責務は 3 つに分かれ、それぞれをここで固定する。
 
-* 判定: return-coverage gate（この file の対象外）が raw analysis に被覆の印を残す。
+* 判定: return-coverage gate（この file の対象外）。比較は判定を自分の obligation runtime に記録する（raw analysis
+  への被覆の印は main と同じく残るが、記録はそれを読まない）。
 * 記録: pairwise の比較は自分の gate の判定を自分の obligation runtime に書く（analysis に追記される印ではない）。
   runner は monolithic fallback を止めたとき、自分の runtime の判定（自分の raw pair の比較だけが書く）から seed の
   無い側の不足を取り、不足を観測した比較の identity と、runner の結果の比較（dispatch frame）への束縛を分けて持つ
@@ -625,3 +626,63 @@ def test_the_raw_comparisons_deficiency_survives_a_last_result_from_another_runt
     assert moved, "the comparison frame was not reachable from the strategy"
     assert result["final_outcome"] == "UNKNOWN", (result.get("failure_message"), _active(result))
     assert _active(result) == [RETURN_COVERAGE_GAP_REASON_ID] * 2
+
+
+def test_a_view_comparison_as_the_runners_last_result_keeps_the_raw_observer(monkeypatch):
+    """review r6 m1（production）: runner の最後の結果が本物の view の比較（S_ABSTRACT_RECURSIVE_SUMMARY が別の
+    raw pair を比べた結果）でも、cause は不足を観測した raw pair の S_PAIRWISE の比較を名指しし、記録はその view の
+    結果の比較に束縛される。最終判定は ERROR でなく UNKNOWN。
+
+    抽象化の producer（``abstract_recursive_calls``）だけを差し替え、runner・抽象化の branch・inner ``check()``・
+    終了処理は本物。view の pair は raw pair と別の解析（別の raw pair の digest）で、view の比較の判定は view の
+    runtime に書かれる。
+    """
+
+    from scripts.function_tracer_pcode.authority.domains import return_coverage as coverage_domain
+    from scripts.function_tracer_pcode.checker import recurrence_stage
+    from scripts.function_tracer_pcode.core import Condition, Expression, ReturnInfo
+    from scripts.function_tracer_pcode.tests.unit._analyzer_pipeline_harness import analyze_through_pipeline
+    from scripts.function_tracer_pcode.tests.unit._production_check_harness import publish_like_the_analyzer
+    from scripts.function_tracer_pcode.tests.unit._production_check_harness import run_production_check
+    from scripts.function_tracer_pcode.tests.unit.test_issue185_type_hypothesis_domain import _analysis, _descriptor
+
+    def view(name):
+        # raw pair と別の解析: ``x > 1`` の領域だけを返す（raw は ``x > 0``）。
+        guard = Condition(Expression.binary_op("INT_SLESS", Expression.constant(1, 4), _int_param()), False)
+        return publish_like_the_analyzer(
+            _analysis(name, [_descriptor("param_1", 4, "int", True)], [ReturnInfo("0x10", _int_param(), [guard])])
+        )
+
+    abstractions = []
+
+    def abstract_recursive_calls(analysis1, analysis2, **_kwargs):
+        abstraction = SimpleNamespace(applied=True, matches=("probe",), analysis1=view("l"), analysis2=view("r"))
+        abstractions.append(abstraction)
+        return abstraction
+
+    adopted = []
+    original_adopt = coverage_domain.adopt_final_unsealed_coverage
+
+    def adopt(result, outcome):
+        adopted.append((getattr(result, "_unsealed_coverage_terminal", None), getattr(result, "_prepared_dispatch_frame", None)))
+        return original_adopt(result, outcome)
+
+    monkeypatch.setattr(recurrence_stage, "abstract_recursive_calls", abstract_recursive_calls)
+    monkeypatch.setattr(coverage_domain, "adopt_final_unsealed_coverage", adopt)
+    result = run_production_check(
+        "pr-c-view-last-result", _template("l", "partial"), _template("r", "partial"),
+        analyze=analyze_through_pipeline,
+    )
+
+    assert abstractions, "the recursive abstraction branch did not run"
+    assert result.get("stage_path") == ["S_PAIRWISE", "S_ABSTRACT_RECURSIVE_SUMMARY"], result.get("stage_path")
+    assert result["final_outcome"] == "UNKNOWN", (result.get("failure_message"), _active(result))
+    assert _active(result) == [RETURN_COVERAGE_GAP_REASON_ID] * 2
+    ((terminal, final_frame),) = adopted
+    assert terminal.binds(final_frame)
+    view_pair_digest = final_frame.comparison_binding.raw_pair_digest
+    # 束縛は view の結果の比較、cause の identity は raw pair の S_PAIRWISE の比較（別の raw pair）。
+    assert terminal.bound_comparison[0] == view_pair_digest
+    assert terminal.observed_comparison[1] == "S_PAIRWISE"
+    assert terminal.observed_comparison[0] != view_pair_digest
+    assert {signal.comparison_identity for signal in terminal.signals()} == {terminal.observed_comparison}

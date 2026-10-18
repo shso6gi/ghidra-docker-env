@@ -15,17 +15,24 @@ terminal も無いまま終わり、終了処理が ERROR にしていた。
 1. 被覆を判定する: return-coverage gate（この domain は判定しない）。
 2. 不足がどの比較に適用されるかを記録する: pairwise の比較は自分の判定を自分の obligation runtime に記録する
    （``ObligationRuntimeSession.coverage_verdict``。analysis に追記される印ではない）。runner が monolithic fallback
-   を止めたとき、runner の runtime（runner の raw pair の比較だけが書く。抽象化・promotion の比較は別の runtime）
-   の判定から不足を取り、runner の結果に ``UnsealedCoverageTerminal`` を付ける（``stage_runner``）。記録は、不足を
-   観測した比較の identity と、付けた結果の比較（dispatch frame）への束縛を分けて持ち、cause はまだ作らない。
+   を止めたとき、runner の runtime の判定から不足を取る（抽象化・promotion の比較は別の runtime に書くので、ここに
+   書くのは runner の raw pair の比較。raw pair の比較が別の runtime を得た場合、その判定は runner に届かず記録は
+   作られない＝main と同じく終了処理が ERROR にする）。そして runner の結果に ``UnsealedCoverageTerminal`` を
+   付ける（``stage_runner``）。記録は、不足を観測した比較の identity と、付けた結果の比較（dispatch frame）への
+   束縛を分けて持ち、cause はまだ作らない。
 3. 採用する: どの結果が最終かを決めた後の authority の終了処理（``pilot.finish``）が、**最終の結果**に付いた
    記録だけを、最終の比較の frame と照合して cause にする（``observe_final_unsealed_coverage``）。
 
-型の再試行の段（P1 / P2 ...）や recurrence promotion の結果が最終になれば、前の比較の記録はその結果と一緒に
-捨てられ、cause にならない。後の段の解析が被覆を回復して示した EQ を、前の段の不足が塞がない。逆に最終の
-比較の被覆が欠けていれば、その比較の cause が判定を UNKNOWN にする。再試行の開始時の一律の削除・EQ という
-結果による解消・段の名前による例外は無い。view（抽象化・promotion）の被覆の印は view に付き、runner の raw
-pair の記録にならない。
+型の再試行の段（P1 / P2 ...）の結果が最終になれば、前の段の runner の記録はその結果と一緒に捨てられ、cause に
+ならない。後の段の解析が被覆を回復して示した EQ を、前の段の不足が塞がない。逆に最終の比較の被覆が欠けていれば、
+その runner の記録の cause が判定を UNKNOWN にする。再試行の開始時の一律の削除・EQ という結果による解消・段の
+名前による例外は無い。
+
+同じ runner の中で recurrence promotion・再帰の抽象化の比較が最後の結果になったとき（その比較は自分の runtime で
+動く）は、runner が fallback を止めた理由である raw pair の比較の不足を、その最後の結果に束縛して記録する。cause は
+不足を観測した raw pair の比較を名指しする。promotion・抽象化の比較が被覆を回復しても別の理由で UNKNOWN なら、
+fallback を止めたのは raw pair の不足なので、その cause が残る（判定は UNKNOWN のまま変わらない）。view の比較の
+判定は view の runtime に書かれ、runner の記録にならない。
 
 * reason は 2 つ: ``return_coverage_gap``（全域でない入力の領域がある）と ``return_coverage_inconclusive``
   （全域かどうか決められない: 条件を SMT へ訳せない、solver が答えない ...）。どちらも legacy の
