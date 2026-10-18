@@ -688,3 +688,77 @@ def test_extension_evidence_requires_the_same_payload_value_not_only_the_same_ta
     rejected = seed_for(_subpiece(4))
     assert accepted.extension_evidence_source.kind == "zero_extend"
     assert rejected.extension_evidence_source.kind != "zero_extend" or not rejected.complete
+
+
+def test_the_canonical_guard_executor_refuses_another_query_with_the_same_digest(monkeypatch):
+    # requirement の query と digest だけが同じ別の query を、その requirement の query として実行しない
+    from scripts.function_tracer_pcode.proof.obligations import guard_overlap
+    from scripts.function_tracer_pcode.proof.strategies import pairwise_query_executor as executor
+    from scripts.function_tracer_pcode.tests.unit.test_guard_overlap_graph import _canonical_guard_strategy, _seed
+
+    monkeypatch.setattr(executor, "canonical_guard_query_digest", lambda query: "0" * 64)
+    monkeypatch.setattr(guard_overlap, "canonical_guard_query_digest", lambda query: "0" * 64)
+    graph = guard_overlap.GuardOverlapGraph(("view",), "premise")
+    requirement = graph.requirement(_seed("left"), _seed("right"), "(set-logic QF_BV)\n(assert false)\n(check-sat)")
+    with pytest.raises(ValueError, match="does not match requirement"):
+        executor.execute_canonical_guard_query(
+            _canonical_guard_strategy(), requirement, "(set-logic QF_BV)\n(assert true)\n(check-sat)", "pr-d",
+        )
+
+
+class _Varnode:
+    def __init__(self, offset, size, defining=None):
+        self.offset, self.size, self.defining = offset, size, defining
+
+
+def test_the_return_flow_certificate_names_the_payload_value_not_its_target(monkeypatch):
+    # certificate の producer（`return_extraction`）も、拡張の payload を値の identity で名指す。対象の
+    # identity では同じ parameter の別の piece を区別できない（consumer `surface` と同じ関数で比べる）
+    from scripts.function_tracer_pcode.analysis.returns import return_extraction
+    from scripts.function_tracer_pcode.core import PcodeOpRef, VarnodeFlowRef
+
+    payload_varnode = _Varnode(0x20, 4)
+    extended_varnode = _Varnode(0x30, 8)
+
+    class _Op:
+        def __init__(self, mnemonic, inputs, output=None):
+            self.mnemonic, self.inputs, self.output = mnemonic, inputs, output
+
+        def getMnemonic(self):
+            return self.mnemonic
+
+        def getNumInputs(self):
+            return len(self.inputs)
+
+        def getInput(self, index):
+            return self.inputs[index]
+
+        def getOutput(self):
+            return self.output
+
+    extension = _Op("INT_ZEXT", [payload_varnode], extended_varnode)
+    return_op = _Op("RETURN", [_Varnode(0, 8), extended_varnode])
+
+    def op_ref(op, **_kwargs):
+        return PcodeOpRef(binary_id="B", function_entry_offset=0x100, target_offset=id(op) & 0xFFFF,
+                          seq_time=1, seq_order=0, mnemonic=op.getMnemonic(), input_sizes=(4,), output_size=8)
+
+    monkeypatch.setattr(return_extraction.PcodeOpRef, "from_pcode_op", staticmethod(op_ref))
+    monkeypatch.setattr(return_extraction.VarnodeFlowRef, "from_varnode",
+                        staticmethod(lambda varnode: VarnodeFlowRef(1, "unique", varnode.offset, varnode.size)))
+    analyzer = SimpleNamespace(
+        _binary_id="B", _program_identity=lambda: None, _current_function_entry_address=lambda: 0x100,
+        _return_value_producer_chain=lambda varnode: [extension],
+    )
+
+    def certificate(payload):
+        tracer = SimpleNamespace(trace_varnode=lambda varnode, use_cache=False: payload)
+        return return_extraction._build_return_value_flow_certificate(
+            analyzer, {"_return_op_object": return_op, "pcode_op_ref": op_ref(return_op)},
+            return_varnode=extended_varnode, tracer=tracer,
+        )
+
+    low, high = publish(_subpiece(0)), publish(_subpiece(4))
+    assert object_target_key(low) == object_target_key(high)
+    assert certificate(low).payload_expression_identity == tuple(value_identity(low))
+    assert certificate(low).payload_expression_identity != certificate(high).payload_expression_identity
