@@ -11,7 +11,7 @@ PR ごとの `unit-fast` job が持つ:
 * PR gate の選択が manifest で明示され、full corpus から何も落ちていないこと
 * per-case budget が**実際の deadline** として効くこと（synthetic worker）
 
-重い 8 case / 9 replay の実行は `test_recorded_pairs.py` が持つ。
+重い 9 case / 10 replay の実行は `test_recorded_pairs.py` が持つ。
 """
 
 from __future__ import annotations
@@ -590,7 +590,7 @@ def test_every_case_has_a_complete_and_consistent_description():
 
 
 def test_the_corpus_was_recorded_from_one_clean_source_tree():
-    """8 case が同じ clean な source tree から記録されていること。
+    """全 case が同じ clean な source tree から記録されていること。
 
     `recording_dirty=true` の fixture は「どの source から取ったか」が
     commit だけでは決まらない。corpus を 1 case ずつ記録すると、先に書いた
@@ -715,13 +715,13 @@ def test_the_identical_case_is_recorded_with_the_fast_path_off():
 
 
 def test_the_corpus_covers_the_issues_it_was_recorded_for():
-    """8 case が Issue #109 提案 2 の対象を保っていること。"""
+    """corpus が記録の目的にした Issue（#109 提案 2 の対象と plan v4 PR-C の #247）を保っていること。"""
 
-    assert len(CASES) == 8, sorted(CASES)
+    assert len(CASES) == 9, sorted(CASES)
     covered: Set[str] = set()
     for case in CASES.values():
         covered.update(case["issue_refs"])
-    assert {"#15", "#16", "#18", "#19", "#20", "#22"} <= covered, sorted(covered)
+    assert {"#15", "#16", "#18", "#19", "#20", "#22", "#247"} <= covered, sorted(covered)
 
 
 def _fixture_bytes(case_id: str) -> int:

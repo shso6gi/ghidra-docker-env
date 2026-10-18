@@ -1,0 +1,245 @@
+{
+ "analyzer_programs": [
+  "B5",
+  "B13"
+ ],
+ "schema": "recorded-pcode-analysis-snapshot-v1",
+ "sides": {
+  "B13": [
+   {
+    "analysis_notes": [
+     "bounded_call_refinement"
+    ],
+    "effect_summary": {
+     "effects": [],
+     "has_unsupported_call": false,
+     "incomplete_reasons": [],
+     "parameter_names": [
+      "param_1"
+     ],
+     "synthetic_expr": null,
+     "unsupported_call_sites": []
+    },
+    "entry_point": "001008d4",
+    "expansion_budget_truncations": [],
+    "function_name": "doubleToRawLongBits",
+    "incomplete_control_flow": false,
+    "parameters": [
+     {
+      "data_type": "undefined8",
+      "index": 0,
+      "is_signed": true,
+      "name": "param_1",
+      "owner_entry_offset": 1050836,
+      "size": 8,
+      "storage": {
+       "base_register_name": "f12",
+       "base_register_size": 8,
+       "base_register_size_bits": 64,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 4192,
+       "register_name": "f12",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     }
+    ],
+    "program_is_big_endian": true,
+    "recovered_from_decompiler": false,
+    "return_abi_facts": {
+     "calling_convention": {
+      "source": "getModelName",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_calling_convention_v1",
+       "__stdcall"
+      ]
+     },
+     "declared_or_effective_return_type": {
+      "source": "ghidra_function_prototype_return_type",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_type_v1",
+       "/undefined8",
+       8
+      ]
+     },
+     "return_storage_descriptor": {
+      "source": "ghidra_function_prototype.getReturnStorage",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_storage_v1",
+       [
+        [
+         "ghidra_return_storage_member_v1",
+         "register",
+         16,
+         8
+        ]
+       ]
+      ]
+     },
+     "schema_version": 1
+    },
+    "return_type": "undefined8",
+    "return_type_provenance": {
+     "counterpart_return_type": null,
+     "declared_return_type_width": 64,
+     "object_derived": true,
+     "resolved_return_override_source": null,
+     "return_type": "undefined8",
+     "return_type_source": "undefined_decompiler_type",
+     "signature_hypothesis_phase": null
+    },
+    "returns": [
+     {
+      "acceptance_status": null,
+      "address": "00100950",
+      "branch_index": 0,
+      "conditions": [],
+      "order_index": 0,
+      "pcode_identity": "00100950:t90",
+      "pcode_order": 3,
+      "pcode_time": 90,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "param_1"
+     }
+    ],
+    "schema": "recorded-pcode-analysis-snapshot-v1",
+    "signedness_result": {
+     "evidence_summary": {
+      "excluded_fastpath": 0,
+      "ignored": 0,
+      "signed_medium": 0,
+      "signed_strong": 0,
+      "unsigned": 0
+     },
+     "opcode_counts": {},
+     "signedness": "unknown"
+    },
+    "unknown_event_reasons": []
+   }
+  ],
+  "B5": [
+   {
+    "analysis_notes": [
+     "bounded_call_refinement"
+    ],
+    "effect_summary": {
+     "effects": [],
+     "has_unsupported_call": false,
+     "incomplete_reasons": [],
+     "parameter_names": [
+      "param_1"
+     ],
+     "synthetic_expr": null,
+     "unsupported_call_sites": []
+    },
+    "entry_point": "00100700",
+    "expansion_budget_truncations": [],
+    "function_name": "doubleToRawLongBits",
+    "incomplete_control_flow": false,
+    "parameters": [
+     {
+      "data_type": "undefined8",
+      "index": 0,
+      "is_signed": true,
+      "name": "param_1",
+      "owner_entry_offset": 1050368,
+      "size": 8,
+      "storage": {
+       "base_register_name": "z0",
+       "base_register_size": 32,
+       "base_register_size_bits": 256,
+       "bit_offset_in_base": 0,
+       "is_register": true,
+       "offset": 20480,
+       "register_name": "d0",
+       "size": 8,
+       "size_bits": 64,
+       "space_name": "register"
+      }
+     }
+    ],
+    "program_is_big_endian": false,
+    "recovered_from_decompiler": false,
+    "return_abi_facts": {
+     "calling_convention": {
+      "source": "getModelName",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_calling_convention_v1",
+       "__cdecl"
+      ]
+     },
+     "declared_or_effective_return_type": {
+      "source": "ghidra_function_prototype_return_type",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_type_v1",
+       "/undefined8",
+       8
+      ]
+     },
+     "return_storage_descriptor": {
+      "source": "ghidra_function_prototype.getReturnStorage",
+      "status": "PRESENT",
+      "value": [
+       "ghidra_return_storage_v1",
+       [
+        [
+         "ghidra_return_storage_member_v1",
+         "register",
+         16384,
+         8
+        ]
+       ]
+      ]
+     },
+     "schema_version": 1
+    },
+    "return_type": "undefined8",
+    "return_type_provenance": {
+     "counterpart_return_type": null,
+     "declared_return_type_width": 64,
+     "object_derived": true,
+     "resolved_return_override_source": null,
+     "return_type": "undefined8",
+     "return_type_source": "undefined_decompiler_type",
+     "signature_hypothesis_phase": null
+    },
+    "returns": [
+     {
+      "acceptance_status": null,
+      "address": "00100760",
+      "branch_index": 0,
+      "conditions": [],
+      "order_index": 0,
+      "pcode_identity": "00100760:t70",
+      "pcode_order": 2,
+      "pcode_time": 70,
+      "return_kind": "exact",
+      "validation_blockers": [],
+      "value": "param_1"
+     }
+    ],
+    "schema": "recorded-pcode-analysis-snapshot-v1",
+    "signedness_result": {
+     "evidence_summary": {
+      "excluded_fastpath": 0,
+      "ignored": 0,
+      "signed_medium": 0,
+      "signed_strong": 0,
+      "unsigned": 0
+     },
+     "opcode_counts": {},
+     "signedness": "unknown"
+    },
+    "unknown_event_reasons": []
+   }
+  ]
+ }
+}

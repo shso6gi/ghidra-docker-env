@@ -293,7 +293,7 @@ class PairwiseStrategy(CheckStrategy):
     _unknown_expression_classification_key = _svc_opaque_unknowns._impl__unknown_expression_classification_key
     _unknown_reason_dedup_key = staticmethod(_svc_orchestration._impl__unknown_reason_dedup_key)
     _unsupported_ops_include_memory_or_effect = staticmethod(_svc_opaque_unknowns._impl__unsupported_ops_include_memory_or_effect)
-    check = _svc_orchestration._impl_check
+    check = _svc_orchestration._impl_check_refusing_unsupported_smt_semantics
     # pairwise_services.orchestration (continued)
     _clear_pairwise_extra_assertions = _svc_pair_cases._impl__clear_pairwise_extra_assertions
     _collect_case_unknown_expression_nodes = _svc_pair_cases._impl__collect_case_unknown_expression_nodes

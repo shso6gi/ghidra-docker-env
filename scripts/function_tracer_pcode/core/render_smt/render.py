@@ -171,7 +171,17 @@ _SUPPORTED_UNARY_OPERATORS = {
 
 
 class UnsupportedSmtSemanticsError(ValueError):
-    """Base class for typed refusals of unavailable exact SMT semantics."""
+    """Base class for typed refusals of unavailable exact SMT semantics.
+
+    ``refusal_evidence_ref`` / ``refusal_target_fields()`` are the refusal's typed identity (what the
+    strategies put into their ``expression_semantics_unsupported`` diagnostic); the message text is
+    diagnostic only.
+    """
+
+    refusal_evidence_ref = "unsupported_smt_semantics"
+
+    def refusal_target_fields(self) -> tuple:
+        return (self.refusal_evidence_ref, type(self).__name__)
 
 
 class UnsupportedSmtIntrinsicError(UnsupportedSmtSemanticsError):
@@ -185,6 +195,11 @@ class UnsupportedSmtIntrinsicError(UnsupportedSmtSemanticsError):
             f"Unsupported intrinsic for SMT lowering: {self.intrinsic_identity}"
         )
 
+    refusal_evidence_ref = "unsupported_intrinsic_smt_lowering"
+
+    def refusal_target_fields(self) -> tuple:
+        return ("unsupported_smt_intrinsic", self.intrinsic_identity)
+
 
 class UnknownSmtExtensionWidthError(ValueError):
     """Typed refusal to lower an extension without its P-code output width."""
@@ -196,6 +211,11 @@ class UnknownSmtExtensionWidthError(ValueError):
             f"{operator} output width is unavailable "
             f"(operand width: {self.operand_bits or 'unknown'} bits)"
         )
+
+    refusal_evidence_ref = "unknown_smt_extension_width"
+
+    def refusal_target_fields(self) -> tuple:
+        return (self.refusal_evidence_ref, self.operator, self.operand_bits)
 
 
 class UnsupportedSmtOperatorError(UnsupportedSmtSemanticsError):
@@ -218,6 +238,18 @@ class UnsupportedSmtOperatorError(UnsupportedSmtSemanticsError):
             f"(operand width: {self.operand_bits or 'unknown'} bits, "
             f"result width: {self.result_bits or 'unknown'} bits)"
         )
+
+    refusal_evidence_ref = "unsupported_smt_operator"
+
+    def refusal_target_fields(self) -> tuple:
+        return (
+            self.refusal_evidence_ref, self.operator, self.reason, self.operand_bits, self.result_bits,
+        )
+
+
+#: 正確な SMT の意味が無いことを示す型つきの拒否の全て（strategy が UNKNOWN にする族）。
+#: ``UnknownSmtExtensionWidthError`` は歴史的に ``UnsupportedSmtSemanticsError`` の外にあるので並べる。
+SMT_SEMANTICS_REFUSALS = (UnsupportedSmtSemanticsError, UnknownSmtExtensionWidthError)
 
 
 #: solver へ渡す描画の出力を観測・予算判定する点（書き出し口は `CountingWriter`）。

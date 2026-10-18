@@ -158,6 +158,16 @@ class ObligationRuntimeSession:
     #: object では None）。``reserve_for_its_raw_pair`` の後は、この raw pair の比較だけに仕える。
     raw_pair_digest: Optional[str] = None
     reserved_for_raw_pair: bool = False
+    #: この runtime の比較が最後に return-coverage gate で判定した被覆の不足（plan v4 PR-C）:
+    #: ``(判定した比較の identity, ((側, reason id), ...))``。gate が走らなかった比較は書き換えない
+    #: （「判定していない」を「不足なし」と取り違えない）。raw analysis の被覆の印と違い、比較をまたいで
+    #: 使い回される analysis に依らず、この runtime の比較だけの判定を持つ。
+    coverage_verdict: Optional[Tuple[Tuple[str, ...], Tuple[Tuple[str, str], ...]]] = None
+
+    def record_coverage_verdict(self, comparison_identity: Tuple[str, ...], verdict: Tuple[Tuple[str, str], ...]) -> None:
+        """この runtime の比較の被覆の判定を記録する（runner が monolithic fallback を止めたときに読む）。"""
+
+        self.coverage_verdict = (tuple(comparison_identity), tuple(tuple(item) for item in verdict))
 
     @classmethod
     def create(cls, analysis1: Any, analysis2: Any) -> "ObligationRuntimeSession":

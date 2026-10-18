@@ -1,0 +1,58 @@
+{
+ "binary_concrete_witness": null,
+ "binary_linkage": {
+  "left_binary_relative_path": "sine/mysin/Eq/source/newV-arm64-gcc-O0",
+  "left_sha256": "28208a3f69a9ac15d9a035eaf5ead5ef95c17df41c677e565780d5daedf05b44",
+  "pair": "B5_B13",
+  "produced_from": {
+   "compile_script": "scripts/eqbench/compile_all_arm_mips.sh",
+   "source_paths": [
+    "benchmarks/sine/mysin/Eq/newV.c"
+   ]
+  },
+  "right_binary_relative_path": "sine/mysin/Eq/source/newV-mips64-gcc-O0",
+  "right_sha256": "292bde103db7e9ec2947f2610f47f42fe45d226889ed4eb0271886c50f447808"
+ },
+ "case_id": "mysin_doubleToRawLongBits_B5_B13",
+ "conditional_compatibility_ref": {
+  "entries": [
+   {
+    "assumption_kind": "EXTERNAL_CALLEE_SPEC",
+    "status": "unverified",
+    "subject": "*"
+   }
+  ],
+  "file": "scripts/eqbench/ground_truth_conditional_compatibility.json"
+ },
+ "implementation_capability": {
+  "last_observed_outcome": "EQUIVALENT",
+  "note": "EQUIVALENT on the first replay (EQ_CLOSURE).  Both binaries are gcc -O0 with the default -fstack-protector-strong (both reference __stack_chk_fail); the analysis of each side has one return and no condition, so the canary check never reaches the return partition.  Recorded for plan v4 PR-C (C-M4); recorded for information only, never asserted",
+  "status": "unconfirmed"
+ },
+ "native_execution_witness": null,
+ "observation_contract": {
+  "basis": "observe_return_value=True",
+  "contract_name": "eqbench_single_threaded_c_abi",
+  "covered_by_contract": true,
+  "observed_surface": "return_value"
+ },
+ "registry": {
+  "function": "doubleToRawLongBits",
+  "kind": "eq_sample_single_source",
+  "sample": "sine/mysin/Eq/newV"
+ },
+ "relation": "EQ",
+ "schema": "verified-ground-truth-ref-v1",
+ "semantic_truth": {
+  "eqbench_commit": "3724fce5b287cc63165028444daf904f25b0158b",
+  "source_paths": [
+   "benchmarks/sine/mysin/Eq/newV.c"
+  ],
+  "source_witness": null
+ },
+ "verification_basis": "EqBench Eq sample: both binaries of the pair are compiled from the one source file listed in semantic_truth.source_paths, so every function of the sample is CONFIRMED_EQ by construction.  This is the same rule function_diff_manifest.build_eq_sample applies to every Eq sample, and the runner's benchmark gate already enforces it on every Eq pair.  What was checked here is the linkage: the sample resolves to that single source, binary_linkage names the two binaries built from it with their SHA-256, and the function was confirmed present exactly once in both by --list-functions.  There is no second definition to execute against, so this entry claims no native execution probe and native_execution_witness is null.",
+ "verification_method": "eq_sample_single_source",
+ "verification_status": "verified",
+ "verified_at": "2026-10-17T00:00:00Z",
+ "verified_by": "plan v4 PR-C (#247)"
+}

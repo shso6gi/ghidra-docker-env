@@ -18,13 +18,13 @@ def test_collaborator_holds_only_its_dependencies():
     service = analyzer._placeholder_algebra
     assert set(vars(service)) == {
         "condition_logic",
-        "stack_protector",
+        "constant_values",
         "session",
         "branch_guarded_expression_is_param_minus_one",
     }
     assert service.condition_logic is analyzer._condition_logic
     assert isinstance(service.condition_logic, ConditionLogicService)
-    assert service.stack_protector is analyzer._stack_protector
+    assert service.constant_values is analyzer._constant_values
 
 
 def test_every_delegator_forwards_to_the_collaborator():
@@ -82,11 +82,11 @@ def test_current_parameters_supplier_reads_analyzer_state_at_call_time():
     assert smt.call_args.args[3] is analyzer._current_parameters
 
 
-def test_constant_int_value_is_a_direct_stack_protector_dependency():
+def test_constant_int_value_is_a_direct_constant_values_dependency():
     analyzer = _analyzer()
     p = Expression.variable("param_1", 4)
     expr = Expression.binary_op("INT_SUB", p, Expression.constant(1, 4))
-    with patch.object(analyzer._stack_protector, "constant_int_value", wraps=analyzer._stack_protector.constant_int_value) as direct, \
+    with patch.object(analyzer._constant_values, "constant_int_value", wraps=analyzer._constant_values.constant_int_value) as direct, \
          patch.object(ReturnAnalyzer, "_constant_int_value", side_effect=AssertionError("facade must not be used")):
         assert analyzer._placeholder_algebra.expression_is_placeholder_minus_one(expr, p) is True
         direct.assert_called()

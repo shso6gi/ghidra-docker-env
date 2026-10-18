@@ -36,7 +36,7 @@ if TYPE_CHECKING:  # 他 collaborator は本 module（BlockGraphService / 純関
     from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
     from scripts.function_tracer_pcode.analysis.returns.phi_origins import PhiOriginService
     from scripts.function_tracer_pcode.analysis.returns.placeholder_algebra import PlaceholderAlgebraService
-    from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
+    from scripts.function_tracer_pcode.analysis.returns.constant_values import ConstantValueService
 
 
 def _impl__phase1_direct_branch_escapes_function_body(self, instruction, body) -> bool:
@@ -67,7 +67,7 @@ class BranchGuardedWhileProofService:
         placeholder_algebra: "PlaceholderAlgebraService",
         divergence_proofs: "DivergenceProofService",
         block_graph: "BlockGraphService",
-        stack_protector: "StackProtectorService",
+        constant_values: "ConstantValueService",
         debug_reporter: "DebugReporter",
         expression_cases: "ExpressionCaseService",
         phi_origins: "PhiOriginService",
@@ -90,7 +90,7 @@ class BranchGuardedWhileProofService:
         self.placeholder_algebra = placeholder_algebra
         self.divergence_proofs = divergence_proofs
         self.block_graph = block_graph
-        self.stack_protector = stack_protector
+        self.constant_values = constant_values
         self.debug_reporter = debug_reporter
         self.expression_cases = expression_cases
         self.phi_origins = phi_origins
@@ -222,7 +222,7 @@ class BranchGuardedWhileProofService:
             c_nonpositive = c_positive.negate()
             zero_seed = None
             for ret in returns:
-                if self.stack_protector.constant_int_value(getattr(ret, "value", None)) != 0:
+                if self.constant_values.constant_int_value(getattr(ret, "value", None)) != 0:
                     continue
                 conditions = tuple(getattr(ret, "conditions", ()) or ())
                 if self.condition_logic.conditions_equivalent(conditions, [c_nonpositive]) or (
@@ -575,7 +575,7 @@ class BranchGuardedWhileProofService:
         initial_c_ret = None
         for ret in getattr(analysis, "returns", []) or ():
             conditions = tuple(getattr(ret, "conditions", ()) or ())
-            if zero_ret is None and self.stack_protector.constant_int_value(getattr(ret, "value", None)) == 0:
+            if zero_ret is None and self.constant_values.constant_int_value(getattr(ret, "value", None)) == 0:
                 if self.condition_logic.conditions_equivalent(conditions, [c_nonpositive]) or (
                     len(conditions) == 1
                     and self.condition_logic.condition_is_signed_nonpositive_of_param(conditions[0], c_param)
@@ -797,7 +797,7 @@ class BranchGuardedWhileProofService:
         recursive_returns: Sequence[ReturnInfo],
         parameters: Sequence[Dict],
     ) -> bool:
-        if self.stack_protector.constant_int_value(getattr(artifact, "value", None)) != 0:
+        if self.constant_values.constant_int_value(getattr(artifact, "value", None)) != 0:
             return False
         artifact_conditions = tuple(getattr(artifact, "conditions", ()) or ())
         artifact_site = self.return_site_key(artifact)
@@ -902,7 +902,7 @@ class BranchGuardedWhileProofService:
                     acc_phi.getInput(acc_init_index),
                     placeholders={acc_output: acc_placeholder},
                 )
-                if self.stack_protector.constant_int_value(acc_init) != 0:
+                if self.constant_values.constant_int_value(acc_init) != 0:
                     if self.debug_flag():
                         self.debug_reporter.debug_print(
                             "Outcome branch-guarded structural proof acc candidate skipped: "
@@ -1187,7 +1187,7 @@ class BranchGuardedWhileProofService:
         c_param: Expression,
         target_conditions: Sequence[Condition],
     ) -> bool:
-        if self.stack_protector.constant_int_value(value) != 1:
+        if self.constant_values.constant_int_value(value) != 1:
             return False
         if not self.condition_logic.conditions_overlap(tuple(conditions or ()), target_conditions):
             return False

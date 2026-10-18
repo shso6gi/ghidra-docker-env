@@ -382,7 +382,7 @@ def implementations() -> dict[str, Callable[..., Any]]:
         "_value_contains_deferred_call_ref": _unresolved_lowering._impl__value_contains_deferred_call_ref,
         "_value_contains_originated_phi_circular": _loop_summary._impl__value_contains_originated_phi_circular,
         "_value_contains_readonly_ref": _readonly_reduction._impl__value_contains_readonly_ref,
-        "check": _orchestration._impl_check,
+        "check": _orchestration._impl_check_refusing_unsupported_smt_semantics,
     }
 
 

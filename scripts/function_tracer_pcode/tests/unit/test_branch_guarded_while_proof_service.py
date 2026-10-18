@@ -8,7 +8,7 @@ from scripts.function_tracer_pcode.analysis.returns import control_recovery as c
 from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import BranchGuardedWhileProofService
 
-DIRECT = ("condition_logic", "placeholder_algebra", "divergence_proofs", "block_graph", "stack_protector",
+DIRECT = ("condition_logic", "placeholder_algebra", "divergence_proofs", "block_graph", "constant_values",
           "debug_reporter", "expression_cases", "phi_origins", "program_access", "parameters", "pcode_sites",
           "return_paths")
 NAMES = {

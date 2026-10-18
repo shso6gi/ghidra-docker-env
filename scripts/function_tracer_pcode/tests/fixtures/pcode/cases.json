@@ -23,8 +23,8 @@
    },
    "pr_gate": true,
    "recording": {
-    "analysis_source_digest": "e54ce91622e09bdc1d8ff5c9c4abb674e7ed266261a2966f7482e498c2fbdc9e",
-    "commit": "f5de2607eda18336a282afd12dfab0305314a108",
+    "analysis_source_digest": "5f702f454556fdb844b238511ee4f65d4c5feb8cd1580f2c60a96a702f0d4a6e",
+    "commit": "de2bd2b6a3fac944d3227f03ad0aa795e894d6f8",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -62,8 +62,8 @@
    },
    "pr_gate": false,
    "recording": {
-    "analysis_source_digest": "e54ce91622e09bdc1d8ff5c9c4abb674e7ed266261a2966f7482e498c2fbdc9e",
-    "commit": "f5de2607eda18336a282afd12dfab0305314a108",
+    "analysis_source_digest": "5f702f454556fdb844b238511ee4f65d4c5feb8cd1580f2c60a96a702f0d4a6e",
+    "commit": "de2bd2b6a3fac944d3227f03ad0aa795e894d6f8",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -101,8 +101,8 @@
    },
    "pr_gate": false,
    "recording": {
-    "analysis_source_digest": "e54ce91622e09bdc1d8ff5c9c4abb674e7ed266261a2966f7482e498c2fbdc9e",
-    "commit": "f5de2607eda18336a282afd12dfab0305314a108",
+    "analysis_source_digest": "5f702f454556fdb844b238511ee4f65d4c5feb8cd1580f2c60a96a702f0d4a6e",
+    "commit": "de2bd2b6a3fac944d3227f03ad0aa795e894d6f8",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -140,8 +140,8 @@
    },
    "pr_gate": true,
    "recording": {
-    "analysis_source_digest": "e54ce91622e09bdc1d8ff5c9c4abb674e7ed266261a2966f7482e498c2fbdc9e",
-    "commit": "f5de2607eda18336a282afd12dfab0305314a108",
+    "analysis_source_digest": "5f702f454556fdb844b238511ee4f65d4c5feb8cd1580f2c60a96a702f0d4a6e",
+    "commit": "de2bd2b6a3fac944d3227f03ad0aa795e894d6f8",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -179,8 +179,8 @@
    },
    "pr_gate": true,
    "recording": {
-    "analysis_source_digest": "e54ce91622e09bdc1d8ff5c9c4abb674e7ed266261a2966f7482e498c2fbdc9e",
-    "commit": "f5de2607eda18336a282afd12dfab0305314a108",
+    "analysis_source_digest": "5f702f454556fdb844b238511ee4f65d4c5feb8cd1580f2c60a96a702f0d4a6e",
+    "commit": "de2bd2b6a3fac944d3227f03ad0aa795e894d6f8",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -218,8 +218,8 @@
    },
    "pr_gate": true,
    "recording": {
-    "analysis_source_digest": "e54ce91622e09bdc1d8ff5c9c4abb674e7ed266261a2966f7482e498c2fbdc9e",
-    "commit": "f5de2607eda18336a282afd12dfab0305314a108",
+    "analysis_source_digest": "5f702f454556fdb844b238511ee4f65d4c5feb8cd1580f2c60a96a702f0d4a6e",
+    "commit": "de2bd2b6a3fac944d3227f03ad0aa795e894d6f8",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -258,8 +258,8 @@
    },
    "pr_gate": true,
    "recording": {
-    "analysis_source_digest": "e54ce91622e09bdc1d8ff5c9c4abb674e7ed266261a2966f7482e498c2fbdc9e",
-    "commit": "f5de2607eda18336a282afd12dfab0305314a108",
+    "analysis_source_digest": "5f702f454556fdb844b238511ee4f65d4c5feb8cd1580f2c60a96a702f0d4a6e",
+    "commit": "de2bd2b6a3fac944d3227f03ad0aa795e894d6f8",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -297,8 +297,8 @@
    },
    "pr_gate": true,
    "recording": {
-    "analysis_source_digest": "e54ce91622e09bdc1d8ff5c9c4abb674e7ed266261a2966f7482e498c2fbdc9e",
-    "commit": "f5de2607eda18336a282afd12dfab0305314a108",
+    "analysis_source_digest": "5f702f454556fdb844b238511ee4f65d4c5feb8cd1580f2c60a96a702f0d4a6e",
+    "commit": "de2bd2b6a3fac944d3227f03ad0aa795e894d6f8",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -309,6 +309,45 @@
     "sha256": "1abc8b82bb0f15c86219d3e03c306b6266a97f8a6940c83b84921f6bbce30d6b"
    },
    "sample_identity": "raytrace/sphere/Neq/newV-oldV",
+   "variants": [
+    "default"
+   ]
+  },
+  {
+   "budget_seconds": 40,
+   "case_id": "mysin_doubleToRawLongBits_B5_B13",
+   "dataset_label": "Eq",
+   "function_confirmed_by": "--list-functions @ b1a75018e58c0028a86bda00c78cb8d5b8c42475",
+   "function_name": "doubleToRawLongBits",
+   "ground_truth_file": "ground_truth/mysin_doubleToRawLongBits_B5_B13.json",
+   "issue_refs": [
+    "#109",
+    "#247"
+   ],
+   "left": {
+    "binary_id": "B5",
+    "eqbench_relative_path": "sine/mysin/Eq/source/newV-arm64-gcc-O0",
+    "fixture": "left.json",
+    "sha256": "28208a3f69a9ac15d9a035eaf5ead5ef95c17df41c677e565780d5daedf05b44"
+   },
+   "measured_seconds": {
+    "container": 1.7,
+    "github_hosted_runner": 4.6
+   },
+   "pr_gate": true,
+   "recording": {
+    "analysis_source_digest": "5f702f454556fdb844b238511ee4f65d4c5feb8cd1580f2c60a96a702f0d4a6e",
+    "commit": "de2bd2b6a3fac944d3227f03ad0aa795e894d6f8",
+    "dirty": false,
+    "identical_fast_path": false
+   },
+   "right": {
+    "binary_id": "B13",
+    "eqbench_relative_path": "sine/mysin/Eq/source/newV-mips64-gcc-O0",
+    "fixture": "right.json",
+    "sha256": "292bde103db7e9ec2947f2610f47f42fe45d226889ed4eb0271886c50f447808"
+   },
+   "sample_identity": "sine/mysin/Eq/newV",
    "variants": [
     "default"
    ]
@@ -339,7 +378,7 @@
   "Exceeding it is a test-harness failure and never becomes a production",
   "UNKNOWN or TIMEOUT outcome.",
   "corpus_budget_seconds is the Issue #109 time acceptance criterion as",
-  "revised on 2026-09-17: 1200 s for ALL nine replays on a GitHub-hosted",
+  "revised on 2026-09-17: 1200 s for ALL replays (ten since plan v4 PR-C) on a GitHub-hosted",
   "runner.  It is the SUM of the measured replay times, never the wall clock",
   "of a parallel workflow -- running the corpus as a matrix shortens the",
   "workflow but changes nothing about the criterion.  The original 180 s was",

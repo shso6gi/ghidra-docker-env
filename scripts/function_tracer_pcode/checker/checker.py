@@ -9,8 +9,7 @@ import warnings
 
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis, FunctionSignature
 from scripts.function_tracer_pcode.core.render_smt import (
-    UnknownSmtExtensionWidthError,
-    UnsupportedSmtOperatorError,
+    SMT_SEMANTICS_REFUSALS,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
 from scripts.function_tracer_pcode.core.deadline import DeadlinePolicy, deadline_scope
@@ -859,7 +858,7 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                         recurrence_promotion_result_receipt=self._recurrence_promotion_result_receipt,
                     )
         
-            except (UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError) as e:
+            except SMT_SEMANTICS_REFUSALS as e:
                 self._debug_print(
                     f"Check blocked by unsupported SMT expression semantics: {e}"
                 )

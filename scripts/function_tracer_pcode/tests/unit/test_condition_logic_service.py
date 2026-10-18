@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
-from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
+from scripts.function_tracer_pcode.analysis.returns.constant_values import ConstantValueService
 from scripts.function_tracer_pcode.core.expression import Condition, Expression
 
 
@@ -15,7 +15,7 @@ def _analyzer():
 
 def _service(**overrides):
     kwargs = dict(
-        stack_protector=Mock(spec=StackProtectorService),
+        constant_values=Mock(spec=ConstantValueService),
         fold_constant_expression=lambda expr, **kw: expr,
     )
     kwargs.update(overrides)
@@ -25,7 +25,7 @@ def _service(**overrides):
 def test_collaborator_holds_no_facade_state():
     service = _service()
     assert set(vars(service)) == {
-        "stack_protector",
+        "constant_values",
         "fold_constant_expression",
     }
 
@@ -72,14 +72,14 @@ def test_injected_helpers_dispatch_through_the_facade_at_call_time():
         assert mocked.call_args.kwargs == {"fallback_expr": fallback}
 
 
-def test_constant_int_value_is_a_direct_stack_protector_dependency():
-    """定数値抽出は facade を経由せず StackProtectorService を直接呼ぶ。"""
+def test_constant_int_value_is_a_direct_constant_values_dependency():
+    """定数値抽出は facade を経由せず ConstantValueService を直接呼ぶ。"""
     analyzer = _analyzer()
-    assert analyzer._condition_logic.stack_protector is analyzer._stack_protector
+    assert analyzer._condition_logic.constant_values is analyzer._constant_values
     p = Expression.variable("param_1", 4)
     zero = Expression.constant(0, 4)
     cond = Condition(Expression.binary_op("INT_SLESS", zero, p), True)
-    with patch.object(analyzer._stack_protector, "constant_int_value", wraps=analyzer._stack_protector.constant_int_value) as direct, \
+    with patch.object(analyzer._constant_values, "constant_int_value", wraps=analyzer._constant_values.constant_int_value) as direct, \
          patch.object(ReturnAnalyzer, "_constant_int_value", side_effect=AssertionError("facade must not be used")):
         analyzer._condition_logic.condition_is_signed_nonpositive_of_param(cond, p)
         direct.assert_called_once_with(zero)

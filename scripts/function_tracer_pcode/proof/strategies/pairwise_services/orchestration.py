@@ -42,7 +42,8 @@ from scripts.function_tracer_pcode.proof.obligations.pair_closure_producers impo
 import time
 from scripts.function_tracer_pcode.core import Expression, FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
-from scripts.function_tracer_pcode.smt import SolverStatus
+from scripts.function_tracer_pcode.core.render_smt import SMT_SEMANTICS_REFUSALS
+from scripts.function_tracer_pcode.smt import ParallelResult, SolverStatus
 from scripts.function_tracer_pcode.smt.solvers.z3 import Z3Solver
 from scripts.function_tracer_pcode.smt.parallel import run_backend_query
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
@@ -288,6 +289,89 @@ def _extract_cases_under_authorization(strategy, analysis, input_correspondence,
     return strategy._extract_return_cases(analysis)
 
 
+def _record_comparison_coverage_verdict(self, dispatch_frame, sat_unsafety_reasons, analysis1, analysis2) -> None:
+    """この比較の return-coverage gate の判定を、この比較の obligation runtime に記録する（plan v4 PR-C）。
+
+    raw analysis への被覆の印（``record_comparison_annotation``）は前の比較の印も残る（analysis は比較をまたいで
+    使い回され、印は追記だけ）ので、「この比較が観測した不足」はここに持つ。完了した被覆の証明が解消した
+    inconclusive は不足に数えない。runner の raw pair の比較は runner の runtime に、抽象化・promotion の比較は
+    それぞれの runtime に書くので、runner は自分の raw pair の比較の判定だけを読む。
+    """
+
+    from scripts.function_tracer_pcode.authority.domains.return_coverage import (
+        RETURN_COVERAGE_INCONCLUSIVE_REASON_ID,
+        RETURN_COVERAGE_REASON_IDS,
+        comparison_identity_of,
+    )
+
+    runtime = getattr(dispatch_frame, "obligation_runtime", None)
+    identity = comparison_identity_of(dispatch_frame)
+    if runtime is None or not identity:
+        return
+    verdict = []
+    for label in ("function1", "function2"):
+        for reason_id in RETURN_COVERAGE_REASON_IDS:
+            if f"{label}:{reason_id}" not in sat_unsafety_reasons:
+                continue
+            if reason_id == RETURN_COVERAGE_INCONCLUSIVE_REASON_ID and self._return_coverage_proof_is_complete(
+                self._make_blocking_unsafety_unknown_reason(
+                    f"{label}:{reason_id}", analysis1, analysis2, stage="S_RETURN_COVERAGE_CHECK",
+                ),
+                analysis1,
+                analysis2,
+            ):
+                continue
+            verdict.append((label, reason_id))
+    runtime.record_coverage_verdict(identity, tuple(verdict))
+
+
+def _impl_check_refusing_unsupported_smt_semantics(
+    self,
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+    save_formula: bool = False
+) -> StrategyResult:
+    """``PairwiseStrategy.check``: 比較の本体（``_impl_check``）と、正確な SMT の意味が無い式の扱い（plan v4 PR-C）。
+
+    条件・値・補助 query のどこかに正確な SMT の意味が無い演算（``INDIRECT`` など）があると、描画が型つきの
+    拒否（``SMT_SEMANTICS_REFUSALS``）を送出する。pairwise はそれを比較の外へ出さず、monolithic の同じ拒否と
+    同じ UNKNOWN（``expression_semantics_unsupported``）の結果にする。外へ出すと checker の互換の handler が
+    authority の event を持たない結果を作り、終了処理で ERROR になる。この結果は EQ も NOT_EQ も主張しない
+    （pair の数は 0 のままで、EQ への昇格の対象にならない）。比較を UNKNOWN に終える authority の根拠は、
+    monolithic fallback が走ればその同じ拒否で封印する inconclusive の terminal、被覆の印で fallback が
+    止まるときは被覆の cause（seed のある解析は outcome partition の段、seed の無い解析は
+    ``return_coverage`` domain）である。
+    """
+
+    try:
+        return _impl_check(self, analysis1, analysis2, save_formula)
+    except SMT_SEMANTICS_REFUSALS as exc:
+        self._debug_print(f"Pairwise check blocked by unsupported SMT semantics: {exc}")
+        return StrategyResult(
+            is_equivalent=None,
+            solver_results=ParallelResult(results=[]),
+            smt_formula=None,
+            counterexample_raw=None,
+            return_var1=None,
+            return_var2=None,
+            constrained_fragments=[],
+            pairwise_debug_stats={exc.refusal_evidence_ref: 1},
+            unknown_reasons=[
+                make_internal_v2_reason_diagnostic(
+                    "expression_semantics_unsupported",
+                    stage="S_PAIRWISE",
+                    evidence_refs=(exc.refusal_evidence_ref,),
+                    object_target_key=(
+                        *exc.refusal_target_fields(),
+                        tuple(analysis1.outcome_function_identity()),
+                        tuple(analysis2.outcome_function_identity()),
+                    ),
+                    detail=str(exc),
+                )
+            ],
+        )
+
+
 def _impl_check(
     self,
     analysis1: FunctionReturnAnalysis,
@@ -447,6 +531,7 @@ def _impl_check(
         record_comparison_annotation(analysis1, "return_case_coverage_inconclusive")
     if "function2:return_coverage_inconclusive" in sat_unsafety_reasons:
         record_comparison_annotation(analysis2, "return_case_coverage_inconclusive")
+    _record_comparison_coverage_verdict(self, dispatch_frame, sat_unsafety_reasons, analysis1, analysis2)
     total_pairs = len(cases1) * len(cases2)
     active_runtime = getattr(self, "_obligation_runtime_session", None)
     successor_plan = (

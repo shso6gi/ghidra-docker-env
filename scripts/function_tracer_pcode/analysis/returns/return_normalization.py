@@ -24,7 +24,6 @@ from scripts.function_tracer_pcode.analysis.session import AnalysisSession
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
-from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
 from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
 from scripts.function_tracer_pcode.analysis.returns.control_recovery import ReturnPathSelectionService
 from scripts.function_tracer_pcode.analysis.returns.phi_origins import expression_contains_phi
@@ -36,7 +35,7 @@ class ReturnNormalizationService:
     per-analysis state: ``AnalysisSession`` を返す ``session`` supplier を 1 本保持し、呼び出し時に
     ``self.session().parameters`` / ``self.session().effect_summary`` を読む（nested ``_analysis_context`` の
     push/pop に追随する）。configuration: ``debug`` フラグは従来どおり supplier 境界。
-    式ケース・条件論理・stack-protector・p-code site の各 collaborator は直接依存。PHI 含有判定は ``phi_origins.expression_contains_phi``（純関数）を import する。
+    式ケース・条件論理・p-code site の各 collaborator は直接依存。PHI 含有判定は ``phi_origins.expression_contains_phi``（純関数）を import する。
     未抽出 family（lifecycle / effect_integration / return_extraction / parameters / control_recovery /
     call_recovery）が所有する helper は facade 経由で遅延 dispatch する callable として注入する。
     """
@@ -48,7 +47,6 @@ class ReturnNormalizationService:
         return_paths: ReturnPathSelectionService,
         expression_cases: ExpressionCaseService,
         condition_logic: ConditionLogicService,
-        stack_protector: StackProtectorService,
         pcode_sites: PcodeSiteService,
         debug_reporter: DebugReporter,
         count_memory_reads: Callable[..., Any],
@@ -66,7 +64,6 @@ class ReturnNormalizationService:
         self.return_paths = return_paths
         self.expression_cases = expression_cases
         self.condition_logic = condition_logic
-        self.stack_protector = stack_protector
         self.pcode_sites = pcode_sites
         self.debug_reporter = debug_reporter
         self.count_memory_reads = count_memory_reads
@@ -84,7 +81,6 @@ class ReturnNormalizationService:
         if analysis is None:
             return
         self.normalize_return_callother_userops(analysis)
-        analysis.returns = self.stack_protector.strip_stack_protector_only_conditions(analysis.returns)
         if "control_region_return_recovery" not in analysis.analysis_notes:
             analysis.returns = self.exclusivize_return_regions(analysis.returns)
         analysis.returns = self.merge_equivalent_return_infos(analysis.returns)
