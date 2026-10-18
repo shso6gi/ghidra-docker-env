@@ -16,8 +16,9 @@ terminal も無いまま終わり、終了処理が ERROR にしていた。
 2. 不足がどの比較に適用されるかを記録する: pairwise の比較は自分の判定を自分の obligation runtime に記録する
    （``ObligationRuntimeSession.coverage_verdict``。analysis に追記される印ではない）。runner が monolithic fallback
    を止めたとき、runner の runtime の判定から不足を取る（抽象化・promotion の比較は別の runtime に書くので、ここに
-   書くのは runner の raw pair の比較。raw pair の比較が別の runtime を得た場合、その判定は runner に届かず記録は
-   作られない＝main と同じく終了処理が ERROR にする）。そして runner の結果に ``UnsealedCoverageTerminal`` を
+   書くのは runner の raw pair の比較。runner の runtime は自分の raw pair に予約されている。コード読解からの帰結:
+   仮に raw pair の比較が別の runtime を得ると、その判定は runner に届かず記録は作られず、main と同じく終了処理が
+   ERROR にする。この経路は test で通していない）。そして runner の結果に ``UnsealedCoverageTerminal`` を
    付ける（``stage_runner``）。記録は、不足を観測した比較の identity と、付けた結果の比較（dispatch frame）への
    束縛を分けて持ち、cause はまだ作らない。
 3. 採用する: どの結果が最終かを決めた後の authority の終了処理（``pilot.finish``）が、**最終の結果**に付いた

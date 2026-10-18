@@ -685,4 +685,6 @@ def test_a_view_comparison_as_the_runners_last_result_keeps_the_raw_observer(mon
     assert terminal.bound_comparison[0] == view_pair_digest
     assert terminal.observed_comparison[1] == "S_PAIRWISE"
     assert terminal.observed_comparison[0] != view_pair_digest
+    # view の比較の判定は view の runtime に書かれ、runner の記録（raw pair の比較の判定）とは別。
+    assert final_frame.obligation_runtime.coverage_verdict[0][0] == view_pair_digest
     assert {signal.comparison_identity for signal in terminal.signals()} == {terminal.observed_comparison}
