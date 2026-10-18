@@ -667,8 +667,16 @@ def test_a_view_comparison_as_the_runners_last_result_keeps_the_raw_observer(mon
         adopted.append((getattr(result, "_unsealed_coverage_terminal", None), getattr(result, "_prepared_dispatch_frame", None)))
         return original_adopt(result, outcome)
 
+    runner_runtimes = []
+    original_skipped = stage_runner._skipped_fallback_coverage
+
+    def skipped(runtime, analysis1, analysis2):
+        runner_runtimes.append(runtime)
+        return original_skipped(runtime, analysis1, analysis2)
+
     monkeypatch.setattr(recurrence_stage, "abstract_recursive_calls", abstract_recursive_calls)
     monkeypatch.setattr(coverage_domain, "adopt_final_unsealed_coverage", adopt)
+    monkeypatch.setattr(stage_runner, "_skipped_fallback_coverage", skipped)
     result = run_production_check(
         "pr-c-view-last-result", _template("l", "partial"), _template("r", "partial"),
         analyze=analyze_through_pipeline,
@@ -685,6 +693,9 @@ def test_a_view_comparison_as_the_runners_last_result_keeps_the_raw_observer(mon
     assert terminal.bound_comparison[0] == view_pair_digest
     assert terminal.observed_comparison[1] == "S_PAIRWISE"
     assert terminal.observed_comparison[0] != view_pair_digest
-    # view の比較の判定は view の runtime に書かれ、runner の記録（raw pair の比較の判定）とは別。
+    # view の比較の判定は view の runtime に書かれ、runner の runtime（raw pair の比較の判定）とは別の object。
+    (runner_runtime,) = runner_runtimes
+    assert final_frame.obligation_runtime is not runner_runtime
     assert final_frame.obligation_runtime.coverage_verdict[0][0] == view_pair_digest
+    assert runner_runtime.coverage_verdict[0] == terminal.observed_comparison
     assert {signal.comparison_identity for signal in terminal.signals()} == {terminal.observed_comparison}
