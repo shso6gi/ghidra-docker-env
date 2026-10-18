@@ -12,7 +12,7 @@ from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.render_smt import (
     SMT_SEMANTICS_REFUSALS,
 )
-from scripts.function_tracer_pcode.core.structural import condition_key, expression_provenance_key
+from scripts.function_tracer_pcode.core.structural import condition_key
 from scripts.function_tracer_pcode.smt import ParallelResult
 from scripts.function_tracer_pcode.proof.formula.symbol_replace import build_symbol_replacer
 from scripts.function_tracer_pcode.proof.formula.returns import ReturnWidthMismatchError

@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "9f93d51b3f039c480198f60853a23d934143a5d740d5ba2580b2c1d9252a3345",
+  "manifest_digest": "0333bcce30ba95fcc880425dad9c94e394866b2dbf2773ff406dc422d52a3f3f",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 34,
   "sites": [
@@ -69,7 +69,7 @@
       "line": 2648,
       "path": "scripts/function_tracer_pcode/proof/call_effect/producer.py",
       "producer_site_manifest_id": "call-effect-producer-blocker",
-      "source_sha256": "5a1d2b18f28d8b2ea9548f063423b6b3ed41654e19fa4b3e1d29a8683d1d8580"
+      "source_sha256": "afa7ae2f0635844ee80bba9b59cb805f42caec8b3e52db452666ca1f43ec636b"
     },
     {
       "allowed_dispositions": [
@@ -128,7 +128,7 @@
       "line": 2643,
       "path": "scripts/function_tracer_pcode/proof/call_effect/producer.py",
       "producer_site_manifest_id": "call-effect-producer-prerequisite",
-      "source_sha256": "5a1d2b18f28d8b2ea9548f063423b6b3ed41654e19fa4b3e1d29a8683d1d8580"
+      "source_sha256": "afa7ae2f0635844ee80bba9b59cb805f42caec8b3e52db452666ca1f43ec636b"
     },
     {
       "allowed_dispositions": [
@@ -1029,7 +1029,7 @@
       "line": 1130,
       "path": "scripts/function_tracer_pcode/proof/return_width/surface.py",
       "producer_site_manifest_id": "return-width-observation-contract-blocker",
-      "source_sha256": "cfb125dcdb61a7c93cb2ca4f6a6b3b2cc37944ed4d4b3569248cccc209e89bd9"
+      "source_sha256": "fce83f85f1aee9dbb09407d71a3207f6884ea686b6d959268b3541eaf4a2d05c"
     },
     {
       "allowed_dispositions": [
@@ -1138,7 +1138,7 @@
       "line": 1255,
       "path": "scripts/function_tracer_pcode/proof/return_width/surface.py",
       "producer_site_manifest_id": "return-width-projection-relation-blocker",
-      "source_sha256": "cfb125dcdb61a7c93cb2ca4f6a6b3b2cc37944ed4d4b3569248cccc209e89bd9"
+      "source_sha256": "fce83f85f1aee9dbb09407d71a3207f6884ea686b6d959268b3541eaf4a2d05c"
     },
     {
       "allowed_dispositions": [
@@ -1167,7 +1167,7 @@
       "line": 1174,
       "path": "scripts/function_tracer_pcode/proof/return_width/surface.py",
       "producer_site_manifest_id": "return-width-unary-provenance-blocker",
-      "source_sha256": "cfb125dcdb61a7c93cb2ca4f6a6b3b2cc37944ed4d4b3569248cccc209e89bd9"
+      "source_sha256": "fce83f85f1aee9dbb09407d71a3207f6884ea686b6d959268b3541eaf4a2d05c"
     },
     {
       "allowed_dispositions": [
@@ -1185,7 +1185,7 @@
       "line": 1368,
       "path": "scripts/function_tracer_pcode/proof/strategies/monolithic.py",
       "producer_site_manifest_id": "safe-counterexample-monolithic-production",
-      "source_sha256": "81ddfda6687c4057868e21a675af7ede3c77bc8fa4963b7e572226472d3b9c1a"
+      "source_sha256": "a798b07822a1ec52c39aa52f194a98004b8297739e1ec368f2d02cd609621e79"
     },
     {
       "allowed_dispositions": [

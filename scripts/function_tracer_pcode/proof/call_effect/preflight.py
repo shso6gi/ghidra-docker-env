@@ -34,7 +34,7 @@ from scripts.function_tracer_pcode.proof.obligations.snapshot import (
     SnapshotFingerprintCodec,
     comparison_pair_identity,
 )
-from scripts.function_tracer_pcode.core import expression_provenance_key
+from scripts.function_tracer_pcode.core import value_identity
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     LEFT as _INPUT_LEFT,
     RIGHT as _INPUT_RIGHT,
@@ -2232,7 +2232,7 @@ def lower_call_projection_for_case_pair(
                     condition_member(item)
                     for item in tuple(getattr(ret, "conditions", ()) or ())
                 ),
-                "value": expression_provenance_key(getattr(ret, "value", None)),
+                "value": value_identity(getattr(ret, "value", None)),
                 "return_kind": getattr(ret, "return_kind", None),
                 "acceptance_status": getattr(ret, "acceptance_status", None),
                 "validation_blockers": tuple(

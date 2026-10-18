@@ -2456,7 +2456,11 @@ class _Walk:
         if _record_protocol(kind, "__json_tree__") is not None:
             built, size = self.budget.tree(item, build=build)
             if self.token_sink is not None:
-                self.token("t" + protocol_method(item, "__json_identity__")(item))
+                identity = protocol_method(item, "__json_identity__")(item)
+                if type(identity) is not str:
+                    # identity を持たない record（digest の無い式）: 型つき token の fingerprint は値を区別しない
+                    raise _OpaqueLeaf(f"{type_name(kind)} has no identity to fingerprint", path=self.path())
+                self.token("t" + identity)
             if build:
                 if self.mode == CANONICAL:
                     # 大きさは作る前に数え済み。canonical な複製は予算の外（同じ大きさ）

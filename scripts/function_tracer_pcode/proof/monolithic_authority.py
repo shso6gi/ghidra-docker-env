@@ -227,13 +227,13 @@ def revoke_monolithic_execution_authority(lease: Optional[MonolithicExecutionAut
 def _case_identity(case: Any) -> Tuple[Any, ...]:
     from scripts.function_tracer_pcode.core.structural import (
         condition_key,
-        expression_provenance_key,
+        value_identity,
     )
     return (
         "monolithic_return_case_v2",
         int(getattr(case, "index", -1)),
         tuple(int(item) for item in tuple(getattr(case, "source_indices", ()) or ())),
-        tuple(expression_provenance_key(getattr(case, "value_expr", None))),
+        tuple(value_identity(getattr(case, "value_expr", None))),
         tuple(condition_key(item) for item in tuple(getattr(case, "conditions", ()) or ())),
     )
 

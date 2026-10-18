@@ -21,7 +21,7 @@ identity の入口（記号の共有・identity の根拠になる値の入口�
 | index の無い PARAMETER の storage の `storage_identity_key()` | 同上（`parameter_storage`） |
 | UNKNOWN の runtime ref の `stable_key()` / `semantic_key()` / origin | unknown 宣言の記号（`render_smt.unknowns`） |
 | loop summary の Method B key | loop lowering の関数名（`runtime_lowering_identity`） |
-| 上の全部 | provenance key（`structural.expression_provenance_key`） |
+| 上の全部 | provenance key（`structural.object_target_key`） |
 | runtime ref そのもの・`stable_key()` | 構造 key（`structural.expression_key_status`） |
 """
 
@@ -214,7 +214,7 @@ def test_every_entry_keeps_legitimate_sharing_and_distinguishes_complete_keys(en
 @pytest.mark.parametrize("name", sorted(INCOMPLETE))
 def test_an_incomplete_key_is_never_a_provenance_identity(name, entry, frozen):
     left, right = _pair(entry, INCOMPLETE[name], frozen)
-    assert structural.expression_provenance_key(left) != structural.expression_provenance_key(right)
+    assert structural.object_target_key(left) != structural.object_target_key(right)
     projection = semantic_projection(left)
     if entry == "parameter_storage":
         assert projection.storage_identity is None and projection.storage_identity_unfixable
@@ -350,7 +350,7 @@ def test_a_keyless_ref_never_falls_back_to_an_index_or_name_symbol(kind):
     verdict, distinct = _notequal(left, right)
     assert verdict is not True, distinct
     assert not _shares_symbol(distinct), distinct
-    assert structural.expression_provenance_key(left) != structural.expression_provenance_key(right)
+    assert structural.object_target_key(left) != structural.object_target_key(right)
 
 
 def test_an_index_parameter_without_a_ref_still_shares_its_index_symbol():
@@ -448,10 +448,10 @@ def test_the_provenance_key_reads_phi_branches():
     one = freeze_expression(_phi(1, Expression.constant(5, size=4)))
     two = freeze_expression(_phi(2, Expression.constant(5, size=4)))
     same = freeze_expression(_phi(1, Expression.constant(5, size=4)))
-    assert structural.expression_provenance_key(one) != structural.expression_provenance_key(two)
-    assert structural.expression_provenance_key(one) == structural.expression_provenance_key(same)
+    assert structural.object_target_key(one) != structural.object_target_key(two)
+    assert structural.object_target_key(one) == structural.object_target_key(same)
     hidden = freeze_expression(_phi(1, Expression(ExpressionType.UNKNOWN, name="u", size=4, runtime_ref=_Stable(("parameter", None)))))
-    assert structural.expression_provenance_key(hidden) != structural.expression_provenance_key(hidden)
+    assert structural.object_target_key(hidden) != structural.object_target_key(hidden)
 
 
 def test_the_shape_view_expands_every_container_for_inspection():

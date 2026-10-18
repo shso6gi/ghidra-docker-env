@@ -10,7 +10,7 @@ from scripts.function_tracer_pcode.core import (
     Expression,
     PcodeBlockRef,
     PcodeOpRef,
-    expression_provenance_key,
+    value_identity,
 )
 from scripts.function_tracer_pcode.analysis.effects._shared import (
     CallArgumentEvidence,
@@ -184,7 +184,7 @@ def _impl_summarize_store_effects(
                 if isinstance(condition, Condition)
             )
             value_key = (
-                expression_provenance_key(expansion_value)
+                value_identity(expansion_value)
                 if isinstance(expansion_value, Expression)
                 else None
             )
@@ -202,7 +202,7 @@ def _impl_summarize_store_effects(
                 pcode_op_ref=_pcode_ref_for_op(op),
                 target_ref=target_ref,
                 argument_keys=tuple(
-                    expression_provenance_key(argument)
+                    value_identity(argument)
                     for argument in arguments or ()
                 ),
                 path_condition_keys=tuple(

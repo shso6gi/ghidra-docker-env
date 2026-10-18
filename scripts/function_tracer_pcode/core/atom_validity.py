@@ -37,11 +37,13 @@ EXACT_TAIL_TAG = "exact_tail"
 UNIDENTIFIED_TAG = "exact_tail_unidentified"
 #: object identity fallback の token の tag（`expression_key_or_identity`）
 PROCESS_OBJECT_TAG = "process_object"
+#: record の bytes を厳密比較で intern した token の tag（`core.structural.exact_record_token`）
+EXACT_RECORD_TAG = "exact_record"
 
 #: 比較に使ってはいけない（どこまで見えているかを表す）key の tag（C-K3）
 PLACEHOLDER_TAGS = frozenset({"truncated", "cycle", "opaque", UNIDENTIFIED_TAG})
 #: その値が process の中でだけ意味を持つ token の tag（Gate A）
-PROCESS_SCOPED_TAGS = frozenset({EXACT_TAIL_TAG, UNIDENTIFIED_TAG, PROCESS_OBJECT_TAG})
+PROCESS_SCOPED_TAGS = frozenset({EXACT_TAIL_TAG, UNIDENTIFIED_TAG, PROCESS_OBJECT_TAG, EXACT_RECORD_TAG})
 #: 構造ではなく「新しく発行した印」か「live object の identity」を表す tag。旧実装の
 #: `("object_id", …, id(value))` が担っていた意味の置き換えなので、`object_id` を
 #: 「安定しない identity」として拒んでいた consumer は同じくこれを拒む

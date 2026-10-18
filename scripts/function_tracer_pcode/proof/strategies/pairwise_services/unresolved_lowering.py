@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import json
 from scripts.function_tracer_pcode.core import Condition, ExpressionType, FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.render_smt import expression_contains_unsupported_smt_ops, expression_smt_bit_width
-from scripts.function_tracer_pcode.core.structural import provenance_key_view
+from scripts.function_tracer_pcode.core.structural import label_view
 from scripts.function_tracer_pcode.proof.obligations.pair_disposition import pair_identity_subject
 from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
     ReturnCase,
@@ -653,7 +653,7 @@ def _impl__deferred_call_runtime_refs_from_value(cls, value: Any) -> Tuple[Any, 
 
     def visit(node: Any) -> None:
         # provenance key の ref の identity（projection の atom）は owner の読み口で形を読む（Issue #215）
-        normalized = provenance_key_view(cls._normalize_nested_tuple(node))
+        normalized = label_view(cls._normalize_nested_tuple(node))
         if isinstance(normalized, tuple):
             if (
                 len(normalized) == 2
@@ -683,7 +683,7 @@ def _impl__deferred_call_runtime_refs_from_value(cls, value: Any) -> Tuple[Any, 
 def _impl__deferred_call_semantic_refs(cls, refs: Tuple[Any, ...]) -> Tuple[Any, ...]:
     grouped: Dict[str, Dict[str, Any]] = {}
     for ref in refs:
-        normalized = provenance_key_view(cls._normalize_nested_tuple(ref))
+        normalized = label_view(cls._normalize_nested_tuple(ref))
         if (
             not isinstance(normalized, tuple)
             or len(normalized) != 2
@@ -1113,7 +1113,7 @@ def _impl__unresolved_expression_action_status(
 
 def _impl__object_target_contains_deferred_call_unknown(cls, value: Any) -> bool:
     # provenance key の ref の identity（projection の atom）は owner の読み口で形を読む（Issue #215）
-    normalized = provenance_key_view(cls._normalize_nested_tuple(value))
+    normalized = label_view(cls._normalize_nested_tuple(value))
     if isinstance(normalized, tuple):
         if (
             len(normalized) >= 4

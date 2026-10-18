@@ -17,7 +17,7 @@ from scripts.function_tracer_pcode.core import (
     LocationBaseRef,
     PcodeBlockRef,
     PcodeOpRef,
-    expression_provenance_key,
+    value_identity,
 )
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _bind_location_to_parameter_refs,
@@ -216,7 +216,7 @@ class UnsupportedCallEffectRef:
                 (
                     "argument",
                     index,
-                    expression_provenance_key(argument),
+                    value_identity(argument),
                 )
                 for index, argument in enumerate(self.arguments or ())
             ),
@@ -364,7 +364,7 @@ class CallSiteEffectSummaryEvidence:
             tuple(
                 (
                     effect.location.stable_key(),
-                    expression_provenance_key(effect.value),
+                    value_identity(effect.value),
                     tuple(_condition_evidence_key(item) for item in effect.conditions),
                     int(effect.order_key),
                 )

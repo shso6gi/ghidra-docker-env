@@ -312,11 +312,12 @@ def test_baseline_is_a_frozen_snapshot_with_stable_totals():
     # Issue #215 PR #216: `structural._stable_value_key` の broad except を列挙した型に狭めた（-1）
     # plan v4 PR-A: ABI の solver の取引の巻き戻しを try/finally にした（broad except を撤去、-1）
     # plan v4 PR-A: loop の solver の取引を session の共通の取引の境界へ移した（-1 key / -1）
+    # plan v4 PR-D: 書き換えの照合を値の identity にし、SMT の文字列の signature を撤去（-1 key / -1）
     assert baseline_totals(entries) == {
-        "keys": 584,
+        "keys": 583,
         "logged": 0,
-        "unlogged": 908,
-        "handlers": 908,
+        "unlogged": 907,
+        "handlers": 907,
     }
 
 

@@ -69,11 +69,19 @@ def canonical_value(value: Any) -> Any:
     raise TypeError(f"unsupported authority value: {type(value).__name__}")
 
 
-def authority_digest(value: Any) -> str:
-    encoded = json.dumps(
+def authority_canonical_text(value: Any) -> str:
+    """`authority_digest` の preimage（canonical な JSON の文字列）。
+
+    2 つの値が同じかを決める consumer はこの文字列どうしを比べる（digest の一致で決めない: #218 PR-D）。
+    """
+
+    return json.dumps(
         canonical_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def authority_digest(value: Any) -> str:
+    return hashlib.sha256(authority_canonical_text(value).encode("utf-8")).hexdigest()
 
 
 def freeze_authority_value(value: Any) -> Any:

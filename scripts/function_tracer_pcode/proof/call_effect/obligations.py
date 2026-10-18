@@ -22,9 +22,9 @@ from scripts.function_tracer_pcode.core import (
     Expression,
     FunctionReturnAnalysis,
     StorageInfo,
-    expression_provenance_key,
+    value_identity,
 )
-from scripts.function_tracer_pcode.core.structural import provenance_key_view
+from scripts.function_tracer_pcode.core.structural import cross_side_node, label_view
 from scripts.function_tracer_pcode.proof.call_effect.candidates import (
     build_internal_call_correspondence_candidates,
 )
@@ -90,7 +90,7 @@ def _expression_key(value: Any) -> Optional[Tuple[Any, ...]]:
     if value is None:
         return None
     try:
-        result = expression_provenance_key(value)
+        result = value_identity(value)
     except Exception:
         return None
     return tuple(result) if isinstance(result, (tuple, list)) else None
@@ -969,16 +969,31 @@ def _cross_binary_expression_shape(value: Any) -> Any:
 
     if not isinstance(value, (tuple, list)):
         return value
-    normalized = tuple(value)
-    if not normalized:
-        return ()
+    # 1 つの解析の中でだけ値を識別する token は左右の候補の一致に使わない（#218 PR-D）
+    normalized = cross_side_node(tuple(value))
+    if not isinstance(normalized, tuple) or not normalized:
+        return normalized if isinstance(normalized, tuple) else ()
     kind = str(normalized[0])
     if kind == "runtime_ref" and len(normalized) >= 2:
         # provenance key の ref の identity は projection の atom（Issue #215）。形（`parameter` /
-        # `function` の program id など）は owner の読み口 `provenance_key_view` で読む（atom の形を
+        # `function` の program id など）は owner の読み口 `label_view` で読む（atom の形を
         # ここで照合しない）
-        return ("runtime_ref", _cross_binary_expression_shape(provenance_key_view(normalized)[1]))
+        return ("runtime_ref", _cross_binary_expression_shape(label_view(normalized)[1]))
     if kind == "parameter":
+        # 構造 key の PARAMETER の label は ("parameter", 名前, 値の atom ("int", index), 大きさ, …)。
+        # 末尾は index でなく大きさなので、ref の形より先に読む（#218 PR-D: 値の identity の引数は
+        # この形で来る。旧実装は ref の形の分岐が先に当たり、index を落として大きさを残していた）
+        if len(normalized) >= 4 and isinstance(normalized[1], str):
+            value_atom = normalized[2]
+            if (
+                isinstance(value_atom, (tuple, list))
+                and len(value_atom) == 2
+                and str(value_atom[0]) == "int"
+                and isinstance(value_atom[1], int)
+            ):
+                width = normalized[3] if isinstance(normalized[3], int) else None
+                return ("parameter", int(value_atom[1]), width)
+            return ("parameter", "index_unavailable")
         # Runtime parameter refs are (parameter, program, function, index).
         if len(normalized) >= 4 and isinstance(normalized[-1], int):
             return ("parameter", int(normalized[-1]))

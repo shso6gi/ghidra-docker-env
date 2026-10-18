@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, List, Mapping, Optional, Sequence, Set, Tuple
 import hashlib
 import json
-from scripts.function_tracer_pcode.core import FunctionReturnAnalysis, expression_provenance_key
+from scripts.function_tracer_pcode.core import FunctionReturnAnalysis, object_target_key
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     ParallelResult,
 )
@@ -413,7 +413,7 @@ def _impl__rewrite_atom_encoded_program_identity_key(
 ) -> Optional[Tuple[Any, ...]]:
     """Normalize program ids inside structural._atom_key encoded tuples.
 
-    expression_provenance_key() preserves runtime_ref.stable_key() through
+    object_target_key() preserves runtime_ref.stable_key() through
     _atom_key(), so CallTargetRef / DeferredCallRef identities can appear as
     ("tuple", (("str", "function"), ("int", program_id), ...)) rather than
     raw ("function", program_id, ...).  These ids are Ghidra session-local
@@ -499,4 +499,4 @@ def _impl__stable_key_or_none(value: Any):
 
 
 def _impl__expression_runtime_object_key(cls, expr: Any) -> Tuple[Any, ...]:
-    return expression_provenance_key(expr)
+    return object_target_key(expr)

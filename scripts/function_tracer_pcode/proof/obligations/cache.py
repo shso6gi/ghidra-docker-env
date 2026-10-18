@@ -33,6 +33,14 @@ class AttemptCacheEntry(Generic[T]):
     elapsed_time: float
     artifact_validation_status: str = "not_applicable"
     retry_eligible: bool = False
+    #: 結果を出した query の文字列そのもの。key の digest が一致しても、文字列が違えば同じ query
+    #: として再利用しない（#218 PR-D: digest は bucket を選ぶだけ）
+    query_text: Optional[str] = field(default=None, repr=False, compare=False)
+
+    def answers(self, query: str) -> bool:
+        """この entry が `query` の結果か（文字列の厳密な一致）。"""
+
+        return type(self.query_text) is str and self.query_text == query
 
 
 class AttemptCache(Generic[T]):
