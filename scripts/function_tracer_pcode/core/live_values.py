@@ -3289,12 +3289,14 @@ class _Reliance:
     外の code の区間を通らずに class を書き換えられる）。分類の memo・止まっている監査済みの code は、数が変わると
     確かめ直す。thread ごとの object を 1 度引いて使う（属性は普通の slot: hot path で thread local を何度も引かない）。"""
 
-    __slots__ = ("count", "active", "trusted")
+    __slots__ = ("count", "active", "trusted", "walks")
 
     def __init__(self) -> None:
         self.count = 0
         self.active: List[List[Tuple[Any, type]]] = []
         self.trusted: Dict[int, Tuple[type, int]] = {}
+        #: 走っている walk（`json_encoding._Walk`: `recheck()` で積んでいる frame の receiver を確かめ直す）
+        self.walks: List[Any] = []
 
 
 class _ForeignEpoch(threading.local):
@@ -3350,7 +3352,7 @@ class outside_audit:
     class・値の型を書き換えたかもしれないので: 元の区間に戻して記録を全部捨て、外の code の回数を数え、今走っている
     監査済みの code が頼る事実（`_FOREIGN_EPOCH.s.active`: walker の receiver・`package_instance` の絞り込み）を確かめ
     直す。落ちれば、頼った型の code を呼ぶ前に判定不能（監査済みの code はそのまま続けない）。止まっている監査済みの
-    code（walker の frame の generator）は、再開する前に再開する側が確かめる（`audited_steps`）。"""
+    code（walker の frame の generator）も、走っている walk（`_Reliance.walks`）の frame の receiver をここで確かめる。"""
 
     __slots__ = ("token", "region")
 
@@ -3395,6 +3397,8 @@ def _recheck_reliance(state: "_Reliance") -> None:
         if not package_type(kind):
             raise undecidable(f"{type_name(kind)}, which audited code relies on, was changed by foreign code")
         trusted[id(kind)] = (kind, count)  # 確かめた型: 次の絞り込みは確かめ直さない（数が同じ間）
+    for walk in state.walks:
+        walk.recheck()  # walk の frame の receiver（止まっている generator を含む）
 
 
 _FIRST = operator.itemgetter(0)

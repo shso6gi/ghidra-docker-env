@@ -235,6 +235,60 @@ def test_b_a_record_pair_is_read_through_its_builtin_slots():
     assert HOOKS == []
 
 
+def _fingerprint(source):
+    return RESULT_JSON_POLICY.token_fingerprint(source, work=json_encoding.JsonBudget(1 << 20))
+
+
+@pytest.mark.parametrize("make", [
+    lambda pair: json_encoding.inline(pair),
+    lambda pair: json_encoding.pairs_of([pair]),
+], ids=["inline", "pairs_of"])
+def test_b_the_token_fingerprint_reads_pairs_through_their_builtin_slots(make):
+    """token の digest は dict の組を frame を作る前に引き出して整列する（`push`）: そこでも組は基底型の slot で読み、
+    双子（基底の tuple）と同じ digest。hook は呼ばない。"""
+
+    HOOKS.clear()
+    assert _fingerprint(make(_LyingPair(("k", 1)))) == _fingerprint(make(("k", 1)))
+    assert HOOKS == []
+    with pytest.raises(JsonValueRejected):
+        _fingerprint(make(_LyingPair(("k", 1, 2))))
+    assert HOOKS == []
+
+
+def _record_running_foreign_code_between_its_pairs():
+    """`json_items` が 1 組目と 2 組目の間に外の code の区間（`outside_audit`）を走らせ、その中で自分の型へ外の property
+    を足す record（型と、作る関数）。"""
+
+    @dataclasses.dataclass(frozen=True)
+    class Record:
+        first: int
+        second: int
+
+        def json_items(self):
+            yield "first", self.first
+            with live_values.outside_audit():
+                setattr(Record, "second", _foreign_getter(999))
+            yield "second", self.second
+
+    return Record
+
+
+@pytest.mark.parametrize("operation", [
+    _prepare,
+    _fingerprint,
+    json_encoding.scalar_record_dict,
+], ids=["walker-frame", "token-digest-drain", "scalar_record_dict"])
+def test_a_a_record_generator_does_not_continue_after_foreign_code_between_its_pairs(operation):
+    """反例 A の 3 経路: record の generator が進んでいる（frame・token の digest の整列で frame を積む前・
+    `scalar_record_dict`）間に外の code が record の型へ外の property を足す。続ければ getter を呼ぶ。区間を抜けるときの
+    確かめで、getter の前に判定不能。"""
+
+    HOOKS.clear()
+    Record = _record_running_foreign_code_between_its_pairs()
+    assert _refused(lambda: operation(Record(first=1, second=7))) == "refused"
+    assert HOOKS == []
+
+
 @pytest.mark.parametrize("pair", [
     ("k", 1, 2),
     ("k",),

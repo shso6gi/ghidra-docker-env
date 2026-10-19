@@ -492,85 +492,44 @@ def _walkable_items(items: Any) -> bool:
 
 def _walk_iter(items: Any) -> Iterator[Any]:
     """walker が辿ってよい列の iterator（それ以外は `TypeError`。上書きした `__iter__` を呼ばない）。package の generator は、
-    宣言した（J19 の監査が本体を辿る）ものは監査済みの code として 1 歩ずつ（`_AuditedSteps`）、宣言していないものは
-    外の code として区間の外で（`_outside_the_region`）進める。"""
+    宣言した（J19 の監査が本体を辿る）ものは監査済みの code として区間の中で、宣言していないものは外の code として区間の
+    外で（`_outside_the_region`）進める。"""
 
     if not _walkable_items(items):
         raise TypeError(f"{type_name(type(items))} is not a builtin iterable")
     if package_generator(items):
-        return _AuditedSteps(items) if _audited(items) else _outside_the_region(items)
+        return items if _audited(items) else _outside_the_region(items)
     return iter(items)
 
 
-def _record_items(json_items: Any, item: Any) -> Iterator[Any]:
-    """record の `json_items(item)` の列。`json_items` 自身の generator（J19 の監査の root の code）は、record を
-    receiver とする監査済みの code として 1 歩ずつ進める（`_AuditedSteps`: 再開の前に record の型を確かめ直す）。"""
+def _record_iteration(json_items: Any, item: Any) -> Tuple[Iterator[Any], Optional[Tuple[Any, type, str, Any]]]:
+    """record の `json_items(item)` の列と、その列を進める間に頼る receiver（`(record, 型, protocol の名前, 関数)`。頼らない
+    列なら `None`）。`json_items` 自身の generator と、それが返した宣言した監査済みの generator は record を receiver とする
+    監査済みの code: 進める側（walker の frame・`scalar_record_dict`）が receiver を記録し、外の code の区間を抜けるたびに
+    確かめ直す（`_require_receiver`）。それ以外の列は walker と同じ規則（`_walk_iter`）。"""
 
     kind = type(item)
-    state = live_values.begin_activation(item, kind)
-    try:
-        items = json_items(item)
-    finally:
-        live_values.end_activation(state)
+    code = json_items.__code__ if type(json_items) is types.FunctionType else None
+    if code is not None and code.co_flags & _CO_GENERATOR:
+        items = json_items(item)  # generator 関数: 呼んでも本体は走らない
+    else:
+        state = live_values.begin_activation(item, kind)
+        try:
+            items = json_items(item)
+        finally:
+            live_values.end_activation(state)
     if _receiver_bound(items, json_items):
-        return _AuditedSteps(items, item, kind, "json_items", json_items)
-    return _walk_iter(items)
+        return items, (item, kind, "json_items", json_items)
+    return _walk_iter(items), None
 
 
 def _receiver_bound(items: Any, json_items: Any) -> bool:
     """`json_items` が返した列を、record を receiver とする監査済みの code として進めるか: `json_items` 自身の generator と、
-    `json_items` が返した宣言した監査済みの generator（record を受け取って止まり得る: 再開の前に record を確かめる）。"""
+    `json_items` が返した宣言した監査済みの generator（record を受け取って止まり得る）。"""
 
     return type(items) is types.GeneratorType and (
         items.gi_code is json_items.__code__ or (package_generator(items) and _audited(items))
     )
-
-
-class _AuditedSteps:
-    """監査済みの code の generator（record の `json_items`・宣言した package の generator）を 1 歩ずつ進める唯一の
-    再開の仕組み（walker の frame・`scalar_record_dict`）。
-
-    外の code をまたいで止まっている generator は、止まる前に確かめた前提（record の型が package の型で、その型の
-    protocol がこの generator の関数）を、外の code が走った後（`live_values.reliance().count` が変わった）なら再開の
-    **前に** 確かめ直す（落ちれば判定不能: 再開しない）。1 歩の間は receiver に頼ることを activation に記録する（その
-    歩の中で外の code が走れば、戻るときに `outside_audit` が確かめ直す）。generator の中の `package_instance` の絞り
-    込みはその歩の activation に入り、歩が終われば捨てる（`yield` の後に使わない: J19 の規則）。"""
-
-    __slots__ = ("iterator", "receiver", "kind", "protocol", "method", "epoch", "state")
-
-    def __init__(
-        self, iterator: Any, receiver: Any = None, kind: Optional[type] = None,
-        protocol: Optional[str] = None, method: Any = None,
-    ) -> None:
-        self.iterator = iterator
-        self.receiver = receiver
-        self.kind = kind
-        self.protocol = protocol
-        self.method = method
-        self.state = live_values.reliance()
-        self.epoch = self.state.count
-
-    def __iter__(self) -> "_AuditedSteps":
-        return self
-
-    def __next__(self) -> Any:
-        state = self.state
-        kind = self.kind
-        if kind is None:
-            activation: List[Any] = []
-        else:
-            if self.epoch != state.count:
-                _require_receiver(self.receiver, kind, self.protocol, self.method)
-            activation = [(self.receiver, kind)]
-        active = state.active
-        active.append(activation)
-        try:
-            return next(self.iterator)
-        finally:
-            active.pop()
-            if not active:  # `live_values.end_activation` と同じ（walk の中は walk の activation が残る）
-                state.trusted.clear()
-            self.epoch = state.count
 
 
 def _require_receiver(receiver: Any, kind: type, protocol: Optional[str], method: Any) -> None:
@@ -2376,7 +2335,7 @@ def _text_marker(value: str, max_chars: int, digest: Optional[str]) -> str:
 class _Frame:
     __slots__ = (
         "kind", "iterator", "out", "parent", "key", "count", "source_id", "source", "build",
-        "keys", "fn", "current", "preserve_keys",
+        "keys", "fn", "current", "preserve_keys", "receiver",
     )
 
 
@@ -2566,6 +2525,10 @@ class _Walk:
         self.key_separator = utf8_length(policy.key_separator)
         self.stack: List[_Frame] = []
         self.active: set = set()
+        #: walk の activation（`run` が積む。歩の中の絞り込みを歩の後に捨てる）
+        self.activation: List[Any] = []
+        #: frame を積む前に引き出している列の receiver（token の digest の整列: `push`）
+        self.pending: Optional[Tuple[Any, type, str, Any]] = None
         cache = _STRING_BYTES_CACHES.get(policy)
         if cache is None or len(cache) > _STRING_BYTES_CACHE_MAX:
             cache = _STRING_BYTES_CACHES[policy] = {}
@@ -2834,7 +2797,8 @@ class _Walk:
     # -- 容器 ------------------------------------------------------------------
 
     def push(self, kind: str, iterator: Iterator[Any], parent: Any, key: Any, source: Any,
-             *, build: bool, fn: Any = None, preserve_keys: bool = False) -> None:
+             *, build: bool, fn: Any = None, preserve_keys: bool = False,
+             receiver: Optional[Tuple[Any, type, str, Any]] = None) -> None:
         if _is_one_shot(source):
             self.entered_iterator = True
         # 閉路の判定は **参照している値**（record / 容器）の identity で行う。遅延構成子の
@@ -2860,9 +2824,22 @@ class _Walk:
                 # digest は dict の並びに依らない（key の文字列で整列）。並べる前に、引き出す
                 # 1 組ごとに数える（幅が予算を超えれば並べずに止まる）
                 pairs = []
-                for pair in iterator:
-                    self.budget.charge(1)
-                    pairs.append(pair)
+                # 引き出す間は、frame を積む前でも receiver を外の code の区間の確かめ直しの対象にする（`recheck`）
+                self.pending = receiver
+                activation = self.activation
+                try:
+                    for pair in iterator:
+                        if activation:
+                            activation.clear()  # 歩の中の絞り込みは歩の後に使わない
+                        self.budget.charge(1)
+                        if type(pair) is not tuple or tuple.__len__(pair) != 2:
+                            try:
+                                pair = live_values.read_pair(pair)
+                            except (TypeError, ValueError) as exc:
+                                self.reject(exception_text(exc))
+                        pairs.append(pair)
+                finally:
+                    self.pending = None
                 # 数え終えてから key の文字列を作り、それだけで整列する（同じ文字列の key は元の順。
                 # 安定な sort）
                 canonical_key = self.policy.canonical_key
@@ -2872,6 +2849,7 @@ class _Walk:
         frame = _Frame()
         frame.kind = kind
         frame.iterator = iterator
+        frame.receiver = receiver
         frame.out = ({} if kind == "dict" else []) if build else None
         frame.parent = parent
         frame.key = key
@@ -2919,7 +2897,8 @@ class _Walk:
         json_items, json_tree = _record_protocols(kind)[:2]
         if json_items is not None:
             # package の型の `json_items`（record の protocol。型の関数を直接呼ぶ）
-            self.push("dict", _record_items(json_items, item), parent, key, item, build=build)
+            items, receiver = _record_iteration(json_items, item)
+            self.push("dict", items, parent, key, item, build=build, receiver=receiver)
             return
         if json_tree is not None:
             built, size = self.budget.tree(item, build=build)
@@ -3088,10 +3067,11 @@ class _Walk:
             method = _receiver_generator(record_kind, item.name)
             if method is None:
                 self.reject(f"{type_name(record_kind)}.{item.name} is not a declared audited generator of a package type")
-            with live_values.relying_on(record, record_kind):
-                generator = method(record, **dict(item.options))
-            steps = _AuditedSteps(generator, record, record_kind, item.name, method)
-            self.push("dict", steps, parent, key, item, build=build, preserve_keys=(self.mode == LEGACY))
+            generator = method(record, **dict(item.options))  # 宣言した generator 関数: 呼んでも本体は走らない
+            self.push(
+                "dict", generator, parent, key, item, build=build, preserve_keys=(self.mode == LEGACY),
+                receiver=(record, record_kind, item.name, method),
+            )
         elif kind is _Inline:
             self.push("dict", iter(item.pairs), parent, key, item, build=build)
         elif kind is _Nested:
@@ -3264,14 +3244,33 @@ class _Walk:
         try:
             # 値の storage の読み（key の検査・instance の状態）も固定の上限を超えた分はこの walk の作業量へ
             # 数える（組み込みのままの容器は要素ごとに数えて辿るので、検査の要る容器も同じ意味にする）
-            # walk の間は監査済みの code（walk 自身の activation: 中の activation が降りても型の確かめの記録が続く。外の
-            # code の区間を抜けると確かめ直す）
-            with live_values.metered_storage_reads(self.effort), live_values.audited_region(), live_values.relying_on():
-                self.enter(source, holder, 0, self.build)
-                self.drain_to(0)
+            # walk の間は監査済みの code: walk 自身の activation（1 歩・converter の中の絞り込みは歩の後に捨てる）を積み、
+            # walk を外の code の区間の確かめ直しに登録する（frame の receiver を区間を抜けるたびに確かめる: `recheck`）
+            with live_values.metered_storage_reads(self.effort), live_values.audited_region():
+                state = live_values.begin_activation()
+                self.activation = state.active[-1]
+                state.walks.append(self)
+                try:
+                    self.enter(source, holder, 0, self.build)
+                    self.drain_to(0)
+                finally:
+                    state.walks.pop()
+                    live_values.end_activation(state)
         finally:
             _ACTIVE_WORK.reset(active)
         return holder[0]
+
+    def recheck(self) -> None:
+        """外の code の区間を抜けたとき（`live_values.outside_audit`）: 積んでいる frame の receiver（record・`receiver_items`
+        の record）の型・型の信頼・method を確かめ直す。止まっている generator も、進めている generator も、外の code の後に
+        続ける前に確かめたことになる（落ちれば判定不能: 続けない）。"""
+
+        for frame in self.stack:
+            receiver = frame.receiver
+            if receiver is not None:
+                _require_receiver(*receiver)
+        if self.pending is not None:
+            _require_receiver(*self.pending)
 
     def _reducer_methods(self, reducer: Any) -> Tuple[Any, Any]:
         """`Reducer` の `add` / `result`（呼ぶ時点で型から引く: package の型の package の関数だけ。`scan` を作った後に型が
@@ -3312,6 +3311,9 @@ class _Walk:
             frame = stack[-1]
             try:
                 child = next(frame.iterator)
+                activation = self.activation
+                if activation:
+                    activation.clear()  # 歩の中の絞り込みは歩の後に使わない（generator の `yield` の後: J19 の規則）
             except PRODUCER_FAILURES as exc:
                 # producer（`json_items` とその helper）の失敗は、その値が JSON にならないこと
                 # （field の規則どおり: 診断は marker、準備する意味の値は内部エラー）
@@ -3374,13 +3376,14 @@ class _Walk:
                 if not _is_converter(fn):
                     # 作った後に source の `fn` を書き換えた: 登録した converter だけを呼ぶ時点で確かめる
                     self.reject(f"{type_name(type(fn))} is not a registered source_converter")
-                state = live_values.begin_activation()  # 監査済みの code（converter）の 1 回の呼び出し
                 try:
-                    converted = fn(target)
+                    converted = fn(target)  # 監査済みの code（converter）: walk の activation の中。絞り込みは呼んだ後に捨てる
                 except PRODUCER_FAILURES as exc:
                     self.producer_failed(exc)
                 finally:
-                    live_values.end_activation(state)
+                    activation = self.activation
+                    if activation:
+                        activation.clear()
                 self.enter(converted, parent, out_key, frame.build)
 
 
@@ -3487,18 +3490,26 @@ def scalar_record_dict(record: Any) -> dict:
     kind = type(record)
     read_pair = live_values.read_pair
     count = 0
-    # 列は walker と同じ規則（`_record_items`）、組は exact な tuple ならそのまま・それ以外は `read_pair`。list を作らずに
+    # 列は walker と同じ規則（`_record_iteration`）、組は exact な tuple ならそのまま・それ以外は `read_pair`。list を作らずに
     # 1 組ずつ読む（walker の外で record の組を読む唯一の入口）
-    for pair in _record_items(protocol_method(record, "json_items"), record):
-        count += 1
-        if count > live_values.SCAN_LIMIT:
-            raise TypeError(f"{type_name(kind)}.json_items has more items than a fixed record")
-        key, value = pair if type(pair) is tuple and tuple.__len__(pair) == 2 else read_pair(pair)
-        if value is not None and not issubclass(type(value), _SCALAR_TYPES):
-            raise TypeError(
-                f"{type_name(type(record))}.{key} is not a scalar; use materialize()"
-            )
-        out[key] = value
+    items, receiver = _record_iteration(protocol_method(record, "json_items"), record)
+    # 列を進める間ずっと record を receiver とする activation（歩の間に走る外の code は区間を抜けるときに確かめる。歩と歩の
+    # 間は owner の code だけ）
+    state = live_values.begin_activation(record, kind) if receiver is not None else None
+    try:
+        for pair in items:
+            count += 1
+            if count > live_values.SCAN_LIMIT:
+                raise TypeError(f"{type_name(kind)}.json_items has more items than a fixed record")
+            key, value = pair if type(pair) is tuple and tuple.__len__(pair) == 2 else read_pair(pair)
+            if value is not None and not issubclass(type(value), _SCALAR_TYPES):
+                raise TypeError(
+                    f"{type_name(type(record))}.{key} is not a scalar; use materialize()"
+                )
+            out[key] = value
+    finally:
+        if state is not None:
+            live_values.end_activation(state)
     return out
 
 
