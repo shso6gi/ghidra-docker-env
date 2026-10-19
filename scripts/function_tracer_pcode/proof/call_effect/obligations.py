@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.core import (
     Expression,
     FunctionReturnAnalysis,
     StorageInfo,
+    object_target_key,
     value_identity,
 )
 from scripts.function_tracer_pcode.core.structural import cross_side_node, label_view
@@ -94,6 +95,33 @@ def _expression_key(value: Any) -> Optional[Tuple[Any, ...]]:
     except Exception:
         return None
     return tuple(result) if isinstance(result, (tuple, list)) else None
+
+
+def _expression_target_key(value: Any) -> Optional[Tuple[Any, ...]]:
+    """引数・userop の対象の key（左右の形の比較の入力。#218 PR-D）。
+
+    左右の候補の形（`_cross_binary_expression_shape`）は、artifact に固有の対象（アドレス・parameter の
+    ref など）を形に写して比べる。値の identity はその対象を落とす（同じ値は同じ identity）ので、左右の
+    形の入力は対象の key から作る。片側の束ね（同じ引数か）は値の identity（`_expression_key`）。
+    """
+
+    if value is None:
+        return None
+    return tuple(object_target_key(value))
+
+
+def _argument_keys(arguments: Any) -> Tuple[Tuple[Any, ...], Tuple[Any, ...]]:
+    """(値の identity の列, 対象の key の列)。同じ引数の列から同じ並びで作る。"""
+
+    values: List[Any] = []
+    targets: List[Any] = []
+    for argument in arguments or ():
+        value_key = _expression_key(argument)
+        if value_key is None:
+            continue
+        values.append(value_key)
+        targets.append(_expression_target_key(argument))
+    return tuple(values), tuple(targets)
 
 
 def _condition_key(value: Any) -> Optional[Tuple[Any, ...]]:
@@ -1116,6 +1144,7 @@ def _extract_side_facts(
                 "pcode_ref": pcode_ref,
                 "pcode_key": pcode_key,
                 "arguments": [],
+                "argument_targets": [],
                 "parameter_keys": [],
                 "guards": [],
                 "targets": [],
@@ -1698,13 +1727,9 @@ def _extract_side_facts(
             bucket["target_categories"].append(
                 _target_ref_category(getattr(evidence, "target_ref", None))
             )
-            argument_keys = tuple(
-                key
-                for argument in getattr(evidence, "arguments", ()) or ()
-                for key in [_expression_key(argument)]
-                if key is not None
-            )
+            argument_keys, argument_targets = _argument_keys(getattr(evidence, "arguments", ()))
             bucket["arguments"].append(argument_keys)
+            bucket["argument_targets"].append(argument_targets)
             parameter_keys = tuple(
                 tuple(key)
                 for key in getattr(evidence, "callee_param_identities", ()) or ()
@@ -1773,6 +1798,11 @@ def _extract_side_facts(
                 if isinstance(key, (tuple, list))
             )
             bucket["arguments"].append(arguments)
+            bucket["argument_targets"].append(tuple(
+                tuple(key)
+                for key in getattr(evidence, "argument_target_keys", ()) or ()
+                if isinstance(key, (tuple, list))
+            ))
             guards = tuple(
                 tuple(key)
                 for key in getattr(evidence, "path_condition_keys", ()) or ()
@@ -1817,7 +1847,7 @@ def _extract_side_facts(
             )
             bucket["callee_return_shape_keys"].extend(
                 _cross_binary_expression_shape(tuple(key))
-                for key in getattr(evidence, "return_value_keys", ()) or ()
+                for key in getattr(evidence, "return_value_target_keys", ()) or ()
                 if isinstance(key, (tuple, list))
             )
 
@@ -1837,14 +1867,10 @@ def _extract_side_facts(
             bucket["target_categories"].append(
                 _target_ref_category(getattr(site, "target_ref", None))
             )
-            arguments = tuple(
-                key
-                for argument in getattr(site, "arguments", ()) or ()
-                for key in [_expression_key(argument)]
-                if key is not None
-            )
+            arguments, argument_targets = _argument_keys(getattr(site, "arguments", ()))
             if arguments:
                 bucket["arguments"].append(arguments)
+                bucket["argument_targets"].append(argument_targets)
             guards = tuple(
                 key
                 for condition in getattr(site, "path_conditions", ()) or ()
@@ -1852,7 +1878,8 @@ def _extract_side_facts(
                 if key is not None
             )
             bucket["guards"].append(guards)
-            target_expr_key = _expression_key(getattr(site, "target_expr", None))
+            # userop の key は左右の形（`UserOpFact.semantic_shape_key`）の入力: 対象の key
+            target_expr_key = _expression_target_key(getattr(site, "target_expr", None))
             if _operation_kind(pcode_ref) == "userop":
                 bucket["userop_key"] = target_expr_key
 
@@ -1869,14 +1896,10 @@ def _extract_side_facts(
         bucket["target_categories"].append(
             _target_ref_category(getattr(info, "target_ref", None))
         )
-        arguments = tuple(
-            key
-            for argument in getattr(info, "arguments", ()) or ()
-            for key in [_expression_key(argument)]
-            if key is not None
-        )
+        arguments, argument_targets = _argument_keys(getattr(info, "arguments", ()))
         if arguments:
             bucket["arguments"].append(arguments)
+            bucket["argument_targets"].append(argument_targets)
         bucket["effect_classes"].append(
             str(getattr(info, "effect_class", "unknown_effect") or "unknown_effect")
         )
@@ -1916,6 +1939,8 @@ def _extract_side_facts(
 
         targets = _dedupe(bucket["targets"])
         argument_groups = _dedupe(bucket["arguments"])
+        # 左右の形は対象の key から作る: 値が 1 つに決まっても対象が分かれれば形を決めない
+        argument_target_groups = _dedupe(bucket["argument_targets"])
         parameter_groups = _dedupe(bucket["parameter_keys"])
         multiplicities = tuple(sorted(set(bucket["multiplicities"])))
         target_status = "resolved" if len(targets) == 1 and _target_category(targets[0]) != "unknown" else (
@@ -1929,6 +1954,7 @@ def _extract_side_facts(
             and operation_kind in {"direct_call", "indirect_call"}
             and target_status == "resolved"
             and len(argument_groups) == 1
+            and len(argument_target_groups) == 1
             and evidence_complete
             and not bucket["unsupported_reasons"]
         )
@@ -1947,7 +1973,7 @@ def _extract_side_facts(
             extraction_failure_causes.append("argument_coverage_incomplete")
         if len(argument_groups) == 0:
             extraction_failure_causes.append("argument_group_missing")
-        elif len(argument_groups) > 1:
+        elif len(argument_groups) > 1 or len(argument_target_groups) > 1:
             extraction_failure_causes.append("argument_groups_ambiguous")
         if bucket["unsupported_reasons"]:
             extraction_failure_causes.append("unsupported_call_effect")
@@ -1978,9 +2004,9 @@ def _extract_side_facts(
                 argument_shape_keys=(
                     tuple(
                         _cross_binary_expression_shape(key)
-                        for key in argument_groups[0]
+                        for key in argument_target_groups[0]
                     )
-                    if len(argument_groups) == 1
+                    if len(argument_groups) == 1 and len(argument_target_groups) == 1
                     else ()
                 ),
                 callee_parameter_keys=parameter_groups[0] if len(parameter_groups) == 1 else (),

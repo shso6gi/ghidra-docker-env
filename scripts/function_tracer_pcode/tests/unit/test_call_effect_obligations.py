@@ -111,6 +111,7 @@ from scripts.function_tracer_pcode.core import (
     PcodeBlockRef,
     PcodeOpRef,
     ReturnInfo,
+    object_target_key,
     value_identity,
 )
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
@@ -257,6 +258,7 @@ def _analysis_with_call(
                     pcode_op_ref=pcode_ref,
                     target_ref=target,
                     argument_keys=(value_identity(argument),),
+                    argument_target_keys=(object_target_key(argument),),
                     path_condition_keys=(),
                     summary_status="complete",
                     memory_effect_count=0,
@@ -267,6 +269,7 @@ def _analysis_with_call(
                     return_semantic_bit_width=32,
                     return_signed=True,
                     return_value_keys=(value_identity(argument),),
+                    return_value_target_keys=(object_target_key(argument),),
                     return_partitions=(((), argument),),
                 ),
             ),
@@ -1295,6 +1298,10 @@ def _phase2_caller_analysis(binary_id: str, program_id: int, entry: int) -> Func
                         value_identity(left),
                         value_identity(right),
                     ),
+                    argument_target_keys=(
+                        object_target_key(left),
+                        object_target_key(right),
+                    ),
                     path_condition_keys=(),
                     summary_status="complete",
                     memory_effect_count=0,
@@ -1306,6 +1313,9 @@ def _phase2_caller_analysis(binary_id: str, program_id: int, entry: int) -> Func
                     return_signed=True,
                     return_value_keys=(
                         value_identity(callee_return),
+                    ),
+                    return_value_target_keys=(
+                        object_target_key(callee_return),
                     ),
                     return_partitions=(((), callee_return),),
                 ),

@@ -327,6 +327,10 @@ class CallSiteEffectSummaryEvidence:
     return_signed: Optional[bool] = None
     return_value_keys: Tuple[Tuple[object, ...], ...] = ()
     return_guard_keys: Tuple[Tuple[object, ...], ...] = ()
+    #: 引数・戻り値の **対象** の key（`object_target_key`。#218 PR-D）。上の `argument_keys` /
+    #: `return_value_keys` は値の identity（片側で同じ値かを決める）で、左右の候補の形はこちらから作る
+    argument_target_keys: Tuple[Tuple[object, ...], ...] = ()
+    return_value_target_keys: Tuple[Tuple[object, ...], ...] = ()
     return_partitions: Tuple[Tuple[Tuple[Condition, ...], Expression], ...] = field(
         default=(),
         repr=False,
@@ -361,6 +365,8 @@ class CallSiteEffectSummaryEvidence:
             self.return_signed,
             self.return_value_keys,
             self.return_guard_keys,
+            self.argument_target_keys,
+            self.return_value_target_keys,
             tuple(
                 (
                     effect.location.stable_key(),
@@ -394,6 +400,8 @@ class CallSiteEffectSummaryEvidence:
         yield "return_signed", self.return_signed
         yield "return_value_keys", self.return_value_keys
         yield "return_guard_keys", self.return_guard_keys
+        yield "argument_target_keys", self.argument_target_keys
+        yield "return_value_target_keys", self.return_value_target_keys
         yield "memory_effects", each(self.memory_effects, _store_effect_source)
         yield "source", self.source
 

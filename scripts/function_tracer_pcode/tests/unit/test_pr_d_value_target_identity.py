@@ -836,3 +836,27 @@ def test_the_return_flow_certificate_names_the_payload_value_not_its_target(monk
     assert object_target_key(low) == object_target_key(high)
     assert certificate(low).payload_expression_identity == tuple(value_identity(low))
     assert certificate(low).payload_expression_identity != certificate(high).payload_expression_identity
+
+
+def test_cross_side_call_shapes_read_targets_and_grouping_reads_values():
+    # 定数のアドレスの引数（文字列の literal など）: 値は binary ごとに違うが、左右の候補の形は対象
+    # （artifact に固有のアドレス）で比べる（main と同じ形）。片側の束ねは値の identity
+    # （recorded corpus `wood_wood_N_B2_O_B4` で、形を値から作ると call site の候補が消えた）
+    from scripts.function_tracer_pcode.proof.call_effect.obligations import (
+        _argument_keys, _cross_binary_expression_shape,
+    )
+
+    def address_argument(program, offset):
+        ref = AddressValueRef(address_offset=offset, program_id=program, space_name="ram")
+        return publish(Expression(ExpressionType.CONSTANT, value=offset, size=8, runtime_ref=ref))
+
+    left_values, left_targets = _argument_keys([address_argument(1, 0x100064)])
+    right_values, right_targets = _argument_keys([address_argument(2, 0x100054)])
+    assert left_values != right_values
+    assert [_cross_binary_expression_shape(key) for key in left_targets] == \
+        [_cross_binary_expression_shape(key) for key in right_targets]
+    # 片側: 同じ対象の別の値（ZEXT / SEXT）は束ねない
+    zext_values, zext_targets = _argument_keys([publish(_extend("INT_ZEXT"))])
+    sext_values, sext_targets = _argument_keys([publish(_extend("INT_SEXT"))])
+    assert zext_targets == sext_targets
+    assert zext_values != sext_values
