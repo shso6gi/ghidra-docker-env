@@ -860,3 +860,47 @@ def test_cross_side_call_shapes_read_targets_and_grouping_reads_values():
     sext_values, sext_targets = _argument_keys([publish(_extend("INT_SEXT"))])
     assert zext_targets == sext_targets
     assert zext_values != sext_values
+
+
+def _call_site_fact(call_argument, summary_argument, *, summary_return=None):
+    """1 つの call に、引数の証拠（`call_argument`）と callee の要約の証拠（`summary_argument`）を持つ解析の
+    CallSiteFact（production の `_extract_side_facts`）。"""
+
+    import dataclasses
+
+    from scripts.function_tracer_pcode.proof.call_effect.obligations import CallSiteFact, _extract_side_facts
+    from scripts.function_tracer_pcode.tests.unit.test_call_effect_obligations import _analysis_with_call
+
+    analysis = _analysis_with_call("left", 0x1000, 0x1010, 0x2000)
+    summary = analysis.effect_summary
+    (key, evidence), = summary.call_argument_evidence.items()
+    summary.call_argument_evidence[key] = dataclasses.replace(evidence, arguments=(call_argument,))
+    site, = summary.call_site_effect_summary_evidence
+    returned = summary_return if summary_return is not None else summary_argument
+    summary.call_site_effect_summary_evidence = (dataclasses.replace(
+        site,
+        argument_keys=(value_identity(summary_argument),),
+        argument_target_keys=(object_target_key(summary_argument),),
+        return_value_keys=(value_identity(returned),),
+        return_value_target_keys=(object_target_key(returned),),
+        return_partitions=(((), returned),),
+    ),)
+    facts = [fact for fact in _extract_side_facts(analysis, binary_name="left") if type(fact) is CallSiteFact]
+    assert len(facts) == 1
+    return facts[0]
+
+
+def test_call_site_facts_build_shapes_from_targets_and_require_one_value():
+    # production の抽出: 左右の形（引数・callee の戻り値）は対象の key から、片側の引数の組は値の identity から
+    address = publish(Expression(
+        ExpressionType.CONSTANT, value=0x100064, size=8,
+        runtime_ref=AddressValueRef(address_offset=0x100064, program_id=1, space_name="ram"),
+    ))
+    fact = _call_site_fact(address, address)
+    assert fact.argument_shape_keys == (("runtime_ref", ("address", "artifact_local_address")),)
+    assert ("runtime_ref", ("address", "artifact_local_address")) in fact.callee_return_shape_keys
+    assert "argument_groups_ambiguous" not in fact.extraction_failure_causes
+    # 2 つの証拠が同じ対象の別の値を渡す（ZEXT / SEXT）: 引数の組は 1 つに決まらない（main は 1 つにした）
+    disagreeing = _call_site_fact(publish(_extend("INT_ZEXT")), publish(_extend("INT_SEXT")))
+    assert "argument_groups_ambiguous" in disagreeing.extraction_failure_causes
+    assert disagreeing.argument_shape_keys == ()
