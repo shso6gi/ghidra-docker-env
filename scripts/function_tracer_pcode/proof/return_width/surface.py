@@ -20,7 +20,7 @@ from scripts.function_tracer_pcode.core.signature import (
     get_data_type_path,
     get_declared_type_size_bits,
 )
-from scripts.function_tracer_pcode.core.structural import value_identity
+from scripts.function_tracer_pcode.core.structural import condition_value_identity, value_identity
 from scripts.function_tracer_pcode.proof.formula.returns import get_return_size
 from scripts.function_tracer_pcode.proof.obligations.model import ProofArtifact
 from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec
@@ -1009,8 +1009,9 @@ def _extension_flow_evidence(
 def extract_function_return_width_seed(analysis: Any, case: Any) -> FunctionReturnWidthSeed:
     target = build_function_return_width_target(analysis, case)
     conditions = tuple(getattr(case, "conditions", ()) or ())
+    # guard の key は条件の identity（否定を含む: C と ¬C の領域を同じ guard にしない。#218 PR-D）
     condition_keys = tuple(
-        tuple(value_identity(getattr(condition, "expression", None)))
+        tuple(condition_value_identity(condition))
         for condition in conditions
     )
     guard = GuardRegionFact(

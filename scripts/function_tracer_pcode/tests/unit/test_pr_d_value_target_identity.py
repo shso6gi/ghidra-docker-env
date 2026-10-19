@@ -905,3 +905,27 @@ def test_call_site_facts_build_shapes_from_targets_and_require_one_value():
     disagreeing = _call_site_fact(publish(_extend("INT_ZEXT")), publish(_extend("INT_SEXT")))
     assert "argument_groups_ambiguous" in disagreeing.extraction_failure_causes
     assert disagreeing.argument_shape_keys == ()
+
+
+def test_return_width_guard_keys_keep_the_condition_polarity():
+    # 戻り値の幅の seed（function 単位の proof の cache の key）の guard は条件の identity: C と ¬C の領域を
+    # 同じ guard にしない（式の値の identity だけでは否定が落ちる）
+    from scripts.function_tracer_pcode.core import Condition
+    from scripts.function_tracer_pcode.proof.return_width.surface import extract_function_return_width_seed
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import extract_return_cases
+    from scripts.function_tracer_pcode.tests.unit.test_return_width_surface import _analysis
+
+    def seed(negated):
+        analysis = _analysis("B-pr-d-guard", 0x1a00, 64, extension="INT_SEXT")
+        guard = Expression.binary_op("INT_SLESS", Expression.parameter("x", 0, "int", size=4),
+                                     Expression.constant(0, size=4))
+        analysis.returns[0].conditions = [Condition(guard, negated=negated)]
+        return extract_function_return_width_seed(analysis, extract_return_cases(analysis)[0])
+
+    positive, negative = seed(False), seed(True)
+    assert positive.guard_region_fact.condition_keys != negative.guard_region_fact.condition_keys
+    assert positive.digest != negative.digest
+    # 対照: 同じ条件は同じ guard・同じ seed
+    assert seed(False).digest == positive.digest
+    assert structural.condition_value_identity(Condition(Expression.constant(1, size=4), negated=True)) != \
+        structural.condition_value_identity(Condition(Expression.constant(1, size=4)))

@@ -27,6 +27,7 @@ from scripts.function_tracer_pcode.core import (
     value_identity,
 )
 from scripts.function_tracer_pcode.core.structural import (
+    condition_value_identity,
     cross_side_node,
     dedupe_exact,
     exact_value_key,
@@ -145,11 +146,10 @@ def _condition_key(value: Any) -> Optional[Tuple[Any, ...]]:
                 bool(getattr(value, "negated", False)),
                 tuple(result),
             )
-    expression = getattr(value, "expression", None)
-    expression_key = _expression_key(expression)
-    if expression_key is None:
+    if getattr(value, "expression", None) is None:
         return None
-    return ("condition", bool(getattr(value, "negated", False)), expression_key)
+    # 条件の値の identity（否定を含む）の owner は `core.structural.condition_value_identity`
+    return tuple(condition_value_identity(value))
 
 
 def condition_key(value: Any) -> Optional[Tuple[Any, ...]]:

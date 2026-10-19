@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "671d6cc9a17c7767cf23c16c28bbf9df44fac609b060af85eb5995fc564ac9b2",
+  "manifest_digest": "013f68c96be19e8d7f8ddabc99f5f53fced502ae11128c3f14a62a9525f306f1",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 34,
   "sites": [
@@ -1026,10 +1026,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1130,
+      "line": 1131,
       "path": "scripts/function_tracer_pcode/proof/return_width/surface.py",
       "producer_site_manifest_id": "return-width-observation-contract-blocker",
-      "source_sha256": "fce83f85f1aee9dbb09407d71a3207f6884ea686b6d959268b3541eaf4a2d05c"
+      "source_sha256": "b835de42691a3beafd3389e5e6a68e51f08bc707d03b97b0d38efceb4cc05035"
     },
     {
       "allowed_dispositions": [
@@ -1135,10 +1135,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1255,
+      "line": 1256,
       "path": "scripts/function_tracer_pcode/proof/return_width/surface.py",
       "producer_site_manifest_id": "return-width-projection-relation-blocker",
-      "source_sha256": "fce83f85f1aee9dbb09407d71a3207f6884ea686b6d959268b3541eaf4a2d05c"
+      "source_sha256": "b835de42691a3beafd3389e5e6a68e51f08bc707d03b97b0d38efceb4cc05035"
     },
     {
       "allowed_dispositions": [
@@ -1164,10 +1164,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1174,
+      "line": 1175,
       "path": "scripts/function_tracer_pcode/proof/return_width/surface.py",
       "producer_site_manifest_id": "return-width-unary-provenance-blocker",
-      "source_sha256": "fce83f85f1aee9dbb09407d71a3207f6884ea686b6d959268b3541eaf4a2d05c"
+      "source_sha256": "b835de42691a3beafd3389e5e6a68e51f08bc707d03b97b0d38efceb4cc05035"
     },
     {
       "allowed_dispositions": [

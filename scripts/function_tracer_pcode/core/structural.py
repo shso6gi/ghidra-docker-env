@@ -1486,6 +1486,22 @@ def value_identity(expr: Optional[Expression]) -> StructuralKey:
     return ("expression_exact", exact_structural_identity(expr, **_VALUE_IDENTITY_OPTIONS))
 
 
+def condition_value_identity(condition: Optional[Condition]) -> StructuralKey:
+    """条件の値の identity: 式の `value_identity` と否定の有無（#218 PR-D）。
+
+    条件 C と ¬C は同じ式を持つので、式の identity だけでは区別できない。条件を束ねる・key にする
+    consumer はこれを使う（式の identity を自分で取り出して否定を落とさない）。
+    """
+
+    if condition is None:
+        return ("none",)
+    return (
+        "condition",
+        value_identity(getattr(condition, "expression", None)),
+        bool(getattr(condition, "negated", False)),
+    )
+
+
 def object_target_key(expr: Optional[Expression]) -> StructuralKey:
     """式が指す対象の identity（T）。reason / blocker の target・call target が使う。
 
