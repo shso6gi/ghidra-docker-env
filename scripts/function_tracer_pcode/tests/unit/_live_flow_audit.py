@@ -44,7 +44,7 @@ SELF = "SELF"  # package の object 自身の状態（record でない method �
 WORK = "WORK"  # 作業量 / 予算 / policy（owner の object）
 REC = "REC"    # "REC:<module>:<class>": 監査済みの code が live な引数で作った package の object（field は live）
 RECR = "RECR"  # "RECR:<module>:<class>": walker が渡す receiver（record・reducer・property の持ち主）。型は呼ぶ時点と
-#               外の code の後に owner が確かめる（`json_encoding._AuditedSteps` / `live_values.relying_on`）: yield をまたいでよい
+#               外の code の後に owner が確かめる（`json_encoding._Walk.recheck` / `live_values.relying_on`）: yield をまたいでよい
 RECN = "RECN"  # "RECN:<module>:<class>": `live_values.package_instance(x, C)` で絞り込んだ値。外の code の後は owner が
 #               確かめ直す（activation）。generator の `yield` をまたがない（再開の後は live: 絞り込み直す）
 OBJ = "OBJ"    # "OBJ:<module>:<class>": package が plain な引数で作った object（field は自身の状態）
@@ -460,7 +460,11 @@ class _FunctionAudit:
                 self.v(s, "augmented assignment with a live value")
         elif isinstance(s, (ast.For, ast.AsyncFor)):
             element = self.iterate(s.iter, s)
-            for _pass in range(2 if _suspends(s.body) else 1):
+            suspends = _suspends(s.body)
+            if suspends and rec_prefix(element) == RECN:
+                # 列ごとの絞り込み（`package_elements`）は loop の前: 本体が止まれば、後の要素の絞り込みは止まる前のもの
+                element = LIVE
+            for _pass in range(2 if suspends else 1):
                 # 本体が止まる（yield）なら、次の繰り返しは止まった後の種類で辿り直す（絞り込みが yield をまたがない）
                 self.assign(s.target, element, None, element_of_iteration=True)
                 self.block(s.body)
@@ -648,6 +652,15 @@ class _FunctionAudit:
             self.v(node, "truth test of a live value")
 
     def iterate(self, node, where):
+        if (
+            isinstance(node, ast.Call) and len(node.args) == 3 and not node.keywords
+            and self._live_values_function(node.func) == "package_elements"
+        ):
+            # 要素を全部絞り込んだ列（`live_values.package_elements`: 要素ごとの `package_instance` と同じ確かめと記録）
+            self.expr(node)
+            self._pairs = False
+            kind = self._narrowed_kind(node.args[1], checked=True)
+            return rec(*rec_class(kind), prefix=RECN) if is_rec(kind) else LIVE
         kind = self.expr(node)
         self._pairs = False
         if kind == VER:

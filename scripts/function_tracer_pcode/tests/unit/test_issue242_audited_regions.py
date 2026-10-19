@@ -256,6 +256,7 @@ VALUE_CODE_FREE = {
     "json_encoding.call_protocol": lambda v: json_encoding.call_protocol(v, "__json_tree__"),
     "live_values.read_pair": lambda v: live_values.read_pair(v),
     "live_values.package_instance": lambda v: live_values.package_instance(v, type(v)),
+    "live_values.package_elements": lambda v: live_values.package_elements(v, type(v), "not one kind"),
     "json_encoding.raw": lambda v: _walked(json_encoding.raw(v)),
     "json_encoding.row_items": lambda v: list(json_encoding.row_items((), v)),
     "json_encoding.scalar_record_dict": lambda v: json_encoding.scalar_record_dict(v),

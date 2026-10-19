@@ -54,6 +54,7 @@ from scripts.function_tracer_pcode.core.stage_journal import (  # noqa: F401
 )
 from scripts.function_tracer_pcode.core.live_values import package_instance
 from scripts.function_tracer_pcode.core.live_values import audited_entry
+from scripts.function_tracer_pcode.core.json_encoding import audited_generator
 
 DIAGNOSTICS_SCHEMA = "result-diagnostics-v1"
 
@@ -639,6 +640,7 @@ def result_diagnostics_payload(result: Any, *, lazy: bool = False) -> Any:
         return {"schema": DIAGNOSTICS_SCHEMA, "error": exception_text(exc, 200)}
 
 
+@audited_generator
 def _attempt_rows(attempts: Any) -> Iterable[Any]:
     from scripts.function_tracer_pcode.core.json_encoding import inline, scan
 
@@ -657,6 +659,7 @@ def _attempt_rows(attempts: Any) -> Iterable[Any]:
         )
 
 
+@audited_generator
 def _attempt_solver_results(attempts: Any) -> Iterator[Any]:
     for attempt in live_values.elements_of(attempts):
         yield live_values.attribute(attempt, "solver_results")

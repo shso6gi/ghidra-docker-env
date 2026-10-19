@@ -2782,7 +2782,7 @@ def test_a_lookup_fact_used_inside_a_type_judgement_adds_its_classes_to_the_judg
 
 def test_json_items_returning_another_generator_forgets_the_protocol_scope():
     """`json_items` が自分でない generator（宣言していない package の generator）を返せば、それを進めるたびに scope の
-    記録を捨てる（`_record_items`: そのまま進めるのは `json_items` 自身の generator だけ）。"""
+    記録を捨てる（`_record_iteration`: そのまま進めるのは `json_items` 自身の generator だけ）。"""
 
     from scripts.function_tracer_pcode.core.json_encoding import JsonValueRejected, RESULT_JSON_POLICY
 

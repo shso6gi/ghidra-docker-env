@@ -115,8 +115,6 @@ class ExpressionType(Enum):
 
 
 
-#: 凍結後に書き換えてはいけない **意味 field**。ここに無い属性（診断用の
-#: 補助 flag 等）は凍結後も置けるが、意味 consumer はそれを読まない。
 #: `ExpressionType` の member の名前（identity で引く: `id(member)` → (member, 名前)）。member と名前は class の定義（code）で、
 #: import の時点で読む。表現は値の型の名前空間を通らずに名前を引く（member でない値は `enum_name` で読む）
 _EXPRESSION_TYPE_NAMES: Dict[int, Tuple["ExpressionType", str]] = {
@@ -124,6 +122,8 @@ _EXPRESSION_TYPE_NAMES: Dict[int, Tuple["ExpressionType", str]] = {
 }
 
 
+#: 凍結後に書き換えてはいけない **意味 field**。ここに無い属性（診断用の
+#: 補助 flag 等）は凍結後も置けるが、意味 consumer はそれを読まない。
 SEMANTIC_FIELDS = frozenset({
     "expr_type",
     "value",
@@ -958,9 +958,7 @@ class Expression:
         if operands is not None and (operands if (type(operands) is list or type(operands) is tuple) else as_bool(operands)):
             if collect is None:
                 rendered = []
-                for op in elements_of(operands):
-                    if not package_instance(op, Expression):
-                        raise TypeError("Expression operands must be Expressions")
+                for op in package_elements(operands, Expression, "Expression operands must be Expressions"):
                     rendered.append(op._to_dict(active))
                 result["operands"] = rendered
             else:
@@ -987,7 +985,7 @@ class Expression:
         # （`semantic_freeze.seal_serialization`）だけで、直列化は状態を書かない。写しの無い node
         # （未検証・まだ写していない `SEAL_PENDING`・写せなかった `UNSEALABLE`）は生の ref を描く
         ref_payload = self._runtime_ref_payload
-        if package_instance(ref_payload, FrozenLegacyTree):
+        if ref_payload is not None and package_instance(ref_payload, FrozenLegacyTree):
             if collect is None:
                 result["runtime_ref"] = ref_payload.thaw()
             else:
@@ -1419,4 +1417,4 @@ def runtime_ref_source(value: Any) -> Any:
 
 # Re-exported for callers that import Condition from model.expression.
 from scripts.function_tracer_pcode.core.condition import Condition
-from scripts.function_tracer_pcode.core.live_values import package_instance
+from scripts.function_tracer_pcode.core.live_values import package_elements, package_instance

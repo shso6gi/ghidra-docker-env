@@ -513,11 +513,13 @@ def _record_iteration(json_items: Any, item: Any) -> Tuple[Iterator[Any], Option
     if code is not None and code.co_flags & _CO_GENERATOR:
         items = json_items(item)  # generator 関数: 呼んでも本体は走らない
     else:
-        state = live_values.begin_activation(item, kind)
+        token = live_values.begin_reliance(item, kind)
         try:
             items = json_items(item)
         finally:
-            live_values.end_activation(state)
+            live_values.end_reliance(token)
+    if type(items) is zip and live_values.builtin_iterator(items):
+        return items, None  # 組み込みの容器の iterator の zip（進めても Python の code は走らない）
     if _receiver_bound(items, json_items):
         return items, (item, kind, "json_items", json_items)
     return _walk_iter(items), None
@@ -532,20 +534,30 @@ def _receiver_bound(items: Any, json_items: Any) -> bool:
     )
 
 
-def _require_receiver(receiver: Any, kind: type, protocol: Optional[str], method: Any) -> None:
+def _require_receiver(
+    receiver: Any, kind: type, protocol: Optional[str], method: Any, verified: Dict[int, type],
+) -> None:
     """外の code の後に監査済みの code を続ける前の確かめ: receiver の型がまだ `kind` で、`kind` がまだ package の型で、
-    その protocol がまだ同じ関数（`_record_protocols` は引くたびに型の信頼を確かめる）。落ちれば判定不能。"""
+    その protocol がまだ同じ package の関数（`receiver_items` の method はまだ宣言した監査済みの generator）。落ちれば
+    判定不能。`verified` は同じ出口で信頼を確かめ済みの型（型ごとに 1 度だけ `package_type` を呼ぶ）。
+
+    protocol の確かめは型の MRO の属性の identity（`type_attribute`）: 信頼を確かめた型の protocol の表
+    （`_record_protocols`）の要素は、その属性が package の関数のときのその属性なので、同じ判定を表を作り直さずに行う。"""
 
     if type(receiver) is not kind:
         raise live_values.undecidable(f"a {type_name(kind)} receiver changed its class in foreign code")
-    if protocol in _PROTOCOL_INDEX:
-        if _record_protocols(kind)[_PROTOCOL_INDEX[protocol]] is not method:
-            raise live_values.undecidable(f"{type_name(kind)}.{protocol} changed or lost trust in foreign code")
-    elif protocol is not None:
-        if _receiver_generator(kind, protocol) is not method:
-            raise live_values.undecidable(f"{type_name(kind)}.{protocol} changed or lost trust in foreign code")
-    elif not live_values.package_type(kind):
-        raise live_values.undecidable(f"{type_name(kind)} lost trust in foreign code")
+    if verified.get(id(kind)) is not kind:
+        if not live_values.package_type(kind):
+            raise live_values.undecidable(f"{type_name(kind)} lost trust in foreign code")
+        verified[id(kind)] = kind
+    if protocol is None:
+        return
+    if (
+        type_attribute(kind, protocol) is not method
+        or not live_values.package_function(method)
+        or (protocol not in _PROTOCOL_INDEX and _AUDITED_GENERATORS.get(id(method.__code__)) is not method.__code__)
+    ):
+        raise live_values.undecidable(f"{type_name(kind)}.{protocol} changed or lost trust in foreign code")
 
 
 def _receiver_generator(kind: type, name: str) -> Any:
@@ -3260,7 +3272,7 @@ class _Walk:
             _ACTIVE_WORK.reset(active)
         return holder[0]
 
-    def recheck(self) -> None:
+    def recheck(self, verified: Dict[int, type]) -> None:
         """外の code の区間を抜けたとき（`live_values.outside_audit`）: 積んでいる frame の receiver（record・`receiver_items`
         の record）の型・型の信頼・method を確かめ直す。止まっている generator も、進めている generator も、外の code の後に
         続ける前に確かめたことになる（落ちれば判定不能: 続けない）。"""
@@ -3268,9 +3280,9 @@ class _Walk:
         for frame in self.stack:
             receiver = frame.receiver
             if receiver is not None:
-                _require_receiver(*receiver)
+                _require_receiver(*receiver, verified)
         if self.pending is not None:
-            _require_receiver(*self.pending)
+            _require_receiver(*self.pending, verified)
 
     def _reducer_methods(self, reducer: Any) -> Tuple[Any, Any]:
         """`Reducer` の `add` / `result`（呼ぶ時点で型から引く: package の型の package の関数だけ。`scan` を作った後に型が
@@ -3289,8 +3301,13 @@ class _Walk:
 
         if type(reducer) is not kind:
             raise live_values.undecidable(f"a {type_name(kind)} reducer changed its class in foreign code")
-        protocols = _record_protocols(kind)
-        if protocols[_PROTOCOL_INDEX["add"]] is not add or protocols[_PROTOCOL_INDEX["result"]] is not result:
+        # `_record_protocols(kind)` の add / result と同じ判定（信頼した型の MRO の属性がまだ同じ package の関数）を表を
+        # 作り直さずに行う（外の code の後は表の記録が捨てられている）
+        if not (
+            live_values.package_type(kind)
+            and type_attribute(kind, "add") is add and live_values.package_function(add)
+            and type_attribute(kind, "result") is result and live_values.package_function(result)
+        ):
             raise live_values.undecidable(f"{type_name(kind)} reducer methods changed or lost trust in foreign code")
         return add, result
 
@@ -3489,27 +3506,31 @@ def scalar_record_dict(record: Any) -> dict:
     # protocol は package の型の package の関数だけ（record の属性を読まない: `__getattribute__` を呼ばない）
     kind = type(record)
     read_pair = live_values.read_pair
-    count = 0
     # 列は walker と同じ規則（`_record_iteration`）、組は exact な tuple ならそのまま・それ以外は `read_pair`。list を作らずに
     # 1 組ずつ読む（walker の外で record の組を読む唯一の入口）
     items, receiver = _record_iteration(protocol_method(record, "json_items"), record)
     # 列を進める間ずっと record を receiver とする activation（歩の間に走る外の code は区間を抜けるときに確かめる。歩と歩の
     # 間は owner の code だけ）
-    state = live_values.begin_activation(record, kind) if receiver is not None else None
+    token = live_values.begin_reliance(record, kind) if receiver is not None else None
+    limit = live_values.SCAN_LIMIT
     try:
-        for pair in items:
-            count += 1
-            if count > live_values.SCAN_LIMIT:
+        for count, pair in enumerate(items, 1):
+            if count > limit:
                 raise TypeError(f"{type_name(kind)}.json_items has more items than a fixed record")
-            key, value = pair if type(pair) is tuple and tuple.__len__(pair) == 2 else read_pair(pair)
+            # exact な tuple の unpack は C の実装（長さが 2 でなければ値の code の前に `ValueError`）。それ以外は `read_pair`
+            key, value = pair if type(pair) is tuple else read_pair(pair)
+            # 固定の形の record の key は field の名前（`str` そのもの）。それ以外は dict へ置く前に拒む（str の subclass の
+            # `__hash__` / `__eq__` を監査済みの code の中で呼ばない）
+            if type(key) is not str:
+                raise TypeError(f"{type_name(kind)}.json_items yields a key that is not a str")
             if value is not None and not issubclass(type(value), _SCALAR_TYPES):
                 raise TypeError(
                     f"{type_name(type(record))}.{key} is not a scalar; use materialize()"
                 )
             out[key] = value
     finally:
-        if state is not None:
-            live_values.end_activation(state)
+        if token is not None:
+            live_values.end_reliance(token)
     return out
 
 

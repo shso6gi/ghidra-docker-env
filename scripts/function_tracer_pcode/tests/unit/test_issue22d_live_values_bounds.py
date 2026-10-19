@@ -326,6 +326,11 @@ _RELIANCE = (
     "activation に 1 度だけ）だけを辿る: 量は監査済みの code が数え済みの自分の仕事（絞り込んだ値の数）の中"
 )
 
+_CALLER_LOOP = (
+    "L: 呼ぶ側が続けて要素ごとに処理する列を 1 度だけ C の反復で確かめる（`package_elements`: 要素ごとの "
+    "`package_instance` をまとめたもの）。量は呼ぶ側の loop の要素 1 つあたり定数（呼ぶ側の仕事の中）"
+)
+
 LIVE_VALUES_WORK_OWNERS = {
     "package_file": _A,
     "_package_type_uncached": _B,
@@ -422,6 +427,8 @@ LIVE_VALUES_WORK_OWNERS = {
     "outside_audit.__exit__": _A,
     # Issue #242 第 11 回: 走っている監査済みの code が頼る事実（activation の記録）だけを辿る
     "_recheck_reliance": _RELIANCE,
+    "end_reliance": _RELIANCE,
+    "package_elements": _CALLER_LOOP,
     # `zip` が包む iterator の数を `SCAN_LIMIT` と比べてから辿る
     "builtin_iterator": _B,
     "audited_entry": _A,

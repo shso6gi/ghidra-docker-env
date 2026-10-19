@@ -435,16 +435,19 @@ def trust_code_directory(path: str) -> None:
 def package_file(path: Any) -> bool:
     """file の path が package の code か（正規化して 1 度だけ調べる。test / fixture は除く）。"""
 
-    if type(path) is not str or not os.path.isabs(path):
-        # 相対の file 名（`<string>`・cwd に依る名前）は package の code ではない
+    if type(path) is not str:
         return False
-    known = _PACKAGE_FILES.get(path)
+    known = _PACKAGE_FILES.get(path)  # 組み込みの str の key（hash・比較は組み込みの実装）
     if known is None:
-        normalized = os.path.normpath(os.path.abspath(path))
-        known = any(normalized.startswith(directory) for directory in _TRUSTED_EXTRA_DIRS) or (
-            normalized.startswith(PACKAGE_DIR)
-            and not any(normalized.startswith(directory) for directory in _UNTRUSTED_DIRS)
-        )
+        if not os.path.isabs(path):
+            # 相対の file 名（`<string>`・cwd に依る名前）は package の code ではない
+            known = False
+        else:
+            normalized = os.path.normpath(os.path.abspath(path))
+            known = any(normalized.startswith(directory) for directory in _TRUSTED_EXTRA_DIRS) or (
+                normalized.startswith(PACKAGE_DIR)
+                and not any(normalized.startswith(directory) for directory in _UNTRUSTED_DIRS)
+            )
         _PACKAGE_FILES[path] = known
     return known
 
@@ -865,6 +868,12 @@ def package_type(kind: type) -> bool:
     （足した code が無い）。組み込みの型（C で定義した型）はそのまま信頼する。
     """
 
+    # 監査済みの code の間に確かめた型（`_Reliance.trusted`: 外の code の数が同じ間だけ）。外の code は外の code の区間で
+    # だけ走り、区間を抜けるたびに数が変わる: 数が同じ間は、確かめた後に型を書き換えた code は無い
+    reliance_state = _FOREIGN_EPOCH.s
+    trusted = reliance_state.trusted.get(id(kind))
+    if trusted is not None and trusted[0] is kind and trusted[1] == reliance_state.count:
+        return True
     if not _plain_metatype(kind):
         return False
     known = _PACKAGE_TYPES.get(kind)
@@ -1194,6 +1203,7 @@ _BUILTIN_ITERATOR_TYPES = frozenset(
     )
 ) - {reversed}
 _BUILTIN_VIEW_TYPES = frozenset(type(view) for view in ({}.keys(), {}.values(), {}.items()))
+_TUPLE_ITERATOR = type(iter(()))
 
 
 # ---------------------------------------------------------------------------
@@ -2728,7 +2738,7 @@ def _exact_tree_read(value: Any, memo: Any = _ACTIVE) -> Tuple[Any, bool]:
 # | 名前の引きだけで決まる型の事実（`lookup_fact`: `_BUILTIN_HASHED`・`_builtin_behaviour`・JSON の protocol） | 引いた名前が同じ object を引く間 | 名前空間・`__bases__` の書き換え、引いた object の `__class__`・descriptor の中身の書き換え | 引くたびに key の型の MRO の identity・引いた (storage, 名前, 見つけた object)・見つけた object 自身の identity の外の状態（`_watch`。計算は見つけた object の中身を読まない）を確かめ、違えば計算し直す。計算の途中に引いた記録の読みは外の計算の読みへ足す |
 # | 名前空間の storage の列（`_PLAIN_MROS`・`_STATIC_NAMESPACES`） | MRO の tuple が同じ object の間 | `__bases__` の書き換え（MRO を作り直す） | 引くたびに MRO の identity を比べる。storage は class が生きている間同じ dict・key は組み込みの `str` のまま（上の行の前提）・組み込みの型の名前空間は変わらない |
 # | 監査済みの区間の記録（`audited_region` / `region_cache`: JSON の型の protocol の判定など） | 区間（最も外の `audited_region`）の間、外の code が走っていない間（区間を開けた thread の中の code。他の thread は前提の外の段落） | 外の code（監査の外の code: identity key の method・宣言していない package の generator・値の code を呼ぶ境界・比べる側の契約が呼ぶ外の比較と hash）。J19 の監査が辿る code が live な値を渡す owner の関数は値の code を呼ばない（呼ぶものは `value_code_boundary` で宣言し、その呼び出しを `outside_audit` の下に置く） | 外の code が走るのは外の code の区間（`outside_audit`）の中だけ: 走る間ずっと区間の外（入り直しても記録を見ない）。抜ければ（例外・中断でも）記録を捨てる。区間を閉じれば捨てる。区間の外は引くたびに上の行の確かめ。開ける場所・境界・owner の関数の分類は static test が監査の結果と突き合わせる |
-# | 監査済みの code が頼る値の型（walker の receiver: record・reducer・sized leaf・property / state setter の持ち主、`package_instance` で絞り込んだ値。第 11 回） | 頼り始めてから外の code の区間を抜けるまで。generator の中の絞り込みは次の `yield` まで | 外の code（区間の中）が型の名前空間・`__bases__`・値の `__class__`・protocol の method を書き換える。監査済みの code の外（activation の無い間）の書き換え | 頼る事実は activation（`relying_on` / `audited_entry` / walker の 1 歩）に記録し、外の code の区間を抜けるときに走っている activation を全部確かめ直す（`_recheck_reliance`）。止まっている監査済みの generator（record の `json_items`・`receiver_items`・宣言した generator）は再開の前にreceiver の型・型の信頼・method を確かめ直す（`json_encoding._AuditedSteps`）。`package_instance` は監査済みの code の中（activation がある）で絞り込むたびに型の信頼を確かめる（外は契約の外: 型の identity だけ。監査済みの code は必ず activation の中で走る: test が root ごとに確かめる。activation のstack が続き、外の code の数が同じ間だけ記録を使い回す）。落ちればその型の code を呼ぶ前に判定不能。J19 の監査は `type(x) is C`（C は package の型）を絞り込みに数えず、絞り込みが `yield` をまたぐ読みと、receiver を新しい generator へ渡して yield の後に読む形を拒む。絞り込む entry root は`audited_entry` の宣言が要る（test が辿る関数から決める） |
+# | 監査済みの code が頼る値の型（walker の receiver: record・reducer・sized leaf・property / state setter の持ち主、`package_instance` で絞り込んだ値。第 11 回） | 頼り始めてから外の code の区間を抜けるまで。generator の中の絞り込みは次の `yield` まで | 外の code（区間の中）が型の名前空間・`__bases__`・値の `__class__`・protocol の method を書き換える。監査済みの code の外（activation の無い間）の書き換え | 頼る事実は activation（`relying_on` / `audited_entry` / walk 自身）に記録し、外の code の区間を抜けるときに走っている activation を全部確かめ直す（`_recheck_reliance`）。walker が進める監査済みの generator（record の `json_items`・`receiver_items`・宣言した generator。止まっているものを含む）は frame が receiver（型・protocol・method）を持ち、走っている walk（`_Reliance.walks`）の frame を同じ区間の出口で確かめ直す（`json_encoding._Walk.recheck`。token の digest の整列で frame を積む前に引き出す列も含む）。walk の中の 1 歩・converter の中の絞り込みは歩の後に捨てる。`package_instance` は監査済みの code の中（activation がある）で絞り込むたびに型の信頼を確かめる（外は契約の外: 型の identity だけ。監査済みの code は必ず activation の中で走る: test が root ごとに確かめる。activation のstack が続き、外の code の数が同じ間だけ記録を使い回す）。落ちればその型の code を呼ぶ前に判定不能。J19 の監査は `type(x) is C`（C は package の型）を絞り込みに数えず、絞り込みが `yield` をまたぐ読みと、receiver を新しい generator へ渡して yield の後に読む形を拒む。絞り込む entry root は`audited_entry` の宣言が要る（test が辿る関数から決める） |
 # | 組（(key, 値)。`inline` / `pairs_of` / record の `json_items` / `mapping_of`）の中の構造 | いつも | tuple / list の subclass の `__iter__` / `__getitem__` / `__len__`（unpack・添字が呼ぶ） | 組は `read_pair` で読む（基底型の slot。exact な tuple はそのまま）。組でない値・長さが 2 でない組は値の code を呼ぶ前に拒む。J19 の監査は、要素が組み込みの tuple と分かる列（owner の組の読み・package の容器の `.items()`・`enumerate` / `zip`）の要素だけの unpack を許す |
 # | instance の `__dict__` を読む descriptor（`_DICT_HOLDERS`） | MRO の tuple が同じ object の間 | `__bases__` の書き換え | metaclass が `type` の class の `__dict__` の entry は作った後に書けも消せもしない（`_fixed_dict_entries`: CPython 3.10 / 3.12 で確かめる test）。そうでない MRO は記録しない。引くたびに MRO の identity を比べる |
 # | 判定不能が確定判定にならない | いつも | helper・`except` の捕捉 | 普通の例外の派生でない。作るときに pair の台帳へ記録（登録した reason `comparison_undecidable`、`blocks_decision`）。名指しの捕捉は分類した場所だけ |
@@ -3391,14 +3401,16 @@ def _recheck_reliance(state: "_Reliance") -> None:
         if not all(map(_IS, map(type, map(_FIRST, activation)), map(_SECOND, activation))):
             raise undecidable("a value audited code relies on changed its class in foreign code")
         seen.update(zip(map(id, map(_SECOND, activation)), map(_SECOND, activation)))
-    trusted = state.trusted
-    count = state.count
     for kind in seen.values():
         if not package_type(kind):
             raise undecidable(f"{type_name(kind)}, which audited code relies on, was changed by foreign code")
-        trusted[id(kind)] = (kind, count)  # 確かめた型: 次の絞り込みは確かめ直さない（数が同じ間）
-    for walk in state.walks:
-        walk.recheck()  # walk の frame の receiver（止まっている generator を含む）
+    if state.walks:
+        for walk in state.walks:
+            walk.recheck(seen)  # walk の frame の receiver（止まっている generator を含む）。確かめた型は確かめ直さない
+    trusted = state.trusted
+    count = state.count
+    for kind in seen.values():
+        trusted[id(kind)] = (kind, count)  # 確かめた型: 次の絞り込み・型の信頼の判定は確かめ直さない（数が同じ間）
 
 
 _FIRST = operator.itemgetter(0)
@@ -3445,6 +3457,33 @@ def end_activation(state: "_Reliance") -> None:
     active.pop()
     if not active:
         state.trusted.clear()
+
+
+def begin_reliance(receiver: Any, kind: type) -> Tuple[Any, Any]:
+    """監査済みの code が `receiver`（型 `kind`）に頼り始める（`end_reliance(token)` を finally で呼ぶ）。activation が既に
+    あれば今の activation に記録し、終わりにその位置から後ろを捨てる（間の絞り込みも、頼る間だけのもの）。無ければ
+    activation を 1 つ積む。外の code の区間の出口で確かめ直す対象になる点は `begin_activation` と同じ（短い呼び出しを
+    1 件ごとに積み降ろししない hot path 版）。"""
+
+    state = _FOREIGN_EPOCH.s
+    active = state.active
+    if active:
+        top = active[-1]
+        mark = len(top)
+        top.append((receiver, kind))
+        return top, mark
+    active.append([(receiver, kind)])
+    return None, state
+
+
+def end_reliance(token: Tuple[Any, Any]) -> None:
+    """`begin_reliance` の終わり（唯一の終わり方）。"""
+
+    top, mark = token
+    if top is None:
+        end_activation(mark)
+    else:
+        del top[mark:]
 
 
 def audited_entry(function: Any) -> Any:
@@ -3515,6 +3554,35 @@ def package_instance(value: Any, kind: type) -> bool:
     # 監査済みの code の外（activation が無い: walk・`audited_entry`・owner が呼ぶ root の外。analysis の code が同じ関数を
     # 呼ぶとき）: 契約の外なので型の identity だけ（監査済みの code が走るときは必ず activation がある）
     return True
+
+
+def package_elements(values: Any, kind: type, message: str) -> Tuple[Any, ...]:
+    """列の要素を全部 package の型 `kind` へ絞り込む（`package_instance` を要素ごとに呼ぶのと同じ判定と記録を 1 度に行う）。
+    要素の型の identity は C の反復で比べ、`kind` の信頼は 1 度だけ確かめ、要素は今の activation へまとめて記録する。
+    返すのは要素の tuple（list なら写し: 反復の間に列を書き換えても、確かめていない要素は現れない）。要素のどれかが
+    `kind` そのものでなければ `TypeError(message)`（値の code を呼ぶ前）。J19 の監査は `for x in package_elements(...)`
+    の `x` を絞り込んだ値に数える（本体が `yield` で止まる loop では数えない）。"""
+
+    container = type(values)
+    if container is tuple:
+        items = values
+    elif container is list:
+        items = tuple(values)  # 組み込みの list の C の反復
+    else:
+        items = tuple(elements_of(values))
+    if not all(map(_IS, map(type, items), itertools.repeat(kind))):
+        raise TypeError(message)
+    if items:
+        state = _FOREIGN_EPOCH.s
+        active = state.active
+        if active:
+            known = state.trusted.get(id(kind))
+            if known is None or known[0] is not kind or known[1] != state.count:
+                if not package_type(kind):
+                    raise undecidable(f"{type_name(kind)} is relied on by audited code but is not a package type now")
+                state.trusted[id(kind)] = (kind, state.count)
+            active[-1].extend(zip(items, itertools.repeat(kind)))
+    return items
 
 
 def region_cache(slot: Any) -> Optional[dict]:
@@ -5089,9 +5157,15 @@ def builtin_iterator(item: Any) -> bool:
         return True
     if kind is zip:
         parts = zip.__reduce__(item)[1]
-        return tuple.__len__(parts) <= SCAN_LIMIT and all(
-            type(part) is not zip and builtin_iterator(part) for part in tuple.__iter__(parts)
-        )
+        if tuple.__len__(parts) > SCAN_LIMIT:
+            return False
+        for part in tuple.__iter__(parts):
+            part_kind = type(part)
+            # 包んだ iterator は組み込みの容器の iterator だけ（入れ子の `zip` は数えない）。tuple の iterator は identity で
+            # 先に見る（型の集合へは metaclass を確かめてから: `builtin_iterator`）
+            if part_kind is not _TUPLE_ITERATOR and (part_kind is zip or not builtin_iterator(part)):
+                return False
+        return True
     return _plain_metatype(kind) and (kind in _BUILTIN_ITERATOR_TYPES or kind in _BUILTIN_VIEW_TYPES)
 
 
@@ -5405,9 +5479,12 @@ __all__ = [
     "reliance",
     "relying_on",
     "begin_activation",
+    "begin_reliance",
+    "end_reliance",
     "end_activation",
     "audited_entry",
     "package_instance",
+    "package_elements",
     "read_pair",
     "exact_scalar",
     "exact_tree",
