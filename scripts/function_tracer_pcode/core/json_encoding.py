@@ -361,7 +361,7 @@ class _Scan(_Source):
 
 class _ReceiverItems(_Source):
     """`receiver_items` の source: record の宣言した監査済みの generator method を walker が呼び、record を receiver として
-    進める（再開の前に型と method を確かめ直す）。"""
+    進める（外の code の区間を抜けるたびに record の型と型の信頼を確かめ直す）。"""
 
     __slots__ = ("record", "name", "options")
 
@@ -374,7 +374,7 @@ class _ReceiverItems(_Source):
 def receiver_items(record: Any, name: str, **options: Any) -> _Source:
     """record の (key, source) の組を、record の宣言した監査済みの generator method（`audited_generator`）`name` で作る
     object（`json_items` と別の組: `to_dict` の版など）。walker は method を呼ぶ時点で型から引き、record を receiver として
-    1 歩ずつ進める（外の code の後は再開の前に、record の型・型の信頼・method を確かめ直す）。`options` は組み込みの
+    1 歩ずつ進める（外の code の区間を抜けるたびに、record の型・型の信頼を確かめ直す）。`options` は組み込みの
     scalar だけ（method の keyword 引数）。"""
 
     if type(name) is not str:
@@ -502,11 +502,11 @@ def _walk_iter(items: Any) -> Iterator[Any]:
     return iter(items)
 
 
-def _record_iteration(json_items: Any, item: Any) -> Tuple[Iterator[Any], Optional[Tuple[Any, type, str, Any]]]:
-    """record の `json_items(item)` の列と、その列を進める間に頼る receiver（`(record, 型, protocol の名前, 関数)`。頼らない
-    列なら `None`）。`json_items` 自身の generator と、それが返した宣言した監査済みの generator は record を receiver とする
-    監査済みの code: 進める側（walker の frame・`scalar_record_dict`）が receiver を記録し、外の code の区間を抜けるたびに
-    確かめ直す（`_require_receiver`）。それ以外の列は walker と同じ規則（`_walk_iter`）。"""
+def _record_iteration(json_items: Any, item: Any) -> Tuple[Iterator[Any], bool]:
+    """record の `json_items(item)` の列と、その列を進める間 record に頼るか。`json_items` 自身の generator と、それが返した
+    宣言した監査済みの generator は record を receiver とする監査済みの code: 進める側（walker の frame・
+    `scalar_record_dict`）が receiver を記録し、外の code の区間を抜けるたびに確かめ直す（`_require_receiver`）。それ以外の
+    列は walker と同じ規則（`_walk_iter`）。"""
 
     kind = type(item)
     code = json_items.__code__ if type(json_items) is types.FunctionType else None
@@ -519,10 +519,10 @@ def _record_iteration(json_items: Any, item: Any) -> Tuple[Iterator[Any], Option
         finally:
             live_values.end_reliance(token)
     if type(items) is zip and live_values.builtin_iterator(items):
-        return items, None  # 組み込みの容器の iterator の zip（進めても Python の code は走らない）
+        return items, False  # 組み込みの容器の iterator の zip（進めても Python の code は走らない）
     if _receiver_bound(items, json_items):
-        return items, (item, kind, "json_items", json_items)
-    return _walk_iter(items), None
+        return items, True
+    return _walk_iter(items), False
 
 
 def _receiver_bound(items: Any, json_items: Any) -> bool:
@@ -534,15 +534,15 @@ def _receiver_bound(items: Any, json_items: Any) -> bool:
     )
 
 
-def _require_receiver(
-    receiver: Any, kind: type, protocol: Optional[str], method: Any, verified: Dict[int, type],
-) -> None:
-    """外の code の後に監査済みの code を続ける前の確かめ: receiver の型がまだ `kind` で、`kind` がまだ package の型で、
-    その protocol がまだ同じ package の関数（`receiver_items` の method はまだ宣言した監査済みの generator）。落ちれば
-    判定不能。`verified` は同じ出口で信頼を確かめ済みの型（型ごとに 1 度だけ `package_type` を呼ぶ）。
+def _require_receiver(receiver: Any, kind: type, verified: Dict[int, type]) -> None:
+    """外の code の後に監査済みの code（止まっている・進めている generator、引いておいた method）を続ける前の確かめ:
+    receiver の型がまだ `kind` で、`kind` がまだ package の型。落ちれば判定不能。`verified` は同じ出口で信頼を確かめ済みの
+    型（型ごとに 1 度だけ `package_type` を呼ぶ）。
 
-    protocol の確かめは型の MRO の属性の identity（`type_attribute`）: 信頼を確かめた型の protocol の表
-    （`_record_protocols`）の要素は、その属性が package の関数のときのその属性なので、同じ判定を表を作り直さずに行う。"""
+    続ける code は引いた時点の package の関数（code は書き換えない: 契約の外）で、その code が頼るのは receiver の型の
+    名前空間（field の descriptor・method）: 型の identity と信頼がそのまま続ける前の前提。型の protocol を別の関数へ
+    書き換えても、引いておいた関数を続ける（書き換えの無い双子と同じ値）。外の code の関数へ書き換えれば型の信頼が
+    落ちる。"""
 
     if type(receiver) is not kind:
         raise live_values.undecidable(f"a {type_name(kind)} receiver changed its class in foreign code")
@@ -550,14 +550,6 @@ def _require_receiver(
         if not live_values.package_type(kind):
             raise live_values.undecidable(f"{type_name(kind)} lost trust in foreign code")
         verified[id(kind)] = kind
-    if protocol is None:
-        return
-    if (
-        type_attribute(kind, protocol) is not method
-        or not live_values.package_function(method)
-        or (protocol not in _PROTOCOL_INDEX and _AUDITED_GENERATORS.get(id(method.__code__)) is not method.__code__)
-    ):
-        raise live_values.undecidable(f"{type_name(kind)}.{protocol} changed or lost trust in foreign code")
 
 
 def _receiver_generator(kind: type, name: str) -> Any:
@@ -2347,7 +2339,7 @@ def _text_marker(value: str, max_chars: int, digest: Optional[str]) -> str:
 class _Frame:
     __slots__ = (
         "kind", "iterator", "out", "parent", "key", "count", "source_id", "source", "build",
-        "keys", "fn", "current", "preserve_keys", "receiver",
+        "keys", "fn", "current", "preserve_keys", "receiver", "receiver_kind",
     )
 
 
@@ -2539,8 +2531,9 @@ class _Walk:
         self.active: set = set()
         #: walk の activation（`run` が積む。歩の中の絞り込みを歩の後に捨てる）
         self.activation: List[Any] = []
-        #: frame を積む前に引き出している列の receiver（token の digest の整列: `push`）
-        self.pending: Optional[Tuple[Any, type, str, Any]] = None
+        #: frame を積む前に引き出している列の receiver とその型（token の digest の整列: `push`）
+        self.pending: Any = None
+        self.pending_kind: Optional[type] = None
         cache = _STRING_BYTES_CACHES.get(policy)
         if cache is None or len(cache) > _STRING_BYTES_CACHE_MAX:
             cache = _STRING_BYTES_CACHES[policy] = {}
@@ -2810,7 +2803,7 @@ class _Walk:
 
     def push(self, kind: str, iterator: Iterator[Any], parent: Any, key: Any, source: Any,
              *, build: bool, fn: Any = None, preserve_keys: bool = False,
-             receiver: Optional[Tuple[Any, type, str, Any]] = None) -> None:
+             receiver: Any = None) -> None:
         if _is_one_shot(source):
             self.entered_iterator = True
         # 閉路の判定は **参照している値**（record / 容器）の identity で行う。遅延構成子の
@@ -2838,6 +2831,7 @@ class _Walk:
                 pairs = []
                 # 引き出す間は、frame を積む前でも receiver を外の code の区間の確かめ直しの対象にする（`recheck`）
                 self.pending = receiver
+                self.pending_kind = type(receiver)
                 activation = self.activation
                 try:
                     for pair in iterator:
@@ -2862,6 +2856,7 @@ class _Walk:
         frame.kind = kind
         frame.iterator = iterator
         frame.receiver = receiver
+        frame.receiver_kind = None if receiver is None else type(receiver)
         frame.out = ({} if kind == "dict" else []) if build else None
         frame.parent = parent
         frame.key = key
@@ -2909,8 +2904,8 @@ class _Walk:
         json_items, json_tree = _record_protocols(kind)[:2]
         if json_items is not None:
             # package の型の `json_items`（record の protocol。型の関数を直接呼ぶ）
-            items, receiver = _record_iteration(json_items, item)
-            self.push("dict", items, parent, key, item, build=build, receiver=receiver)
+            items, bound = _record_iteration(json_items, item)
+            self.push("dict", items, parent, key, item, build=build, receiver=item if bound else None)
             return
         if json_tree is not None:
             built, size = self.budget.tree(item, build=build)
@@ -3082,7 +3077,7 @@ class _Walk:
             generator = method(record, **dict(item.options))  # 宣言した generator 関数: 呼んでも本体は走らない
             self.push(
                 "dict", generator, parent, key, item, build=build, preserve_keys=(self.mode == LEGACY),
-                receiver=(record, record_kind, item.name, method),
+                receiver=record,
             )
         elif kind is _Inline:
             self.push("dict", iter(item.pairs), parent, key, item, build=build)
@@ -3274,15 +3269,15 @@ class _Walk:
 
     def recheck(self, verified: Dict[int, type]) -> None:
         """外の code の区間を抜けたとき（`live_values.outside_audit`）: 積んでいる frame の receiver（record・`receiver_items`
-        の record）の型・型の信頼・method を確かめ直す。止まっている generator も、進めている generator も、外の code の後に
+        の record）の型・型の信頼を確かめ直す。止まっている generator も、進めている generator も、外の code の後に
         続ける前に確かめたことになる（落ちれば判定不能: 続けない）。"""
 
         for frame in self.stack:
-            receiver = frame.receiver
-            if receiver is not None:
-                _require_receiver(*receiver, verified)
+            kind = frame.receiver_kind
+            if kind is not None:
+                _require_receiver(frame.receiver, kind, verified)
         if self.pending is not None:
-            _require_receiver(*self.pending, verified)
+            _require_receiver(self.pending, self.pending_kind, verified)
 
     def _reducer_methods(self, reducer: Any) -> Tuple[Any, Any]:
         """`Reducer` の `add` / `result`（呼ぶ時点で型から引く: package の型の package の関数だけ。`scan` を作った後に型が
@@ -3296,19 +3291,10 @@ class _Walk:
         return add, result
 
     def _reducer_methods_again(self, reducer: Any, kind: type, add: Any, result: Any) -> Tuple[Any, Any]:
-        """外の code が走った後に reducer の method を引き直す: 型・method が変わっていれば判定不能（引いておいた method
-        も、書き換えた後の型の method も、双子の値を作らない）。"""
+        """外の code が走った後、引いておいた reducer の method を続ける前の確かめ（`_require_receiver` と同じ: 型の identity と
+        型の信頼）。落ちれば判定不能（書き換えた型の method も、引いておいた method も呼ばない）。"""
 
-        if type(reducer) is not kind:
-            raise live_values.undecidable(f"a {type_name(kind)} reducer changed its class in foreign code")
-        # `_record_protocols(kind)` の add / result と同じ判定（信頼した型の MRO の属性がまだ同じ package の関数）を表を
-        # 作り直さずに行う（外の code の後は表の記録が捨てられている）
-        if not (
-            live_values.package_type(kind)
-            and type_attribute(kind, "add") is add and live_values.package_function(add)
-            and type_attribute(kind, "result") is result and live_values.package_function(result)
-        ):
-            raise live_values.undecidable(f"{type_name(kind)} reducer methods changed or lost trust in foreign code")
+        _require_receiver(reducer, kind, {})
         return add, result
 
     def producer_failed(self, exc: BaseException) -> None:
@@ -3508,10 +3494,10 @@ def scalar_record_dict(record: Any) -> dict:
     read_pair = live_values.read_pair
     # 列は walker と同じ規則（`_record_iteration`）、組は exact な tuple ならそのまま・それ以外は `read_pair`。list を作らずに
     # 1 組ずつ読む（walker の外で record の組を読む唯一の入口）
-    items, receiver = _record_iteration(protocol_method(record, "json_items"), record)
+    items, bound = _record_iteration(protocol_method(record, "json_items"), record)
     # 列を進める間ずっと record を receiver とする activation（歩の間に走る外の code は区間を抜けるときに確かめる。歩と歩の
     # 間は owner の code だけ）
-    token = live_values.begin_reliance(record, kind) if receiver is not None else None
+    token = live_values.begin_reliance(record, kind) if bound else None
     limit = live_values.SCAN_LIMIT
     try:
         for count, pair in enumerate(items, 1):

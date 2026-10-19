@@ -334,6 +334,98 @@ def test_b_a_fixed_record_key_is_a_str_before_it_is_hashed(make):
     assert HOOKS == []
 
 
+def _record_with_plain_json_items_running_foreign_code():
+    """`json_items` が generator でない関数: 外の code の区間で自分の型へ外の property を足してから `self.second` を読み、
+    組の列（組み込みの tuple の iterator）を返す record の型。"""
+
+    @dataclasses.dataclass(frozen=True)
+    class Record:
+        first: int
+        second: int
+
+        def json_items(self):
+            with live_values.outside_audit():
+                setattr(Record, "second", _foreign_getter(999))
+            return iter((("first", self.first), ("second", self.second)))
+
+    return Record
+
+
+def _inside_an_activation(operation):
+    """監査済みの code の中（外側に activation がある）で `operation` を呼び、外側の activation の記録が呼ぶ前と同じ数に
+    戻ったかも返す。"""
+
+    state = live_values.begin_activation()
+    try:
+        outer = state.active[-1]
+        before = len(outer)
+        result = _refused(operation)
+        return result, len(outer) == before
+    finally:
+        live_values.end_activation(state)
+
+
+@pytest.mark.parametrize("operation", [_prepare, json_encoding.scalar_record_dict], ids=["walker", "scalar_record_dict"])
+@pytest.mark.parametrize("outer", [False, True], ids=["alone", "inside-an-activation"])
+@pytest.mark.parametrize("make", [
+    _record_running_foreign_code_between_its_pairs,
+    _record_with_plain_json_items_running_foreign_code,
+], ids=["generator", "plain-function"])
+def test_a_record_relied_on_while_json_items_runs_is_rechecked_with_or_without_an_outer_activation(make, outer, operation):
+    """反例 A の receiver の記録（`begin_reliance`）: 外側に activation があれば receiver はその activation に記録され、無ければ
+    activation を積む。どちらでも、`json_items` が走る間・進める間の外の code の後は record の型を確かめ直し、getter を呼ぶ前に
+    判定不能。終わった後、外側の activation の記録は呼ぶ前の数に戻る（頼る間だけの記録）。"""
+
+    HOOKS.clear()
+    Record = make()
+    if outer:
+        result, restored = _inside_an_activation(lambda: operation(Record(first=1, second=7)))
+        assert restored
+    else:
+        result = _refused(lambda: operation(Record(first=1, second=7)))
+    assert result == "refused"
+    assert HOOKS == []
+
+
+def test_a_fixed_record_leaves_the_outer_activation_as_it_was():
+    """双子（外の code の無い record）でも、外側の activation の記録は呼ぶ前の数に戻る。"""
+
+    @dataclasses.dataclass(frozen=True)
+    class Record:
+        first: int
+
+        def json_items(self):
+            yield "first", self.first
+
+    result, restored = _inside_an_activation(lambda: json_encoding.scalar_record_dict(Record(first=1)))
+    assert result == {"first": 1} and restored
+
+
+class _HookedIterator:
+    """`__next__` を呼ばれたら記録する iterator（組み込みの iterator でない）。"""
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        HOOKS.append("next")
+        raise StopIteration
+
+
+@pytest.mark.parametrize("operation", [_prepare, json_encoding.scalar_record_dict], ids=["walker", "scalar_record_dict"])
+def test_a_zip_of_a_non_builtin_iterator_returned_by_json_items_is_refused_before_it_is_stepped(operation):
+    """`json_items` が返す `zip` は、包んだ iterator が全部組み込みのときだけ組み込みの列（速い経路）。外の iterator を包む
+    `zip` は進める前に拒む（双子: 組み込みの iterator の `zip` は同じ組）。"""
+
+    HOOKS.clear()
+    twin = type("Twin", (), {"json_items": lambda self: zip(iter(("k",)), iter((1,)))})()
+    assert operation(twin) == {"k": 1}
+    record = type("Record", (), {"json_items": lambda self: zip(iter(("k",)), _HookedIterator())})()
+    with pytest.raises((TypeError, JsonValueRejected)):
+        operation(record)
+    assert HOOKS == []
+
+
 @pytest.mark.parametrize("pair", [
     ("k", 1, 2),
     ("k",),
@@ -841,6 +933,32 @@ def test_receiver_items_calls_only_a_declared_audited_generator_of_a_package_typ
     with pytest.raises(JsonValueRejected):
         _prepare(json_encoding.receiver_items(Record(), "_items"))
     assert calls == []
+
+
+def test_a_receiver_items_walk_does_not_resume_its_record_after_a_child_rewrote_the_record_type():
+    """反例 A の `receiver_items` の経路: 宣言した監査済みの generator が止まっている間（子を辿る間）に、子の外の code が
+    record の型へ外の property を足す。再開すれば区間の中で getter を呼ぶ。frame の receiver（record）を出口で確かめ、
+    getter の前に判定不能。双子（書き換えの無い子）は同じ組。"""
+
+    HOOKS.clear()
+
+    @dataclasses.dataclass(frozen=True)
+    class Record:
+        first: object
+        second: int
+
+        def _items(self):
+            yield "first", self.first
+            yield "second", self.second
+
+    json_encoding.audited_generator(Record._items)
+    try:
+        assert _prepare(json_encoding.receiver_items(Record(first=[1], second=7), "_items")) == {"first": [1], "second": 7}
+        record = Record(first=_record_with_rewriting_child(Record, "second", 999), second=7)
+        assert _refused(lambda: _prepare(json_encoding.receiver_items(record, "_items"))) == "refused"
+    finally:
+        json_encoding._AUDITED_GENERATORS.pop(id(Record._items.__code__), None)
+    assert HOOKS == []
 
 
 def test_a_zip_is_walked_only_when_every_zipped_iterator_is_builtin():
