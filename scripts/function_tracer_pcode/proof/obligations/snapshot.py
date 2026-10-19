@@ -465,21 +465,19 @@ class SnapshotFingerprintCodec:
         count = 0
         if type(items) is not tuple:
             raise TypeError("frozen mapping items must be a builtin tuple")
-        pairs = []
         for pair in items:
             if type(pair) is tuple:
                 key, _item = pair  # 凍結した組（exact な tuple の unpack は Python の code を呼ばない。長さの違いは ValueError）
             else:
-                pair = live_values.read_pair(pair)
-                key, _item = pair
-            pairs.append(pair)
+                # exact な tuple でない組: 全部の組を基底型の slot で読んだ列で並べ直す（凍結した組では起きない）
+                return cls.sorted_mapping_items(tuple([live_values.read_pair(pair) for pair in items]))
             keyed.append((_fingerprint_json(key), count))
             count += 1
         keyed.sort()
         for index in range(1, count):
             if keyed[index - 1][0] == keyed[index][0]:
                 raise ValueError("mapping contains duplicate canonical semantic keys")
-        return tuple(pairs[index] for _text, index in keyed)
+        return tuple(items[index] for _text, index in keyed)
 
     @staticmethod
     def _sort_key(value: Any) -> str:

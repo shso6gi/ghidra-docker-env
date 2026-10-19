@@ -460,11 +460,7 @@ class _FunctionAudit:
                 self.v(s, "augmented assignment with a live value")
         elif isinstance(s, (ast.For, ast.AsyncFor)):
             element = self.iterate(s.iter, s)
-            suspends = _suspends(s.body)
-            if suspends and rec_prefix(element) == RECN:
-                # 列ごとの絞り込み（`package_elements`）は loop の前: 本体が止まれば、後の要素の絞り込みは止まる前のもの
-                element = LIVE
-            for _pass in range(2 if suspends else 1):
+            for _pass in range(2 if _suspends(s.body) else 1):
                 # 本体が止まる（yield）なら、次の繰り返しは止まった後の種類で辿り直す（絞り込みが yield をまたがない）
                 self.assign(s.target, element, None, element_of_iteration=True)
                 self.block(s.body)
@@ -652,15 +648,6 @@ class _FunctionAudit:
             self.v(node, "truth test of a live value")
 
     def iterate(self, node, where):
-        if (
-            isinstance(node, ast.Call) and len(node.args) == 3 and not node.keywords
-            and self._live_values_function(node.func) == "package_elements"
-        ):
-            # 要素を全部絞り込んだ列（`live_values.package_elements`: 要素ごとの `package_instance` と同じ確かめと記録）
-            self.expr(node)
-            self._pairs = False
-            kind = self._narrowed_kind(node.args[1], checked=True)
-            return rec(*rec_class(kind), prefix=RECN) if is_rec(kind) else LIVE
         kind = self.expr(node)
         self._pairs = False
         if kind == VER:

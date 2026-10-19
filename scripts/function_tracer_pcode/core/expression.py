@@ -958,7 +958,9 @@ class Expression:
         if operands is not None and (operands if (type(operands) is list or type(operands) is tuple) else as_bool(operands)):
             if collect is None:
                 rendered = []
-                for op in package_elements(operands, Expression, "Expression operands must be Expressions"):
+                for op in elements_of(operands):
+                    if not package_instance(op, Expression):
+                        raise TypeError("Expression operands must be Expressions")
                     rendered.append(op._to_dict(active))
                 result["operands"] = rendered
             else:
@@ -1417,4 +1419,4 @@ def runtime_ref_source(value: Any) -> Any:
 
 # Re-exported for callers that import Condition from model.expression.
 from scripts.function_tracer_pcode.core.condition import Condition
-from scripts.function_tracer_pcode.core.live_values import package_elements, package_instance
+from scripts.function_tracer_pcode.core.live_values import package_instance

@@ -348,54 +348,8 @@ def test_b_a_value_that_is_not_a_builtin_pair_of_two_is_refused_before_its_code_
     assert HOOKS == []
 
 
-# ---------------------------------------------------------------------------
-# 列ごとの絞り込み（`package_elements`: 要素ごとの `package_instance` と同じ確かめと記録）
-# ---------------------------------------------------------------------------
-
-
-@dataclasses.dataclass
-class _Node:
-    """test の package の型（要素の型）。"""
-
-    value: int
-
-
-def test_package_elements_matches_per_element_narrowing():
-    """双子: 要素ごとの `package_instance` と同じ判定（全部その型そのものなら要素の tuple、1 つでも違えば `TypeError`）。
-    list は写しを返す（反復の間に列を書き換えても、確かめていない要素は現れない）。"""
-
-    nodes = [_Node(1), _Node(2)]
-    state = live_values.begin_activation()
-    try:
-        assert live_values.package_elements(tuple(nodes), _Node, "m") == tuple(nodes)
-        snapshot = live_values.package_elements(nodes, _Node, "m")
-        nodes.append("not a node")
-        assert snapshot == (nodes[0], nodes[1])
-        assert all(live_values.package_instance(node, _Node) for node in snapshot)
-        for bad in ([_Node(1), type("Sub", (_Node,), {})(2)], [_Node(1), None]):
-            with pytest.raises(TypeError, match="^m$"):
-                live_values.package_elements(bad, _Node, "m")
-    finally:
-        live_values.end_activation(state)
-
-
-def test_package_elements_records_every_element_for_the_exit_recheck():
-    """記録は要素ごと: 外の code が絞り込んだ要素の 1 つの class を書き換えれば、区間を抜けるときに判定不能（値の code を
-    呼ぶ前）。型の信頼を失った型への絞り込みも判定不能。"""
-
-    nodes = (_Node(1), _Node(2))
-    state = live_values.begin_activation()
-    try:
-        live_values.package_elements(nodes, _Node, "m")
-        with pytest.raises(live_values.UndecidableComparison):
-            with live_values.outside_audit():
-                object.__setattr__(nodes[1], "__class__", type("Swapped", (_Node,), {}))
-    finally:
-        live_values.end_activation(state)
-
-
 def test_expression_operands_render_like_the_twin_and_refuse_a_non_expression():
-    """`Expression` の子の描画（`package_elements` で絞り込む）: 双子と同じ dict、子に式でない値があれば値の code を呼ぶ
+    """`Expression` の子の描画（子ごとに `package_instance` で絞り込む）: 双子と同じ dict、子に式でない値があれば値の code を呼ぶ
     前に `TypeError`。"""
 
     from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
@@ -418,7 +372,6 @@ def test_expression_operands_render_like_the_twin_and_refuse_a_non_expression():
 
 _STUB_LIVE_VALUES = """
 def package_instance(value, kind): pass
-def package_elements(values, kind, message): pass
 def elements_of(value): pass
 def items_of(value): pass
 def read_pair(value): pass
@@ -436,7 +389,7 @@ def elements_within_limit(values, scan=None): pass
 """
 
 _CASES = '''
-from scripts.function_tracer_pcode.core.live_values import elements_of, items_of, package_elements, package_instance
+from scripts.function_tracer_pcode.core.live_values import elements_of, items_of, package_instance
 
 
 class Other:
@@ -537,26 +490,6 @@ class NarrowAcrossWhileYield:
                 yield "a", value.f
 
 
-class ElementsChecked:
-    def json_items(self):
-        out = []
-        for value in package_elements(self.x, Other, "not Other"):
-            out.append(value.f)
-        yield "a", out
-
-
-class ElementsAcrossYield:
-    def json_items(self):
-        for value in package_elements(self.x, Other, "not Other"):
-            yield "a", value.f
-
-
-class ElementsUnchecked:
-    def json_items(self):
-        for value in elements_of(self.x):
-            yield "a", value.f
-
-
 class YieldInTheCondition:
     def json_items(self):
         value = self.x
@@ -588,11 +521,9 @@ def test_the_audit_requires_checked_narrowing_that_does_not_survive_suspension(t
     assert {
         "NarrowWithoutTrust", "NarrowAcrossYield", "NarrowAcrossLoopYield", "helper", "UnpackNonPairs",
         "GeneratorExpressionAcross", "YieldInTheCondition", "NarrowAcrossWhileYield",
-        "ElementsAcrossYield", "ElementsUnchecked",
     } <= flagged, sorted(violations)
     assert not {
         "NarrowChecked", "ReceiverAcrossYield", "ReceiverDelegated", "UnpackPairs", "GeneratorExpressionFirstIterable",
-        "ElementsChecked",
     } & flagged, sorted(violations)
 
 

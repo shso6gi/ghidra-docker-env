@@ -3556,35 +3556,6 @@ def package_instance(value: Any, kind: type) -> bool:
     return True
 
 
-def package_elements(values: Any, kind: type, message: str) -> Tuple[Any, ...]:
-    """列の要素を全部 package の型 `kind` へ絞り込む（`package_instance` を要素ごとに呼ぶのと同じ判定と記録を 1 度に行う）。
-    要素の型の identity は C の反復で比べ、`kind` の信頼は 1 度だけ確かめ、要素は今の activation へまとめて記録する。
-    返すのは要素の tuple（list なら写し: 反復の間に列を書き換えても、確かめていない要素は現れない）。要素のどれかが
-    `kind` そのものでなければ `TypeError(message)`（値の code を呼ぶ前）。J19 の監査は `for x in package_elements(...)`
-    の `x` を絞り込んだ値に数える（本体が `yield` で止まる loop では数えない）。"""
-
-    container = type(values)
-    if container is tuple:
-        items = values
-    elif container is list:
-        items = tuple(values)  # 組み込みの list の C の反復
-    else:
-        items = tuple(elements_of(values))
-    if not all(map(_IS, map(type, items), itertools.repeat(kind))):
-        raise TypeError(message)
-    if items:
-        state = _FOREIGN_EPOCH.s
-        active = state.active
-        if active:
-            known = state.trusted.get(id(kind))
-            if known is None or known[0] is not kind or known[1] != state.count:
-                if not package_type(kind):
-                    raise undecidable(f"{type_name(kind)} is relied on by audited code but is not a package type now")
-                state.trusted[id(kind)] = (kind, state.count)
-            active[-1].extend(zip(items, itertools.repeat(kind)))
-    return items
-
-
 def region_cache(slot: Any) -> Optional[dict]:
     """今の区間の、`slot`（記録の持ち主が持つ object）ごとの記録（区間の外・区間の外の code の間は `None`）。"""
 
@@ -5484,7 +5455,6 @@ __all__ = [
     "end_activation",
     "audited_entry",
     "package_instance",
-    "package_elements",
     "read_pair",
     "exact_scalar",
     "exact_tree",
