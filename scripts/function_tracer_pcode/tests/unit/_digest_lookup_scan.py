@@ -4,12 +4,24 @@
 source: 名前に digest を含む呼び出し・属性、`json.dumps`・`_jsonable`・`canonical_value`・`repr` の結果と、
 それを代入・for で受けた名前（tuple の要素を含む）、digest を返す同じ package の関数の結果。
 sink: `in` / `.add` / `.get` / `.setdefault` / `.pop` / `.fromkeys` / `.discard` / `.remove` / subscript /
-dict・set の literal と内包 / `sorted`・`Counter`・`set` の等値比較。test は対象外。
+dict・set の literal と内包 / `sorted`・`Counter`・`set` の等値比較。`.fromkeys` は内包の引数も、`map(<digest 関数>, ...)` も source として見る。test は対象外。
+
+走査しないもの: 2 つの digest の `==` / `!=`。package には artifact に束縛した digest と要求の digest を照合する
+検証（封印・束縛の確認）が数百あり、規則で同一性の判定と分けられない。review で見つけた、digest の等値で
+2 つの値を同じとする判定は baseline の `hand_recorded` に書く（`test_digest_lookup_keys.py` が場所の存在を
+確かめる）。
 """
 
-import ast, pathlib, sys, collections
+import ast
+import collections
+import pathlib
 SOURCE_CALLS = {"dumps", "_jsonable", "canonical_value", "repr"}
 LOOKUP = {"add", "setdefault", "get", "pop", "fromkeys", "discard", "remove", "__contains__"}
+def _names_digest_function(node, returning):
+    name = node.attr if isinstance(node, ast.Attribute) else node.id if isinstance(node, ast.Name) else ""
+    return "digest" in name.lower() or name in SOURCE_CALLS or name in returning
+
+
 def call_name(node):
     f = node.func
     return f.attr if isinstance(f, ast.Attribute) else (f.id if isinstance(f, ast.Name) else "")
@@ -40,6 +52,7 @@ def scan_tree(tree, rel, found, returning):
             if isinstance(e, ast.Call):
                 n = call_name(e)
                 if "digest" in n.lower() or n in SOURCE_CALLS or n in returning: return True
+                if n == "map" and e.args and _names_digest_function(e.args[0], returning): return True
             if isinstance(e, ast.Attribute) and "digest" in e.attr.lower(): return True
             if isinstance(e, ast.Name) and e.id in tainted: return True
             if isinstance(e, (ast.Tuple, ast.List)) and any(src(x) for x in e.elts): return True
@@ -71,13 +84,17 @@ def scan_tree(tree, rel, found, returning):
                     def coll(e):
                         return isinstance(e, ast.Call) and call_name(e) in {"sorted", "Counter", "set", "frozenset", "tuple"} and e.args and (src(e.args[0]) or (isinstance(e.args[0], (ast.GeneratorExp, ast.ListComp, ast.SetComp)) and src(e.args[0].elt)))
                     if sum(1 for e in sides if coll(e)) >= 1 and all(coll(e) or src(e) for e in sides): kind = "collection_eq"
-            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in LOOKUP and n.args and src(n.args[0]): kind = n.func.attr
+            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in LOOKUP and n.args and (
+                src(n.args[0]) or (isinstance(n.args[0], (ast.GeneratorExp, ast.ListComp, ast.SetComp)) and src(n.args[0].elt))
+            ): kind = n.func.attr
             elif isinstance(n, ast.Subscript) and isinstance(n.ctx, (ast.Load, ast.Store, ast.Del)) and src(n.slice): kind = "subscript"
             elif isinstance(n, ast.Dict) and any(k is not None and src(k) for k in n.keys): kind = "dict_key"
             elif isinstance(n, ast.DictComp) and src(n.key): kind = "dict_comp_key"
             elif isinstance(n, ast.SetComp) and src(n.elt): kind = "set_comp"
             elif isinstance(n, ast.Set) and any(src(e) for e in n.elts): kind = "set_literal"
-            elif isinstance(n, ast.Call) and call_name(n) in {"set", "frozenset", "Counter"} and n.args and isinstance(n.args[0], (ast.GeneratorExp, ast.ListComp)) and src(n.args[0].elt): kind = "set_of"
+            elif isinstance(n, ast.Call) and call_name(n) in {"set", "frozenset", "Counter"} and n.args and (
+                src(n.args[0]) or (isinstance(n.args[0], (ast.GeneratorExp, ast.ListComp)) and src(n.args[0].elt))
+            ): kind = "set_of"
             if kind: found[(rel, fn, kind)] += 1
 def returning_helpers(trees):
     names = set()

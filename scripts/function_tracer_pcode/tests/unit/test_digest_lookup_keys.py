@@ -23,6 +23,7 @@ call の bucket・P-code の census・signal の重複の除去・前提の束�
 
 from __future__ import annotations
 
+import ast
 import collections
 import json
 from pathlib import Path
@@ -37,7 +38,11 @@ ROLES = frozenset({
 
 
 def _baseline():
-    return json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+    return json.loads(BASELINE_PATH.read_text(encoding="utf-8"))["scanned"]
+
+
+def _hand_recorded():
+    return json.loads(BASELINE_PATH.read_text(encoding="utf-8"))["hand_recorded"]
 
 
 def test_digest_lookup_keys_match_the_baseline_exactly():
@@ -65,6 +70,21 @@ def test_every_baseline_entry_has_a_role_a_reason_and_an_owner_when_it_is_a_foll
             assert "owner" not in entry, entry
 
 
+def test_hand_recorded_digest_equalities_still_exist_where_recorded():
+    # 走査しない形（2 つの digest の ==）で見つけた同一性の判定: 場所が消えたら baseline から外す
+    for entry in _hand_recorded():
+        assert entry["role"] == "identity_follow_up" and entry.get("owner") and entry.get("why"), entry
+        source = (PACKAGE_ROOT / entry["path"]).read_text(encoding="utf-8")
+        functions = [
+            node for node in ast.walk(ast.parse(source))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == entry["function"]
+        ]
+        assert functions, entry
+        body = "\n".join(ast.get_source_segment(source, node) or "" for node in functions)
+        left, _, right = entry["form"].partition(" == " if " == " in entry["form"] else " != ")
+        assert left.split(".")[-1] in body and right.split(".")[-1] in body, entry
+
+
 def test_the_scan_finds_the_forms_a_digest_keyed_identity_takes(tmp_path):
     # 走査の検出力: 過去に実際にあった形（束ね・属性の digest の key・sorted の比較・JSON の文字列）を見つける
     package = tmp_path / "pkg"
@@ -84,6 +104,10 @@ def test_the_scan_finds_the_forms_a_digest_keyed_identity_takes(tmp_path):
         "    return sorted(_digest(item) for item in left) == sorted(_digest(item) for item in right)\n"
         "def by_text(values):\n"
         "    return {json.dumps(value): value for value in values}\n"
+        "def by_map(left, right):\n"
+        "    return set(map(_digest, left)) == set(map(_digest, right))\n"
+        "def keys(values):\n"
+        "    return dict.fromkeys(_digest(value) for value in values)\n"
         "def nested(values):\n"
         "    def inner(value, seen):\n"
         "        key = repr(value)\n"
@@ -95,5 +119,7 @@ def test_the_scan_finds_the_forms_a_digest_keyed_identity_takes(tmp_path):
     assert found[("m.py", "by_formula", "dict_comp_key")] == 1
     assert found[("m.py", "census", "collection_eq")] == 1
     assert found[("m.py", "by_text", "dict_comp_key")] == 1
+    assert found[("m.py", "by_map", "set_of")] == 2
+    assert found[("m.py", "keys", "fromkeys")] == 1
     # 入れ子の関数は自分の scope で 1 回だけ数える
     assert found[("m.py", "inner", "in")] == 1 and ("m.py", "nested", "in") not in found

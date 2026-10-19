@@ -376,7 +376,6 @@ def test_the_authority_identity_keeps_apart_what_the_digest_preimage_merges():
         ({1: "v"}, {"1": "v"}),
         (_Kind.ONE, "one"),
         (_A(1), _B(1)),
-        ([1, 2], (1, 2)),
         (frozenset({1}), (1,)),
         (True, 1),
     ]
@@ -386,6 +385,18 @@ def test_the_authority_identity_keeps_apart_what_the_digest_preimage_merges():
         assert authority_identity_key(left) != authority_identity_key(right), (left, right)
         assert authority_identity_key(left) == authority_identity_key(left)
     assert canonical_value({"a": 1}) == canonical_value((("a", 1),))
+    # authority の不変の形（`freeze_authority_value`）で同じ値は同じ identity（list と tuple）
+    assert authority_identity_key([1, (2, [3])]) == authority_identity_key((1, (2, (3,))))
+
+
+def test_readonly_value_symbols_are_never_shared_for_an_unidentified_key():
+    from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import _readonly_value_symbol_key
+
+    body = ("side_local_readonly_value_v2", "left", ("parameter", 0), 4, 0, 0, "d")
+    assert _readonly_value_symbol_key(body, 0) == _readonly_value_symbol_key(body, 1)
+    token = structural.unidentified_identity("probe")
+    unidentified = body[:-1] + (token,)
+    assert _readonly_value_symbol_key(unidentified, 0) != _readonly_value_symbol_key(unidentified, 1)
 
 
 def test_signals_that_differ_only_in_type_are_both_emitted(monkeypatch):

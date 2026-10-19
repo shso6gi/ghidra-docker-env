@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Optional
 
 from scripts.function_tracer_pcode.authority.domains.sat_safety_ledger import SAT_SAFETY_LEDGER_KEYS
+from scripts.function_tracer_pcode.core.structural import key_contains_unidentified
 from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrence,
     CauseOccurrenceAuthority,
@@ -1356,6 +1357,19 @@ class ResolvedReadonlyObjectSetSeed:
 _READONLY_CORRESPONDENCE_FACT_TOKEN = object()
 
 
+def _readonly_value_symbol_key(key_body: Any, ordinal: int) -> Any:
+    """readonly の値の記号を共有する key（#218 PR-D）。
+
+    同じ値（`authority_identity_key` が等しい key）だけが同じ記号になる。識別不能 token を含む key は
+    値として同じと言えない（同じ token の写しでも: `core.structural.exact_value_key` と同じ規則）ので、
+    出現ごとに別の key（新しい記号）にする。
+    """
+
+    if key_contains_unidentified(key_body):
+        return ("unshared_readonly_value", ordinal)
+    return authority_identity_key(key_body)
+
+
 @dataclass(frozen=True, init=False)
 class ReadonlyCorrespondenceFactSet:
     """Independent structural premises plus the factory-owned value goal."""
@@ -1606,7 +1620,7 @@ class ReadonlyCorrespondenceFactSet:
             values = []
             for member, descriptor in zip(members, descriptors):
                 key_body, is_shared = value_key(member, descriptor, side)
-                value_key_identity = authority_identity_key(key_body)
+                value_key_identity = _readonly_value_symbol_key(key_body, len(symbols_by_value_key))
                 symbol = symbols_by_value_key.setdefault(
                     value_key_identity,
                     f"readonly_value_{len(symbols_by_value_key)}",

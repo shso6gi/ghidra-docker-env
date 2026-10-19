@@ -1,803 +1,897 @@
-[
- {
-  "path": "analysis/returns/return_extraction.py",
-  "function": "_produce_standard_termination_path_effect_evidence",
-  "kind": "set_comp",
-  "count": 1,
-  "role": "identity_follow_up",
-  "owner": "follow-up: repr equality of termination descriptors (new Issue candidate, reported on PR #259)",
-  "why": "'all targets share one termination contract' decided by repr equality, not exact_value_key; L766"
- },
- {
-  "path": "authority/contracts.py",
-  "function": "__init__",
-  "kind": "set_comp",
-  "count": 1,
-  "role": "seal_verification",
-  "why": "factory invariant 'children sorted+deduped by digest' re-checked in SatisfactionExpression.__init__ L513"
- },
- {
-  "path": "authority/contracts.py",
-  "function": "_operator_expression",
-  "kind": "dict_comp_key",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "children deduped by child.digest L552"
- },
- {
-  "path": "authority/decision/candidate.py",
-  "function": "build_candidate_projection",
-  "kind": "in",
-  "count": 1,
-  "role": "seal_verification",
-  "why": "terminal timeout receipt must bind an (event_digest, requirement) of the snapshot L153"
- },
- {
-  "path": "authority/domains/abi_width_readonly.py",
-  "function": "_execute_pending_solver_queries",
-  "kind": "add",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "once-per-query scheduling set keyed by query authority digest L3953/L3992"
- },
- {
-  "path": "authority/domains/abi_width_readonly.py",
-  "function": "_execute_pending_solver_queries",
-  "kind": "in",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "once-per-query scheduling set keyed by query authority digest L3953/L3992"
- },
- {
-  "path": "authority/domains/abi_width_readonly.py",
-  "function": "_solver_batch_intents",
-  "kind": "in",
-  "count": 1,
-  "role": "identity_follow_up",
-  "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)",
-  "why": "'already processed this receipt' set keyed by its own receipt_digest, no object re-check L3122"
- },
- {
-  "path": "authority/domains/abi_width_readonly.py",
-  "function": "finalize_derived_promotions",
-  "kind": "subscript",
-  "count": 1,
-  "role": "diagnostic",
-  "why": "store-only map keyed by seed_digest L3890"
- },
- {
-  "path": "authority/domains/abi_width_readonly.py",
-  "function": "finalize_open_execution_history",
-  "kind": "add",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "emit-once set by receipt_digest L4067/L4081"
- },
- {
-  "path": "authority/domains/abi_width_readonly.py",
-  "function": "finalize_open_execution_history",
-  "kind": "in",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "emit-once set by receipt_digest L4067/L4081"
- },
- {
-  "path": "authority/domains/abi_width_readonly.py",
-  "function": "from_readonly_correspondence_theorem",
-  "kind": "set_comp",
-  "count": 1,
-  "role": "seal_verification",
-  "why": "seed.dependency_completion_receipt_digests must be in the live stream L2683"
- },
- {
-  "path": "authority/domains/abi_width_readonly.py",
-  "function": "register_readonly_promotion",
-  "kind": "setdefault",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "pending promotions keyed by seed_digest L3740"
- },
- {
-  "path": "authority/domains/abi_width_readonly.py",
-  "function": "register_return_observation_proof_plan",
-  "kind": "setdefault",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "keyed by seed_digest, then dataclass equality check L3784"
- },
- {
-  "path": "authority/domains/abi_width_readonly.py",
-  "function": "register_solver_candidate",
-  "kind": "setdefault",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "pending solver candidates keyed by seed_digest, no post-check L3763"
- },
- {
-  "path": "authority/domains/abi_width_readonly.py",
-  "function": "register_void_effect_only_return_abi_seed",
-  "kind": "setdefault",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "keyed by seed_digest then equality check L3697"
- },
- {
-  "path": "authority/domains/call_effect.py",
-  "function": "__call__",
-  "kind": "in",
-  "count": 3,
-  "role": "identity_follow_up",
-  "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)",
-  "why": "emit-once dedupe of CAUSE_OBSERVED by _signal_key/_prerequisite_signal_key/_summary_effect_signal_key (authority_digest) L1449/L1461/L1474"
- },
- {
-  "path": "authority/domains/call_effect.py",
-  "function": "__call__",
-  "kind": "subscript",
-  "count": 6,
-  "role": "identity_follow_up",
-  "why": "state['authorities'/'signals'][key] store keyed by the same digests L1452-1478",
-  "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)"
- },
- {
-  "path": "authority/domains/call_effect.py",
-  "function": "_proof_batch_intents",
-  "kind": "add",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "emit-once receipt set L1546/L1561"
- },
- {
-  "path": "authority/domains/call_effect.py",
-  "function": "_proof_batch_intents",
-  "kind": "in",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "emit-once receipt set L1546/L1561"
- },
- {
-  "path": "authority/domains/call_effect.py",
-  "function": "_proof_batch_intents",
-  "kind": "subscript",
-  "count": 1,
-  "role": "identity_follow_up",
-  "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)",
-  "why": "authority lookup by _signal_key L1511"
- },
- {
-  "path": "authority/domains/call_effect.py",
-  "function": "build_execution_context",
-  "kind": "subscript",
-  "count": 1,
-  "role": "identity_follow_up",
-  "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)",
-  "why": "authority lookup by _signal_key L1610"
- },
- {
-  "path": "authority/domains/call_effect.py",
-  "function": "finalize_open_execution_history",
-  "kind": "add",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "emit-once receipt set L1788/L1803"
- },
- {
-  "path": "authority/domains/call_effect.py",
-  "function": "finalize_open_execution_history",
-  "kind": "in",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "emit-once receipt set L1788/L1803"
- },
- {
-  "path": "authority/domains/call_effect.py",
-  "function": "record_refusal",
-  "kind": "in",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "same L1697 line as build_execution_context"
- },
- {
-  "path": "authority/domains/call_effect.py",
-  "function": "record_refusal",
-  "kind": "set_comp",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "same L1697 line as build_execution_context"
- },
- {
-  "path": "authority/domains/comparison_closure.py",
-  "function": "validates",
-  "kind": "collection_eq",
-  "count": 2,
-  "role": "seal_verification",
-  "why": "stored region/query receipt digests vs recomputed from receipts L144/L154"
- },
- {
-  "path": "authority/domains/loop_recurrence.py",
-  "function": "__init__",
-  "kind": "in",
-  "count": 1,
-  "role": "seal_verification",
-  "why": "term_completion_artifact_digest must be among dependency_proof_ids L1589"
- },
- {
-  "path": "authority/domains/loop_recurrence.py",
-  "function": "_solver_batch_intents",
-  "kind": "in",
-  "count": 1,
-  "role": "identity_follow_up",
-  "why": "receipt_digest seen-set L2317",
-  "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)"
- },
- {
-  "path": "authority/domains/loop_recurrence.py",
-  "function": "finalize_open_execution_history",
-  "kind": "add",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "emit-once receipt set L2722/L2736"
- },
- {
-  "path": "authority/domains/loop_recurrence.py",
-  "function": "finalize_open_execution_history",
-  "kind": "in",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "emit-once receipt set L2722/L2736"
- },
- {
-  "path": "authority/domains/return_outcome.py",
-  "function": "__call__",
-  "kind": "add",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "emit-once receipt set L963/L965"
- },
- {
-  "path": "authority/domains/return_outcome.py",
-  "function": "__call__",
-  "kind": "in",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "emit-once receipt set L963/L965"
- },
- {
-  "path": "authority/lifecycle/execution_authority.py",
-  "function": "_ledger_for",
-  "kind": "get",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "solver ledger map keyed by registry digest L1064-1073"
- },
- {
-  "path": "authority/lifecycle/execution_authority.py",
-  "function": "_ledger_for",
-  "kind": "in",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "solver ledger map keyed by registry digest L1064-1073"
- },
- {
-  "path": "authority/lifecycle/execution_authority.py",
-  "function": "_ledger_for",
-  "kind": "subscript",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "solver ledger map keyed by registry digest L1064-1073"
- },
- {
-  "path": "authority/lifecycle/execution_authority.py",
-  "function": "has_open_result_ledger",
-  "kind": "in",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "same key L1052"
- },
- {
-  "path": "authority/lifecycle/execution_authority.py",
-  "function": "seal_result_census",
-  "kind": "add",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "same key L1088-1093"
- },
- {
-  "path": "authority/lifecycle/execution_authority.py",
-  "function": "seal_result_census",
-  "kind": "pop",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "same key L1088-1093"
- },
- {
-  "path": "authority/lifecycle/execution_authority.py",
-  "function": "seal_result_census",
-  "kind": "subscript",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "same key L1088-1093"
- },
- {
-  "path": "authority/lifecycle/pilot.py",
-  "function": "validate",
-  "kind": "set_comp",
-  "count": 1,
-  "role": "seal_verification",
-  "why": "terminal event digests must be a subset of stream timeout-event digests L252"
- },
- {
-  "path": "authority/process/census.py",
-  "function": "_record",
-  "kind": "in",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "membership verified (is + digest recompute) then keyed by own digest L186"
- },
- {
-  "path": "authority/process/census.py",
-  "function": "_record",
-  "kind": "subscript",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "entry store by membership_digest L263"
- },
- {
-  "path": "authority/process/census.py",
-  "function": "_validate_membership",
-  "kind": "get",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "factory looked up by digest after `is` + recompute check L157"
- },
- {
-  "path": "authority/process/census.py",
-  "function": "_validate_membership_operational_factory",
-  "kind": "get",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "L168"
- },
- {
-  "path": "authority/process/census.py",
-  "function": "seal",
-  "kind": "set_comp",
-  "count": 2,
-  "role": "seal_verification",
-  "why": "issuer invocation census == registered memberships L301/L305"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "_issue_invocation_locked",
-  "kind": "in",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "duplicate issuance raises L1714"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "_issue_invocation_locked",
-  "kind": "subscript",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "store by own receipt_digest L1716"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "capture_attempt_observation",
-  "kind": "get",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "`is` check L1793"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "capture_attempt_observation",
-  "kind": "in",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "duplicate capture raises L1795"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "capture_attempt_observation",
-  "kind": "subscript",
-  "count": 2,
-  "role": "identity_follow_up",
-  "why": "_results[handle] stores raw DecompileResults keyed by a handle digest with no object check (the _observations half is a seal registry with `is` checks)",
-  "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "issue_attempt",
-  "kind": "get",
-  "count": 2,
-  "role": "seal_registry",
-  "why": "`is` checks L1816/L1819"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "issue_attempt",
-  "kind": "subscript",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "store by own digest (overwrite would fail later `is` checks) L1829"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "issue_decompilation_artifact",
-  "kind": "get",
-  "count": 3,
-  "role": "seal_registry",
-  "why": "`is` checks L1840-1842"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "issue_decompilation_artifact",
-  "kind": "subscript",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "store by own artifact_digest L1853"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "issue_error",
-  "kind": "get",
-  "count": 2,
-  "role": "seal_registry",
-  "why": "`is` checks L1921/L1927"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "issue_ir_artifact",
-  "kind": "get",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "`is` check L1895"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "observe_high_function",
-  "kind": "add",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "_high_consumed one-shot set by handle L1869/L1874"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "observe_high_function",
-  "kind": "get",
-  "count": 2,
-  "role": "seal_registry",
-  "why": "artifact `is` check + result handle lookup"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "observe_high_function",
-  "kind": "in",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "_high_consumed one-shot set by handle L1869/L1874"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "owns_completion_artifact",
-  "kind": "get",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "`is` check L1959"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "validate_artifact_membership",
-  "kind": "get",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "`is` check L1777"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "validate_attempt_membership",
-  "kind": "get",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "`is` check L1768"
- },
- {
-  "path": "authority/process/operational_extraction.py",
-  "function": "validate_invocation_membership",
-  "kind": "get",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "`is` + recomputed digest L1724"
- },
- {
-  "path": "authority/process/supervisor.py",
-  "function": "validate_timeout_bundle_membership",
-  "kind": "dict_comp_key",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "launch receipt addressed by its digest, uniqueness + validate() L1504-1512"
- },
- {
-  "path": "authority/process/supervisor.py",
-  "function": "validate_timeout_bundle_membership",
-  "kind": "set_literal",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "launch receipt addressed by its digest, uniqueness + validate() L1504-1512"
- },
- {
-  "path": "authority/process/supervisor.py",
-  "function": "validate_timeout_bundle_membership",
-  "kind": "subscript",
-  "count": 1,
-  "role": "seal_registry",
-  "why": "launch receipt addressed by its digest, uniqueness + validate() L1504-1512"
- },
- {
-  "path": "authority/process/terminal_recovery.py",
-  "function": "_allowed_bootstrap_priors",
-  "kind": "add",
-  "count": 1,
-  "role": "seal_verification",
-  "why": "hash-chain predecessor set L332"
- },
- {
-  "path": "authority/process/terminal_recovery.py",
-  "function": "_attribution",
-  "kind": "set_literal",
-  "count": 1,
-  "role": "seal_verification",
-  "why": "anchor checkpoint membership L343"
- },
- {
-  "path": "authority/sites/activation.py",
-  "function": "issue",
-  "kind": "in",
-  "count": 2,
-  "role": "seal_verification",
-  "why": "terminal timeout selection must be in frozen candidate view L1148/L1185"
- },
- {
-  "path": "authority/sites/activation.py",
-  "function": "issue",
-  "kind": "set_comp",
-  "count": 3,
-  "role": "seal_verification",
-  "why": "CAUSE_OBSERVED census == emitted rows; terminal-timeout events share one query digest"
- },
- {
-  "path": "authority/sites/runtime.py",
-  "function": "buffer_signal_intents",
-  "kind": "get",
-  "count": 2,
-  "role": "identity_non_decisive",
-  "why": "activation bucket keyed by lossy signal_digest L221/L226/L543/L548"
- },
- {
-  "path": "authority/sites/runtime.py",
-  "function": "buffer_signal_intents",
-  "kind": "pop",
-  "count": 2,
-  "role": "identity_non_decisive",
-  "why": "activation bucket keyed by lossy signal_digest L221/L226/L543/L548"
- },
- {
-  "path": "authority/sites/runtime.py",
-  "function": "finalize",
-  "kind": "setdefault",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "by_digest bucket of expected activations L647"
- },
- {
-  "path": "authority/sites/runtime.py",
-  "function": "record_pre_emission_activation",
-  "kind": "get",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "activation plan lookup by signal_digest L201/L214/L517"
- },
- {
-  "path": "authority/sites/runtime.py",
-  "function": "record_pre_emission_activation",
-  "kind": "setdefault",
-  "count": 2,
-  "role": "identity_non_decisive",
-  "why": "activation plan lookup by signal_digest L201/L214/L517"
- },
- {
-  "path": "checker/cause_aggregate.py",
-  "function": "intern",
-  "kind": "get",
-  "count": 1,
-  "role": "diagnostic",
-  "why": "IdentityPool interning by repr L1559/L1562"
- },
- {
-  "path": "checker/cause_aggregate.py",
-  "function": "intern",
-  "kind": "subscript",
-  "count": 1,
-  "role": "diagnostic",
-  "why": "IdentityPool interning by repr L1559/L1562"
- },
- {
-  "path": "checker/recurrence_stage.py",
-  "function": "_attach_recurrence_proposal_blockers",
-  "kind": "add",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "known_targets exact tuple set whose element includes proposal.digest L174/L186"
- },
- {
-  "path": "checker/recurrence_stage.py",
-  "function": "_attach_recurrence_proposal_blockers",
-  "kind": "in",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "known_targets exact tuple set whose element includes proposal.digest L174/L186"
- },
- {
-  "path": "core/recurrence_contracts.py",
-  "function": "__post_init__",
-  "kind": "add",
-  "count": 1,
-  "role": "seal_verification",
-  "why": "dependency-DAG check over subproof digests L969"
- },
- {
-  "path": "proof/call_effect/preflight.py",
-  "function": "validate",
-  "kind": "collection_eq",
-  "count": 1,
-  "role": "identity_follow_up",
-  "owner": "#219: snapshot semantic fingerprint codec (lossy) decides the aligned surface",
-  "why": "surface-delta audit compares recomputed aligned surface to candidate by fingerprint L244"
- },
- {
-  "path": "proof/monolithic_authority.py",
-  "function": "_verify_counterexample_safety_receipt",
-  "kind": "collection_eq",
-  "count": 2,
-  "role": "seal_verification",
-  "why": "L2133/L2135 sub-receipt digests vs stored"
- },
- {
-  "path": "proof/monolithic_authority.py",
-  "function": "_verify_expected_query_set",
-  "kind": "collection_eq",
-  "count": 1,
-  "role": "seal_verification",
-  "why": "L630 + HMAC seal"
- },
- {
-  "path": "proof/monolithic_authority.py",
-  "function": "validates",
-  "kind": "collection_eq",
-  "count": 3,
-  "role": "seal_verification",
-  "why": "L498/L2071/L2073 + HMAC seal"
- },
- {
-  "path": "proof/monolithic_authority.py",
-  "function": "verify_monolithic_proof_bundle",
-  "kind": "collection_eq",
-  "count": 2,
-  "role": "seal_verification",
-  "why": "L1394/L1396"
- },
- {
-  "path": "proof/recurrence_promotion.py",
-  "function": "_proposal_candidates",
-  "kind": "set_comp",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "candidate membership by (identity_key, payload_digest) L514/L527"
- },
- {
-  "path": "proof/recurrence_promotion.py",
-  "function": "belongs",
-  "kind": "in",
-  "count": 1,
-  "role": "identity_non_decisive",
-  "why": "nested fn of _proposal_candidates L527"
- },
- {
-  "path": "proof/recurrence_promotion.py",
-  "function": "promote_recurrence_pair",
-  "kind": "in",
-  "count": 1,
-  "role": "seal_verification",
-  "why": "validated proposal must be targeted by authority blocker keys L1071"
- },
- {
-  "path": "proof/strategies/monolithic.py",
-  "function": "check",
-  "kind": "set_comp",
-  "count": 1,
-  "role": "diagnostic",
-  "why": "gate_refs = sorted set of sha256(str(...)) L1273"
- },
- {
-  "path": "proof/strategies/monolithic_regions.py",
-  "function": "_execute_region_plan",
-  "kind": "add",
-  "count": 2,
-  "role": "diagnostic",
-  "why": "L229/L302, read at L489"
- },
- {
-  "path": "proof/strategies/monolithic_support.py",
-  "function": "validate",
-  "kind": "collection_eq",
-  "count": 1,
-  "role": "seal_verification",
-  "why": "binding receipt digests vs ordered_receipt_digests L78"
- },
- {
-  "path": "proof/strategies/pairwise_services/opaque_unknowns.py",
-  "function": "_impl__opaque_unknown_return_object_evidence_from_target",
-  "kind": "add",
-  "count": 1,
-  "role": "diagnostic",
-  "why": "repr dedupe L34/L35"
- },
- {
-  "path": "proof/strategies/pairwise_services/opaque_unknowns.py",
-  "function": "_impl__opaque_unknown_return_object_evidence_from_target",
-  "kind": "in",
-  "count": 1,
-  "role": "diagnostic",
-  "why": "repr dedupe L34/L35"
- },
- {
-  "path": "proof/strategies/pairwise_services/opaque_unknowns.py",
-  "function": "visit",
-  "kind": "add",
-  "count": 1,
-  "role": "diagnostic",
-  "why": "same lines L76/L77"
- },
- {
-  "path": "proof/strategies/pairwise_services/opaque_unknowns.py",
-  "function": "visit",
-  "kind": "in",
-  "count": 1,
-  "role": "diagnostic",
-  "why": "same lines L76/L77"
- },
- {
-  "path": "proof/strategies/pairwise_services/unresolved_lowering.py",
-  "function": "_impl__deferred_call_semantic_refs",
-  "kind": "setdefault",
-  "count": 1,
-  "role": "diagnostic",
-  "why": "group by json.dumps payload L698/L708"
- },
- {
-  "path": "proof/strategies/pairwise_services/unresolved_lowering.py",
-  "function": "_impl__deferred_call_semantic_refs",
-  "kind": "subscript",
-  "count": 1,
-  "role": "diagnostic",
-  "why": "group by json.dumps payload L698/L708"
- },
- {
-  "path": "proof/strategies/pairwise_services/unresolved_lowering.py",
-  "function": "visit",
-  "kind": "add",
-  "count": 1,
-  "role": "diagnostic",
-  "why": "same lines"
- },
- {
-  "path": "proof/strategies/pairwise_services/unresolved_lowering.py",
-  "function": "visit",
-  "kind": "in",
-  "count": 1,
-  "role": "diagnostic",
-  "why": "same lines"
- }
-]
+{
+ "scanned": [
+  {
+   "path": "analysis/returns/return_extraction.py",
+   "function": "_produce_standard_termination_path_effect_evidence",
+   "kind": "set_comp",
+   "count": 1,
+   "role": "identity_follow_up",
+   "owner": "follow-up: repr equality of termination descriptors (new Issue candidate, reported on PR #259)",
+   "why": "'all targets share one termination contract' decided by repr equality, not exact_value_key;"
+  },
+  {
+   "path": "authority/contracts.py",
+   "function": "__init__",
+   "kind": "set_comp",
+   "count": 1,
+   "role": "seal_verification",
+   "why": "factory invariant 'children sorted+deduped by digest' re-checked in SatisfactionExpression.__init__"
+  },
+  {
+   "path": "authority/contracts.py",
+   "function": "_operator_expression",
+   "kind": "dict_comp_key",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "all_of / any_of children deduped by child digest; a collision would drop a conjunct, which is safe only because the inputs are static contract templates of the module (no runtime value reaches it)"
+  },
+  {
+   "path": "authority/decision/candidate.py",
+   "function": "build_candidate_projection",
+   "kind": "in",
+   "count": 1,
+   "role": "seal_verification",
+   "why": "terminal timeout receipt must bind an (event_digest, requirement) of the snapshot"
+  },
+  {
+   "path": "authority/decision/candidate.py",
+   "function": "validate",
+   "kind": "set_of",
+   "count": 3,
+   "role": "seal_verification",
+   "why": "timeout / terminal event digests of the hash-chained stream compared as sets with the snapshot"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "__init__",
+   "kind": "set_of",
+   "count": 2,
+   "role": "identity_non_decisive",
+   "why": "duplicate member keys detected by digest; a collision makes the check raise (fail-closed)"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "_execute_pending_solver_queries",
+   "kind": "add",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "once-per-query scheduling set keyed by query authority digest"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "_execute_pending_solver_queries",
+   "kind": "in",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "once-per-query scheduling set keyed by query authority digest"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "_solver_batch_intents",
+   "kind": "in",
+   "count": 1,
+   "role": "identity_follow_up",
+   "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)",
+   "why": "'already processed this receipt' set keyed by its own receipt_digest, no object re-check"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "finalize_derived_promotions",
+   "kind": "subscript",
+   "count": 1,
+   "role": "diagnostic",
+   "why": "store-only map keyed by seed_digest"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "finalize_open_execution_history",
+   "kind": "add",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "emit-once set by receipt_digest"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "finalize_open_execution_history",
+   "kind": "in",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "emit-once set by receipt_digest"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "from_readonly_correspondence_theorem",
+   "kind": "set_comp",
+   "count": 1,
+   "role": "seal_verification",
+   "why": "seed.dependency_completion_receipt_digests must be in the live stream"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "from_readonly_correspondence_theorem",
+   "kind": "set_of",
+   "count": 1,
+   "role": "seal_verification",
+   "why": "dependency completion receipt digests must be a subset of the seed's sealed digests"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "register_readonly_promotion",
+   "kind": "setdefault",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "pending promotions keyed by seed_digest"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "register_return_observation_proof_plan",
+   "kind": "setdefault",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "keyed by seed_digest, then dataclass equality check"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "register_solver_candidate",
+   "kind": "setdefault",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "pending solver candidates keyed by seed_digest, no post-check"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "register_void_effect_only_return_abi_seed",
+   "kind": "setdefault",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "keyed by seed_digest then equality check"
+  },
+  {
+   "path": "authority/domains/call_effect.py",
+   "function": "__call__",
+   "kind": "in",
+   "count": 3,
+   "role": "identity_follow_up",
+   "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)",
+   "why": "emit-once dedupe of CAUSE_OBSERVED by _signal_key/_prerequisite_signal_key/_summary_effect_signal_key (authority_digest)"
+  },
+  {
+   "path": "authority/domains/call_effect.py",
+   "function": "__call__",
+   "kind": "subscript",
+   "count": 6,
+   "role": "identity_follow_up",
+   "why": "state['authorities'/'signals'][key] store keyed by the same digests",
+   "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)"
+  },
+  {
+   "path": "authority/domains/call_effect.py",
+   "function": "_proof_batch_intents",
+   "kind": "add",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "emit-once receipt set"
+  },
+  {
+   "path": "authority/domains/call_effect.py",
+   "function": "_proof_batch_intents",
+   "kind": "in",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "emit-once receipt set"
+  },
+  {
+   "path": "authority/domains/call_effect.py",
+   "function": "_proof_batch_intents",
+   "kind": "subscript",
+   "count": 1,
+   "role": "identity_follow_up",
+   "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)",
+   "why": "authority lookup by _signal_key"
+  },
+  {
+   "path": "authority/domains/call_effect.py",
+   "function": "build_execution_context",
+   "kind": "subscript",
+   "count": 1,
+   "role": "identity_follow_up",
+   "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)",
+   "why": "authority lookup by _signal_key"
+  },
+  {
+   "path": "authority/domains/call_effect.py",
+   "function": "finalize_open_execution_history",
+   "kind": "add",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "emit-once receipt set"
+  },
+  {
+   "path": "authority/domains/call_effect.py",
+   "function": "finalize_open_execution_history",
+   "kind": "in",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "emit-once receipt set"
+  },
+  {
+   "path": "authority/domains/call_effect.py",
+   "function": "record_refusal",
+   "kind": "in",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "same line as build_execution_context"
+  },
+  {
+   "path": "authority/domains/call_effect.py",
+   "function": "record_refusal",
+   "kind": "set_comp",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "same line as build_execution_context"
+  },
+  {
+   "path": "authority/domains/comparison_closure.py",
+   "function": "validates",
+   "kind": "collection_eq",
+   "count": 2,
+   "role": "seal_verification",
+   "why": "stored region/query receipt digests vs recomputed from receipts"
+  },
+  {
+   "path": "authority/domains/loop_recurrence.py",
+   "function": "__init__",
+   "kind": "in",
+   "count": 1,
+   "role": "seal_verification",
+   "why": "term_completion_artifact_digest must be among dependency_proof_ids"
+  },
+  {
+   "path": "authority/domains/loop_recurrence.py",
+   "function": "_solver_batch_intents",
+   "kind": "in",
+   "count": 1,
+   "role": "identity_follow_up",
+   "why": "receipt_digest seen-set",
+   "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)"
+  },
+  {
+   "path": "authority/domains/loop_recurrence.py",
+   "function": "finalize_open_execution_history",
+   "kind": "add",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "emit-once receipt set"
+  },
+  {
+   "path": "authority/domains/loop_recurrence.py",
+   "function": "finalize_open_execution_history",
+   "kind": "in",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "emit-once receipt set"
+  },
+  {
+   "path": "authority/domains/return_outcome.py",
+   "function": "__call__",
+   "kind": "add",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "emit-once receipt set"
+  },
+  {
+   "path": "authority/domains/return_outcome.py",
+   "function": "__call__",
+   "kind": "in",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "emit-once receipt set"
+  },
+  {
+   "path": "authority/lifecycle/execution_authority.py",
+   "function": "_ledger_for",
+   "kind": "get",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "solver ledger map keyed by registry digest"
+  },
+  {
+   "path": "authority/lifecycle/execution_authority.py",
+   "function": "_ledger_for",
+   "kind": "in",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "solver ledger map keyed by registry digest"
+  },
+  {
+   "path": "authority/lifecycle/execution_authority.py",
+   "function": "_ledger_for",
+   "kind": "subscript",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "solver ledger map keyed by registry digest"
+  },
+  {
+   "path": "authority/lifecycle/execution_authority.py",
+   "function": "has_open_result_ledger",
+   "kind": "in",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "same key"
+  },
+  {
+   "path": "authority/lifecycle/execution_authority.py",
+   "function": "seal_result_census",
+   "kind": "add",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "same key"
+  },
+  {
+   "path": "authority/lifecycle/execution_authority.py",
+   "function": "seal_result_census",
+   "kind": "pop",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "same key"
+  },
+  {
+   "path": "authority/lifecycle/execution_authority.py",
+   "function": "seal_result_census",
+   "kind": "subscript",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "same key"
+  },
+  {
+   "path": "authority/lifecycle/pilot.py",
+   "function": "validate",
+   "kind": "set_comp",
+   "count": 1,
+   "role": "seal_verification",
+   "why": "terminal event digests must be a subset of stream timeout-event digests"
+  },
+  {
+   "path": "authority/lifecycle/pilot.py",
+   "function": "validate",
+   "kind": "set_of",
+   "count": 2,
+   "role": "seal_verification",
+   "why": "execution / terminal event digests of the sealed snapshot compared as sets"
+  },
+  {
+   "path": "authority/process/census.py",
+   "function": "_record",
+   "kind": "in",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "membership verified (is + digest recompute) then keyed by own digest"
+  },
+  {
+   "path": "authority/process/census.py",
+   "function": "_record",
+   "kind": "subscript",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "entry store by membership_digest"
+  },
+  {
+   "path": "authority/process/census.py",
+   "function": "_validate_membership",
+   "kind": "get",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "factory looked up by digest after `is` + recompute check"
+  },
+  {
+   "path": "authority/process/census.py",
+   "function": "_validate_membership_operational_factory",
+   "kind": "get",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "fail-closed (`is not` -> raise)"
+  },
+  {
+   "path": "authority/process/census.py",
+   "function": "seal",
+   "kind": "set_comp",
+   "count": 2,
+   "role": "seal_verification",
+   "why": "issuer invocation census == registered memberships"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "_issue_invocation_locked",
+   "kind": "in",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "duplicate issuance raises"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "_issue_invocation_locked",
+   "kind": "subscript",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "store by own receipt_digest"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "capture_attempt_observation",
+   "kind": "get",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "`is` check"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "capture_attempt_observation",
+   "kind": "in",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "duplicate capture raises"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "capture_attempt_observation",
+   "kind": "subscript",
+   "count": 2,
+   "role": "identity_follow_up",
+   "why": "_results[handle] stores raw DecompileResults keyed by a handle digest with no object check (the _observations half is a seal registry with `is` checks)",
+   "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "issue_attempt",
+   "kind": "get",
+   "count": 2,
+   "role": "seal_registry",
+   "why": "`is` checks"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "issue_attempt",
+   "kind": "subscript",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "store by own digest (overwrite would fail later `is` checks)"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "issue_decompilation_artifact",
+   "kind": "get",
+   "count": 3,
+   "role": "seal_registry",
+   "why": "`is` checks"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "issue_decompilation_artifact",
+   "kind": "subscript",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "store by own artifact_digest"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "issue_error",
+   "kind": "get",
+   "count": 2,
+   "role": "seal_registry",
+   "why": "`is` checks"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "issue_ir_artifact",
+   "kind": "get",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "`is` check"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "observe_high_function",
+   "kind": "add",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "_high_consumed one-shot set by handle"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "observe_high_function",
+   "kind": "get",
+   "count": 2,
+   "role": "seal_registry",
+   "why": "artifact `is` check + result handle lookup"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "observe_high_function",
+   "kind": "in",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "_high_consumed one-shot set by handle"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "owns_completion_artifact",
+   "kind": "get",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "`is` check"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "validate_artifact_membership",
+   "kind": "get",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "`is` check"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "validate_attempt_membership",
+   "kind": "get",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "`is` check"
+  },
+  {
+   "path": "authority/process/operational_extraction.py",
+   "function": "validate_invocation_membership",
+   "kind": "get",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "`is` + recomputed digest"
+  },
+  {
+   "path": "authority/process/subordinate_decompilation.py",
+   "function": "__post_init__",
+   "kind": "set_of",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "duplicate proposal digests detected; a collision makes construction raise (fail-closed)"
+  },
+  {
+   "path": "authority/process/supervisor.py",
+   "function": "validate_timeout_bundle_membership",
+   "kind": "dict_comp_key",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "launch receipt addressed by its digest, uniqueness + validate()"
+  },
+  {
+   "path": "authority/process/supervisor.py",
+   "function": "validate_timeout_bundle_membership",
+   "kind": "set_literal",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "launch receipt addressed by its digest, uniqueness + validate()"
+  },
+  {
+   "path": "authority/process/supervisor.py",
+   "function": "validate_timeout_bundle_membership",
+   "kind": "subscript",
+   "count": 1,
+   "role": "seal_registry",
+   "why": "launch receipt addressed by its digest, uniqueness + validate()"
+  },
+  {
+   "path": "authority/process/terminal_recovery.py",
+   "function": "_allowed_bootstrap_priors",
+   "kind": "add",
+   "count": 1,
+   "role": "seal_verification",
+   "why": "hash-chain predecessor set"
+  },
+  {
+   "path": "authority/process/terminal_recovery.py",
+   "function": "_attribution",
+   "kind": "set_literal",
+   "count": 1,
+   "role": "seal_verification",
+   "why": "anchor checkpoint membership"
+  },
+  {
+   "path": "authority/sites/activation.py",
+   "function": "issue",
+   "kind": "in",
+   "count": 2,
+   "role": "seal_verification",
+   "why": "terminal timeout selection must be in frozen candidate view"
+  },
+  {
+   "path": "authority/sites/activation.py",
+   "function": "issue",
+   "kind": "set_comp",
+   "count": 3,
+   "role": "seal_verification",
+   "why": "CAUSE_OBSERVED census == emitted rows; terminal-timeout events share one query digest"
+  },
+  {
+   "path": "authority/sites/runtime.py",
+   "function": "buffer_signal_intents",
+   "kind": "get",
+   "count": 2,
+   "role": "identity_non_decisive",
+   "why": "activation bucket keyed by lossy signal_digest"
+  },
+  {
+   "path": "authority/sites/runtime.py",
+   "function": "buffer_signal_intents",
+   "kind": "pop",
+   "count": 2,
+   "role": "identity_non_decisive",
+   "why": "activation bucket keyed by lossy signal_digest"
+  },
+  {
+   "path": "authority/sites/runtime.py",
+   "function": "finalize",
+   "kind": "setdefault",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "by_digest bucket of expected activations"
+  },
+  {
+   "path": "authority/sites/runtime.py",
+   "function": "record_pre_emission_activation",
+   "kind": "get",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "activation plan lookup by signal_digest"
+  },
+  {
+   "path": "authority/sites/runtime.py",
+   "function": "record_pre_emission_activation",
+   "kind": "setdefault",
+   "count": 2,
+   "role": "identity_non_decisive",
+   "why": "activation plan lookup by signal_digest"
+  },
+  {
+   "path": "checker/cause_aggregate.py",
+   "function": "intern",
+   "kind": "get",
+   "count": 1,
+   "role": "diagnostic",
+   "why": "IdentityPool interning by repr"
+  },
+  {
+   "path": "checker/cause_aggregate.py",
+   "function": "intern",
+   "kind": "subscript",
+   "count": 1,
+   "role": "diagnostic",
+   "why": "IdentityPool interning by repr"
+  },
+  {
+   "path": "checker/recurrence_stage.py",
+   "function": "_attach_recurrence_proposal_blockers",
+   "kind": "add",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "known_targets exact tuple set whose element includes proposal.digest"
+  },
+  {
+   "path": "checker/recurrence_stage.py",
+   "function": "_attach_recurrence_proposal_blockers",
+   "kind": "in",
+   "count": 1,
+   "role": "identity_non_decisive",
+   "why": "known_targets exact tuple set whose element includes proposal.digest"
+  },
+  {
+   "path": "core/recurrence_contracts.py",
+   "function": "__post_init__",
+   "kind": "add",
+   "count": 1,
+   "role": "seal_verification",
+   "why": "dependency-DAG check over subproof digests"
+  },
+  {
+   "path": "proof/call_effect/preflight.py",
+   "function": "validate",
+   "kind": "collection_eq",
+   "count": 1,
+   "role": "identity_follow_up",
+   "owner": "#219: snapshot semantic fingerprint codec (lossy) decides the aligned surface",
+   "why": "surface-delta audit compares recomputed aligned surface to candidate by fingerprint"
+  },
+  {
+   "path": "proof/call_effect/preflight.py",
+   "function": "validate",
+   "kind": "set_of",
+   "count": 3,
+   "role": "seal_verification",
+   "why": "receipt digests must be sorted and unique as sealed"
+  },
+  {
+   "path": "proof/monolithic_authority.py",
+   "function": "_verify_counterexample_safety_receipt",
+   "kind": "collection_eq",
+   "count": 2,
+   "role": "seal_verification",
+   "why": "sub-receipt digests vs stored"
+  },
+  {
+   "path": "proof/monolithic_authority.py",
+   "function": "_verify_expected_query_set",
+   "kind": "collection_eq",
+   "count": 1,
+   "role": "seal_verification",
+   "why": "+ HMAC seal"
+  },
+  {
+   "path": "proof/monolithic_authority.py",
+   "function": "validates",
+   "kind": "collection_eq",
+   "count": 3,
+   "role": "seal_verification",
+   "why": "+ HMAC seal"
+  },
+  {
+   "path": "proof/monolithic_authority.py",
+   "function": "verify_monolithic_proof_bundle",
+   "kind": "collection_eq",
+   "count": 2,
+   "role": "seal_verification",
+   "why": "fail-closed"
+  },
+  {
+   "path": "proof/recurrence_promotion.py",
+   "function": "_proposal_candidates",
+   "kind": "set_comp",
+   "count": 1,
+   "role": "identity_follow_up",
+   "why": "candidate membership by (identity_key, payload digest): a collision could promote a different payload",
+   "owner": "follow-up: recurrence proposals are bound to receipts by content digest (new Issue candidate, reported on PR #259)"
+  },
+  {
+   "path": "proof/recurrence_promotion.py",
+   "function": "belongs",
+   "kind": "in",
+   "count": 1,
+   "role": "identity_follow_up",
+   "why": "candidate membership by (identity_key, payload digest): a collision could promote a different payload",
+   "owner": "follow-up: recurrence proposals are bound to receipts by content digest (new Issue candidate, reported on PR #259)"
+  },
+  {
+   "path": "proof/recurrence_promotion.py",
+   "function": "promote_recurrence_pair",
+   "kind": "in",
+   "count": 1,
+   "role": "seal_verification",
+   "why": "validated proposal must be targeted by authority blocker keys"
+  },
+  {
+   "path": "proof/strategies/monolithic.py",
+   "function": "check",
+   "kind": "set_comp",
+   "count": 1,
+   "role": "diagnostic",
+   "why": "gate_refs = sorted set of sha256(str(...))"
+  },
+  {
+   "path": "proof/strategies/monolithic_regions.py",
+   "function": "_execute_region_plan",
+   "kind": "add",
+   "count": 2,
+   "role": "diagnostic",
+   "why": ", read at"
+  },
+  {
+   "path": "proof/strategies/monolithic_support.py",
+   "function": "validate",
+   "kind": "collection_eq",
+   "count": 1,
+   "role": "seal_verification",
+   "why": "binding receipt digests vs ordered_receipt_digests"
+  },
+  {
+   "path": "proof/strategies/pairwise_services/opaque_unknowns.py",
+   "function": "_impl__opaque_unknown_return_object_evidence_from_target",
+   "kind": "add",
+   "count": 1,
+   "role": "diagnostic",
+   "why": "repr dedupe"
+  },
+  {
+   "path": "proof/strategies/pairwise_services/opaque_unknowns.py",
+   "function": "_impl__opaque_unknown_return_object_evidence_from_target",
+   "kind": "in",
+   "count": 1,
+   "role": "diagnostic",
+   "why": "repr dedupe"
+  },
+  {
+   "path": "proof/strategies/pairwise_services/opaque_unknowns.py",
+   "function": "visit",
+   "kind": "add",
+   "count": 1,
+   "role": "diagnostic",
+   "why": "same lines"
+  },
+  {
+   "path": "proof/strategies/pairwise_services/opaque_unknowns.py",
+   "function": "visit",
+   "kind": "in",
+   "count": 1,
+   "role": "diagnostic",
+   "why": "same lines"
+  },
+  {
+   "path": "proof/strategies/pairwise_services/unresolved_lowering.py",
+   "function": "_impl__deferred_call_semantic_refs",
+   "kind": "setdefault",
+   "count": 1,
+   "role": "diagnostic",
+   "why": "group by json.dumps payload"
+  },
+  {
+   "path": "proof/strategies/pairwise_services/unresolved_lowering.py",
+   "function": "_impl__deferred_call_semantic_refs",
+   "kind": "subscript",
+   "count": 1,
+   "role": "diagnostic",
+   "why": "group by json.dumps payload"
+  },
+  {
+   "path": "proof/strategies/pairwise_services/unresolved_lowering.py",
+   "function": "visit",
+   "kind": "add",
+   "count": 1,
+   "role": "diagnostic",
+   "why": "same lines"
+  },
+  {
+   "path": "proof/strategies/pairwise_services/unresolved_lowering.py",
+   "function": "visit",
+   "kind": "in",
+   "count": 1,
+   "role": "diagnostic",
+   "why": "same lines"
+  }
+ ],
+ "hand_recorded": [
+  {
+   "path": "analysis/returns/summary_returns.py",
+   "function": "attach_quarantined_recurrence_proposal",
+   "form": "item.digest != proposal.digest",
+   "role": "identity_follow_up",
+   "owner": "follow-up: recurrence proposals are bound to receipts by content digest (new Issue candidate, reported on PR #259)",
+   "why": "quarantined recurrence proposals are deduplicated by content digest"
+  },
+  {
+   "path": "proof/strategies/proof_gates/call_effect.py",
+   "function": "_impl__self_recursive_no_store_call_effect_proof_content",
+   "form": "proposal.digest == proposal_digest",
+   "role": "identity_follow_up",
+   "owner": "follow-up: recurrence proposals are bound to receipts by content digest (new Issue candidate, reported on PR #259)",
+   "why": "the proposal a recurrence receipt validated is selected by digest equality"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "_complete_registered_observation_contracts",
+   "form": "row.source_seed_digest == seed.seed_digest",
+   "role": "identity_follow_up",
+   "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)",
+   "why": "dependency rows are matched to their seed by digest equality"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "finalize_derived_promotions",
+   "form": "row.source_seed_digest == seed.seed_digest",
+   "role": "identity_follow_up",
+   "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)",
+   "why": "same as above"
+  },
+  {
+   "path": "authority/domains/abi_width_readonly.py",
+   "function": "_execute_pending_solver_queries",
+   "form": "row.source_seed_digest == seed.seed_digest",
+   "role": "identity_follow_up",
+   "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)",
+   "why": "same as above"
+  }
+ ]
+}

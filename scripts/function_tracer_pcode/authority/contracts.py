@@ -84,11 +84,13 @@ def authority_identity_key(value: Any) -> Tuple[Any, ...]:
     `authority_digest` の preimage（`canonical_value` の JSON）は封印と並びの key で、型を落とす
     （dict と組の tuple、Enum とその値、同じ field の別の dataclass、list と tuple、`{1: …}` と
     `{"1": …}` が同じ文字列になる）。2 つの値が同じかを決める consumer（1 回だけ出す signal・前提の
-    束ね・記号の共有）はこれを使う: 型を tag にした木を `core.structural.exact_occurrence_key` で符号化
-    する。並びは従来どおり `authority_digest` の順。canonical_value が受け付けない値は TypeError。
+    束ね・記号の共有）はこれを使う: authority の不変の形（`freeze_authority_value`: list と tuple、dict と
+    MappingProxyType、set と frozenset は同じ値）にしてから、型を tag にした木を
+    `core.structural.exact_occurrence_key` で符号化する。namedtuple は tuple として読む（型を見ない）。
+    並びは従来どおり `authority_digest` の順。canonical_value が受け付けない値は TypeError。
     """
 
-    return exact_occurrence_key(_identity_tree(value))
+    return exact_occurrence_key(_identity_tree(freeze_authority_value(value)))
 
 
 def _identity_tree(value: Any) -> Any:
