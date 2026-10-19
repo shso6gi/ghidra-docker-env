@@ -1,123 +1,99 @@
 # -*- coding: utf-8 -*-
-"""digest を lookup の key にする箇所の棚卸し（Issue #218、計画 v4 PR-D review r4）。
+"""digest（と型を落とす再符号化）を lookup / 束ねの key にする箇所の棚卸し（Issue #218、計画 v4 PR-D review r4）。
 
 identity の一致は digest でなく厳密比較で決める（計画 v4 §6.4 の 1）。owner（`core.structural` の
-`exact_value_key` / `dedupe_exact` / `ExactRecordIntern`、authority の `authority_canonical_text`）が厳密な
-identity を作っても、consumer が自分で digest にして集合・dict の key に使うと、digest の衝突で別の値が
-1 つになる（PR #259 review: call effect の引数の束ね・call の bucket・P-code の census・signal の重複の除去・
-共有 Z3 session の formula で起きていた）。
+`exact_value_key` / `exact_occurrence_key` / `dedupe_exact` / `ExactRecordIntern`、`authority.contracts` の
+`authority_identity_key`）が厳密な identity を作っても、consumer が自分で digest や JSON の文字列にして集合・
+dict の key に使うと、digest の衝突や再符号化で別の値が 1 つになる（PR #259 review: call effect の引数の束ね・
+call の bucket・P-code の census・signal の重複の除去・前提の束ね・共有 Z3 session の formula で起きていた）。
 
-この test は「`*digest*` という名前の関数の結果（とそれを代入した名前）が `in` / `.add` / `.get` /
-`.setdefault` / `.pop` / `[...]` / dict の key に使われる」node を AST で探し、baseline と完全に一致させる。
-新しい node は不合格（厳密な identity を使うか、封印・表示の用途なら理由を書いて baseline に足す）。消えた
-entry も不合格（baseline は縮むだけ）。
+`_digest_lookup_scan.scan` が見つける node を、baseline（`tests/fixtures/digest_lookup_keys/baseline.json`）と
+完全に一致させる。新しい node も、消えた entry も不合格（baseline は縮むだけ）。entry は role を持つ:
 
-baseline の各 entry は、digest の衝突が確定した判定に届かない理由を持つ。この test の通過は安全性の証明では
-ない（安全性は `test_pr_d_identity_consumers.py` の強制衝突の反例が示す）。
+* `seal_registry`: 封印された object を自分の digest で引き、object（`is`・seal）を確かめる
+* `seal_verification`: 記録した digest を同じ内容の再計算と比べる
+* `diagnostic`: 判定に入らない証拠・件数
+* `identity_non_decisive`: 同一性を digest で決めるが、併合しても判定の値を作らない（blocker が残る・UNKNOWN /
+  TIMEOUT / ERROR の event だけ・静的な入力）
+* `identity_follow_up`: 衝突で確定した判定に届き得る、PR-D の範囲外の identity（`owner` に後続を書く）
+
+新しい identity の判定はここに足さず、owner の API を使う。この test の通過は安全性の証明ではない（安全性は
+`test_pr_d_identity_consumers.py` の強制衝突の反例が示す）。
 """
 
 from __future__ import annotations
 
-import ast
 import collections
+import json
 from pathlib import Path
 
+from scripts.function_tracer_pcode.tests.unit._digest_lookup_scan import scan
+
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
-
-LOOKUP_METHODS = frozenset({"add", "setdefault", "get", "pop"})
-
-#: (path, 関数, 使い方) → 件数と理由
-BASELINE = {
-    ("authority/process/operational_extraction.py", "capture_attempt_observation", "subscript"): (
-        1, "receipt の digest で観測を引き、同じ receipt の object であることも `is` で確かめる（封印された receipt の参照）",
-    ),
-    ("authority/sites/runtime.py", "buffer_signal_intents", "get"): (
-        2, "Phase 7 の活性化の封印（signal digest）。衝突は同じ site の活性化の取り違えか例外（判定の値を作らない）。"
-           "authority 層の digest identity として後続に記録",
-    ),
-    ("authority/sites/runtime.py", "buffer_signal_intents", "pop"): (2, "同上"),
-    ("authority/sites/runtime.py", "record_pre_emission_activation", "get"): (1, "同上"),
-    ("authority/sites/runtime.py", "record_pre_emission_activation", "setdefault"): (2, "同上"),
-}
+BASELINE_PATH = PACKAGE_ROOT / "tests" / "fixtures" / "digest_lookup_keys" / "baseline.json"
+ROLES = frozenset({
+    "seal_registry", "seal_verification", "diagnostic", "identity_non_decisive", "identity_follow_up",
+})
 
 
-def _is_digest_call(node: ast.AST) -> bool:
-    if not isinstance(node, ast.Call):
-        return False
-    func = node.func
-    name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
-    return "digest" in name.lower()
-
-
-def scan(root: Path = PACKAGE_ROOT) -> collections.Counter:
-    found: collections.Counter = collections.Counter()
-    for path in sorted(root.rglob("*.py")):
-        relative = path.relative_to(root)
-        if relative.parts[0] == "tests":
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for function in ast.walk(tree):
-            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            tainted = {
-                target.id
-                for node in ast.walk(function)
-                if isinstance(node, ast.Assign) and _is_digest_call(node.value)
-                for target in node.targets
-                if isinstance(target, ast.Name)
-            }
-
-            def digest_valued(node: ast.AST) -> bool:
-                return _is_digest_call(node) or (isinstance(node, ast.Name) and node.id in tainted)
-
-            for node in ast.walk(function):
-                kind = None
-                if isinstance(node, ast.Compare) and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops):
-                    if digest_valued(node.left):
-                        kind = "in"
-                elif (
-                    isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr in LOOKUP_METHODS and node.args and digest_valued(node.args[0])
-                ):
-                    kind = node.func.attr
-                elif isinstance(node, ast.Subscript) and digest_valued(node.slice):
-                    kind = "subscript"
-                elif isinstance(node, ast.Dict) and any(key is not None and digest_valued(key) for key in node.keys):
-                    kind = "dict_key"
-                if kind:
-                    found[(str(relative), function.name, kind)] += 1
-    return found
+def _baseline():
+    return json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
 
 
 def test_digest_lookup_keys_match_the_baseline_exactly():
-    found = scan()
-    pinned = collections.Counter({key: count for key, (count, _why) in BASELINE.items()})
+    found = scan(PACKAGE_ROOT)
+    pinned = collections.Counter(
+        {(entry["path"], entry["function"], entry["kind"]): entry["count"] for entry in _baseline()}
+    )
     new = sorted((found - pinned).elements())
     stale = sorted((pinned - found).elements())
     assert not new, (
-        "a digest is used as a lookup / dedupe key: decide identity by exact comparison "
-        "(core.structural.exact_value_key / dedupe_exact / ExactRecordIntern, authority_canonical_text), "
-        "or record why it is a seal: " + repr(new)
+        "a digest (or a type-dropping re-encoding) is used as a lookup / dedupe key: decide identity by exact "
+        "comparison (core.structural.exact_value_key / exact_occurrence_key / dedupe_exact / ExactRecordIntern, "
+        "authority.contracts.authority_identity_key), or classify it in the baseline: " + repr(new)
     )
     assert not stale, "baseline entries that no longer exist: remove them: " + repr(stale)
 
 
-def test_every_baseline_entry_has_a_reason():
-    for key, (count, why) in BASELINE.items():
-        assert count > 0 and why, key
+def test_every_baseline_entry_has_a_role_a_reason_and_an_owner_when_it_is_a_follow_up():
+    for entry in _baseline():
+        assert entry["role"] in ROLES, entry
+        assert entry.get("why"), entry
+        if entry["role"] == "identity_follow_up":
+            assert entry.get("owner"), entry
+        else:
+            assert "owner" not in entry, entry
 
 
-def test_the_scan_finds_a_digest_keyed_dedupe(tmp_path):
-    # 走査そのものの検出力（dedupe を digest で書いた module を見つける）
+def test_the_scan_finds_the_forms_a_digest_keyed_identity_takes(tmp_path):
+    # 走査の検出力: 過去に実際にあった形（束ね・属性の digest の key・sorted の比較・JSON の文字列）を見つける
     package = tmp_path / "pkg"
     package.mkdir()
     (package / "m.py").write_text(
-        "def _dedupe(values):\n"
+        "import json\n"
+        "def dedupe(values):\n"
         "    seen = set()\n"
         "    for value in values:\n"
         "        key = _digest(value)\n"
         "        if key in seen:\n"
         "            continue\n"
         "        seen.add(key)\n"
+        "def by_formula(queries):\n"
+        "    return {query.contract.formula_digest: query for query in queries}\n"
+        "def census(left, right):\n"
+        "    return sorted(_digest(item) for item in left) == sorted(_digest(item) for item in right)\n"
+        "def by_text(values):\n"
+        "    return {json.dumps(value): value for value in values}\n"
+        "def nested(values):\n"
+        "    def inner(value, seen):\n"
+        "        key = repr(value)\n"
+        "        return key in seen\n"
+        "    return inner\n"
     )
-    assert scan(package) == collections.Counter({("m.py", "_dedupe", "in"): 1, ("m.py", "_dedupe", "add"): 1})
+    found = scan(package)
+    assert found[("m.py", "dedupe", "in")] == 1 and found[("m.py", "dedupe", "add")] == 1
+    assert found[("m.py", "by_formula", "dict_comp_key")] == 1
+    assert found[("m.py", "census", "collection_eq")] == 1
+    assert found[("m.py", "by_text", "dict_comp_key")] == 1
+    # 入れ子の関数は自分の scope で 1 回だけ数える
+    assert found[("m.py", "inner", "in")] == 1 and ("m.py", "nested", "in") not in found

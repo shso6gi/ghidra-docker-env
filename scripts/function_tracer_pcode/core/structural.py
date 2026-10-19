@@ -270,11 +270,12 @@ _EXACT_RECORD_OWNERS = SerialCounter()
 class ExactRecordIntern:
     """record の bytes → 厳密な identity の token（#218 PR-D）。
 
-    契約: 2 つの token が等しい ⇔ **同じ intern** が同じ (domain, record) に発行した。digest は bucket を
-    選ぶだけで、一致は bucket の中の bytes の厳密比較で決まる（計画 v4 §6.4 の 1）。token は発行した
-    intern の印（instance の通し番号と乱数）を持つので、別の intern・別の process の token とは digest が
-    衝突しても等しくならない（bucket の位置は intern ごとに数えるので、印が無いと別の intern に最初に
-    登録した別の record が同じ token になる）。
+    契約: 2 つの token が等しいのは、**同じ intern** が同じ (domain, record) に発行したときで、そのときに
+    限る。bucket は record の hash で選び、一致は bucket の中の bytes の厳密比較で決める（計画 v4 §6.4
+    の 1）。token は発行した intern の印（process の中の通し番号）を持つので、別の intern の token とは
+    等しくならない（bucket の位置は intern ごとに数えるので、印が無いと別の intern に最初に登録した別の
+    record が同じ token になる）。別の process の token と比べない（`cross_process_node`）。
+    instance の複製は同じ intern を指す（`copy` / `deepcopy` は自分を返す: 印を複製して表を分けない）。
 
     描画した SMT の文字列のような、構造 key を持たない値の memo・cache の key に使う。record を持ち
     続けるので、instance はそれを key にする memo・cache と同じ寿命で持つ（process 全体に置かない）。
@@ -286,7 +287,13 @@ class ExactRecordIntern:
 
     def __init__(self) -> None:
         self._buckets = AppendOnlyBuckets()
-        self._owner = (_EXACT_RECORD_OWNERS.next(), _token_nonce())
+        self._owner = (_EXACT_RECORD_OWNERS.next(),)
+
+    def __copy__(self) -> "ExactRecordIntern":
+        return self
+
+    def __deepcopy__(self, memo: dict) -> "ExactRecordIntern":
+        return self
 
     def token(self, domain: str, record: bytes) -> StructuralKey:
         if type(domain) is not str or type(record) is not bytes:
@@ -294,6 +301,23 @@ class ExactRecordIntern:
         keyed = _canonical_bytes(domain) + record
         digest = hashlib.sha256(_EXACT_RECORD_DOMAIN + keyed).hexdigest()
         return (EXACT_RECORD_TAG, *self._owner, digest, self._buckets.position(digest, keyed))
+
+
+def exact_occurrence_key(value: Any) -> StructuralKey:
+    """組み込みの値の厳密な identity（**同じ出現**か。#218 PR-D）。
+
+    ``("exact_occurrence", canonical bytes)``。値が型まで等しいときだけ等しい（tuple と list、True と 1、
+    "1" と 1 を分ける）。`exact_value_key` との違いは識別不能 token の扱いだけ: こちらは **同じ token の
+    写し** を同じ出現とする（1 つの計算が作った token を持つ値を、もう一度送った・もう一度読んだ、を
+    区別しない。別々に計算した token は乱数が違うので等しくならない）。「1 回だけ出す」「同じ活性化か」の
+    ような冪等性の判定が使う。値として同じか（束ね・照合）は `exact_value_key`。canonical な bytes に
+    ならない値は毎回新しい識別不能 token。
+    """
+
+    try:
+        return ("exact_occurrence", _canonical_bytes(value))
+    except (_NotCanonical, RecursionError):
+        return unidentified_identity("non_canonical_occurrence")
 
 
 def exact_value_key(value: Any) -> StructuralKey:
@@ -1408,13 +1432,14 @@ def _process_object_identity(expr: Any) -> StructuralKey:
 #
 # digest で一致を決めていた箇所の分類（計画 v4 §7.5。PR-D で決めた）:
 #
-#   厳密比較へ移した  readonly の値の記号（`abi_width_readonly`: key の canonical な文字列で引く）、
+#   厳密比較へ移した  readonly の値の記号（`abi_width_readonly`）、
 #                     guard overlap の node（描画した条件・query の `ExactRecordIntern` の token）、
 #                     exact query の attempt cache（hit は query の文字列の一致）、書き換えの operand の
 #                     照合（値の identity）、証拠の fingerprint（digest の無い式は fingerprint を付けない）、
 #                     call effect の束ね・call の bucket・P-code の census（`dedupe_exact` /
 #                     `exact_value_key`）、production signal の「1 回だけ出す」集合（`signal_identity`）、
-#                     authority の前提 signal の束ね・conditional の前提（`authority_canonical_text`）、
+#                     authority の前提 signal の束ね・conditional の前提・readonly の値の記号
+#                     （`authority.contracts.authority_identity_key`: 型を区別する authority の identity）、
 #                     共有 Z3 session の region（formula の文字列）
 #   consumer の規則   identity の値を束ねる・集合の key にする・照合する consumer は、digest や JSON の
 #                     文字列を自分で作らず、上の owner の API を使う（`test_digest_lookup_keys.py` が

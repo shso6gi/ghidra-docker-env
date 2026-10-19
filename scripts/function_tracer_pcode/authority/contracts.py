@@ -11,6 +11,8 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
 
+from scripts.function_tracer_pcode.core.structural import exact_occurrence_key
+
 
 SCHEMA_VERSION = 2
 
@@ -69,19 +71,56 @@ def canonical_value(value: Any) -> Any:
     raise TypeError(f"unsupported authority value: {type(value).__name__}")
 
 
-def authority_canonical_text(value: Any) -> str:
-    """`authority_digest` の preimage（canonical な JSON の文字列）。
-
-    2 つの値が同じかを決める consumer はこの文字列どうしを比べる（digest の一致で決めない: #218 PR-D）。
-    """
-
-    return json.dumps(
+def authority_digest(value: Any) -> str:
+    encoded = json.dumps(
         canonical_value(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def authority_digest(value: Any) -> str:
-    return hashlib.sha256(authority_canonical_text(value).encode("utf-8")).hexdigest()
+def authority_identity_key(value: Any) -> Tuple[Any, ...]:
+    """authority の値の厳密な identity（同じ出現か。#218 PR-D）。
+
+    `authority_digest` の preimage（`canonical_value` の JSON）は封印と並びの key で、型を落とす
+    （dict と組の tuple、Enum とその値、同じ field の別の dataclass、list と tuple、`{1: …}` と
+    `{"1": …}` が同じ文字列になる）。2 つの値が同じかを決める consumer（1 回だけ出す signal・前提の
+    束ね・記号の共有）はこれを使う: 型を tag にした木を `core.structural.exact_occurrence_key` で符号化
+    する。並びは従来どおり `authority_digest` の順。canonical_value が受け付けない値は TypeError。
+    """
+
+    return exact_occurrence_key(_identity_tree(value))
+
+
+def _identity_tree(value: Any) -> Any:
+    kind = type(value)
+    if value is None or kind in _PRIMITIVE_TYPES or kind is bytes:
+        return value
+    if isinstance(value, Enum):
+        return ("enum", kind.__module__, kind.__qualname__, _identity_tree(value.value))
+    if hasattr(value, "to_authority_dict"):
+        return ("authority_dict", kind.__module__, kind.__qualname__, _identity_tree(value.to_authority_dict()))
+    if is_dataclass(value) and not isinstance(value, type):
+        return (
+            "dataclass", kind.__module__, kind.__qualname__,
+            tuple((item.name, _identity_tree(getattr(value, item.name))) for item in fields(value)),
+        )
+    if isinstance(value, _AbcMapping):
+        items = [(_identity_tree(key), _identity_tree(child)) for key, child in value.items()]
+        return ("mapping", tuple(sorted(items, key=lambda item: _sort_bytes(item[0]))))
+    if kind is tuple or kind is list:
+        return ("tuple" if kind is tuple else "list", tuple(_identity_tree(child) for child in value))
+    if isinstance(value, (set, frozenset)):
+        return ("set", tuple(sorted((_identity_tree(child) for child in value), key=_sort_bytes)))
+    if isinstance(value, (str, int, float, bool)):
+        # 外部ランタイムの基底型の subclass（JInt など）: 基底型のデータ（`canonical_value` と同じ規則）
+        return exact_primitive(value)
+    if isinstance(value, (tuple, list)):
+        return ("tuple" if isinstance(value, tuple) else "list", tuple(_identity_tree(child) for child in value))
+    raise TypeError(f"unsupported authority value: {type(value).__name__}")
+
+
+def _sort_bytes(tree: Any) -> bytes:
+    return repr(exact_occurrence_key(tree)).encode("utf-8")
 
 
 def freeze_authority_value(value: Any) -> Any:

@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-import hashlib
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, Tuple
 
-from scripts.function_tracer_pcode.authority.contracts import authority_canonical_text, authority_digest
+from scripts.function_tracer_pcode.authority.contracts import authority_digest, authority_identity_key
 from scripts.function_tracer_pcode.authority.decision.decision import (
     FinalizationAuthority,
     TerminalTimeoutReceipt,
@@ -151,19 +150,23 @@ class Phase7ProductionRuntime:
 
     @staticmethod
     def signal_digest(producer_site_manifest_id: str, signal: Any) -> str:
-        """signal の identity（`signal_identity`）の digest。活性化の契約の封印と bucket に使う。"""
+        """signal の authority の digest（活性化の契約の封印と bucket。値は従来どおり）。"""
 
-        identity = Phase7ProductionRuntime.signal_identity(producer_site_manifest_id, signal)
-        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        return authority_digest(Phase7ProductionRuntime._signal_authority_payload(producer_site_manifest_id, signal))
 
     @staticmethod
-    def signal_identity(producer_site_manifest_id: str, signal: Any) -> str:
-        """production signal の identity: site・型・signal の authority の canonical な preimage（#218 PR-D）。
+    def signal_identity(producer_site_manifest_id: str, signal: Any) -> Tuple[Any, ...]:
+        """production signal の identity: site・型・signal の authority の厳密な identity（#218 PR-D）。
 
-        2 つの signal が同じか（1 回だけ出す・同じ活性化か）を決める consumer はこの文字列どうしを比べる。
-        digest の一致で決めると、衝突した別の signal（別の target の blocker）を出さずに捨てる。
+        2 つの signal が同じ出現か（1 回だけ出すか）を決める consumer はこれどうしを比べる。digest の一致で
+        決めると、衝突した別の signal（別の target の blocker）を出さずに捨てる。digest の preimage
+        （`canonical_value` の JSON）も型を落とすので使わない（`authority_identity_key`）。
         """
 
+        return authority_identity_key(Phase7ProductionRuntime._signal_authority_payload(producer_site_manifest_id, signal))
+
+    @staticmethod
+    def _signal_authority_payload(producer_site_manifest_id: str, signal: Any) -> dict:
         if type(producer_site_manifest_id) is not str or not producer_site_manifest_id:
             raise TypeError("production signal requires audited producer site identity")
         authority_projection = getattr(
@@ -183,11 +186,11 @@ class Phase7ProductionRuntime:
             }
         else:
             signal_authority = signal
-        return authority_canonical_text({
+        return {
             "producer_site_manifest_id": producer_site_manifest_id,
             "phase7_production_signal_type": type(signal).__qualname__,
             "signal": signal_authority,
-        })
+        }
 
     def record_pre_emission_activation(
         self, producer_site_manifest_id: str, signal: Any,

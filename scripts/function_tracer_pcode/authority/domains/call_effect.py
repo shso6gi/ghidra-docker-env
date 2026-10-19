@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-import hashlib
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, Optional
 
@@ -43,8 +42,8 @@ from scripts.function_tracer_pcode.authority.contracts import (
     RequirementSlotDefinition,
     SatisfactionContractDefinition,
     all_of,
-    authority_canonical_text,
     authority_digest,
+    authority_identity_key,
     any_of,
     requirement_slot,
 )
@@ -1037,22 +1036,24 @@ def _dedupe_prerequisite_signals(
 ) -> tuple["SummaryEffectPrerequisiteProductionSignal", ...]:
     """同じ (reason, target, missing) の signal を 1 つにする。
 
-    同じかは canonical な preimage の厳密な一致で決める（target は値・対象の identity を含む。digest の
-    一致で別の target の signal を落とさない: #218 PR-D）。並びは従来どおり digest の順。
+    同じかは authority の厳密な identity（`authority_identity_key`）で決める（target は値・対象の
+    identity を含む。digest の一致・型を落とす preimage の一致で別の target の signal を落とさない:
+    #218 PR-D）。並びは従来どおり digest の順。
     """
 
-    deduped: dict[str, SummaryEffectPrerequisiteProductionSignal] = {}
+    deduped: dict[Any, SummaryEffectPrerequisiteProductionSignal] = {}
+    order: dict[Any, tuple] = {}
     for signal in results:
-        key = authority_canonical_text({
+        payload = {
             "reason_id": signal.reason_id,
             "target": signal.canonical_target_key,
             "missing": signal.missing_semantic_fact,
-        })
-        deduped.setdefault(key, signal)
-    return tuple(
-        deduped[key]
-        for key in sorted(deduped, key=lambda text: (hashlib.sha256(text.encode("utf-8")).hexdigest(), text))
-    )
+        }
+        key = authority_identity_key(payload)
+        if key not in deduped:
+            deduped[key] = signal
+            order[key] = (authority_digest(payload), len(order))
+    return tuple(deduped[key] for key in sorted(deduped, key=order.__getitem__))
 
 
 def _summary_effect_source_members(

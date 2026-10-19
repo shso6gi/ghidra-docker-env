@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-import hashlib
 import threading
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Optional
@@ -27,8 +26,8 @@ from scripts.function_tracer_pcode.authority.contracts import (
     RequirementSlotDefinition,
     SatisfactionContractDefinition,
     TransformationKind,
-    authority_canonical_text,
     authority_digest,
+    authority_identity_key,
     canonical_value,
     requirement_slot,
 )
@@ -1550,10 +1549,12 @@ class ReadonlyCorrespondenceFactSet:
                         "resolved storage descriptor differs from load semantics"
                     )
 
-        # 値の key の canonical な文字列（digest でなく preimage）で引く: 記号の共有は key の厳密な一致で
-        # 決める（#218 PR-D）。行の並びは従来どおり key の digest の順
-        symbols_by_value_key: dict[str, str] = {}
-        shared_authority_rows: dict[str, Any] = {}
+        # 記号の共有は値の key の厳密な identity（`authority_identity_key`）で決める: digest の一致・型を
+        # 落とす preimage の一致で別の値を同じ記号にしない（#218 PR-D）。行の並びは従来どおり key の
+        # digest の順
+        symbols_by_value_key: dict[Any, str] = {}
+        shared_authority_rows: dict[Any, Any] = {}
+        shared_row_order: dict[Any, tuple] = {}
         shared_contract = seed.shared_input_memory_contract
 
         def value_key(
@@ -1605,14 +1606,17 @@ class ReadonlyCorrespondenceFactSet:
             values = []
             for member, descriptor in zip(members, descriptors):
                 key_body, is_shared = value_key(member, descriptor, side)
-                value_key_text = authority_canonical_text(key_body)
+                value_key_identity = authority_identity_key(key_body)
                 symbol = symbols_by_value_key.setdefault(
-                    value_key_text,
+                    value_key_identity,
                     f"readonly_value_{len(symbols_by_value_key)}",
                 )
                 if is_shared:
+                    shared_row_order.setdefault(
+                        value_key_identity, (authority_digest(key_body), len(shared_row_order)),
+                    )
                     shared_authority_rows.setdefault(
-                        value_key_text,
+                        value_key_identity,
                         (
                             "shared_parameter_value_authority_v2",
                             symbol, key_body, shared_contract,
@@ -1687,10 +1691,7 @@ class ReadonlyCorrespondenceFactSet:
             premise_fact_rows=premise_rows,
             shared_value_authority_rows=tuple(
                 shared_authority_rows[key]
-                for key in sorted(
-                    shared_authority_rows,
-                    key=lambda text: (hashlib.sha256(text.encode("utf-8")).hexdigest(), text),
-                )
+                for key in sorted(shared_authority_rows, key=shared_row_order.__getitem__)
             ),
             goal_fact_row=goal,
             _factory_token=_READONLY_CORRESPONDENCE_FACT_TOKEN,

@@ -697,11 +697,12 @@ def _shared_session(formulas):
     session._z3 = z3
     session._ctx = z3.Context()
     session._solver = z3.Solver(ctx=session._ctx)
+    # 本番と同じく region の formula の文字列で引く（#218 PR-D）
     session._prepared = {
-        query.contract.formula_digest: z3_backend.prepare_witness_query(z3, query.formula, session._ctx)
+        query.formula: z3_backend.prepare_witness_query(z3, query.formula, session._ctx)
         for query in map(_Query, formulas)
     }
-    session._specific = {digest: prepared.assertions for digest, prepared in session._prepared.items()}
+    session._specific = {formula: prepared.assertions for formula, prepared in session._prepared.items()}
     session.check_count = 0
     return session
 

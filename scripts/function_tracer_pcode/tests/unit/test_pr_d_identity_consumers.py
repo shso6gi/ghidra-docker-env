@@ -100,6 +100,28 @@ def test_record_tokens_name_their_intern(every_sha256_collides):
     assert first.token("d", b"x") != second.token("d", b"x")
 
 
+def test_two_fresh_interns_with_one_record_each_never_share_a_token(every_sha256_collides):
+    # 最小の反例（review r4 m1）: 別々の intern に別の record を 1 つずつ。印が無いと両方とも
+    # (tag, digest, 0) になる
+    assert structural.ExactRecordIntern().token("d", b"p") != structural.ExactRecordIntern().token("d", b"q")
+
+
+def test_a_copied_intern_is_the_same_intern():
+    import copy
+
+    intern = structural.ExactRecordIntern()
+    token = intern.token("d", b"x")
+    assert copy.deepcopy(intern) is intern and copy.copy(intern) is intern
+    assert copy.deepcopy(intern).token("d", b"x") == token
+
+
+def test_occurrence_identity_merges_copies_of_one_token_but_value_identity_does_not():
+    token = structural.unidentified_identity("probe")
+    assert structural.exact_occurrence_key(("k", token)) == structural.exact_occurrence_key(("k", token))
+    assert structural.exact_value_key(("k", token)) != structural.exact_value_key(("k", token))
+    assert structural.exact_occurrence_key((1, 2)) != structural.exact_occurrence_key([1, 2])
+
+
 def _guard_case(conditions_smt):
     from types import SimpleNamespace
 
@@ -327,3 +349,84 @@ def test_distinct_assumption_premises_survive_a_collision(every_sha256_collides)
 
     kept = _conditional.canonical_assumption_dependencies([premise("log"), premise("exp"), premise("log")])
     assert sorted(item.subject for item in kept) == ["exp", "log"]
+
+
+
+def test_the_authority_identity_keeps_apart_what_the_digest_preimage_merges():
+    # `authority_digest` の preimage（canonical_value の JSON）は型を落とす。identity は落とさない
+    import enum
+
+    from scripts.function_tracer_pcode.authority.contracts import (
+        authority_digest, authority_identity_key, canonical_value,
+    )
+
+    class _Kind(enum.Enum):
+        ONE = "one"
+
+    @dataclasses.dataclass(frozen=True)
+    class _A:
+        x: int
+
+    @dataclasses.dataclass(frozen=True)
+    class _B:
+        x: int
+
+    pairs = [
+        ({"a": 1}, (("a", 1),)),
+        ({1: "v"}, {"1": "v"}),
+        (_Kind.ONE, "one"),
+        (_A(1), _B(1)),
+        ([1, 2], (1, 2)),
+        (frozenset({1}), (1,)),
+        (True, 1),
+    ]
+    for left, right in pairs:
+        if not isinstance(left, bool):
+            assert authority_digest(left) == authority_digest(right), (left, right)
+        assert authority_identity_key(left) != authority_identity_key(right), (left, right)
+        assert authority_identity_key(left) == authority_identity_key(left)
+    assert canonical_value({"a": 1}) == canonical_value((("a", 1),))
+
+
+def test_signals_that_differ_only_in_type_are_both_emitted(monkeypatch):
+    # 1 回だけ出す集合は型を落とさない: digest の preimage が同じでも別の signal なら出す
+    import enum
+
+    class _Kind(enum.Enum):
+        ONE = "one"
+
+    emitted = []
+    session = _pilot_session(emitted)
+    monkeypatch.setattr(_production_signals, "active_production_pilot_session", lambda: session)
+    by_enum, by_value = _Signal(_Kind.ONE), _Signal("one")
+    for signal in (by_enum, by_value, by_enum):
+        _production_signals.emit_call_effect_signal(signal, producer_site_manifest_id="pr-d-site")
+    assert emitted == [by_enum, by_value]
+
+
+class _TargetRef:
+    """`stable_key()` だけを持つ call target（list と tuple の違いだけがある 2 つを作る）。"""
+
+    def __init__(self, key):
+        self.key = key
+
+    def stable_key(self):
+        return self.key
+
+
+def test_call_targets_that_a_json_projection_merges_stay_two_candidates():
+    # 束ねは型まで比べる: JSON（`_jsonable`）にすると同じになる 2 つの target を 1 つにしない
+    # （digest の衝突が無くても、JSON の文字列で束ねる実装に戻すとここで落ちる）
+    analysis = _analysis([publish(_extend("INT_ZEXT"))], [publish(_extend("INT_ZEXT"))])
+    summary = analysis.effect_summary
+    (key, evidence), = summary.call_argument_evidence.items()
+    summary.call_argument_evidence[key] = dataclasses.replace(
+        evidence, target_ref=_TargetRef(("function", 1, [0x2000])),
+    )
+    site, = summary.call_site_effect_summary_evidence
+    summary.call_site_effect_summary_evidence = (
+        dataclasses.replace(site, target_ref=_TargetRef(("function", 1, (0x2000,)))),
+    )
+    fact, = _call_site_facts(analysis)
+    assert len(fact.target_candidates) == 2
+    assert fact.target_resolution_status == "ambiguous"

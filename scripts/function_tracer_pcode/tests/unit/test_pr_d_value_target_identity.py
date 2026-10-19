@@ -258,7 +258,7 @@ def test_the_exact_record_intern_compares_bytes_under_a_forced_digest_collision(
     intern = structural.ExactRecordIntern()
     one = intern.token("d", b"one")
     two = intern.token("d", b"two")
-    assert one[3] == two[3]  # 同じ bucket（digest を定数にした）
+    assert one[2] == two[2]  # 同じ bucket（digest を定数にした）
     assert one != two
     assert intern.token("d", b"one") == one
     assert intern.token("e", b"one") != one  # domain も record の一部

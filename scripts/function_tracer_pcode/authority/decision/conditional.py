@@ -17,15 +17,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-import hashlib
 from typing import Any, Iterable, Mapping, Tuple
 
 from scripts.function_tracer_pcode.authority.contracts import (
     Outcome,
     VerifiedLifecycleProjection,
     assert_deep_immutable,
-    authority_canonical_text,
     authority_digest,
+    authority_identity_key,
     freeze_authority_value,
 )
 from scripts.function_tracer_pcode.authority.decision.decision import DecisionReceipt
@@ -60,14 +59,14 @@ def canonical_assumption_dependencies(
                 f"{type(premise).__name__}"
             )
         assert_deep_immutable(premise)
-        # 同じ premise かは canonical な preimage の厳密な一致で決める（digest の衝突で別の premise を
-        # 落とさない: #218 PR-D）。並びは従来どおり digest の順
-        identity = authority_canonical_text(premise)
+        # 同じ premise かは authority の厳密な identity で決める（digest の衝突・型を落とす preimage の
+        # 一致で別の premise を落とさない: #218 PR-D）。並びは従来どおり digest の順
+        identity = authority_identity_key(premise)
         if identity in seen:
             continue
         seen.add(identity)
-        ordered.append((hashlib.sha256(identity.encode("utf-8")).hexdigest(), identity, premise))
-    return tuple(premise for _digest, _identity, premise in sorted(ordered, key=lambda item: item[:2]))
+        ordered.append(((authority_digest(premise), len(ordered)), premise))
+    return tuple(premise for _order, premise in sorted(ordered, key=lambda item: item[0]))
 
 
 def assumption_dependencies_digest(premises: Iterable[AssumptionPremise]) -> str:
