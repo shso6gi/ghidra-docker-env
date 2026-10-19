@@ -2728,7 +2728,7 @@ def _exact_tree_read(value: Any, memo: Any = _ACTIVE) -> Tuple[Any, bool]:
 # | 名前の引きだけで決まる型の事実（`lookup_fact`: `_BUILTIN_HASHED`・`_builtin_behaviour`・JSON の protocol） | 引いた名前が同じ object を引く間 | 名前空間・`__bases__` の書き換え、引いた object の `__class__`・descriptor の中身の書き換え | 引くたびに key の型の MRO の identity・引いた (storage, 名前, 見つけた object)・見つけた object 自身の identity の外の状態（`_watch`。計算は見つけた object の中身を読まない）を確かめ、違えば計算し直す。計算の途中に引いた記録の読みは外の計算の読みへ足す |
 # | 名前空間の storage の列（`_PLAIN_MROS`・`_STATIC_NAMESPACES`） | MRO の tuple が同じ object の間 | `__bases__` の書き換え（MRO を作り直す） | 引くたびに MRO の identity を比べる。storage は class が生きている間同じ dict・key は組み込みの `str` のまま（上の行の前提）・組み込みの型の名前空間は変わらない |
 # | 監査済みの区間の記録（`audited_region` / `region_cache`: JSON の型の protocol の判定など） | 区間（最も外の `audited_region`）の間、外の code が走っていない間（区間を開けた thread の中の code。他の thread は前提の外の段落） | 外の code（監査の外の code: identity key の method・宣言していない package の generator・値の code を呼ぶ境界・比べる側の契約が呼ぶ外の比較と hash）。J19 の監査が辿る code が live な値を渡す owner の関数は値の code を呼ばない（呼ぶものは `value_code_boundary` で宣言し、その呼び出しを `outside_audit` の下に置く） | 外の code が走るのは外の code の区間（`outside_audit`）の中だけ: 走る間ずっと区間の外（入り直しても記録を見ない）。抜ければ（例外・中断でも）記録を捨てる。区間を閉じれば捨てる。区間の外は引くたびに上の行の確かめ。開ける場所・境界・owner の関数の分類は static test が監査の結果と突き合わせる |
-# | 監査済みの code が頼る値の型（walker の receiver: record・reducer・sized leaf・property / state setter の持ち主、`package_instance` で絞り込んだ値。第 11 回） | 頼り始めてから外の code の区間を抜けるまで。generator の中の絞り込みは次の `yield` まで | 外の code（区間の中）が型の名前空間・`__bases__`・値の `__class__`・protocol の method を書き換える。監査済みの code の外（activation の無い間）の書き換え | 頼る事実は activation（`relying_on` / `audited_entry` / walker の 1 歩）に記録し、外の code の区間を抜けるときに走っている activation を全部確かめ直す（`_recheck_reliance`）。止まっている監査済みの generator（record の `json_items`・`receiver_items`・宣言した generator）は再開の前にreceiver の型・型の信頼・method を確かめ直す（`json_encoding._AuditedSteps`）。`package_instance` は絞り込むたびに型の信頼を確かめる（activation のstack が続き、外の code の数が同じ間だけ記録を使い回す）。落ちればその型の code を呼ぶ前に判定不能。J19 の監査は `type(x) is C`（C は package の型）を絞り込みに数えず、絞り込みが `yield` をまたぐ読みと、receiver を新しい generator へ渡して yield の後に読む形を拒む。絞り込む entry root は`audited_entry` の宣言が要る（test が辿る関数から決める） |
+# | 監査済みの code が頼る値の型（walker の receiver: record・reducer・sized leaf・property / state setter の持ち主、`package_instance` で絞り込んだ値。第 11 回） | 頼り始めてから外の code の区間を抜けるまで。generator の中の絞り込みは次の `yield` まで | 外の code（区間の中）が型の名前空間・`__bases__`・値の `__class__`・protocol の method を書き換える。監査済みの code の外（activation の無い間）の書き換え | 頼る事実は activation（`relying_on` / `audited_entry` / walker の 1 歩）に記録し、外の code の区間を抜けるときに走っている activation を全部確かめ直す（`_recheck_reliance`）。止まっている監査済みの generator（record の `json_items`・`receiver_items`・宣言した generator）は再開の前にreceiver の型・型の信頼・method を確かめ直す（`json_encoding._AuditedSteps`）。`package_instance` は監査済みの code の中（activation がある）で絞り込むたびに型の信頼を確かめる（外は契約の外: 型の identity だけ。監査済みの code は必ず activation の中で走る: test が root ごとに確かめる。activation のstack が続き、外の code の数が同じ間だけ記録を使い回す）。落ちればその型の code を呼ぶ前に判定不能。J19 の監査は `type(x) is C`（C は package の型）を絞り込みに数えず、絞り込みが `yield` をまたぐ読みと、receiver を新しい generator へ渡して yield の後に読む形を拒む。絞り込む entry root は`audited_entry` の宣言が要る（test が辿る関数から決める） |
 # | 組（(key, 値)。`inline` / `pairs_of` / record の `json_items` / `mapping_of`）の中の構造 | いつも | tuple / list の subclass の `__iter__` / `__getitem__` / `__len__`（unpack・添字が呼ぶ） | 組は `read_pair` で読む（基底型の slot。exact な tuple はそのまま）。組でない値・長さが 2 でない組は値の code を呼ぶ前に拒む。J19 の監査は、要素が組み込みの tuple と分かる列（owner の組の読み・package の容器の `.items()`・`enumerate` / `zip`）の要素だけの unpack を許す |
 # | instance の `__dict__` を読む descriptor（`_DICT_HOLDERS`） | MRO の tuple が同じ object の間 | `__bases__` の書き換え | metaclass が `type` の class の `__dict__` の entry は作った後に書けも消せもしない（`_fixed_dict_entries`: CPython 3.10 / 3.12 で確かめる test）。そうでない MRO は記録しない。引くたびに MRO の identity を比べる |
 # | 判定不能が確定判定にならない | いつも | helper・`except` の捕捉 | 普通の例外の派生でない。作るときに pair の台帳へ記録（登録した reason `comparison_undecidable`、`blocks_decision`）。名指しの捕捉は分類した場所だけ |
@@ -3487,8 +3487,8 @@ def read_pair(value: Any) -> Tuple[Any, Any]:
 
 
 def package_instance(value: Any, kind: type) -> bool:
-    """`type(value) is kind` で、`kind` が今 package の型（`package_type`）か。監査済みの code が値を package の型へ絞り
-    込む唯一の判定（J19 の監査は `type(x) is C` を絞り込みに数えない）: 絞り込んだ値の field・method を使ってよいのは、
+    """`type(value) is kind` で、監査済みの code の中（activation がある）なら `kind` が今 package の型（`package_type`）か。
+    監査済みの code が値を package の型へ絞り込む唯一の判定（J19 の監査は `type(x) is C` を絞り込みに数えない）: 絞り込んだ値の field・method を使ってよいのは、
     次に外の code が走るまで（外の code から戻るときに確かめ直す: 今の activation に記録する）と、generator なら次の
     `yield` まで（J19 の規則）。`kind` が package の型でなくなっていれば判定不能（その型の code を呼ぶ前に止める）。"""
 
@@ -3508,8 +3508,8 @@ def package_instance(value: Any, kind: type) -> bool:
         if not activation or activation[-1][0] is not value:  # 続けて同じ値を絞り込む形（loop の中）は 1 度だけ
             activation.append((value, kind))
         return True
-    if not package_type(kind):
-        raise undecidable(f"{type_name(kind)} is relied on by audited code but is not a package type now")
+    # 監査済みの code の外（activation が無い: walk・`audited_entry`・owner が呼ぶ root の外。analysis の code が同じ関数を
+    # 呼ぶとき）: 契約の外なので型の identity だけ（監査済みの code が走るときは必ず activation がある）
     return True
 
 
@@ -3638,8 +3638,15 @@ def _compare(foreign: bool, operation: Any, left: Any, right: Any) -> Any:
     区間の記録を見せず、戻るときに監査済みの code が頼る事実を確かめ直す）。"""
 
     if foreign:
-        with outside_audit():
+        state = _FOREIGN_EPOCH.s
+        if state.active or _REGION.get() is not None:
+            with outside_audit():
+                return operation(left, right)
+        # 監査済みの code の外（区間も activation も無い）: 隠す記録も確かめ直す事実も無い。外の code の回数だけ数える
+        try:
             return operation(left, right)
+        finally:
+            state.count += 1
     return operation(left, right)
 
 

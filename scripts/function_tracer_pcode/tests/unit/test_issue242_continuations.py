@@ -740,3 +740,70 @@ def test_a_zip_is_walked_only_when_every_zipped_iterator_is_builtin():
     with pytest.raises(JsonValueRejected):
         _prepare(json_encoding.each(zip(produced(), (1,))))
     assert HOOKS == []
+
+
+def test_every_audited_root_runs_inside_an_activation():
+    """監査済みの code（J19 の root）は、どれも owner が積んだ activation の中で走る（`package_instance` が型の信頼を確かめ、
+    外の code の後に確かめ直す前提）: record の `json_items`・reducer・converter・`readable_property`・entry root。"""
+
+    seen = {}
+
+    def observe(name):
+        seen[name] = bool(live_values.reliance().active)
+
+    class Record:
+        def json_items(self):
+            observe("json_items")
+            yield "a", 1
+
+    class Counting(json_encoding.Reducer):
+        __slots__ = ()
+
+        def add(self, element, *, work):
+            observe("add")
+
+        def result(self, *, work):
+            observe("result")
+            return 0
+
+    class Holder:
+        __slots__ = ()
+
+        @live_values.readable_property
+        def label(self):
+            observe("property")
+            return "x"
+
+    @live_values.audited_entry
+    def entry():
+        observe("entry")
+
+    _prepare(Record())
+    _prepare(json_encoding.scan([1], Counting()))
+    live_values.attribute(Holder(), "label")
+    entry()
+    from scripts.function_tracer_pcode.core import signature
+
+    _prepare(json_encoding.each([{"name": "p"}], signature.parameter_descriptor_source))
+    assert seen == {"json_items": True, "add": True, "result": True, "property": True, "entry": True}
+    assert live_values.reliance().active == []
+
+
+def test_package_instance_checks_trust_inside_audited_code_and_identity_outside():
+    """`package_instance` は監査済みの code の中（activation がある）で型の信頼を確かめる（書き換えた型は判定不能）。外
+    （analysis の code が同じ関数を呼ぶとき）は契約の外: 型の identity だけ（`type(x) is C` と同じ）。"""
+
+    @dataclasses.dataclass
+    class Narrowed:
+        field: int
+
+    value = Narrowed(1)
+    Narrowed.field = _foreign_getter(2)
+    try:
+        assert live_values.package_instance(value, Narrowed) is True
+        assert live_values.package_instance(value, int) is False
+        with live_values.relying_on():
+            with pytest.raises(live_values.UndecidableComparison):
+                live_values.package_instance(value, Narrowed)
+    finally:
+        del Narrowed.field

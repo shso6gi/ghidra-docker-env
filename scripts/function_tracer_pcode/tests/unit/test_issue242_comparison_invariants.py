@@ -992,8 +992,20 @@ def test_a_replaced_element_reusing_a_freed_id_is_still_seen_as_a_change():
 
         class Swap:
             def __eq__(self, other):
+                if not lying:
+                    left[2] = 6
+                    return True
+                # 外した要素の番地に新しい値が作られるまで作る（元の要素を比べる側が持っていれば番地は空かない: その
+                # ときは別の番地の値で、変化として見える）。allocator の偶然に頼らずに `id` の再利用を作る
+                old = id(left[2])
                 left[2] = None
-                left[2] = Liar(6) if lying else 6
+                kept = []
+                for _ in range(10_000):
+                    candidate = Liar(6)
+                    if id(candidate) == old:
+                        break
+                    kept.append(candidate)
+                left[2] = candidate
                 return True
 
             __hash__ = object.__hash__
