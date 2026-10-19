@@ -440,14 +440,13 @@ def package_file(path: Any) -> bool:
     known = _PACKAGE_FILES.get(path)  # 組み込みの str の key（hash・比較は組み込みの実装）
     if known is None:
         if not os.path.isabs(path):
-            # 相対の file 名（`<string>`・cwd に依る名前）は package の code ではない
-            known = False
-        else:
-            normalized = os.path.normpath(os.path.abspath(path))
-            known = any(normalized.startswith(directory) for directory in _TRUSTED_EXTRA_DIRS) or (
-                normalized.startswith(PACKAGE_DIR)
-                and not any(normalized.startswith(directory) for directory in _UNTRUSTED_DIRS)
-            )
+            # 相対の file 名（`<string>`・cwd に依る名前）は package の code ではない（記録しない: 名前の数で表を育てない）
+            return False
+        normalized = os.path.normpath(os.path.abspath(path))
+        known = any(normalized.startswith(directory) for directory in _TRUSTED_EXTRA_DIRS) or (
+            normalized.startswith(PACKAGE_DIR)
+            and not any(normalized.startswith(directory) for directory in _UNTRUSTED_DIRS)
+        )
         _PACKAGE_FILES[path] = known
     return known
 
@@ -3369,6 +3368,9 @@ class outside_audit:
     def __enter__(self) -> "outside_audit":
         self.region = _REGION.get()
         self.token = _REGION.set(None)
+        # 入るときも数える: 区間の中の外の code が監査済みの code を呼んでも、区間の前に確かめた型の信頼
+        # （`_Reliance.trusted`・比べる側の記録）を使い回させない（独立 review）
+        _FOREIGN_EPOCH.s.count += 1
         return self
 
     def __exit__(self, *exc: Any) -> None:

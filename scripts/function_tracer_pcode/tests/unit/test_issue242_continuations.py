@@ -766,8 +766,10 @@ def test_scalar_record_dict_walks_what_json_items_returns_like_the_walker():
 
 
 def test_a_declared_generator_returned_by_json_items_resumes_with_its_record_checked():
-    """独立 review 第 11 回 P1: `json_items` が宣言した監査済みの generator を返すとき、その generator も record を receiver
-    として進める（止まっている間に record の型の名前空間を書き換えれば、再開の前に判定不能）。"""
+    """独立 review 第 11 回 P1（と最終 review の receiver の束縛）: `json_items` が宣言した監査済みの generator を返すとき、
+    その generator の receiver は generator の第 1 引数（ここでは `params`。record ではない）。止まっている間に record の型を
+    書き換えても、generator は record を読まない: 双子（書き換えの無い record）と同じ組で、hook は呼ばない（receiver の
+    型を書き換える形は `test_a_declared_generator_of_another_object_returned_by_json_items_rechecks_that_object`）。"""
 
     from scripts.function_tracer_pcode.core import signature
 
@@ -779,10 +781,11 @@ def test_a_declared_generator_returned_by_json_items_resumes_with_its_record_che
         def json_items(self):
             return signature._parameter_descriptor_pairs(self.params)
 
+    twin = _prepare(Record(params={"first": _record_with_rewriting_child(type("Other", (), {}), "probe", 999), "second": 2}))
     record = Record(params={"first": _record_with_rewriting_child(Record, "probe", 999), "second": 2})
     HOOKS.clear()
     try:
-        assert _refused(lambda: _prepare(record)) == "refused"
+        assert _refused(lambda: _prepare(record)) == twin
     finally:
         if "probe" in Record.__dict__ and type(Record.__dict__["probe"]) is property:
             Record.probe = 1
@@ -959,6 +962,94 @@ def test_a_receiver_items_walk_does_not_resume_its_record_after_a_child_rewrote_
     finally:
         json_encoding._AUDITED_GENERATORS.pop(id(Record._items.__code__), None)
     assert HOOKS == []
+
+
+def test_audited_code_called_by_foreign_code_does_not_reuse_trust_judged_before_the_section():
+    """独立 review: 外の code（区間の中）が class を書き換えてから監査済みの code を呼べば、区間の前に確かめた型の信頼
+    （`_Reliance.trusted`）を使ってはいけない。中の絞り込みは書き換えた後の型を確かめて判定不能（getter の前）、区間を
+    抜けるときも外側の記録を確かめ直して判定不能。"""
+
+    HOOKS.clear()
+
+    @dataclasses.dataclass(frozen=True)
+    class Record:
+        second: int
+
+    record = Record(second=7)
+    seen = {}
+    state = live_values.begin_activation()
+    try:
+        assert live_values.package_instance(record, Record)
+        with pytest.raises(live_values.UndecidableComparison):
+            with live_values.outside_audit():
+                setattr(Record, "second", _foreign_getter(999))
+                seen["trusted"] = live_values.package_type(Record)
+                inner = live_values.begin_activation()
+                try:
+                    seen["narrowed"] = _refused(lambda: live_values.package_instance(record, Record))
+                finally:
+                    live_values.end_activation(inner)
+    finally:
+        live_values.end_activation(state)
+    assert seen == {"trusted": False, "narrowed": "refused"}
+    assert HOOKS == []
+
+
+def test_a_declared_generator_of_another_object_returned_by_json_items_rechecks_that_object():
+    """独立 review: generator でない `json_items` が別の object（`inner`）の宣言した監査済みの generator を返すとき、止まって
+    いる generator が頼るのは `inner`（generator の self）。子の外の code が `inner` の型へ外の property を足せば、再開の前に
+    判定不能（getter の前）。双子（書き換えの無い子）は同じ組。"""
+
+    HOOKS.clear()
+
+    @dataclasses.dataclass(frozen=True)
+    class Inner:
+        first: object
+        second: int
+
+        def _items(self):
+            yield "first", self.first
+            yield "second", self.second
+
+    class Outer:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def json_items(self):
+            return self.inner._items()
+
+    json_encoding.audited_generator(Inner._items)
+    try:
+        assert _prepare(Outer(Inner(first=[1], second=7))) == {"first": [1], "second": 7}
+        assert json_encoding.scalar_record_dict(Outer(Inner(first=1, second=7))) == {"first": 1, "second": 7}
+        outer = Outer(Inner(first=_record_with_rewriting_child(Inner, "second", 999), second=7))
+        assert _refused(lambda: _prepare(outer)) == "refused"
+    finally:
+        json_encoding._AUDITED_GENERATORS.pop(id(Inner._items.__code__), None)
+        if "second" in Inner.__dict__ and isinstance(Inner.__dict__["second"], property):
+            delattr(Inner, "second")
+    assert HOOKS == []
+
+
+def test_canonical_cause_tuple_reads_the_same_fields_as_json_items():
+    """`canonical_cause_tuple` は field を dataclass の field の表から読む（`json_items` の generator を持たない: yield を
+    またぐ絞り込みを作らない）。読む名前と値が `json_items` の組と同じであること（2 つの源がずれない）。"""
+
+    from scripts.function_tracer_pcode.proof.cause_identity import (
+        ExecutionCauseKey, RelationalCauseKey, UnaryCauseKey, canonical_cause_tuple,
+    )
+
+    keys = [
+        UnaryCauseKey(cause_kind="k", binary_content_identity=("b",), function_ir_identity=("f", 1),
+                      semantic_object_identity=("o",)),
+        RelationalCauseKey(cause_kind="k", comparison_domain=("d",), left_semantic_object=("l",),
+                           right_semantic_object=("r",), correspondence_contract=("c",)),
+        ExecutionCauseKey(cause_kind="k", comparison_domain=("d",), logical_query_identity=("q",),
+                          execution_semantics_identity=("e",)),
+    ]
+    for key in keys:
+        names = [name for name, _value in canonical_cause_tuple(key)]
+        assert names == sorted(name for name, _value in key.json_items()), type(key).__name__
 
 
 def test_a_zip_is_walked_only_when_every_zipped_iterator_is_builtin():

@@ -502,11 +502,12 @@ def _walk_iter(items: Any) -> Iterator[Any]:
     return iter(items)
 
 
-def _record_iteration(json_items: Any, item: Any) -> Tuple[Iterator[Any], bool]:
-    """record の `json_items(item)` の列と、その列を進める間 record に頼るか。`json_items` 自身の generator と、それが返した
-    宣言した監査済みの generator は record を receiver とする監査済みの code: 進める側（walker の frame・
-    `scalar_record_dict`）が receiver を記録し、外の code の区間を抜けるたびに確かめ直す（`_require_receiver`）。それ以外の
-    列は walker と同じ規則（`_walk_iter`）。"""
+def _record_iteration(json_items: Any, item: Any) -> Tuple[Iterator[Any], Any]:
+    """record の `json_items(item)` の列と、その列を進める間に頼る receiver（頼らない列なら `None`）。`json_items` 自身の
+    generator は record、それが返した宣言した監査済みの generator は **その generator の第 1 引数**（別の object の method
+    なら その object: 止まっている generator が再開の後に読むのはそれ）を receiver とする監査済みの code: 進める側（walker の
+    frame・`scalar_record_dict`）が receiver を記録し、外の code の区間を抜けるたびに確かめ直す（`_require_receiver`）。
+    それ以外の列は walker と同じ規則（`_walk_iter`）。"""
 
     kind = type(item)
     code = json_items.__code__ if type(json_items) is types.FunctionType else None
@@ -519,19 +520,24 @@ def _record_iteration(json_items: Any, item: Any) -> Tuple[Iterator[Any], bool]:
         finally:
             live_values.end_reliance(token)
     if type(items) is zip and live_values.builtin_iterator(items):
-        return items, False  # 組み込みの容器の iterator の zip（進めても Python の code は走らない）
-    if _receiver_bound(items, json_items):
-        return items, True
-    return _walk_iter(items), False
+        return items, None  # 組み込みの容器の iterator の zip（進めても Python の code は走らない）
+    if type(items) is types.GeneratorType:
+        if items.gi_code is json_items.__code__:
+            return items, item
+        if package_generator(items) and _audited(items):
+            return items, _generator_receiver(items)
+    return _walk_iter(items), None
 
 
-def _receiver_bound(items: Any, json_items: Any) -> bool:
-    """`json_items` が返した列を、record を receiver とする監査済みの code として進めるか: `json_items` 自身の generator と、
-    `json_items` が返した宣言した監査済みの generator（record を受け取って止まり得る）。"""
+def _generator_receiver(generator: types.GeneratorType) -> Any:
+    """まだ走っていない generator の第 1 引数（generator の本体が頼る receiver。引数が無ければ `None`）。frame の局所変数は
+    C の実装で読む（値の code を呼ばない）。"""
 
-    return type(items) is types.GeneratorType and (
-        items.gi_code is json_items.__code__ or (package_generator(items) and _audited(items))
-    )
+    code = generator.gi_code
+    frame = generator.gi_frame
+    if frame is None or not code.co_argcount:
+        return None
+    return frame.f_locals.get(code.co_varnames[0])
 
 
 def _require_receiver(receiver: Any, kind: type, verified: Dict[int, type]) -> None:
@@ -2904,8 +2910,8 @@ class _Walk:
         json_items, json_tree = _record_protocols(kind)[:2]
         if json_items is not None:
             # package の型の `json_items`（record の protocol。型の関数を直接呼ぶ）
-            items, bound = _record_iteration(json_items, item)
-            self.push("dict", items, parent, key, item, build=build, receiver=item if bound else None)
+            items, receiver = _record_iteration(json_items, item)
+            self.push("dict", items, parent, key, item, build=build, receiver=receiver)
             return
         if json_tree is not None:
             built, size = self.budget.tree(item, build=build)
@@ -3130,7 +3136,7 @@ class _Walk:
                     # 要素の中の仕事は reducer が同じ作業量へ数える
                     effort.charge(1)
                     if state.count != epoch:
-                        add, result = self._reducer_methods_again(reducer, kind, add, result)
+                        add, result = self._recheck_reducer(reducer, kind, add, result)
                         epoch = state.count
                     state_ = live_values.begin_activation(reducer, kind)
                     try:
@@ -3144,7 +3150,7 @@ class _Walk:
                 self.budget.exceeded()
                 raise
             if state.count != epoch:
-                add, result = self._reducer_methods_again(reducer, kind, add, result)
+                add, result = self._recheck_reducer(reducer, kind, add, result)
             try:
                 with live_values.relying_on(reducer, kind):
                     produced = result(reducer, work=self.effort)
@@ -3290,7 +3296,7 @@ class _Walk:
             self.reject(f"{type_name(kind)} is not a package Reducer")
         return add, result
 
-    def _reducer_methods_again(self, reducer: Any, kind: type, add: Any, result: Any) -> Tuple[Any, Any]:
+    def _recheck_reducer(self, reducer: Any, kind: type, add: Any, result: Any) -> Tuple[Any, Any]:
         """外の code が走った後、引いておいた reducer の method を続ける前の確かめ（`_require_receiver` と同じ: 型の identity と
         型の信頼）。落ちれば判定不能（書き換えた型の method も、引いておいた method も呼ばない）。"""
 
@@ -3494,11 +3500,11 @@ def scalar_record_dict(record: Any) -> dict:
     read_pair = live_values.read_pair
     # 列は walker と同じ規則（`_record_iteration`）、組は exact な tuple ならそのまま・それ以外は `read_pair`。list を作らずに
     # 1 組ずつ読む（walker の外で record の組を読む唯一の入口）
-    items, bound = _record_iteration(protocol_method(record, "json_items"), record)
+    limit = live_values.SCAN_LIMIT
+    items, receiver = _record_iteration(protocol_method(record, "json_items"), record)
     # 列を進める間ずっと record を receiver とする activation（歩の間に走る外の code は区間を抜けるときに確かめる。歩と歩の
     # 間は owner の code だけ）
-    token = live_values.begin_reliance(record, kind) if bound else None
-    limit = live_values.SCAN_LIMIT
+    token = None if receiver is None else live_values.begin_reliance(receiver, type(receiver))
     try:
         for count, pair in enumerate(items, 1):
             if count > limit:
