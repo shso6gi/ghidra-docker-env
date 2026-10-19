@@ -14,6 +14,7 @@ serializable identities and semantic keys are retained.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, is_dataclass, replace
+import collections
 import hashlib
 import json
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
@@ -25,7 +26,12 @@ from scripts.function_tracer_pcode.core import (
     object_target_key,
     value_identity,
 )
-from scripts.function_tracer_pcode.core.structural import cross_side_node, label_view
+from scripts.function_tracer_pcode.core.structural import (
+    cross_side_node,
+    dedupe_exact,
+    exact_value_key,
+    label_view,
+)
 from scripts.function_tracer_pcode.proof.call_effect.candidates import (
     build_internal_call_correspondence_candidates,
 )
@@ -1094,18 +1100,6 @@ def _operation_kind(pcode_ref: Any) -> str:
     return "unknown_call"
 
 
-def _dedupe(values: Iterable[Any]) -> Tuple[Any, ...]:
-    result: List[Any] = []
-    seen: set[str] = set()
-    for value in values:
-        key = _digest(value)
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(value)
-    return tuple(result)
-
-
 def _extract_side_facts(
     analysis: FunctionReturnAnalysis,
     *,
@@ -1137,10 +1131,13 @@ def _extract_side_facts(
 
     def bucket_for(pcode_ref: Any, fallback: Any) -> Dict[str, Any]:
         pcode_key = _stable_key(pcode_ref)
-        bucket_key = _digest((pcode_key, fallback if pcode_key is None else None))
+        identity = (pcode_key, fallback if pcode_key is None else None)
+        # 同じ call かは identity の厳密な一致で決める（digest の一致で別の call の証拠を混ぜない:
+        # #218 PR-D）。digest は従来どおり facts の並びの順だけに使う
         bucket = buckets.setdefault(
-            bucket_key,
+            exact_value_key(identity),
             {
+                "order": (_digest(identity), len(buckets)),
                 "pcode_ref": pcode_ref,
                 "pcode_key": pcode_key,
                 "arguments": [],
@@ -1908,7 +1905,7 @@ def _extract_side_facts(
             bucket["multiplicities"].append(int(multiplicity))
 
     facts: List[RiskBearingFact] = []
-    for bucket_key, bucket in sorted(buckets.items()):
+    for bucket in sorted(buckets.values(), key=lambda item: item["order"]):
         pcode_ref = bucket["pcode_ref"]
         operation_kind = _operation_kind(pcode_ref)
         identity = ArtifactObjectIdentity(
@@ -1917,7 +1914,7 @@ def _extract_side_facts(
             pcode_op_key=bucket["pcode_key"],
         )
         if operation_kind == "userop":
-            input_groups = _dedupe(bucket["arguments"])
+            input_groups = dedupe_exact(bucket["arguments"])
             input_keys = input_groups[0] if len(input_groups) == 1 else ()
             fact_id = _digest(("userop_fact", identity.stable_key(), bucket["userop_key"]))
             facts.append(
@@ -1926,7 +1923,7 @@ def _extract_side_facts(
                     identity=identity,
                     userop_semantic_key=bucket["userop_key"],
                     input_keys=input_keys,
-                    guard_keys=tuple(key for group in _dedupe(bucket["guards"]) for key in group),
+                    guard_keys=tuple(key for group in dedupe_exact(bucket["guards"]) for key in group),
                     unsupported_reason=(
                         str(bucket["unsupported_reasons"][0])
                         if bucket["unsupported_reasons"]
@@ -1937,11 +1934,11 @@ def _extract_side_facts(
             )
             continue
 
-        targets = _dedupe(bucket["targets"])
-        argument_groups = _dedupe(bucket["arguments"])
+        targets = dedupe_exact(bucket["targets"])
+        argument_groups = dedupe_exact(bucket["arguments"])
         # 左右の形は対象の key から作る: 値が 1 つに決まっても対象が分かれれば形を決めない
-        argument_target_groups = _dedupe(bucket["argument_targets"])
-        parameter_groups = _dedupe(bucket["parameter_keys"])
+        argument_target_groups = dedupe_exact(bucket["argument_targets"])
+        parameter_groups = dedupe_exact(bucket["parameter_keys"])
         multiplicities = tuple(sorted(set(bucket["multiplicities"])))
         target_status = "resolved" if len(targets) == 1 and _target_category(targets[0]) != "unknown" else (
             "ambiguous" if len(targets) > 1 else "inconclusive"
@@ -1980,7 +1977,7 @@ def _extract_side_facts(
         fact_id = _digest(("call_site_fact", identity.stable_key(), operation_kind))
         call_invocation_status = invocation_status(pcode_ref, bucket["pcode_key"])
         call_guard_groups = tuple(
-            tuple(group) for group in _dedupe(bucket["guards"])
+            tuple(group) for group in dedupe_exact(bucket["guards"])
         )
         (
             output_use_status,
@@ -2010,7 +2007,7 @@ def _extract_side_facts(
                     else ()
                 ),
                 callee_parameter_keys=parameter_groups[0] if len(parameter_groups) == 1 else (),
-                guard_keys=tuple(key for group in _dedupe(bucket["guards"]) for key in group),
+                guard_keys=tuple(key for group in dedupe_exact(bucket["guards"]) for key in group),
                 call_site_multiplicity=multiplicities[0] if len(multiplicities) == 1 else None,
                 invocation_proof_status=call_invocation_status,
                 output_use_reaching_definition_status=output_use_status,
@@ -2030,7 +2027,7 @@ def _extract_side_facts(
                 callee_has_unsupported_nested_call=bool(
                     bucket["callee_has_unsupported_nested_call"]
                 ),
-                callee_control_profile_keys=_dedupe(
+                callee_control_profile_keys=dedupe_exact(
                     bucket["callee_control_profile_keys"]
                 ),
                 callee_ordered_scalar_store_candidates=tuple(
@@ -2044,7 +2041,7 @@ def _extract_side_facts(
                 callee_recursive_scc_identities=tuple(
                     sorted(set(bucket["callee_recursive_scc_identities"]))
                 ),
-                callee_recursive_scc_member_keys=_dedupe(
+                callee_recursive_scc_member_keys=dedupe_exact(
                     bucket["callee_recursive_scc_member_keys"]
                 ),
                 callee_return_summary_statuses=tuple(
@@ -2052,7 +2049,7 @@ def _extract_side_facts(
                 ),
                 callee_return_shape_keys=tuple(
                     sorted(
-                        _dedupe(bucket["callee_return_shape_keys"]),
+                        dedupe_exact(bucket["callee_return_shape_keys"]),
                         key=_digest,
                     )
                 ),
@@ -3236,15 +3233,16 @@ def _structural_coverage_failure_causes(
     for side in ("left", "right"):
         if payload.get(f"{side}_census_status") != "complete":
             failures.append(f"{side}_pcode_census_incomplete")
-        census_keys = tuple(
-            _digest(item)
+        # op の key の多重集合を厳密に比べる（digest の一致で別の op を同じとしない: #218 PR-D）
+        census_keys = collections.Counter(
+            exact_value_key(item)
             for item in payload.get(f"{side}_census_pcode_op_keys", ()) or ()
         )
-        fact_keys = tuple(
-            _digest(item)
+        fact_keys = collections.Counter(
+            exact_value_key(item)
             for item in payload.get(f"{side}_fact_pcode_op_keys", ()) or ()
         )
-        if sorted(census_keys) != sorted(fact_keys):
+        if census_keys != fact_keys:
             failures.append(f"{side}_pcode_census_fact_key_mismatch")
         if payload.get(f"{side}_missing_fact_pcode_op_keys"):
             failures.append(f"{side}_missing_call_facts_present")

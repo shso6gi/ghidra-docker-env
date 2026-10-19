@@ -713,9 +713,11 @@ class SharedZ3RegionSession:
         ast_nodes_by_query: list[set[str]] = []
         for query in query_set.queries:
             prepared = prepare_witness_query(self._z3, query.formula, self._ctx)
-            self._prepared[query.contract.formula_digest] = prepared
+            # region の formula は文字列そのもので引く（digest の一致で別の region の assertion を使わない:
+            # #218 PR-D）
+            self._prepared[query.formula] = prepared
             assertions = prepared.assertions
-            parsed[query.contract.formula_digest] = assertions
+            parsed[query.formula] = assertions
             sexprs_by_query.append({item.sexpr() for item in assertions})
             nodes: set[str] = set()
             pending = list(assertions)
@@ -735,8 +737,8 @@ class SharedZ3RegionSession:
         self._solver = self._z3.Solver(ctx=self._ctx)
         self._solver.add(*(representative[item] for item in sorted(common)))
         self._specific = {
-            digest: tuple(item for item in assertions if item.sexpr() not in common)
-            for digest, assertions in parsed.items()
+            formula: tuple(item for item in assertions if item.sexpr() not in common)
+            for formula, assertions in parsed.items()
         }
         self.parse_count = len(parsed)
         # The context hash-conses these shared nodes even when their enclosing
@@ -762,8 +764,7 @@ class SharedZ3RegionSession:
         import time
         from scripts.function_tracer_pcode.smt import ParallelResult
         from scripts.function_tracer_pcode.smt.interface import SolverResult, SolverStatus
-        digest = hashlib.sha256(query.encode("utf-8")).hexdigest()
-        if digest not in self._specific:
+        if query not in self._specific:
             raise RuntimeError("shared_z3_region_query_outside_canonical_set")
         from scripts.function_tracer_pcode.smt.execution import ExecutionBudget
         from scripts.function_tracer_pcode.smt.interface import (
@@ -798,7 +799,7 @@ class SharedZ3RegionSession:
         budget = ExecutionBudget.starting_now(configured, not_after=window.adapter_end)
         self._solver.push()
         try:
-            self._solver.add(*self._specific[digest])
+            self._solver.add(*self._specific[query])
             stop = budget.interruption()
             if stop is not None:
                 item = interrupted_result(
@@ -816,7 +817,7 @@ class SharedZ3RegionSession:
                 # 共有 session の履歴（先に解いた region）に依らない canonical witness。
                 # 確定の手順（生成の前後の中断確認）は interface が持つ。
                 item = sat_result_with_witness(
-                    self._z3, self._solver, self._prepared[digest],
+                    self._z3, self._solver, self._prepared[query],
                     solver_name="Z3(shared-region)", started=started, budget=budget,
                 )
             elif verdict == self._z3.unsat:

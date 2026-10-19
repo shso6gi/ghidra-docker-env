@@ -258,7 +258,7 @@ def test_the_exact_record_intern_compares_bytes_under_a_forced_digest_collision(
     intern = structural.ExactRecordIntern()
     one = intern.token("d", b"one")
     two = intern.token("d", b"two")
-    assert one[1] == two[1]  # 同じ bucket（digest を定数にした）
+    assert one[3] == two[3]  # 同じ bucket（digest を定数にした）
     assert one != two
     assert intern.token("d", b"one") == one
     assert intern.token("e", b"one") != one  # domain も record の一部
@@ -532,10 +532,11 @@ def test_explicit_arguments_with_one_target_but_different_values_are_not_collaps
 
 
 def test_call_effect_argument_keys_keep_values_with_one_target_apart():
-    from scripts.function_tracer_pcode.proof.call_effect.obligations import _dedupe, _expression_key
+    from scripts.function_tracer_pcode.core.structural import dedupe_exact
+    from scripts.function_tracer_pcode.proof.call_effect.obligations import _expression_key
 
     zext, sext = publish(_extend("INT_ZEXT")), publish(_extend("INT_SEXT"))
-    groups = _dedupe([(_expression_key(zext),), (_expression_key(sext),)])
+    groups = dedupe_exact([(_expression_key(zext),), (_expression_key(sext),)])
     # 2 つの証拠が別の値を渡す: 引数の組は 1 つに決まらない（extraction_complete にしない）
     assert len(groups) == 2
 

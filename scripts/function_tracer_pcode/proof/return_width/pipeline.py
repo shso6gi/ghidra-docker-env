@@ -62,13 +62,14 @@ def _emit_return_width_signal_once(signal: Any, producer_site_manifest_id: str) 
     session = active_production_pilot_session()
     if session is None:
         return 0
-    signal_digest = Phase7ProductionRuntime.signal_digest(
+    # 1 回だけ出すかは signal の identity の厳密な一致で決める（digest の衝突で別の signal を捨てない）
+    signal_identity_text = Phase7ProductionRuntime.signal_identity(
         producer_site_manifest_id, signal
     )
     emitted = session.domain_signal_state.setdefault(
-        "return_width_producer_signal_digests", set()
+        "return_width_producer_signal_identity_texts", set()
     )
-    if signal_digest in emitted:
+    if signal_identity_text in emitted:
         return 0
     # Phase 7 audits the literal site IDs at this helper's call sites.  Keep the
     # generic dispatch itself out of that AST inventory: it has no independent
@@ -78,7 +79,7 @@ def _emit_return_width_signal_once(signal: Any, producer_site_manifest_id: str) 
         signal, producer_site_manifest_id=producer_site_manifest_id
     )
     if count:
-        emitted.add(signal_digest)
+        emitted.add(signal_identity_text)
     return count
 
 

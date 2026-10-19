@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
 from typing import Any, Mapping, Sequence
 
-from scripts.function_tracer_pcode.authority.contracts import authority_digest
+from scripts.function_tracer_pcode.authority.contracts import authority_canonical_text, authority_digest
 from scripts.function_tracer_pcode.authority.decision.decision import (
     FinalizationAuthority,
     TerminalTimeoutReceipt,
@@ -150,6 +151,19 @@ class Phase7ProductionRuntime:
 
     @staticmethod
     def signal_digest(producer_site_manifest_id: str, signal: Any) -> str:
+        """signal の identity（`signal_identity`）の digest。活性化の契約の封印と bucket に使う。"""
+
+        identity = Phase7ProductionRuntime.signal_identity(producer_site_manifest_id, signal)
+        return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def signal_identity(producer_site_manifest_id: str, signal: Any) -> str:
+        """production signal の identity: site・型・signal の authority の canonical な preimage（#218 PR-D）。
+
+        2 つの signal が同じか（1 回だけ出す・同じ活性化か）を決める consumer はこの文字列どうしを比べる。
+        digest の一致で決めると、衝突した別の signal（別の target の blocker）を出さずに捨てる。
+        """
+
         if type(producer_site_manifest_id) is not str or not producer_site_manifest_id:
             raise TypeError("production signal requires audited producer site identity")
         authority_projection = getattr(
@@ -169,7 +183,7 @@ class Phase7ProductionRuntime:
             }
         else:
             signal_authority = signal
-        return authority_digest({
+        return authority_canonical_text({
             "producer_site_manifest_id": producer_site_manifest_id,
             "phase7_production_signal_type": type(signal).__qualname__,
             "signal": signal_authority,

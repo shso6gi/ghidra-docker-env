@@ -263,27 +263,72 @@ _PROCESS_OBJECT_SERIALS = WeakKeyedTable()
 _EXACT_RECORD_DOMAIN = b"pr-d-exact-record-v1\x00"
 
 
-class ExactRecordIntern:
-    """record の bytes → 厳密な identity の token（process の中だけ。#218 PR-D）。
+#: `ExactRecordIntern` の instance の通し番号（token に instance を入れる）
+_EXACT_RECORD_OWNERS = SerialCounter()
 
-    digest は bucket を選ぶだけで、一致は bucket の中の bytes の厳密比較で決まる（計画 v4 §6.4 の 1）。
-    同じ (domain, record) ⇔ 同じ token。描画した SMT の文字列のような、構造 key を持たない値の memo・
-    cache の key に使う（digest の一致だけで同じとしない）。record を持ち続けるので、instance は
-    それを key にする memo・cache と同じ寿命で持つ（process 全体に置かない）。token は process の中でだけ
-    意味を持つ（`PROCESS_SCOPED_TAGS`。外へ出す値の比較は `cross_process_node` が識別不能にする）。
+
+class ExactRecordIntern:
+    """record の bytes → 厳密な identity の token（#218 PR-D）。
+
+    契約: 2 つの token が等しい ⇔ **同じ intern** が同じ (domain, record) に発行した。digest は bucket を
+    選ぶだけで、一致は bucket の中の bytes の厳密比較で決まる（計画 v4 §6.4 の 1）。token は発行した
+    intern の印（instance の通し番号と乱数）を持つので、別の intern・別の process の token とは digest が
+    衝突しても等しくならない（bucket の位置は intern ごとに数えるので、印が無いと別の intern に最初に
+    登録した別の record が同じ token になる）。
+
+    描画した SMT の文字列のような、構造 key を持たない値の memo・cache の key に使う。record を持ち
+    続けるので、instance はそれを key にする memo・cache と同じ寿命で持つ（process 全体に置かない）。
+    token は process の中でだけ意味を持つ（`PROCESS_SCOPED_TAGS`。外へ出す値の比較は
+    `cross_process_node` が、左右の比較は `cross_side_node` が識別不能にする）。
     """
 
-    __slots__ = ("_buckets",)
+    __slots__ = ("_buckets", "_owner")
 
     def __init__(self) -> None:
         self._buckets = AppendOnlyBuckets()
+        self._owner = (_EXACT_RECORD_OWNERS.next(), _token_nonce())
 
     def token(self, domain: str, record: bytes) -> StructuralKey:
         if type(domain) is not str or type(record) is not bytes:
             raise TypeError("an exact record token takes a str domain and a bytes record")
         keyed = _canonical_bytes(domain) + record
         digest = hashlib.sha256(_EXACT_RECORD_DOMAIN + keyed).hexdigest()
-        return (EXACT_RECORD_TAG, digest, self._buckets.position(digest, keyed))
+        return (EXACT_RECORD_TAG, *self._owner, digest, self._buckets.position(digest, keyed))
+
+
+def exact_value_key(value: Any) -> StructuralKey:
+    """組み込みの値（None・bool・int・str・bytes・float・tuple・list の入れ子）の厳密な identity（#218 PR-D）。
+
+    ``("exact_value", canonical bytes)``。2 つが等しい ⇔ 値が型まで等しい（tuple と list、True と 1、
+    "1" と 1 を分ける）。dict・set・class の instance・subclass の値など、canonical な bytes にならない値と、
+    識別不能 token を含む値は、毎回新しい識別不能 token（何とも、自分の再計算とも等しくならない）。
+
+    identity の値（`value_identity` / `object_target_key` の key、それを部分に持つ key）を束ねる・集合に
+    入れる・照合する consumer は、digest や JSON の文字列を自分で作らず、これ（か `dedupe_exact`）を使う。
+    hash は dict / set の bucket を選ぶだけで、一致は bytes の比較で決まる。
+    """
+
+    if key_contains_unidentified(value):
+        # 識別不能 token を含む値は identity ではない（同じ token の写しどうしでも束ねない: C-K5）
+        return unidentified_identity("unidentified_value")
+    try:
+        return ("exact_value", _canonical_bytes(value))
+    except (_NotCanonical, RecursionError):
+        return unidentified_identity("non_canonical_value")
+
+
+def dedupe_exact(values: Any) -> Tuple[Any, ...]:
+    """出現順を保って、厳密に等しい値（`exact_value_key`）の 2 つ目以降を除く。識別できない値は除かない。"""
+
+    seen: set = set()
+    result: list = []
+    for value in values:
+        key = exact_value_key(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return tuple(result)
 
 
 def unidentified_identity(reason: str) -> StructuralKey:
@@ -1274,10 +1319,12 @@ def cross_side_node(node: Any) -> Any:
     左右を同一視すると、旧 provenance digest（ref の program id を含んだ）では一致しなかった深い式が
     一致する。左右の値の対応は PR-H の `CorrespondenceScope` が owner になるまで、そのような node は
     毎回新しい識別不能 token にして、左右の比較で何とも等しくならないようにする（`cross_process_node` と
-    同じ形の規則で、適用する場所が別）。
+    同じ形の規則で、適用する場所が別。こちらは node の中の深さを問わない）。
     """
 
-    if (type(node) is tuple or type(node) is list) and not PROCESS_SCOPED_TAGS.isdisjoint(_tags_of(node)):
+    if (type(node) is tuple or type(node) is list) and not key_is_process_independent(node):
+        # node の **どこか** に token があれば node 全体を識別不能にする（形を作る consumer は分岐ごとに
+        # 子の一部だけを返すことがあり、子へ降りる前に止めないと token が形の中に残る）
         return unidentified_identity("side_local_identity")
     return node
 
@@ -1364,12 +1411,20 @@ def _process_object_identity(expr: Any) -> StructuralKey:
 #   厳密比較へ移した  readonly の値の記号（`abi_width_readonly`: key の canonical な文字列で引く）、
 #                     guard overlap の node（描画した条件・query の `ExactRecordIntern` の token）、
 #                     exact query の attempt cache（hit は query の文字列の一致）、書き換えの operand の
-#                     照合（値の identity）、証拠の fingerprint（digest の無い式は fingerprint を付けない）
+#                     照合（値の identity）、証拠の fingerprint（digest の無い式は fingerprint を付けない）、
+#                     call effect の束ね・call の bucket・P-code の census（`dedupe_exact` /
+#                     `exact_value_key`）、production signal の「1 回だけ出す」集合（`signal_identity`）、
+#                     authority の前提 signal の束ね・conditional の前提（`authority_canonical_text`）、
+#                     共有 Z3 session の region（formula の文字列）
+#   consumer の規則   identity の値を束ねる・集合の key にする・照合する consumer は、digest や JSON の
+#                     文字列を自分で作らず、上の owner の API を使う（`test_digest_lookup_keys.py` が
+#                     digest を lookup の key にする箇所を棚卸しで固定する）
 #   封印・束縛のまま  InputCorrespondence の digest（束縛した artifact が同じ relation の下で作られたか
 #                     の確認と receipt の封印。値どうしを同じとはしない）、receipt の evidence digest、
 #                     artifact の seal
 #   範囲外（記録）    function 単位の unary artifact cache と ProofCache の key（snapshot / premise の
-#                     fingerprint の一致で再利用する。#219 の snapshot 再利用の identity と同じ族）
+#                     fingerprint の一致で再利用する。#219 の snapshot 再利用の identity と同じ族）、
+#                     Phase 7 の活性化の封印（signal digest）・CauseIdV2 の digest（authority 層の identity）
 
 #: `value_identity` の option（予算内の key と、超えたときの exact identity が同じ T_o を見る）
 _VALUE_IDENTITY_OPTIONS = {
