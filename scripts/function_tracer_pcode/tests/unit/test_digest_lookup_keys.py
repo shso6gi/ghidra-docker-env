@@ -81,8 +81,8 @@ def test_hand_recorded_digest_equalities_still_exist_where_recorded():
         ]
         assert functions, entry
         body = "\n".join(ast.get_source_segment(source, node) or "" for node in functions)
-        left, _, right = entry["form"].partition(" == " if " == " in entry["form"] else " != ")
-        assert left.split(".")[-1] in body and right.split(".")[-1] in body, entry
+        # 記録した比較の source そのもの（直したら場所が消えて、この test が baseline の掃除を求める）
+        assert entry["form"] in body, entry
 
 
 def test_the_scan_finds_the_forms_a_digest_keyed_identity_takes(tmp_path):

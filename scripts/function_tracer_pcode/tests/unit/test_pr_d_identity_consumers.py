@@ -385,8 +385,23 @@ def test_the_authority_identity_keeps_apart_what_the_digest_preimage_merges():
         assert authority_identity_key(left) != authority_identity_key(right), (left, right)
         assert authority_identity_key(left) == authority_identity_key(left)
     assert canonical_value({"a": 1}) == canonical_value((("a", 1),))
-    # authority の不変の形（`freeze_authority_value`）で同じ値は同じ identity（list と tuple）
+    # authority の不変の形（`freeze_authority_value`）で同じ値は同じ identity（list と tuple）。dataclass の
+    # field の中でも同じ
     assert authority_identity_key([1, (2, [3])]) == authority_identity_key((1, (2, (3,))))
+    assert authority_identity_key(_A([1])) == authority_identity_key(_A((1,)))
+
+    class _Spec(dict):
+        """容器の subclass でも `to_authority_dict` で読む。"""
+
+        def __init__(self, contents, authority):
+            super().__init__(contents)
+            self.authority = authority
+
+        def to_authority_dict(self):
+            return {"spec": self.authority}
+
+    assert authority_identity_key(_Spec({"k": 1}, "a")) != authority_identity_key(_Spec({"k": 1}, "b"))
+    assert authority_digest(_Spec({"k": 1}, "a")) != authority_digest(_Spec({"k": 1}, "b"))
 
 
 def test_readonly_value_symbols_are_never_shared_for_an_unidentified_key():
@@ -397,6 +412,10 @@ def test_readonly_value_symbols_are_never_shared_for_an_unidentified_key():
     token = structural.unidentified_identity("probe")
     unidentified = body[:-1] + (token,)
     assert _readonly_value_symbol_key(unidentified, 0) != _readonly_value_symbol_key(unidentified, 1)
+    # 記号は左右で共有する: process の中だけの token（exact tail）を含む key も共有しない
+    tail = structural.exact_tail_token(Expression.parameter("p", 0, "int", size=4))
+    side_local = body[:-1] + (tail,)
+    assert _readonly_value_symbol_key(side_local, 0) != _readonly_value_symbol_key(side_local, 1)
 
 
 def test_signals_that_differ_only_in_type_are_both_emitted(monkeypatch):

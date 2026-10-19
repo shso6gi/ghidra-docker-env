@@ -6,7 +6,14 @@ source: 名前に digest を含む呼び出し・属性、`json.dumps`・`_jsona
 sink: `in` / `.add` / `.get` / `.setdefault` / `.pop` / `.fromkeys` / `.discard` / `.remove` / subscript /
 dict・set の literal と内包 / `sorted`・`Counter`・`set` の等値比較。`.fromkeys` は内包の引数も、`map(<digest 関数>, ...)` も source として見る。test は対象外。
 
-走査しないもの: 2 つの digest の `==` / `!=`。package には artifact に束縛した digest と要求の digest を照合する
+走査しないもの（この走査の範囲外。review で見つけたものは baseline の `hand_recorded` に書く）:
+
+* 2 つの digest の `==` / `!=`（`any(... == ...)` を含む）と、属性どうしの比較
+* closure・`self` の属性・束縛した method の別名・walrus・`+=` を経由した流れ
+* `hash` / `str` / f-string の key、`list.index`、groupby
+* digest を返す関数は、`return <digest の呼び出し>` の形のものだけを source とする
+
+`==` / `!=` を走査しない理由: package には artifact に束縛した digest と要求の digest を照合する
 検証（封印・束縛の確認）が数百あり、規則で同一性の判定と分けられない。review で見つけた、digest の等値で
 2 つの値を同じとする判定は baseline の `hand_recorded` に書く（`test_digest_lookup_keys.py` が場所の存在を
 確かめる）。

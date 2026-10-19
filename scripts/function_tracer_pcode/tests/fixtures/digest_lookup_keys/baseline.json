@@ -856,7 +856,7 @@
   {
    "path": "analysis/returns/summary_returns.py",
    "function": "attach_quarantined_recurrence_proposal",
-   "form": "item.digest != proposal.digest",
+   "form": "if all(item.digest != proposal.digest for item in proposals):",
    "role": "identity_follow_up",
    "owner": "follow-up: recurrence proposals are bound to receipts by content digest (new Issue candidate, reported on PR #259)",
    "why": "quarantined recurrence proposals are deduplicated by content digest"
@@ -864,7 +864,7 @@
   {
    "path": "proof/strategies/proof_gates/call_effect.py",
    "function": "_impl__self_recursive_no_store_call_effect_proof_content",
-   "form": "proposal.digest == proposal_digest",
+   "form": "if str(getattr(proposal, \"digest\", \"\") or \"\") == proposal_digest",
    "role": "identity_follow_up",
    "owner": "follow-up: recurrence proposals are bound to receipts by content digest (new Issue candidate, reported on PR #259)",
    "why": "the proposal a recurrence receipt validated is selected by digest equality"
@@ -872,7 +872,7 @@
   {
    "path": "authority/domains/abi_width_readonly.py",
    "function": "_complete_registered_observation_contracts",
-   "form": "row.source_seed_digest == seed.seed_digest",
+   "form": "and row[1].source_seed_digest == seed.seed_digest",
    "role": "identity_follow_up",
    "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)",
    "why": "dependency rows are matched to their seed by digest equality"
@@ -880,7 +880,7 @@
   {
    "path": "authority/domains/abi_width_readonly.py",
    "function": "finalize_derived_promotions",
-   "form": "row.source_seed_digest == seed.seed_digest",
+   "form": "and row[1].source_seed_digest == seed.seed_digest",
    "role": "identity_follow_up",
    "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)",
    "why": "same as above"
@@ -888,7 +888,7 @@
   {
    "path": "authority/domains/abi_width_readonly.py",
    "function": "_execute_pending_solver_queries",
-   "form": "row.source_seed_digest == seed.seed_digest",
+   "form": "and row[1].source_seed_digest == seed.seed_digest",
    "role": "identity_follow_up",
    "owner": "follow-up: authority-layer digest identities (new Issue candidate, reported on PR #259)",
    "why": "same as above"

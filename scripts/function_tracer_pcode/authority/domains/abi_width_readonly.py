@@ -13,7 +13,7 @@ from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Optional
 
 from scripts.function_tracer_pcode.authority.domains.sat_safety_ledger import SAT_SAFETY_LEDGER_KEYS
-from scripts.function_tracer_pcode.core.structural import key_contains_unidentified
+from scripts.function_tracer_pcode.core.structural import key_is_process_independent
 from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrence,
     CauseOccurrenceAuthority,
@@ -1360,12 +1360,13 @@ _READONLY_CORRESPONDENCE_FACT_TOKEN = object()
 def _readonly_value_symbol_key(key_body: Any, ordinal: int) -> Any:
     """readonly の値の記号を共有する key（#218 PR-D）。
 
-    同じ値（`authority_identity_key` が等しい key）だけが同じ記号になる。識別不能 token を含む key は
-    値として同じと言えない（同じ token の写しでも: `core.structural.exact_value_key` と同じ規則）ので、
-    出現ごとに別の key（新しい記号）にする。
+    同じ値（`authority_identity_key` が等しい key）だけが同じ記号になる。記号は左右で共有するので、
+    process の中だけで意味を持つ token（識別不能・exact tail・object identity・exact record）を含む key は
+    値として同じと言えない（`core.structural.cross_side_node` と同じ規則）: 出現ごとに別の key（新しい
+    記号）にする。
     """
 
-    if key_contains_unidentified(key_body):
+    if not key_is_process_independent(key_body):
         return ("unshared_readonly_value", ordinal)
     return authority_identity_key(key_body)
 
