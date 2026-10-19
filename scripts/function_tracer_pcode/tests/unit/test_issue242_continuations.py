@@ -995,6 +995,38 @@ def test_audited_code_called_by_foreign_code_does_not_reuse_trust_judged_before_
     assert HOOKS == []
 
 
+def test_trust_judged_by_audited_code_inside_a_section_does_not_outlive_later_foreign_code():
+    """区間の中で呼ばれた監査済みの code が確かめた型の信頼は、その後に同じ区間の外の code が型を書き換えれば使えない:
+    区間を抜けるときにも epoch を数え、外側の確かめ直しは書き換えた後の型を確かめて判定不能（getter の前）。"""
+
+    HOOKS.clear()
+
+    @dataclasses.dataclass(frozen=True)
+    class Record:
+        second: int
+
+    record = Record(second=7)
+    seen = {}
+    state = live_values.begin_activation()
+    try:
+        assert live_values.package_instance(record, Record)
+        try:
+            with live_values.outside_audit():
+                inner = live_values.begin_activation()
+                try:
+                    seen["inner"] = live_values.package_instance(record, Record)
+                finally:
+                    live_values.end_activation(inner)
+                setattr(Record, "second", _foreign_getter(999))
+            seen["exit"] = "continued"
+        except live_values.UndecidableComparison:
+            seen["exit"] = "refused"
+    finally:
+        live_values.end_activation(state)
+    assert seen == {"inner": True, "exit": "refused"}
+    assert HOOKS == []
+
+
 def test_a_declared_generator_of_another_object_returned_by_json_items_rechecks_that_object():
     """独立 review: generator でない `json_items` が別の object（`inner`）の宣言した監査済みの generator を返すとき、止まって
     いる generator が頼るのは `inner`（generator の self）。子の外の code が `inner` の型へ外の property を足せば、再開の前に
