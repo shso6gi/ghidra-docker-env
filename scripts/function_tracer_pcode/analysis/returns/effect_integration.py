@@ -74,7 +74,6 @@ from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugR
 from scripts.function_tracer_pcode.analysis.returns._api import ConditionTracker
 from scripts.function_tracer_pcode.analysis.returns.expression_cases import ExpressionCaseService
 from scripts.function_tracer_pcode.analysis.returns.return_normalization import ReturnNormalizationService
-from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
 from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
 from scripts.function_tracer_pcode.analysis.returns.phi_origins import PhiOriginService
 from scripts.function_tracer_pcode.analysis.returns.divergence_proofs import DivergenceProofService
@@ -141,7 +140,7 @@ class EffectIntegrationService:
     都度読み、その container を in-place 更新する。owner の identity は固定するが各 field は都度参照するため、
     facade property による field object の差し替えには追随する。
     configuration: ``program`` / ``binary_id`` / ``debug`` フラグは従来どおり supplier 境界。
-    既存 collaborator（式ケース・条件正規化・stack-protector・p-code site・PHI 起源・発散証明・パラメータ・
+    既存 collaborator（式ケース・条件正規化・p-code site・PHI 起源・発散証明・パラメータ・
     RegionFacts・LocalValueResolver）は直接依存。未抽出 family（lifecycle / call_recovery / return_extraction）が
     所有する helper は facade 経由で遅延 dispatch する callable として注入する。
     ``local_memory_key`` / ``observable_store_effects`` は module 関数のまま据え置く。
@@ -155,7 +154,6 @@ class EffectIntegrationService:
         program_access: ProgramAccessService,
         expression_cases: ExpressionCaseService,
         return_normalization: ReturnNormalizationService,
-        stack_protector: StackProtectorService,
         pcode_sites: PcodeSiteService,
         phi_origins: PhiOriginService,
         divergence_proofs: DivergenceProofService,
@@ -191,7 +189,6 @@ class EffectIntegrationService:
         self.program_access = program_access
         self.expression_cases = expression_cases
         self.return_normalization = return_normalization
-        self.stack_protector = stack_protector
         self.pcode_sites = pcode_sites
         self.phi_origins = phi_origins
         self.divergence_proofs = divergence_proofs
@@ -580,37 +577,6 @@ class EffectIntegrationService:
             region_cross_edges_enumerated=bool(edges_complete),
             unsupported_mnemonics=tuple(sorted(unsupported)),
         )
-
-    def extract_stack_protector_memory_probe(
-        self,
-        expr: Optional[Expression],
-    ) -> Optional[Tuple[StructuralKey, int, int, int]]:
-        if expr is None:
-            return None
-
-        current = expr
-        while (
-            current.expr_type == ExpressionType.UNARY_OP
-            and current.operator in {"INT_ZEXT", "INT_SEXT"}
-            and current.operands
-        ):
-            current = current.operands[0]
-
-        if current.expr_type == ExpressionType.MEMORY and current.operands:
-            probe = self.stack_protector.extract_indirect_probe(current.operands[0])
-            if probe is None:
-                return None
-            base_key, displacement, deref_depth = probe
-            return (base_key, displacement, deref_depth, int(current.size or 0))
-
-        # Some architectures materialize the stack-protector spill as a direct
-        # INDIRECT expression over an already-dereferenced guard pointer instead
-        # of wrapping it in a MEMORY node. Preserve the same structured probe.
-        probe = self.stack_protector.extract_indirect_probe(current)
-        if probe is None:
-            return None
-        base_key, displacement, deref_depth = probe
-        return (base_key, displacement, deref_depth, int(current.size or 0))
 
     def make_empty_effect_summary(
         self,

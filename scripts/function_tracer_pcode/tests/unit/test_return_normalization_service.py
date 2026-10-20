@@ -17,7 +17,6 @@ DIRECT = {
         "parameter_constant_assignments_from_conditions",
         "evaluate_expression_under_parameter_assignments",
     },
-    "stack_protector": {"strip_stack_protector_only_conditions"},
     "pcode_sites": {"get_pcode_opcode"},
 }
 FACADE_CALLBACKS = (

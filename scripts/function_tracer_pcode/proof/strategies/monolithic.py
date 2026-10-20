@@ -10,9 +10,7 @@ from typing import Optional, Dict, Any, List, Mapping, Set, Tuple
 
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
 from scripts.function_tracer_pcode.core.render_smt import (
-    UnknownSmtExtensionWidthError,
-    UnsupportedSmtIntrinsicError,
-    UnsupportedSmtOperatorError,
+    SMT_SEMANTICS_REFUSALS,
 )
 from scripts.function_tracer_pcode.core.structural import condition_key, expression_provenance_key
 from scripts.function_tracer_pcode.smt import ParallelResult
@@ -1430,10 +1428,10 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                 blocked_result.comparison_execution_receipt = dispatch_frame.receipt
             return blocked_result
 
-        except UnknownSmtExtensionWidthError as e:
+        except SMT_SEMANTICS_REFUSALS as e:
             message = str(e)
             self._debug_print(
-                f"Monolithic check blocked by unknown extension width: {message}"
+                f"Monolithic check blocked by unsupported SMT semantics: {message}"
             )
             blocked_result = StrategyResult(
                 is_equivalent=None,
@@ -1447,82 +1445,9 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                     make_internal_v2_reason_diagnostic(
                         "expression_semantics_unsupported",
                         stage="S_MONOLITHIC_FALLBACK",
-                        evidence_refs=("unknown_smt_extension_width",),
+                        evidence_refs=(e.refusal_evidence_ref,),
                         object_target_key=(
-                            "unknown_smt_extension_width",
-                            e.operator,
-                            e.operand_bits,
-                            tuple(analysis1.outcome_function_identity()),
-                            tuple(analysis2.outcome_function_identity()),
-                        ),
-                        detail=message,
-                    )
-                ],
-            )
-            if dispatch_frame is not None and dispatch_frame.receipt is None:
-                issue_inconclusive_monolithic_receipts(
-                    dispatch_frame, frozen_surface, canonical_census, message
-                )
-                blocked_result.comparison_execution_receipt = dispatch_frame.receipt
-            return blocked_result
-
-        except UnsupportedSmtIntrinsicError as e:
-            message = str(e)
-            self._debug_print(f"Monolithic check blocked by unresolved intrinsic: {message}")
-            blocked_result = StrategyResult(
-                is_equivalent=None,
-                solver_results=ParallelResult(results=[]),
-                smt_formula=None,
-                counterexample_raw=None,
-                return_var1=None,
-                return_var2=None,
-                constrained_fragments=[],
-                unknown_reasons=[
-                    make_internal_v2_reason_diagnostic(
-                        "expression_semantics_unsupported",
-                        stage="S_MONOLITHIC_FALLBACK",
-                        evidence_refs=("unsupported_intrinsic_smt_lowering",),
-                        object_target_key=(
-                            "unsupported_smt_intrinsic",
-                            e.intrinsic_identity,
-                            tuple(analysis1.outcome_function_identity()),
-                            tuple(analysis2.outcome_function_identity()),
-                        ),
-                        detail=message,
-                    )
-                ],
-            )
-            if dispatch_frame is not None and dispatch_frame.receipt is None:
-                issue_inconclusive_monolithic_receipts(
-                    dispatch_frame, frozen_surface, canonical_census, message
-                )
-                blocked_result.comparison_execution_receipt = dispatch_frame.receipt
-            return blocked_result
-
-        except UnsupportedSmtOperatorError as e:
-            message = str(e)
-            self._debug_print(
-                f"Monolithic check blocked by unsupported SMT operator: {message}"
-            )
-            blocked_result = StrategyResult(
-                is_equivalent=None,
-                solver_results=ParallelResult(results=[]),
-                smt_formula=None,
-                counterexample_raw=None,
-                return_var1=None,
-                return_var2=None,
-                constrained_fragments=[],
-                unknown_reasons=[
-                    make_internal_v2_reason_diagnostic(
-                        "expression_semantics_unsupported",
-                        stage="S_MONOLITHIC_FALLBACK",
-                        evidence_refs=("unsupported_smt_operator",),
-                        object_target_key=(
-                            "unsupported_smt_operator",
-                            e.operator,
-                            e.reason,
-                            e.operand_bits,
-                            e.result_bits,
+                            *e.refusal_target_fields(),
                             tuple(analysis1.outcome_function_identity()),
                             tuple(analysis2.outcome_function_identity()),
                         ),

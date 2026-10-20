@@ -12,7 +12,7 @@ from scripts.function_tracer_pcode.analysis.returns._shared import (
 )
 from scripts.function_tracer_pcode.analysis.returns.debug_reporter import DebugReporter
 from scripts.function_tracer_pcode.analysis.returns.condition_logic import ConditionLogicService
-from scripts.function_tracer_pcode.analysis.returns.stack_protector import StackProtectorService
+from scripts.function_tracer_pcode.analysis.returns.constant_values import ConstantValueService
 from scripts.function_tracer_pcode.analysis.returns.pcode_sites import PcodeSiteService
 
 if TYPE_CHECKING:  # return_normalization は本 module の純関数を import するため循環回避
@@ -35,7 +35,7 @@ class PhiOriginService:
     """ReturnAnalyzer から切り出した PHI 起源鍵・PHI 循環判定・有限パラメータ到達分割の collaborator。
 
     facade 状態は読まない（debug フラグは supplier 経由）。条件論理は ``ConditionLogicService``、
-    定数値抽出は ``StackProtectorService``、p-code op 鍵は ``PcodeSiteService``、return 値正規化は
+    定数値抽出は ``ConstantValueService``、p-code op 鍵は ``PcodeSiteService``、return 値正規化は
     ``ReturnNormalizationService``、デバッグ出力は ``DebugReporter`` を直接依存として受け取る。facade 経由の
     callback は残っていない。``expression_contains_phi`` は module 関数が実装。
     """
@@ -44,14 +44,14 @@ class PhiOriginService:
         self,
         *,
         condition_logic: ConditionLogicService,
-        stack_protector: StackProtectorService,
+        constant_values: ConstantValueService,
         pcode_sites: PcodeSiteService,
         return_normalization: "ReturnNormalizationService",
         debug_reporter: DebugReporter,
         debug_flag: Callable[..., Any],
     ) -> None:
         self.condition_logic = condition_logic
-        self.stack_protector = stack_protector
+        self.constant_values = constant_values
         self.pcode_sites = pcode_sites
         self.return_normalization = return_normalization
         self.debug_reporter = debug_reporter
@@ -103,7 +103,7 @@ class PhiOriginService:
                 return (1, 0)
         expr_type = getattr(expr, "expr_type", None)
         if expr_type == ExpressionType.CONSTANT:
-            value = self.stack_protector.constant_int_value(expr)
+            value = self.constant_values.constant_int_value(expr)
             if value is None:
                 return None
             return (0, int(value))

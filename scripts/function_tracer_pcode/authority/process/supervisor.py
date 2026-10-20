@@ -82,6 +82,10 @@ from scripts.function_tracer_pcode.authority.domains.cross_side_identity import 
     CROSS_SIDE_IDENTITY_REASON_REGISTRY,
     CROSS_SIDE_IDENTITY_RECOVERY_REGISTRY,
 )
+from scripts.function_tracer_pcode.authority.domains.return_coverage import (
+    RETURN_COVERAGE_REASON_REGISTRY,
+    RETURN_COVERAGE_RECOVERY_REGISTRY,
+)
 from scripts.function_tracer_pcode.authority.registry import (
     SatisfactionBindingFactory,
     SealedReasonRegistry,
@@ -175,6 +179,7 @@ PROCESS_DURABLE_REASON_REGISTRY = SealedReasonRegistry.build((
     *ABI_WIDTH_READONLY_REASON_REGISTRY.snapshot(),
     *COMPARISON_CLOSURE_REASON_REGISTRY.snapshot(),
     *CROSS_SIDE_IDENTITY_REASON_REGISTRY.snapshot(),
+    *RETURN_COVERAGE_REASON_REGISTRY.snapshot(),
     *ANALYSIS_LIMITATION_REASON_REGISTRY.snapshot(),
     *PROCESS_COMPLETION_REASON_REGISTRY.snapshot(),
 ))
@@ -187,6 +192,7 @@ PROCESS_DURABLE_RECOVERY_REGISTRY = SealedRecoveryRegistry.build((
     *ABI_WIDTH_READONLY_RECOVERY_REGISTRY.snapshot(),
     *COMPARISON_CLOSURE_RECOVERY_REGISTRY.snapshot(),
     *CROSS_SIDE_IDENTITY_RECOVERY_REGISTRY.snapshot(),
+    *RETURN_COVERAGE_RECOVERY_REGISTRY.snapshot(),
     *ANALYSIS_LIMITATION_RECOVERY_REGISTRY.snapshot(),
     *PROCESS_COMPLETION_RECOVERY_REGISTRY.snapshot(),
 ))

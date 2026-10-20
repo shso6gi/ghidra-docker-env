@@ -57,6 +57,9 @@ from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
 from scripts.function_tracer_pcode.authority.domains.cross_side_identity import (
     CROSS_SIDE_IDENTITY_REASON_REGISTRY,
 )
+from scripts.function_tracer_pcode.authority.domains.return_coverage import (
+    RETURN_COVERAGE_REASON_REGISTRY,
+)
 from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
     ANALYSIS_LIMITATION_REASON_REGISTRY,
     AnalysisLimitationBlockerSignal,
@@ -67,13 +70,14 @@ from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
 
 
 PILOT_TYPED_CAUSE_KINDS = frozenset({
-    "return_coverage_gap",
-    "return_coverage_inconclusive",
     "outcome_partition_residual_sat",
     "comparison_equivalence_closure_unproven",
     "pair_process_completion_unavailable",
 }) | frozenset(
     item.reason_id for item in CROSS_SIDE_IDENTITY_REASON_REGISTRY.snapshot()
+) | frozenset(
+    # plan v4 PR-C: seed の無い解析の被覆（以前はここに名前だけを書いていた）。
+    item.reason_id for item in RETURN_COVERAGE_REASON_REGISTRY.snapshot()
 ) | frozenset(SAT_SAFETY_REASON_RESOLUTION) | frozenset(
     reason_id for reason_id in OUTCOME_STAGE_REASON_MATRIX.values()
     if reason_id is not None
@@ -1752,6 +1756,20 @@ class ProductionDualWritePilotConnector:
                     session.domain_signal_error_details,
                 )))
             )
+        # plan v4 PR-C: 最終の結果の比較が被覆の欠けで inconclusive の terminal 無しに終わったなら、その
+        # 記録（runner が比較に束縛した ``UnsealedCoverageTerminal``）だけを cause にする。前の段・別の比較
+        # の記録は最終の結果に付かないので cause にならない。
+        if getattr(result, "_unsealed_coverage_terminal", None) is not None:
+            from scripts.function_tracer_pcode.authority.domains.return_coverage import (
+                adopt_final_unsealed_coverage,
+            )
+            from scripts.function_tracer_pcode.authority.lifecycle.production_context import (
+                production_pilot_session_scope,
+            )
+
+            with production_pilot_session_scope(session):
+                adopt_final_unsealed_coverage(result, before_outcome)
+            session.ensure_event_contract_limitation()
         provisional_projection = session.preview_lifecycle_projection()
         provenance = getattr(result, "call_proof_terminal_provenance", None)
         if (

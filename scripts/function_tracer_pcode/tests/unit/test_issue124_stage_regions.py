@@ -929,7 +929,7 @@ def test_check_region_opens_at_method_entry_without_widening_the_catch_scope():
     # Issue #106 PR-106-0: typed handler は族 1 つ（`AnalysisFailureError`）。
     # catch scope は変えていないので、region の開き位置の契約はそのまま。
     assert [ast.unparse(handler.type) for handler in judgement[0].handlers] == [
-        "(UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError)",
+        "SMT_SEMANTICS_REFUSALS",
         "AnalysisFailureError",
         "Exception",
     ]

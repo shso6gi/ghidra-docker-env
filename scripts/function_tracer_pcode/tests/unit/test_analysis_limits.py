@@ -58,7 +58,7 @@ def test_owners_are_created_before_any_state_dependent_collaborator_in_the_const
     src = inspect.getsource(ReturnAnalyzer.__init__)
     lines = src.splitlines()
     idx = {k: next(i for i, l in enumerate(lines) if k in l) for k in ("self._analysis_session = AnalysisSession()", "self._runtime_state = AnalysisRuntimeState()", "self._limits = AnalysisLimits.from_settings()", "self._diagnostics = AnalysisDiagnosticsState()")}
-    first_collab = next(i for i, l in enumerate(lines) if "= ExpressionCaseService(" in l or "= StackProtectorService(" in l)
+    first_collab = next(i for i, l in enumerate(lines) if "= ExpressionCaseService(" in l or "= ConstantValueService(" in l)
     assert max(idx.values()) < first_collab
     # DebugReporter / LocalValueResolver / ProgramAccessService はそれより前に作られるが、runtime state / limits を受け取らない
     assert "_runtime_state" not in "".join(lines[: idx["self._runtime_state = AnalysisRuntimeState()"]])

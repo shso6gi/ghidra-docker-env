@@ -1,6 +1,6 @@
 name: recorded-full
 
-# The whole recorded P-code corpus: all eight cases, nine replays, every one
+# The whole recorded P-code corpus: all nine cases, ten replays, every one
 # through the same validator the per-PR recorded-fast job uses. This is off the
 # PR critical path because two replays (wood, barthe2big) are ~92% of the
 # corpus wall clock -- not because anything about them is checked less.
@@ -136,7 +136,7 @@ jobs:
           path: reports
           merge-multiple: true
 
-      # Replays nothing. Checks that the expected nine variants each appear
+      # Replays nothing. Checks that the expected ten variants each appear
       # exactly once and passed, and that the SUM of their times is inside the
       # corpus budget. The budget is never read as the workflow's wall clock:
       # running the corpus as a matrix shortens the workflow and changes

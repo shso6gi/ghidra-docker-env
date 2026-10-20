@@ -29,6 +29,13 @@ from scripts.function_tracer_pcode.authority.domains.cross_side_identity import 
     CROSS_SIDE_IDENTITY_REASON_ID,
     CROSS_SIDE_IDENTITY_SITE_ID,
 )
+from scripts.function_tracer_pcode.authority.domains.return_coverage import (
+    RETURN_COVERAGE_DOMAIN,
+    RETURN_COVERAGE_IDENTITY_SCOPE,
+    RETURN_COVERAGE_PRODUCER_ID,
+    RETURN_COVERAGE_REASON_IDS,
+    RETURN_COVERAGE_SITE_ID,
+)
 from scripts.function_tracer_pcode.authority.domains.call_effect_sites import (
     CALL_EFFECT_PROOF_BATCH_SITE,
     CALL_EFFECT_PRODUCER_SITE_SPECS,
@@ -62,6 +69,7 @@ EMITTERS = frozenset({
     "emit_operational_extraction_signal",
     "emit_comparison_closure_signal",
     "emit_cross_side_identity_signal",
+    "emit_return_coverage_signal",
     "emit_identical_function_identity_signal",
 })
 
@@ -77,6 +85,7 @@ _DOMAIN_BY_EMITTER = {
     "emit_operational_extraction_signal": "operational_extraction",
     "emit_comparison_closure_signal": "comparison_closure",
     "emit_cross_side_identity_signal": CROSS_SIDE_IDENTITY_DOMAIN,
+    "emit_return_coverage_signal": RETURN_COVERAGE_DOMAIN,
     "emit_identical_function_identity_signal": "identical_function_identity",
 }
 
@@ -173,6 +182,7 @@ _PRODUCER_IDS_BY_SITE = {
     ),
     "comparison-inconclusive-terminal": ("comparison-closure-producer-v1",),
     CROSS_SIDE_IDENTITY_SITE_ID: (CROSS_SIDE_IDENTITY_PRODUCER_ID,),
+    RETURN_COVERAGE_SITE_ID: (RETURN_COVERAGE_PRODUCER_ID,),
     "checker-identical-function-identity": (
         "identical-function-identity-producer-v1",
     ),
@@ -218,6 +228,7 @@ _DISPOSITIONS_BY_SITE = {
     },
     "comparison-inconclusive-terminal": ("ELIGIBLE",),
     CROSS_SIDE_IDENTITY_SITE_ID: ("ELIGIBLE",),
+    RETURN_COVERAGE_SITE_ID: ("ELIGIBLE",),
     "checker-identical-function-identity": ("DECISIVE",),
 }
 
@@ -235,6 +246,7 @@ _CAUSE_REASON_IDS_BY_SITE = {
         "comparison_equivalence_closure_unproven",
     ),
     CROSS_SIDE_IDENTITY_SITE_ID: (CROSS_SIDE_IDENTITY_REASON_ID,),
+    RETURN_COVERAGE_SITE_ID: RETURN_COVERAGE_REASON_IDS,
     "call-effect-producer-blocker": ("pure_call_semantics_unproven",),
     "call-effect-producer-prerequisite": (
         "abi_argument_relation_unproven",
@@ -333,6 +345,7 @@ _REASON_IDENTITY_SCOPES = {
     **{reason_id: "RELATIONAL" for reason_id in SAT_SAFETY_REASON_RESOLUTION},
     "comparison_equivalence_closure_unproven": "RELATIONAL",
     CROSS_SIDE_IDENTITY_REASON_ID: CROSS_SIDE_IDENTITY_IDENTITY_SCOPE.value,
+    **{reason_id: RETURN_COVERAGE_IDENTITY_SCOPE.value for reason_id in RETURN_COVERAGE_REASON_IDS},
     ANALYSIS_BUDGET_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,
     EXPRESSION_SIZE_BUDGET_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,
     COMPARISON_UNDECIDABLE_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,

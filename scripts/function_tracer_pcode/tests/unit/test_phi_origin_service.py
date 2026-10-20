@@ -19,14 +19,14 @@ def test_collaborator_holds_only_its_dependencies():
     service = analyzer._phi_origins
     assert set(vars(service)) == {
         "condition_logic",
-        "stack_protector",
+        "constant_values",
         "pcode_sites",
         "return_normalization",
         "debug_reporter",
         "debug_flag",
     }
     assert service.condition_logic is analyzer._condition_logic
-    assert service.stack_protector is analyzer._stack_protector
+    assert service.constant_values is analyzer._constant_values
     assert service.pcode_sites is analyzer._pcode_sites
     assert service.return_normalization is analyzer._return_normalization
 
@@ -50,7 +50,7 @@ def test_every_delegator_forwards_to_the_collaborator():
             mocked.assert_called_once_with(*args, **kwargs)
 
 
-def test_condition_logic_and_stack_protector_are_direct_dependencies():
+def test_condition_logic_and_constant_values_are_direct_dependencies():
     """collaborator 本体は conditions_are_unsat / constant_int_value を直接依存経由でのみ呼ぶ。"""
     tree = ast.parse(inspect.getsource(po_module))
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "PhiOriginService")
@@ -62,7 +62,7 @@ def test_condition_logic_and_stack_protector_are_direct_dependencies():
                 routed.add((base.attr, node.attr))
             elif isinstance(base, ast.Name) and base.id == "self":
                 direct_on_self.add(node.attr)
-    assert routed == {("condition_logic", "conditions_are_unsat"), ("stack_protector", "constant_int_value")}
+    assert routed == {("condition_logic", "conditions_are_unsat"), ("constant_values", "constant_int_value")}
     assert direct_on_self == set()
     # 実行時にも facade を経由しないこと
     analyzer = _analyzer()

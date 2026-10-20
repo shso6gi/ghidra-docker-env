@@ -66,8 +66,8 @@ WITNESSED_REASON_PROPOSITIONS = MappingProxyType({
 RETURN_OUTCOME_TYPED_REASON_IDS = frozenset(
     reason_id for reason_id in OUTCOME_STAGE_REASON_MATRIX.values() if reason_id
 ) | frozenset({
-    "return_coverage_gap",
-    "return_coverage_inconclusive",
+    # ``return_coverage_gap`` / ``return_coverage_inconclusive`` は ``return_coverage`` domain が所有する
+    # （seed の無い解析の被覆。plan v4 PR-C）。
     "outcome_partition_semantics_unresolved",
     "outcome_seed_missing",
     "outcome_stage_producer_missing",

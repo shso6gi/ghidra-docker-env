@@ -66,7 +66,7 @@ def test_top_level_try_except_handlers_keep_their_types_order_and_bodies():
     tr = _top_try(fn)
     assert len(tr.handlers) == 3 and not tr.orelse and not tr.finalbody
     assert [ast.unparse(handler.type) for handler in tr.handlers] == [
-        "(UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError)",
+        "SMT_SEMANTICS_REFUSALS",
         "AnalysisFailureError",
         "Exception",
     ]

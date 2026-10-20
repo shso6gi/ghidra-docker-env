@@ -6,8 +6,7 @@ from typing import Optional, Dict, List, Tuple
 import time
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis, FunctionSignature
 from scripts.function_tracer_pcode.core.render_smt import (
-    UnknownSmtExtensionWidthError,
-    UnsupportedSmtOperatorError,
+    SMT_SEMANTICS_REFUSALS,
 )
 from scripts.function_tracer_pcode.smt import ParallelResult
 from scripts.function_tracer_pcode.proof.formula.returns import ReturnWidthMismatchError
@@ -128,12 +127,8 @@ class AbiRetryMixin:
             )
             return equivalence_result
 
-        except (UnknownSmtExtensionWidthError, UnsupportedSmtOperatorError) as e:
-            diagnostic_kind = (
-                "unknown_smt_extension_width"
-                if isinstance(e, UnknownSmtExtensionWidthError)
-                else "unsupported_smt_operator"
-            )
+        except SMT_SEMANTICS_REFUSALS as e:
+            diagnostic_kind = e.refusal_evidence_ref
             self._debug_print(
                 f"ABI retry blocked by unsupported SMT expression semantics: {e}"
             )
@@ -177,10 +172,7 @@ class AbiRetryMixin:
                         stage="ABI_RETRY",
                         evidence_refs=(diagnostic_kind,),
                         object_target_key=(
-                            diagnostic_kind,
-                            e.operator,
-                            e.operand_bits,
-                            getattr(e, "result_bits", 0),
+                            *e.refusal_target_fields(),
                             tuple(blocked_analysis1.outcome_function_identity()),
                             tuple(blocked_analysis2.outcome_function_identity()),
                         ),

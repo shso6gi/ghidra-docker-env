@@ -9,6 +9,12 @@ template が材料を持たない段（構造的な再帰の要約・bounded cal
 control flow の印・observable effect）と公開境界（``publish_raw_function_analysis``: 意味値の公開と
 入力領域の封印）は本物。
 
+``outcome_seed=True`` のときは outcome partition の段（``_apply_outcome_partition_summaries``: termination の
+証拠と outcome seed の構築）も本物で通し、CFG を要る要約（``_try_apply_*``）だけを「適用しない」にする。
+本番の解析器は解析ごとに seed を作り、seed のある解析は比較の前に outcome partition の段の cause を出す
+（plan v4 PR-C §7.3 の 3）。合成の CFG は無いので、seed のある解析は CFG の到達性を証明できず、比較は
+EQ にならない（``outcome_cfg_reachability_unproven``）。EQ の対照は既定（seed なし）で作る。
+
 ``run_production_check(..., analyze=analyze_through_pipeline)`` と組み合わせると、左右の解析がこの段を
 通った後に本物の checker・authority・cutover で判定される。
 """
@@ -88,7 +94,35 @@ class _ConditionTracker:
         return None
 
 
-def analyze_through_pipeline(template: Any) -> Any:
+def _cfg_outcome_summaries() -> tuple:
+    """outcome partition の段が呼ぶ、CFG を要る要約（``self._try_apply_*``）の名前。
+
+    一覧を手で持たず、段の本体（``_impl__apply_outcome_partition_summaries``）が呼ぶ名前を読む: 要約が
+    増えても「適用しない」に差し替え漏れが出ない。
+    """
+
+    import ast
+    import inspect
+    import textwrap
+
+    from scripts.function_tracer_pcode.analysis.returns import return_extraction
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(return_extraction._impl__apply_outcome_partition_summaries)))
+    names = sorted({
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+        and node.func.attr.startswith("_try_apply_")
+    })
+    if not names:
+        raise AssertionError("the outcome partition stage calls no CFG summary; the harness premise changed")
+    return tuple(names)
+
+
+def analyze_through_pipeline(template: Any, *, outcome_seed: bool = False) -> Any:
     """``template``（公開前の解析）の return から始めて、本物の解析の段と公開境界を通した解析。
 
     呼ぶたびに新しい解析器・新しい return の複製を使う（本番の再解析と同じく、毎回新しい解析を作る）。
@@ -148,5 +182,9 @@ def analyze_through_pipeline(template: Any) -> Any:
         )
         stack.enter_context(patch.object(analyzer, "_apply_structural_recurrence_summary", return_value=None))
         stack.enter_context(patch.object(analyzer, "_apply_bounded_call_refinement", return_value=None))
-        stack.enter_context(patch.object(analyzer, "_apply_outcome_partition_summaries", return_value=None))
+        if outcome_seed:
+            for name in _cfg_outcome_summaries():
+                stack.enter_context(patch.object(analyzer, name, return_value=False))
+        else:
+            stack.enter_context(patch.object(analyzer, "_apply_outcome_partition_summaries", return_value=None))
         return analyzer.analyze_function_by_name(template.function_name)
