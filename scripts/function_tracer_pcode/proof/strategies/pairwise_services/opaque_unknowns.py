@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, List, Optional, Tuple
 
-from scripts.function_tracer_pcode.core.structural import provenance_key_view
+from scripts.function_tracer_pcode.core.structural import label_view
 
 
 def _impl__opaque_unknown_return_object_evidence_from_target(
@@ -62,7 +62,7 @@ def _impl__opaque_unknown_refs_from_value(cls, value: Any) -> Tuple[Any, ...]:
 
     def visit(node: Any) -> None:
         # provenance key の ref の identity（projection の atom）は owner の読み口で形を読む（Issue #215）
-        normalized = provenance_key_view(cls._normalize_nested_tuple(node))
+        normalized = label_view(cls._normalize_nested_tuple(node))
         if isinstance(normalized, tuple):
             if (
                 len(normalized) == 2
@@ -158,7 +158,7 @@ def _impl__unknown_expression_classification_key(self, expr: Any) -> Tuple[str, 
 
 def _impl__object_target_contains_void_opaque_unknown(cls, value: Any) -> bool:
     # provenance key の ref の identity（projection の atom）は owner の読み口で形を読む（Issue #215）
-    normalized = provenance_key_view(cls._normalize_nested_tuple(value))
+    normalized = label_view(cls._normalize_nested_tuple(value))
     if isinstance(normalized, tuple):
         if (
             len(normalized) >= 2

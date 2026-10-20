@@ -10,7 +10,8 @@ from scripts.function_tracer_pcode.core import (
     Expression,
     PcodeBlockRef,
     PcodeOpRef,
-    expression_provenance_key,
+    object_target_key,
+    value_identity,
 )
 from scripts.function_tracer_pcode.analysis.effects._shared import (
     CallArgumentEvidence,
@@ -174,6 +175,7 @@ def _impl_summarize_store_effects(
             else None
         )
         expansion_values: List[Tuple[object, ...]] = []
+        expansion_targets: List[Tuple[object, ...]] = []
         expansion_guards: List[Tuple[object, ...]] = []
         expansion_partitions: List[Tuple[Tuple[Condition, ...], Expression]] = []
         for expansion in return_expansions or ():
@@ -184,12 +186,13 @@ def _impl_summarize_store_effects(
                 if isinstance(condition, Condition)
             )
             value_key = (
-                expression_provenance_key(expansion_value)
+                value_identity(expansion_value)
                 if isinstance(expansion_value, Expression)
                 else None
             )
             if isinstance(value_key, tuple):
                 expansion_values.append(value_key)
+                expansion_targets.append(object_target_key(expansion_value))
                 expansion_partitions.append(
                     (expansion_conditions, expansion_value)
                 )
@@ -202,7 +205,11 @@ def _impl_summarize_store_effects(
                 pcode_op_ref=_pcode_ref_for_op(op),
                 target_ref=target_ref,
                 argument_keys=tuple(
-                    expression_provenance_key(argument)
+                    value_identity(argument)
+                    for argument in arguments or ()
+                ),
+                argument_target_keys=tuple(
+                    object_target_key(argument)
                     for argument in arguments or ()
                 ),
                 path_condition_keys=tuple(
@@ -258,6 +265,7 @@ def _impl_summarize_store_effects(
                     else None
                 ),
                 return_value_keys=tuple(expansion_values),
+                return_value_target_keys=tuple(expansion_targets),
                 return_guard_keys=tuple(expansion_guards),
                 return_partitions=tuple(expansion_partitions),
                 memory_effects=tuple(getattr(callee_summary, "effects", ()) or ()),

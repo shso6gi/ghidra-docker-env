@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "9f93d51b3f039c480198f60853a23d934143a5d740d5ba2580b2c1d9252a3345",
+  "manifest_digest": "013f68c96be19e8d7f8ddabc99f5f53fced502ae11128c3f14a62a9525f306f1",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 34,
   "sites": [
@@ -69,7 +69,7 @@
       "line": 2648,
       "path": "scripts/function_tracer_pcode/proof/call_effect/producer.py",
       "producer_site_manifest_id": "call-effect-producer-blocker",
-      "source_sha256": "5a1d2b18f28d8b2ea9548f063423b6b3ed41654e19fa4b3e1d29a8683d1d8580"
+      "source_sha256": "afa7ae2f0635844ee80bba9b59cb805f42caec8b3e52db452666ca1f43ec636b"
     },
     {
       "allowed_dispositions": [
@@ -128,7 +128,7 @@
       "line": 2643,
       "path": "scripts/function_tracer_pcode/proof/call_effect/producer.py",
       "producer_site_manifest_id": "call-effect-producer-prerequisite",
-      "source_sha256": "5a1d2b18f28d8b2ea9548f063423b6b3ed41654e19fa4b3e1d29a8683d1d8580"
+      "source_sha256": "afa7ae2f0635844ee80bba9b59cb805f42caec8b3e52db452666ca1f43ec636b"
     },
     {
       "allowed_dispositions": [
@@ -595,10 +595,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 2091,
+      "line": 2092,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "pairwise-loop-sat-safety-observed",
-      "source_sha256": "7f80a32fac10a2deb582907d6daa93b0b83c2027471a8475c7b0894c49cdb0d1"
+      "source_sha256": "d65697194d2bd5e84da72489317acad2faaf78ad61b4d4175f34b0307ea4a986"
     },
     {
       "allowed_dispositions": [
@@ -1026,10 +1026,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1130,
+      "line": 1131,
       "path": "scripts/function_tracer_pcode/proof/return_width/surface.py",
       "producer_site_manifest_id": "return-width-observation-contract-blocker",
-      "source_sha256": "cfb125dcdb61a7c93cb2ca4f6a6b3b2cc37944ed4d4b3569248cccc209e89bd9"
+      "source_sha256": "b835de42691a3beafd3389e5e6a68e51f08bc707d03b97b0d38efceb4cc05035"
     },
     {
       "allowed_dispositions": [
@@ -1067,10 +1067,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 197,
+      "line": 198,
       "path": "scripts/function_tracer_pcode/proof/return_width/pipeline.py",
       "producer_site_manifest_id": "return-width-pair-assessment",
-      "source_sha256": "377bd28c578c9ebc0810a641bf2bed28e0407edc19b27d2f2f91ecc04e02136d"
+      "source_sha256": "296e64d83ff02af3302180f6c4d6f4ca3d3349249e423c0f135a3af6d427a29e"
     },
     {
       "allowed_dispositions": [
@@ -1096,10 +1096,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 256,
+      "line": 257,
       "path": "scripts/function_tracer_pcode/proof/return_width/pipeline.py",
       "producer_site_manifest_id": "return-width-pair-unary-provenance-blocker",
-      "source_sha256": "377bd28c578c9ebc0810a641bf2bed28e0407edc19b27d2f2f91ecc04e02136d"
+      "source_sha256": "296e64d83ff02af3302180f6c4d6f4ca3d3349249e423c0f135a3af6d427a29e"
     },
     {
       "allowed_dispositions": [
@@ -1135,10 +1135,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1255,
+      "line": 1256,
       "path": "scripts/function_tracer_pcode/proof/return_width/surface.py",
       "producer_site_manifest_id": "return-width-projection-relation-blocker",
-      "source_sha256": "cfb125dcdb61a7c93cb2ca4f6a6b3b2cc37944ed4d4b3569248cccc209e89bd9"
+      "source_sha256": "b835de42691a3beafd3389e5e6a68e51f08bc707d03b97b0d38efceb4cc05035"
     },
     {
       "allowed_dispositions": [
@@ -1164,10 +1164,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1174,
+      "line": 1175,
       "path": "scripts/function_tracer_pcode/proof/return_width/surface.py",
       "producer_site_manifest_id": "return-width-unary-provenance-blocker",
-      "source_sha256": "cfb125dcdb61a7c93cb2ca4f6a6b3b2cc37944ed4d4b3569248cccc209e89bd9"
+      "source_sha256": "b835de42691a3beafd3389e5e6a68e51f08bc707d03b97b0d38efceb4cc05035"
     },
     {
       "allowed_dispositions": [
@@ -1185,7 +1185,7 @@
       "line": 1368,
       "path": "scripts/function_tracer_pcode/proof/strategies/monolithic.py",
       "producer_site_manifest_id": "safe-counterexample-monolithic-production",
-      "source_sha256": "81ddfda6687c4057868e21a675af7ede3c77bc8fa4963b7e572226472d3b9c1a"
+      "source_sha256": "a798b07822a1ec52c39aa52f194a98004b8297739e1ec368f2d02cd609621e79"
     },
     {
       "allowed_dispositions": [
@@ -1325,7 +1325,7 @@
       "line": 1682,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "sat-safety-counterexample-bound-completed",
-      "source_sha256": "7f80a32fac10a2deb582907d6daa93b0b83c2027471a8475c7b0894c49cdb0d1"
+      "source_sha256": "d65697194d2bd5e84da72489317acad2faaf78ad61b4d4175f34b0307ea4a986"
     }
   ]
 }

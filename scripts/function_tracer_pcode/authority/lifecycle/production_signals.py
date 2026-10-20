@@ -1747,13 +1747,14 @@ def emit_call_effect_signal(
         return 0
     from scripts.function_tracer_pcode.authority.sites.runtime import Phase7ProductionRuntime
 
-    signal_digest = Phase7ProductionRuntime.signal_digest(
+    # 1 回だけ出すかは signal の identity の厳密な一致で決める（digest の衝突で別の signal を捨てない）
+    signal_identity_key = Phase7ProductionRuntime.signal_identity(
         producer_site_manifest_id, signal
     )
     emitted = session.domain_signal_state.setdefault(
-        "call_effect_production_signal_digests", set()
+        "call_effect_production_signal_identities", set()
     )
-    if signal_digest in emitted:
+    if signal_identity_key in emitted:
         return 0
     if getattr(session, "phase7_runtime", None) is not None:
         session.record_phase7_pre_emission_activation(
@@ -1763,7 +1764,7 @@ def emit_call_effect_signal(
     if not callable(emit):
         raise TypeError("active production pilot session lacks signal authority")
     count = int(emit(signal))
-    emitted.add(signal_digest)
+    emitted.add(signal_identity_key)
     return count
 
 

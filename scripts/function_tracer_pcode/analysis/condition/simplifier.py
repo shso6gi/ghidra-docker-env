@@ -17,7 +17,6 @@ CONDITION_SIMPLIFY_STAGE = "condition_simplify"
 from scripts.function_tracer_pcode.core.structural import (
     ConditionsSignature,
     condition_key_safe,
-    expression_provenance_key,
 )
 from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
     cache_lookup,

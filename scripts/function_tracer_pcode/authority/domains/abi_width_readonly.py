@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Optional
 
 from scripts.function_tracer_pcode.authority.domains.sat_safety_ledger import SAT_SAFETY_LEDGER_KEYS
+from scripts.function_tracer_pcode.core.structural import key_is_process_independent
 from scripts.function_tracer_pcode.authority.contracts import (
     CauseOccurrence,
     CauseOccurrenceAuthority,
@@ -27,6 +28,7 @@ from scripts.function_tracer_pcode.authority.contracts import (
     SatisfactionContractDefinition,
     TransformationKind,
     authority_digest,
+    authority_identity_key,
     canonical_value,
     requirement_slot,
 )
@@ -1355,6 +1357,20 @@ class ResolvedReadonlyObjectSetSeed:
 _READONLY_CORRESPONDENCE_FACT_TOKEN = object()
 
 
+def _readonly_value_symbol_key(key_body: Any, ordinal: int) -> Any:
+    """readonly の値の記号を共有する key（#218 PR-D）。
+
+    同じ値（`authority_identity_key` が等しい key）だけが同じ記号になる。記号は左右で共有するので、
+    process の中だけで意味を持つ token（識別不能・exact tail・object identity・exact record）を含む key は
+    値として同じと言えない（`core.structural.cross_side_node` と同じ規則）: 出現ごとに別の key（新しい
+    記号）にする。
+    """
+
+    if not key_is_process_independent(key_body):
+        return ("unshared_readonly_value", ordinal)
+    return authority_identity_key(key_body)
+
+
 @dataclass(frozen=True, init=False)
 class ReadonlyCorrespondenceFactSet:
     """Independent structural premises plus the factory-owned value goal."""
@@ -1548,8 +1564,12 @@ class ReadonlyCorrespondenceFactSet:
                         "resolved storage descriptor differs from load semantics"
                     )
 
-        symbols_by_value_key: dict[str, str] = {}
-        shared_authority_rows: dict[str, Any] = {}
+        # 記号の共有は値の key の厳密な identity（`authority_identity_key`）で決める: digest の一致・型を
+        # 落とす preimage の一致で別の値を同じ記号にしない（#218 PR-D）。行の並びは従来どおり key の
+        # digest の順
+        symbols_by_value_key: dict[Any, str] = {}
+        shared_authority_rows: dict[Any, Any] = {}
+        shared_row_order: dict[Any, tuple] = {}
         shared_contract = seed.shared_input_memory_contract
 
         def value_key(
@@ -1601,14 +1621,17 @@ class ReadonlyCorrespondenceFactSet:
             values = []
             for member, descriptor in zip(members, descriptors):
                 key_body, is_shared = value_key(member, descriptor, side)
-                value_key_digest = authority_digest(key_body)
+                value_key_identity = _readonly_value_symbol_key(key_body, len(symbols_by_value_key))
                 symbol = symbols_by_value_key.setdefault(
-                    value_key_digest,
+                    value_key_identity,
                     f"readonly_value_{len(symbols_by_value_key)}",
                 )
                 if is_shared:
+                    shared_row_order.setdefault(
+                        value_key_identity, (authority_digest(key_body), len(shared_row_order)),
+                    )
                     shared_authority_rows.setdefault(
-                        value_key_digest,
+                        value_key_identity,
                         (
                             "shared_parameter_value_authority_v2",
                             symbol, key_body, shared_contract,
@@ -1683,7 +1706,7 @@ class ReadonlyCorrespondenceFactSet:
             premise_fact_rows=premise_rows,
             shared_value_authority_rows=tuple(
                 shared_authority_rows[key]
-                for key in sorted(shared_authority_rows)
+                for key in sorted(shared_authority_rows, key=shared_row_order.__getitem__)
             ),
             goal_fact_row=goal,
             _factory_token=_READONLY_CORRESPONDENCE_FACT_TOKEN,

@@ -333,7 +333,7 @@ def test_an_unfixable_value_gives_no_identity_and_no_shared_symbol(name, placeme
         assert projection.runtime_semantic_key is None
         assert projection.runtime_stable_origin is None
     assert structural.structural_identity_digest(left) is None
-    assert structural.expression_provenance_key(left) != structural.expression_provenance_key(right)
+    assert structural.object_target_key(left) != structural.object_target_key(right)
     verdict, distinct = _notequal_verdict(left, right)
     assert verdict is not True, distinct
     assert not _same_symbol(distinct), distinct
@@ -389,7 +389,7 @@ def test_an_unfixable_value_is_never_comparable_and_never_raises(name, placement
     assert comparable is False
     assert exact_structural_identity(expr) != exact_structural_identity(other)
     assert structural.structural_identity_digest(expr) is None
-    assert structural.expression_provenance_key(expr) != structural.expression_provenance_key(other)
+    assert structural.object_target_key(expr) != structural.object_target_key(other)
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +410,7 @@ def test_a_cyclic_or_deep_value_stops_every_reader(make, placement, frozen):
     expression_key_status(expr)
     exact_structural_identity(expr)
     structural.structural_identity_digest(expr)
-    structural.expression_provenance_key(expr)
+    structural.object_target_key(expr)
     solver_symbol_identity(expr)
     verdict, _distinct = _notequal_verdict(expr, _maybe_frozen(builders[placement](make()), frozen))
     assert verdict is not True
@@ -448,7 +448,7 @@ def test_an_incomplete_parameter_key_is_still_rejected_as_a_solver_symbol(key):
 
 
 def test_the_cross_binary_shape_reads_the_parameter_identity_through_the_view():
-    # 対応候補の形（artifact に固有の program id を外す）は provenance key を `provenance_key_view` で読む
+    # 対応候補の形（artifact に固有の program id を外す）は provenance key を `label_view` で読む
     from scripts.function_tracer_pcode.core.runtime_refs import LocationBaseRef
     from scripts.function_tracer_pcode.proof.call_effect.obligations import _cross_binary_expression_shape
 
@@ -456,7 +456,7 @@ def test_the_cross_binary_shape_reads_the_parameter_identity_through_the_view():
         ref = LocationBaseRef.parameter("p", index=2, owner_program_id=program_id, owner_entry_offset=0x1000)
         return freeze_expression(Expression.parameter("p", 2, "int", size=4, runtime_ref=ref))
 
-    left, right = (structural.expression_provenance_key(parameter(program)) for program in (11, 22))
+    left, right = (structural.object_target_key(parameter(program)) for program in (11, 22))
     assert left != right
     assert _cross_binary_expression_shape(left) == _cross_binary_expression_shape(right) == ("runtime_ref", ("parameter", 2))
 
@@ -482,15 +482,17 @@ def test_an_address_identity_outside_its_schema_is_not_an_identity():
 
 
 @pytest.mark.parametrize("make", [_cyclic_list, _cyclic_dict, lambda: _deep(MAX_VALUE_DEPTH * 4)], ids=["list", "dict", "deep"])
-def test_the_provenance_value_reader_stops_on_cycles_by_itself(make):
-    # provenance の digest は識別できない値の前に止まるが（`_provenance_inputs_identified`）、値の表現の
-    # reader 自身も閉路と深い入れ子で止まる（読み手ごとの guard に頼らない: 入口を足しても再帰しない）
-    key = structural._stable_value_key(make())
-    assert structural._value_key_has_opaque(key)
+def test_the_value_identity_stops_on_cycles_by_itself(make):
+    # 値の identity は閉路と深い入れ子の値で止まり、識別不能になる（#218 PR-D: 旧 provenance digest の
+    # 値の reader は撤去した。値は構造 key と同じ `canonical_atom` の判定だけで読む）
+    expr = Expression.constant(0, size=4)
+    expr.value = make()
+    assert structural.value_identity(expr) != structural.value_identity(expr)
+    assert structural.object_target_key(expr) != structural.object_target_key(expr)
 
 
 def test_shape_matchers_and_forbidden_tag_checks_see_inside_identity_atoms():
-    # provenance key の ref の identity（atom）の中の schema と印は、owner の読み口（`provenance_key_view` /
+    # provenance key の ref の identity（atom）の中の schema と印は、owner の読み口（`label_view` /
     # `tags_of`）で読む consumer から見える
     from scripts.function_tracer_pcode.analysis.returns.summary_returns import _key_contains_forbidden_identity
     from scripts.function_tracer_pcode.core.runtime_refs import UnknownValueRef
@@ -506,7 +508,7 @@ def test_shape_matchers_and_forbidden_tag_checks_see_inside_identity_atoms():
     unknown = freeze_expression(
         Expression.unknown("phi", runtime_ref=UnknownValueRef.phi_circular(pcode_op_ref=_Op()))
     )
-    target = ("object_target", structural.expression_provenance_key(unknown))
+    target = ("object_target", structural.object_target_key(unknown))
     assert PairwiseStrategy._object_target_contains_originated_phi_circular(target) is True
     assert PairwiseStrategy._value_contains_originated_phi_circular(target) is True
     for tag in ("process_object", structural.UNIDENTIFIED_TAG, "object_id"):
@@ -529,8 +531,8 @@ def test_a_semantic_only_ref_keeps_its_identity_in_the_provenance_key():
     left = freeze_expression(_variable(_SemanticRef(("ref", 1))))
     right = freeze_expression(_variable(_SemanticRef(("ref", 2))))
     same = freeze_expression(_variable(_SemanticRef(("ref", 1))))
-    assert structural.expression_provenance_key(left) != structural.expression_provenance_key(right)
-    assert structural.expression_provenance_key(left) == structural.expression_provenance_key(same)
+    assert structural.object_target_key(left) != structural.object_target_key(right)
+    assert structural.object_target_key(left) == structural.object_target_key(same)
 
 
 def test_semantic_and_stable_lowering_identities_never_share_a_name():
@@ -544,9 +546,9 @@ def test_a_semantic_only_ref_is_read_through_the_provenance_view_too():
     from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
 
     expr = freeze_expression(_variable(_SemanticRef(("opaque_unknown", "void", 7))))
-    key = structural.expression_provenance_key(expr)
+    key = structural.object_target_key(expr)
     assert key[0] == "runtime_semantic_ref"
-    assert structural.provenance_key_view(key) == ("runtime_semantic_ref", ("opaque_unknown", "void", 7))
+    assert structural.label_view(key) == ("runtime_semantic_ref", ("opaque_unknown", "void", 7))
     assert PairwiseStrategy._object_target_contains_void_opaque_unknown(("target", key)) is True
 
 
@@ -585,5 +587,5 @@ def test_constants_with_different_opaque_values_never_share_a_provenance_key():
 
     left, right = Expression.constant(0, size=4), Expression.constant(0, size=4)
     left.value, right.value = _Object(), _Object()
-    assert structural.expression_provenance_key(left) != structural.expression_provenance_key(right)
-    assert structural.expression_provenance_key(left) != structural.expression_provenance_key(left)
+    assert structural.object_target_key(left) != structural.object_target_key(right)
+    assert structural.object_target_key(left) != structural.object_target_key(left)

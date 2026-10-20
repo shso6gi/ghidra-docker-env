@@ -9,7 +9,7 @@ from scripts.function_tracer_pcode.core.budget_policy import (
     FallbackBudgetMeter,
 )
 from scripts.function_tracer_pcode.core import Expression, Condition, ExpressionType
-from scripts.function_tracer_pcode.core.structural import expression_provenance_key
+from scripts.function_tracer_pcode.core.structural import value_identity
 from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
     cache_lookup,
     cache_store,
@@ -155,7 +155,7 @@ class CnfReasoningMixin:
         cls, term: object, _memo: Optional[Dict[int, Tuple[object, ...]]]
     ) -> Tuple[object, ...]:
         if isinstance(term, Expression):
-            return ("expr", expression_provenance_key(term, safe_budget=256))
+            return ("expr", value_identity(term))
         if term is None:
             return ("none",)
         if isinstance(term, (str, int, bool, float)):

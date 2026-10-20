@@ -55,7 +55,8 @@ from scripts.function_tracer_pcode.core import (
     PcodeOpRef,
     ReturnInfo,
     StorageInfo,
-    expression_provenance_key,
+    object_target_key,
+    value_identity,
 )
 
 from scripts.function_tracer_pcode.core.runtime_refs import LocationBaseRef

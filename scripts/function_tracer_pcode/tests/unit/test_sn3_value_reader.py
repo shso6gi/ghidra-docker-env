@@ -276,7 +276,7 @@ def test_an_identity_that_cannot_be_fixed_never_merges_two_refs(make, frozen):
 
     one, two = _build("stable_ref", make("a"), frozen), _build("stable_ref", make("b"), frozen)
     assert _unknown_runtime_identity_key(one) != _unknown_runtime_identity_key(two)
-    assert structural.expression_provenance_key(one) != structural.expression_provenance_key(two)
+    assert structural.object_target_key(one) != structural.object_target_key(two)
     assert expression_key_status(one)[1] is False
 
 
@@ -400,8 +400,8 @@ def test_an_unfixable_ref_identity_reaches_no_consumer_as_an_identity(kind, ref_
     assert projection.runtime_semantic_key is None
     assert projection.runtime_stable_origin is None
     assert structural_identity_digest(one) is None
-    assert structural.expression_provenance_key(one) != structural.expression_provenance_key(two)
-    assert structural.expression_provenance_key(one) != structural.expression_provenance_key(bare)
+    assert structural.object_target_key(one) != structural.object_target_key(two)
+    assert structural.object_target_key(one) != structural.object_target_key(bare)
     if kind is ExpressionType.UNKNOWN:
         assert _unknown_runtime_identity_key(one) != _unknown_runtime_identity_key(two)
     try:
@@ -429,4 +429,4 @@ def test_a_fixable_ref_identity_is_kept_and_shared():
 
     assert semantic_projection(one).runtime_stable_key == canonical_atom(("glob", 1))
     assert _unknown_runtime_identity_key(one) == _unknown_runtime_identity_key(two)
-    assert structural.expression_provenance_key(one) == structural.expression_provenance_key(two)
+    assert structural.object_target_key(one) == structural.object_target_key(two)

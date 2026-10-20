@@ -984,29 +984,29 @@ def test_pairwise_phi_circular_guard_origin_mismatch_stays_unknown(monkeypatch):
     assert "pairwise_extra_assertions_by_pair" not in base_ctx
     strategy._solve_query_after_guard.assert_not_called()
 
-def test_expression_provenance_key_handles_very_deep_target_expression_without_recursion_error():
-    left_key = expression_provenance_key(_deep_zext_target("fp", 0, depth=900))
-    right_key = expression_provenance_key(_deep_zext_target("gp", 1, depth=900))
+def test_object_target_key_handles_very_deep_target_expression_without_recursion_error():
+    left_key = object_target_key(_deep_zext_target("fp", 0, depth=900))
+    right_key = object_target_key(_deep_zext_target("gp", 1, depth=900))
 
     assert left_key != right_key
 
-def test_expression_provenance_key_distinguishes_sources_beyond_digest_node_limit():
-    left_key = expression_provenance_key(_deep_zext_target("fp", 0, depth=8200))
-    right_key = expression_provenance_key(_deep_zext_target("gp", 1, depth=8200))
+def test_object_target_key_distinguishes_sources_beyond_digest_node_limit():
+    left_key = object_target_key(_deep_zext_target("fp", 0, depth=8200))
+    right_key = object_target_key(_deep_zext_target("gp", 1, depth=8200))
 
     assert left_key != right_key
 
-def test_expression_provenance_key_distinguishes_deep_tail_structure_beyond_digest_node_limit():
-    zext_key = expression_provenance_key(
+def test_object_target_key_distinguishes_deep_tail_structure_beyond_digest_node_limit():
+    zext_key = object_target_key(
         _deep_target_with_tail_op("fp", 0, "INT_ZEXT", depth=8200)
     )
-    sext_key = expression_provenance_key(
+    sext_key = object_target_key(
         _deep_target_with_tail_op("fp", 0, "INT_SEXT", depth=8200)
     )
 
     assert zext_key != sext_key
 
-def test_expression_provenance_key_prefers_parameter_runtime_ref_over_storage():
+def test_object_target_key_prefers_parameter_runtime_ref_over_storage():
     storage = StorageInfo(
         is_register=True,
         space_name="register",
@@ -1031,14 +1031,14 @@ def test_expression_provenance_key_prefers_parameter_runtime_ref_over_storage():
         runtime_ref=parameter_ref,
     )
 
-    key = expression_provenance_key(expr)
+    key = object_target_key(expr)
 
     # Issue #215: provenance key の ref の identity は projection の atom。形は owner の読み口で読む
     from scripts.function_tracer_pcode.core.semantic_projection import canonical_atom
-    from scripts.function_tracer_pcode.core.structural import provenance_key_view
+    from scripts.function_tracer_pcode.core.structural import label_view
 
     assert key == ("runtime_ref", canonical_atom(("parameter", 1234, 0x401000, 0)))
-    assert provenance_key_view(key) == ("runtime_ref", ("parameter", 1234, 0x401000, 0))
+    assert label_view(key) == ("runtime_ref", ("parameter", 1234, 0x401000, 0))
     assert key[0] != "storage"
 
 def test_artifact_stable_key_rewrites_parameter_runtime_ref_program_ids():

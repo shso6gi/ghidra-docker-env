@@ -111,7 +111,8 @@ from scripts.function_tracer_pcode.core import (
     PcodeBlockRef,
     PcodeOpRef,
     ReturnInfo,
-    expression_provenance_key,
+    object_target_key,
+    value_identity,
 )
 from scripts.function_tracer_pcode.smt import ParallelResult, SolverResult, SolverStatus
 import scripts.function_tracer_pcode.checker.preflight_gate as _mx_preflight_gate
@@ -256,7 +257,8 @@ def _analysis_with_call(
                 CallSiteEffectSummaryEvidence(
                     pcode_op_ref=pcode_ref,
                     target_ref=target,
-                    argument_keys=(expression_provenance_key(argument),),
+                    argument_keys=(value_identity(argument),),
+                    argument_target_keys=(object_target_key(argument),),
                     path_condition_keys=(),
                     summary_status="complete",
                     memory_effect_count=0,
@@ -266,7 +268,8 @@ def _analysis_with_call(
                     return_summary_status="complete",
                     return_semantic_bit_width=32,
                     return_signed=True,
-                    return_value_keys=(expression_provenance_key(argument),),
+                    return_value_keys=(value_identity(argument),),
+                    return_value_target_keys=(object_target_key(argument),),
                     return_partitions=(((), argument),),
                 ),
             ),
@@ -428,7 +431,7 @@ def test_unmatched_call_obligations_cover_both_sides_without_regions():
     object.__setattr__(
         right.effect_summary.call_site_effect_summary_evidence[0],
         "argument_keys",
-        (expression_provenance_key(right_argument),),
+        (value_identity(right_argument),),
     )
 
     manifest = build_call_effect_shadow_manifest(
@@ -519,7 +522,7 @@ def test_unmatched_recursive_callee_reports_scc_proof_stage():
     object.__setattr__(
         right_effect,
         "return_value_keys",
-        (expression_provenance_key(Expression.constant(7, 4)),),
+        (value_identity(Expression.constant(7, 4)),),
     )
 
     manifest = build_call_effect_shadow_manifest(
@@ -557,7 +560,7 @@ def test_nonrecursive_nested_call_reports_dependency_closure_missing():
     object.__setattr__(
         right_effect,
         "return_value_keys",
-        (expression_provenance_key(Expression.constant(9, 4)),),
+        (value_identity(Expression.constant(9, 4)),),
     )
 
     manifest = build_call_effect_shadow_manifest(
@@ -1292,8 +1295,12 @@ def _phase2_caller_analysis(binary_id: str, program_id: int, entry: int) -> Func
                     pcode_op_ref=pcode_ref,
                     target_ref=target,
                     argument_keys=(
-                        expression_provenance_key(left),
-                        expression_provenance_key(right),
+                        value_identity(left),
+                        value_identity(right),
+                    ),
+                    argument_target_keys=(
+                        object_target_key(left),
+                        object_target_key(right),
                     ),
                     path_condition_keys=(),
                     summary_status="complete",
@@ -1305,7 +1312,10 @@ def _phase2_caller_analysis(binary_id: str, program_id: int, entry: int) -> Func
                     return_semantic_bit_width=32,
                     return_signed=True,
                     return_value_keys=(
-                        expression_provenance_key(callee_return),
+                        value_identity(callee_return),
+                    ),
+                    return_value_target_keys=(
+                        object_target_key(callee_return),
                     ),
                     return_partitions=(((), callee_return),),
                 ),
@@ -1584,7 +1594,7 @@ def test_observed_call_result_store_does_not_hide_different_call_semantics():
     object.__setattr__(
         right_evidence,
         "return_value_keys",
-        (expression_provenance_key(different),),
+        (value_identity(different),),
     )
 
     result = EquivalenceChecker(

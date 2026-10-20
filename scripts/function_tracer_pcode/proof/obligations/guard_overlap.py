@@ -16,6 +16,8 @@ from pathlib import Path
 import secrets
 from typing import Any, Dict, Optional, Tuple
 
+from scripts.function_tracer_pcode.core.structural import ExactRecordIntern
+
 
 _GUARD_ARTIFACT_AUTHORITY_KEY = secrets.token_bytes(32)
 _TRUSTED_GUARD_QUERY_EXECUTOR_CODE: Any = None
@@ -45,15 +47,12 @@ class GuardRegionSeed:
     side: str
     case_index: int
     structural_condition_key: Tuple[Any, ...]
-    rendered_condition_digest: str
+    #: 描画した条件（renderer の写しを含む）。key には文字列そのものの厳密な token を入れる
+    #: （#218 PR-D: digest の一致で同じ seed としない）。`GuardOverlapGraph.requirement` が token にする
+    rendered_conditions: Any
 
-    def stable_key(self) -> Tuple[Any, ...]:
-        return (
-            "guard_region_seed_v1",
-            self.side,
-            self.structural_condition_key,
-            self.rendered_condition_digest,
-        )
+    def rendered_record(self) -> bytes:
+        return repr(self.rendered_conditions).encode("utf-8", "surrogatepass")
 
 
 @dataclass(frozen=True)
@@ -64,16 +63,22 @@ class GuardOverlapRequirement:
     derived_view_id: Tuple[Any, ...]
     premise_digest: str
     graph_generation: int
+    #: canonical な query の文字列の厳密な token（graph の intern が発行。#218 PR-D）。digest は
+    #: receipt の封印に残し、node の再利用は token の一致で決める
+    canonical_query_token: Tuple[Any, ...] = ()
+    #: token の preimage（実行する query がこの requirement の query かを厳密に確かめる）
+    canonical_query_text: Optional[str] = field(default=None, compare=False, repr=False)
 
     def stable_key(self) -> Tuple[Any, ...]:
         return (
-            "guard_overlap_requirement_v1",
+            "guard_overlap_requirement_v2",
             self.left_seed_key,
             self.right_seed_key,
             self.canonical_query_digest,
             self.derived_view_id,
             self.premise_digest,
             self.graph_generation,
+            self.canonical_query_token,
         )
 
 
@@ -304,7 +309,7 @@ class GuardDisjointArtifact:
             self.query_execution_digest, self.query_issuer_identity,
         )
         return (
-            self.requirement_key[:1] == ("guard_overlap_requirement_v1",)
+            self.requirement_key[:1] == ("guard_overlap_requirement_v2",)
             and self.query_digest == self.requirement_key[3]
             and self.derived_view_id == self.requirement_key[4]
             and self.premise_digest == self.requirement_key[5]
@@ -338,6 +343,21 @@ class GuardOverlapGraph:
     premise_digest: str
     generation: int = 1
     nodes: Dict[Tuple[Any, ...], GuardOverlapNode] = field(default_factory=dict)
+    #: node の key に入れる文字列（描画した条件・canonical な query）の厳密な intern。node と同じ寿命
+    exact_records: ExactRecordIntern = field(default_factory=ExactRecordIntern, repr=False, compare=False)
+
+    def seed_key(self, seed: GuardRegionSeed) -> Tuple[Any, ...]:
+        return (
+            "guard_region_seed_v2",
+            seed.side,
+            seed.structural_condition_key,
+            self.exact_records.token("guard_rendered_conditions", seed.rendered_record()),
+        )
+
+    def query_token(self, canonical_query: str) -> Tuple[Any, ...]:
+        return self.exact_records.token(
+            "guard_canonical_query", canonical_guard_query_text(canonical_query).encode("utf-8", "surrogatepass"),
+        )
 
     def requirement(
         self,
@@ -346,13 +366,16 @@ class GuardOverlapGraph:
         canonical_query: str,
     ) -> GuardOverlapRequirement:
         digest = canonical_guard_query_digest(canonical_query)
+        text = canonical_guard_query_text(canonical_query)
         return GuardOverlapRequirement(
-            left_seed.stable_key(),
-            right_seed.stable_key(),
+            self.seed_key(left_seed),
+            self.seed_key(right_seed),
             digest,
             self.derived_view_id,
             self.premise_digest,
             self.generation,
+            self.query_token(canonical_query),
+            text,
         )
 
     def lookup(self, requirement: GuardOverlapRequirement) -> Optional[GuardOverlapNode]:
@@ -366,7 +389,7 @@ class GuardOverlapGraph:
 
     def record(self, result: GuardOverlapExecutionResult) -> GuardOverlapNode:
         key = result.attempt.requirement_key
-        if key[:1] != ("guard_overlap_requirement_v1",):
+        if key[:1] != ("guard_overlap_requirement_v2",):
             raise ValueError("guard attempt is not bound to a typed requirement")
         requirement = GuardOverlapRequirement(
             left_seed_key=key[1],
@@ -375,6 +398,7 @@ class GuardOverlapGraph:
             derived_view_id=key[4],
             premise_digest=key[5],
             graph_generation=key[6],
+            canonical_query_token=key[7],
         )
         if self.lookup(requirement) is not None:
             return self.nodes[key]
@@ -421,8 +445,7 @@ def guard_seed(side: str, case: Any, renderer: Any) -> GuardRegionSeed:
         if callable(render_conditions)
         else tuple(repr(condition) for condition in conditions)
     )
-    rendered_digest = hashlib.sha256(repr(rendered).encode("utf-8")).hexdigest()
-    return GuardRegionSeed(side, int(getattr(case, "index", -1)), structural, rendered_digest)
+    return GuardRegionSeed(side, int(getattr(case, "index", -1)), structural, rendered)
 
 
 def status_from_query_result(result: Any) -> GuardOverlapStatus:
@@ -434,11 +457,16 @@ def status_from_query_result(result: Any) -> GuardOverlapStatus:
     return GuardOverlapStatus.UNKNOWN
 
 
-def canonical_guard_query_digest(query: str) -> str:
-    """Hash SMT semantics while ignoring diagnostic comments and whitespace."""
+def canonical_guard_query_text(query: str) -> str:
+    """SMT の意味の行だけ（診断の comment と空白の違いを除いた）の文字列。"""
     semantic_lines = (
         " ".join(line.split())
         for line in query.splitlines()
         if line.strip() and not line.lstrip().startswith(";")
     )
-    return hashlib.sha256("\n".join(semantic_lines).encode("utf-8")).hexdigest()
+    return "\n".join(semantic_lines)
+
+
+def canonical_guard_query_digest(query: str) -> str:
+    """Hash SMT semantics while ignoring diagnostic comments and whitespace."""
+    return hashlib.sha256(canonical_guard_query_text(query).encode("utf-8")).hexdigest()

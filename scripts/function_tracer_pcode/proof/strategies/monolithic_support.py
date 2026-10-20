@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Optional, Dict, Any, Mapping, Tuple
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
-from scripts.function_tracer_pcode.core.structural import condition_key, expression_provenance_key
+from scripts.function_tracer_pcode.core.structural import condition_key, value_identity
 from scripts.function_tracer_pcode.smt import ParallelResult
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     InputCorrespondenceSet,
@@ -87,7 +87,7 @@ def _monolithic_case_identity(case: Any) -> Tuple[Any, ...]:
         "monolithic_return_case_v1",
         int(getattr(case, "index", -1)),
         tuple(int(item) for item in tuple(getattr(case, "source_indices", ()) or ())),
-        tuple(expression_provenance_key(getattr(case, "value_expr", None))),
+        tuple(value_identity(getattr(case, "value_expr", None))),
         tuple(condition_key(item) for item in tuple(getattr(case, "conditions", ()) or ())),
     )
 

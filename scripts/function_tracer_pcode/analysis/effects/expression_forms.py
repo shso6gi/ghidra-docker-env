@@ -13,7 +13,8 @@ from scripts.function_tracer_pcode.core import (
     PostStateReadRef,
     PostStateSnapshotRef,
     expression_key_or_identity,
-    expression_provenance_key,
+    object_target_key,
+    condition_value_identity,
 )
 from scripts.function_tracer_pcode.analysis.effects._shared import (
     ConditionSimplifier,
@@ -45,7 +46,7 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
 def _impl__stable_target_expression_key(expr: Optional[Expression]) -> Optional[Tuple[object, ...]]:
     if expr is None:
         return None
-    return expression_provenance_key(expr)
+    return object_target_key(expr)
 
 
 def _impl__condition_evidence_key(condition: Condition) -> Tuple[object, ...]:
@@ -55,12 +56,7 @@ def _impl__condition_evidence_key(condition: Condition) -> Tuple[object, ...]:
         structural_key = None
     if structural_key is not None:
         return ("condition", bool(getattr(condition, "negated", False)), structural_key)
-    expression = getattr(condition, "expression", None)
-    return (
-        "condition",
-        bool(getattr(condition, "negated", False)),
-        expression_provenance_key(expression) if expression is not None else None,
-    )
+    return condition_value_identity(condition)
 
 
 def _impl__runtime_expression_signature(expr: Optional[Expression]):
