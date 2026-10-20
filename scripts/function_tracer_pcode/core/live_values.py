@@ -2982,11 +2982,14 @@ def _classify_dunder(implementation: Any, name: str) -> str:
 
 
 def _leaf_trust(value: Any, names: Tuple[str, ...] = None) -> str:  # type: ignore[assignment]
-    """葉の比較の分類（`names` の dunder の分類の最も強いもの）。型の MRO の名前空間を **今** 読む（cache しない）。
+    """葉の比較の分類（`names` の dunder の分類の最も強いもの）。
 
-    名前空間の読みは hook を呼ばない（`_namespace_value`）。組み込みの `str` でない key がその名前と同じ文字列なら、
-    Python の属性の引きが key の `__eq__` を呼ぶ型: 不透明（判定しない）。scalar の subclass は外の code（読みで基底型の
-    値にしてから比べる）。
+    型だけで決まる部分（MRO の名前空間で dunder を最初に定義する実装と、その実装の分類）は `lookup_fact` の記録で引く
+    （引くたびに読んだ名前と MRO を確かめる: 名前空間を書き換えれば読み直す）。値で決まる部分（条件つきの自己完結の
+    実装がこの値で自己完結か・登録した比較を持つ型が今 package の型か）は使うたびに確かめる。名前空間の読みは hook を
+    呼ばない（`_NamespaceReader`）。組み込みの `str` でない key がその名前と同じ文字列なら、Python の属性の引きが key の
+    `__eq__` を呼ぶ型: 不透明（判定しない。その判定は記録しない）。scalar の subclass は外の code（読みで基底型の値にして
+    から比べる）。
     """
 
     if names is None:
@@ -2996,11 +2999,34 @@ def _leaf_trust(value: Any, names: Tuple[str, ...] = None) -> str:  # type: igno
         return _TRUSTED
     if issubclass(kind, _SCALAR_BASES) and not issubclass(kind, Enum):
         return _FOREIGN
+    table = _LEAF_TRUST_FACTS.get(id(names))
+    if table is None or table[0] is not names:
+        table = _LEAF_TRUST_FACTS[id(names)] = (names, LookupFactTable())
+    trust, conditioned = lookup_fact(table[1], kind, _leaf_type_trust, kind, names)
+    for implementation in conditioned:
+        if not _self_contained_for(implementation, value) and _TRUST_RANK[_FOREIGN] > _TRUST_RANK[trust]:
+            trust = _FOREIGN  # 条件つきの実装: この値では外の code を呼び得る
+    if trust == _CALLS and not package_type(kind):
+        # 登録した比較を継承しても、型の中身（field の descriptor・上書きした method）が外の code なら、実装が読む
+        # `self.x` / `self.f()` が外の code を呼ぶ: 外の code として包む
+        return _FOREIGN
+    return trust
+
+
+#: `_leaf_trust` の型ごとの記録（`id(names)` → (names, 表)。names は module の定数の tuple）
+_LEAF_TRUST_FACTS: Dict[int, Tuple[Tuple[str, ...], "LookupFactTable"]] = {}
+
+
+def _leaf_type_trust(kind: type, names: Tuple[str, ...]) -> Tuple[str, Tuple[Any, ...]]:
+    """`_leaf_trust` の型だけで決まる部分: (値に依らない分類, 値で確かめる条件つきの実装の列)。MRO を 1 回辿り、dunder を
+    最初に定義する class の実装を分類する（`object` の実装は不活性: そこで止める）。読みは `_NamespaceReader`（記録の
+    確かめのために読んだ名前を残す）。"""
+
     mro = _TYPE_MRO.__get__(kind)
     if not _within_scan(len(mro)):
-        return _OPAQUE
-    # MRO を 1 回辿り、dunder を最初に定義する class の実装を分類する（`object` の実装は不活性: そこで止める）
+        return _OPAQUE, ()
     trust = _TRUSTED
+    conditioned = []
     pending = names
     for klass in mro:
         if klass is object:
@@ -3013,20 +3039,16 @@ def _leaf_trust(value: Any, names: Tuple[str, ...] = None) -> str:  # type: igno
                 unresolved.append(name)
                 continue
             found = _OPAQUE if implementation is _AMBIGUOUS_NAME else _dunder_trust(implementation, name)
-            if found == _TRUSTED and not _self_contained_for(implementation, value):
-                found = _FOREIGN  # 条件つきの実装: この値では外の code を呼び得る
+            if found == _TRUSTED and implementation is _SELF_CONTAINED_FUNCTIONS[0]:  # identity（実装の `__eq__` を呼ばない）
+                conditioned.append(implementation)  # 自己完結かは値で決まる（使うたびに確かめる）
             if found == _OPAQUE:
-                return _OPAQUE
+                return _OPAQUE, ()
             if _TRUST_RANK[found] > _TRUST_RANK[trust]:
                 trust = found
         if not unresolved:
             break
         pending = tuple(unresolved)
-    if trust == _CALLS and not package_type(kind):
-        # 登録した比較を継承しても、型の中身（field の descriptor・上書きした method）が外の code なら、実装が読む
-        # `self.x` / `self.f()` が外の code を呼ぶ: 外の code として包む
-        return _FOREIGN
-    return trust
+    return trust, tuple(conditioned)
 
 
 def plain_attribute_lookup(kind: type) -> bool:
@@ -3110,9 +3132,15 @@ class _NamespaceReader:
 
     def value(self, name: str) -> Any:
         if self.static:
-            return self.raw.get(name, _MISSING_DUNDER)
+            return self.raw.get(name, _MISSING_DUNDER)  # 組み込みの型の名前空間は変わらない（記録しない）
+        witness = _LOOKUPS.active
         if self.plain:
-            return dict.get(self.raw, name, _MISSING_DUNDER)
+            found = dict.get(self.raw, name, _MISSING_DUNDER)
+            if witness is not None:
+                witness.append((self.raw, name, found))  # 判定が読んだ名前と見つけた object（`_LookupFactTable`）
+            return found
+        if witness is not None:
+            witness.append(_UNRECORDABLE)  # 決めない引きに依る判定は記録しない（毎回読み直す）
         # 組み込みの `str` でない key（`str` の subclass に限らない）が 1 つでもあれば、どの名前の引きも決めない:
         # Python の引きは hash の等しい key の `__eq__` を **key の文字列に依らず** 呼び、key の hash は
         # その key の code が決める（hook を呼ばずに読めない）
@@ -4048,6 +4076,15 @@ def inert(value: Any) -> bool:
     kind = type(value)
     if value is None or kind is int or kind is str or kind is bool or kind is float:
         return True
+    if kind is tuple and tuple.__len__(value) <= _FLAT_INERT_LIMIT:
+        # よくある形（比べる値の小さい tuple）: 葉が全部 exact な scalar なら、記録の object を作らずに答える（型は identity
+        # で見る。容器の葉が 1 つでもあれば下の一般の走査）
+        for item in tuple.__iter__(value):
+            item_kind = type(item)
+            if not (item is None or item_kind is int or item_kind is str or item_kind is bool or item_kind is float):
+                break
+        else:
+            return True
     read = _StorageRead(_COMPARISON_NODES, traversal=True)
     pending = [value]
     seen: set = set()
@@ -4073,6 +4110,10 @@ def inert(value: Any) -> bool:
         else:
             return False
     return True
+
+
+#: `inert` の速い経路で 1 段で読む tuple の長さの上限（作業量の数え方を変えない小さい値: 一般の走査は `read.admit` で数える）
+_FLAT_INERT_LIMIT = 16
 
 
 def truth(value: Any) -> bool:

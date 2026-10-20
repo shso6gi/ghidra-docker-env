@@ -399,7 +399,8 @@ LIVE_VALUES_WORK_OWNERS = {
     "_require_same_comparison": _A,
     "_plain_operands": _B,
     "_CopyFrame._read": _B,
-    "_leaf_trust": _B,
+    "_leaf_trust": _A,  # 条件つきの実装の列（高々 `names` の数: module の定数）だけを辿る
+    "_leaf_type_trust": _B,
     # 登録した比較・自己完結の組み込みの型（書いた数の組）だけ
     "_classify_dunder": _A,
     # 比べる 2 つの値だけ
