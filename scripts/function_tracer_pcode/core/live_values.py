@@ -870,8 +870,9 @@ def package_type(kind: type) -> bool:
     # 監査済みの code の間に確かめた型（`_Reliance.trusted`: 外の code の数が同じ間だけ）。外の code は外の code の区間で
     # だけ走り、区間を抜けるたびに数が変わる: 数が同じ間は、確かめた後に型を書き換えた code は無い
     reliance_state = _FOREIGN_EPOCH.s
-    if len(reliance_state.active) > reliance_state.floor:
-        # 記録を使うのは監査済みの code の中だけ（区間の中の外の code・監査済みの code の外は毎回確かめる）
+    if len(reliance_state.active) > reliance_state.floor and not _NESTING.active:
+        # 記録を使うのは監査済みの code の中だけ（区間の中の外の code・監査済みの code の外は毎回確かめる）。型の信頼の
+        # 判定の途中は使わない（判定は読んだ型を依存として記録する: 記録で答えると依存が抜ける）
         trusted = reliance_state.trusted.get(id(kind))
         if trusted is not None and trusted[0] is kind and trusted[1] == reliance_state.count:
             return True
@@ -3340,7 +3341,9 @@ class _Reliance:
         self.trusted: Dict[int, Tuple[type, int]] = {}
         #: 今の外の code の区間に入った時点の activation の深さ（区間の外は 0）。`len(active) > floor` の間だけが監査済みの
         #: code（第 12 回: 区間の中で外の code が呼んだ監査済みの code は floor より上に activation を積む）。
-        #: 外の code ⇄ 監査済みの code の切り替え（区間の出入り・floor での activation の出入り）のたびに `count` を数える
+        #: `count` は外の code から監査済みの code へ戻る切り替えのたびに数える: 区間を抜けるとき（`outside_audit`）と、
+        #: floor の上へ最初の activation を積むとき（`_push_activation`）。記録（`trusted`）を使うのは監査済みの code の中
+        #: だけなので、この 2 つで「記録の後に外の code が走った」ことが必ず数に出る
         self.floor = 0
         self.floors: List[int] = []
         #: 走っている walk（`json_encoding._Walk`: `recheck()` で積んでいる frame の receiver を確かめ直す）
@@ -3407,10 +3410,10 @@ class outside_audit:
     def __enter__(self) -> "outside_audit":
         self.region = _REGION.get()
         self.token = _REGION.set(None)
-        # 監査済みの code → 外の code の切り替え: 数を数え、今の深さを floor にする（区間の中で外の code が呼ぶ監査済みの
-        # code は floor より上に積み、そこへ入るとき・そこから戻るときにも数える: `begin_activation` / `end_activation`）
+        # 監査済みの code → 外の code の切り替え: 今の深さを floor にする（区間の中で外の code が呼ぶ監査済みの code は
+        # floor より上に積み、そこへ入るときに数を数える: `_push_activation`。記録は監査済みの code の中でだけ使うので、
+        # 外の code へ移るときに数える必要は無い）
         state = _FOREIGN_EPOCH.s
-        state.count += 1
         state.floors.append(state.floor)
         state.floor = len(state.active)
         return self
@@ -3506,20 +3509,18 @@ def _push_activation(state: "_Reliance", activation: List[Any]) -> None:
 
 
 def end_activation(state: "_Reliance") -> None:
-    """activation を 1 つ降ろす（唯一の降ろし方）。floor まで降りれば外の code（か監査済みの code の外）へ戻る切り替え:
-    数を数える（この間に確かめた型の信頼は、戻った先の code が走った後に使わせない）。stack が空になれば
-    `package_instance` の型の確かめの記録を捨てる。"""
+    """activation を 1 つ降ろす（唯一の降ろし方）。stack が空になれば `package_instance` の型の確かめの記録を捨てる。
+    floor まで降りて外の code へ戻っても数は数えない: 記録を使うのは監査済みの code の中だけで、外の code から監査済みの
+    code へ入るときに数える（`_push_activation`）。"""
 
     active = state.active
     active.pop()
     depth = len(active)
-    if depth <= state.floor:
-        if depth < state.floor:
-            # 区間より前の activation を区間の中で降ろした（積み降ろしの順の崩れ）: 監査済みの code かの判断が狂う
-            raise undecidable("an activation below the current foreign section was ended inside it")
-        state.count += 1
-        if not active:
-            state.trusted.clear()
+    if depth < state.floor:
+        # 区間より前の activation を区間の中で降ろした（積み降ろしの順の崩れ）: 監査済みの code かの判断が狂う
+        raise undecidable("an activation below the current foreign section was ended inside it")
+    if not active:
+        state.trusted.clear()
 
 
 def in_audited_code(state: "_Reliance") -> bool:

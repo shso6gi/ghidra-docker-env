@@ -1353,6 +1353,99 @@ def test_trust_written_by_a_recheck_is_not_answered_to_foreign_code_running_afte
     assert seen == {"foreign": False, "exit": "refused"}
 
 
+def test_a_type_judged_while_another_type_s_trust_is_memoized_still_depends_on_that_type():
+    """型 K の信頼の判定が型 J（K の class の値）を読むとき、J の信頼が監査済みの code の記録にあっても、判定は J を依存と
+    して記録する（記録で答えると依存が抜け、J を外の code が書き換えた後も K の判定を使い回す）。"""
+
+    HOOKS.clear()
+    J = type("J", (), {"__module__": __name__, "value": 1})
+    K = type("K", (), {"__module__": __name__, "helper": J})
+    j = J()
+    state = live_values.begin_activation()
+    try:
+        assert live_values.package_instance(j, J)  # J の信頼を監査済みの code の記録に置く
+        assert live_values.package_type(K)  # K の判定は J を読む
+    finally:
+        live_values.end_activation(state)
+    J.value = _foreign_getter(999)  # 監査済みの code の外で J を書き換える（K の名前空間は変えない）
+    assert not live_values.package_type(J)
+    assert not live_values.package_type(K)
+    assert HOOKS == []
+
+
+def test_audited_code_called_from_foreign_code_checks_the_types_it_narrows():
+    """外の code（区間の中）が監査済みの code を呼ぶと、その code は floor の上の activation の中で走る: 絞り込みは型の信頼
+    を確かめる（区間の前の activation に記録して identity だけで通さない）。外の code が書き換えた field の型を絞り込めば
+    getter の前に拒む。"""
+
+    HOOKS.clear()
+
+    @dataclasses.dataclass(frozen=True)
+    class Child:
+        x: int
+
+    @dataclasses.dataclass(frozen=True)
+    class Parent:
+        child: object
+
+        def json_items(self):
+            child = self.child
+            if not live_values.package_instance(child, Child):
+                raise TypeError("not a Child")
+            yield "x", child.x
+
+    parent = Parent(child=Child(x=7))
+    results = []
+    state = live_values.begin_activation()
+    try:
+        with live_values.outside_audit():
+            results.append(_refused_or_raised(lambda: json_encoding.scalar_record_dict(parent)))
+            setattr(Child, "x", _foreign_getter(999))
+            results.append(_refused_or_raised(lambda: json_encoding.scalar_record_dict(parent)))
+    except live_values.UndecidableComparison:
+        pass
+    finally:
+        live_values.end_activation(state)
+        if isinstance(Child.__dict__.get("x"), property):
+            delattr(Child, "x")
+    assert results == [{"x": 7}, "refused"]
+    assert HOOKS == []
+
+
+def test_trust_recorded_by_a_recheck_inside_foreign_code_is_not_reused_when_audited_code_is_entered_again():
+    """区間の出口の確かめ直しが（外側の区間の中で）型の信頼を記録した後、外の code が型を書き換えてから監査済みの code へ
+    入れば、その code は記録を使わずに確かめる（入るときに数が変わる）。"""
+
+    HOOKS.clear()
+
+    @dataclasses.dataclass(frozen=True)
+    class Record:
+        second: int
+
+    record = Record(second=7)
+    seen = {}
+    state = live_values.begin_activation()
+    try:
+        assert live_values.package_instance(record, Record)
+        with live_values.outside_audit():
+            with live_values.outside_audit():
+                pass  # 抜けるときの確かめ直しが Record の信頼を記録する
+            setattr(Record, "second", _foreign_getter(999))
+            inner = live_values.begin_activation()
+            try:
+                seen["narrowed"] = _refused_or_raised(lambda: live_values.package_instance(record, Record))
+            finally:
+                live_values.end_activation(inner)
+    except live_values.UndecidableComparison:
+        pass
+    finally:
+        live_values.end_activation(state)
+        if isinstance(Record.__dict__.get("second"), property):
+            delattr(Record, "second")
+    assert seen == {"narrowed": "refused"}
+    assert HOOKS == []
+
+
 def _call_in_a_step(function):
     """未宣言の generator（walker は 1 歩を外の code の区間で進める）の 1 歩で `function` を呼ぶ。"""
 
