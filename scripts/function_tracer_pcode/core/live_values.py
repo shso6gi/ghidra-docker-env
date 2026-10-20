@@ -3298,12 +3298,17 @@ class _Reliance:
     外の code の区間を通らずに class を書き換えられる）。分類の memo・止まっている監査済みの code は、数が変わると
     確かめ直す。thread ごとの object を 1 度引いて使う（属性は普通の slot: hot path で thread local を何度も引かない）。"""
 
-    __slots__ = ("count", "active", "trusted", "walks")
+    __slots__ = ("count", "active", "trusted", "walks", "floor", "floors")
 
     def __init__(self) -> None:
         self.count = 0
         self.active: List[List[Tuple[Any, type]]] = []
         self.trusted: Dict[int, Tuple[type, int]] = {}
+        #: 今の外の code の区間に入った時点の activation の深さ（区間の外は 0）。`len(active) > floor` の間だけが監査済みの
+        #: code（第 12 回: 区間の中で外の code が呼んだ監査済みの code は floor より上に activation を積む）。
+        #: 外の code ⇄ 監査済みの code の切り替え（区間の出入り・floor での activation の出入り）のたびに `count` を数える
+        self.floor = 0
+        self.floors: List[int] = []
         #: 走っている walk（`json_encoding._Walk`: `recheck()` で積んでいる frame の receiver を確かめ直す）
         self.walks: List[Any] = []
 
@@ -3368,9 +3373,12 @@ class outside_audit:
     def __enter__(self) -> "outside_audit":
         self.region = _REGION.get()
         self.token = _REGION.set(None)
-        # 入るときも数える: 区間の中の外の code が監査済みの code を呼んでも、区間の前に確かめた型の信頼
-        # （`_Reliance.trusted`・比べる側の記録）を使い回させない（独立 review）
-        _FOREIGN_EPOCH.s.count += 1
+        # 監査済みの code → 外の code の切り替え: 数を数え、今の深さを floor にする（区間の中で外の code が呼ぶ監査済みの
+        # code は floor より上に積み、そこへ入るとき・そこから戻るときにも数える: `begin_activation` / `end_activation`）
+        state = _FOREIGN_EPOCH.s
+        state.count += 1
+        state.floors.append(state.floor)
+        state.floor = len(state.active)
         return self
 
     def __exit__(self, *exc: Any) -> None:
@@ -3382,6 +3390,7 @@ class outside_audit:
                 cache.clear()
             region.clear()
         state = _FOREIGN_EPOCH.s
+        state.floor = state.floors.pop()
         state.count += 1
         if state.active:
             _recheck_reliance(state)
@@ -3437,7 +3446,7 @@ class relying_on:
         self.activation = [] if value is _NO_RECEIVER else [(value, type(value) if kind is None else kind)]
 
     def __enter__(self) -> "relying_on":
-        _FOREIGN_EPOCH.s.active.append(self.activation)
+        _push_activation(_FOREIGN_EPOCH.s, self.activation)
         return self
 
     def __exit__(self, *exc: Any) -> None:
@@ -3448,17 +3457,38 @@ def begin_activation(receiver: Any = _NO_RECEIVER, kind: Optional[type] = None) 
     """activation を 1 つ積む（`relying_on` の hot path 版: 呼ぶ側が `end_activation(state)` を finally で呼ぶ）。"""
 
     state = _FOREIGN_EPOCH.s
-    state.active.append([] if receiver is _NO_RECEIVER else [(receiver, type(receiver) if kind is None else kind)])
+    _push_activation(state, [] if receiver is _NO_RECEIVER else [(receiver, type(receiver) if kind is None else kind)])
     return state
 
 
+def _push_activation(state: "_Reliance", activation: List[Any]) -> None:
+    """activation を積む唯一の入口。floor の上に最初に積むのは外の code（か監査済みの code の外）から監査済みの code へ
+    入る切り替え: 数を数える（それより前に確かめた型の信頼・比べる側の記録を使わせない）。"""
+
+    active = state.active
+    if len(active) == state.floor:
+        state.count += 1
+    active.append(activation)
+
+
 def end_activation(state: "_Reliance") -> None:
-    """activation を 1 つ降ろす（唯一の降ろし方）。stack が空になれば `package_instance` の型の確かめの記録を捨てる。"""
+    """activation を 1 つ降ろす（唯一の降ろし方）。floor まで降りれば外の code（か監査済みの code の外）へ戻る切り替え:
+    数を数える（この間に確かめた型の信頼は、戻った先の code が走った後に使わせない）。stack が空になれば
+    `package_instance` の型の確かめの記録を捨てる。"""
 
     active = state.active
     active.pop()
-    if not active:
-        state.trusted.clear()
+    if len(active) == state.floor:
+        state.count += 1
+        if not active:
+            state.trusted.clear()
+
+
+def in_audited_code(state: "_Reliance") -> bool:
+    """今が監査済みの code の中か（floor より上に activation がある）。区間の中で外の code が走る間は偽（区間の前の
+    activation は止まっている code のもので、そこへ記録しない・そこで確かめた事実を使わない）。"""
+
+    return len(state.active) > state.floor
 
 
 def begin_reliance(receiver: Any, kind: type) -> Tuple[Any, Any]:
@@ -3469,12 +3499,12 @@ def begin_reliance(receiver: Any, kind: type) -> Tuple[Any, Any]:
 
     state = _FOREIGN_EPOCH.s
     active = state.active
-    if active:
+    if len(active) > state.floor:
         top = active[-1]
         mark = len(top)
         top.append((receiver, kind))
         return top, mark
-    active.append([(receiver, kind)])
+    _push_activation(state, [(receiver, kind)])
     return None, state
 
 
@@ -3496,7 +3526,7 @@ def audited_entry(function: Any) -> Any:
     @functools.wraps(function)
     def entry(*args: Any, **kwargs: Any) -> Any:
         state = _FOREIGN_EPOCH.s
-        state.active.append([])
+        _push_activation(state, [])
         try:
             return function(*args, **kwargs)
         finally:
@@ -3541,9 +3571,9 @@ def package_instance(value: Any, kind: type) -> bool:
         return False
     state = _FOREIGN_EPOCH.s
     active = state.active
-    if active:
-        # 監査済みの code の間（activation がある）は、外の code は外の code の区間でだけ走り、区間を抜けると数が変わる:
-        # 型の確かめは、数が同じ間は使い回す（activation の stack が空になれば捨てる: `end_activation`）
+    if len(active) > state.floor:
+        # 監査済みの code の間（floor の上に activation がある）は、外の code は外の code の区間でだけ走り、外の code ⇄
+        # 監査済みの code の切り替えのたびに数が変わる: 型の確かめは、数が同じ間は使い回す
         known = state.trusted.get(id(kind))
         if known is None or known[0] is not kind or known[1] != state.count:
             if not package_type(kind):
@@ -3553,8 +3583,8 @@ def package_instance(value: Any, kind: type) -> bool:
         if not activation or activation[-1][0] is not value:  # 続けて同じ値を絞り込む形（loop の中）は 1 度だけ
             activation.append((value, kind))
         return True
-    # 監査済みの code の外（activation が無い: walk・`audited_entry`・owner が呼ぶ root の外。analysis の code が同じ関数を
-    # 呼ぶとき）: 契約の外なので型の identity だけ（監査済みの code が走るときは必ず activation がある）
+    # 監査済みの code の外（floor の上に activation が無い: walk・`audited_entry`・owner が呼ぶ root の外。analysis の code・
+    # 外の code が同じ関数を呼ぶとき）: 契約の外なので型の identity だけ（監査済みの code が走るときは必ず activation がある）
     return True
 
 
@@ -3684,7 +3714,7 @@ def _compare(foreign: bool, operation: Any, left: Any, right: Any) -> Any:
 
     if foreign:
         state = _FOREIGN_EPOCH.s
-        if state.active or _REGION.get() is not None:
+        if len(state.active) > state.floor or _REGION.get() is not None:
             with outside_audit():
                 return operation(left, right)
         # 監査済みの code の外（区間も activation も無い）: 隠す記録も確かめ直す事実も無い。外の code の回数だけ数える

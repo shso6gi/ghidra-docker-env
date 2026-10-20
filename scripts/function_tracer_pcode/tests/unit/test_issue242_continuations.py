@@ -1027,6 +1027,268 @@ def test_trust_judged_by_audited_code_inside_a_section_does_not_outlive_later_fo
     assert HOOKS == []
 
 
+def _scalar_dict_twice_around_a_rewrite(record_type, record, results):
+    """未宣言の generator（walker は 1 歩を外の code の区間で進める）: 1 歩の中で、監査済みの code（`scalar_record_dict`）を
+    呼ぶ → record の型へ外の getter を足す → もう一度呼ぶ。結果は `results` に記録する。"""
+
+    def child():
+        results.append(_refused_or_raised(lambda: json_encoding.scalar_record_dict(record)))
+        setattr(record_type, "second", _foreign_getter(999))
+        results.append(_refused_or_raised(lambda: json_encoding.scalar_record_dict(record)))
+        yield 1
+
+    return child()
+
+
+def _refused_or_raised(operation):
+    try:
+        return operation()
+    except (live_values.UndecidableComparison, JsonValueRejected, TypeError):
+        return "refused"
+
+
+def test_audited_code_reentered_twice_from_one_foreign_step_does_not_reuse_trust_across_the_foreign_code_between():
+    """第 12 回の反例: 外側の walker の activation が残る状態で、未宣言の generator の 1 回の実行（外の code の区間）の中で
+    `scalar_record_dict(record)` → record の型へ外の getter を足す → `scalar_record_dict(record)`。2 回目は 1 回目が確かめた
+    型の信頼を使い回して getter を呼び 7 を 999 にしていた。外の code の区間の寿命と外の code が実際に走る期間は同じでない:
+    監査済みの code へ入るたび・外の code へ戻るたびに、その間に頼った事実は失効する。2 回目は getter の前に拒む。record は
+    監査済みの code の外で作る。"""
+
+    HOOKS.clear()
+
+    @dataclasses.dataclass(frozen=True)
+    class Record:
+        first: int
+        second: int
+
+        def json_items(self):
+            # 監査済みの code が receiver を絞り込む（型の信頼を確かめて memo に残す: 1 回目の呼び出しの中）
+            if not live_values.package_instance(self, Record):
+                raise TypeError("not a Record")
+            yield "first", self.first
+            yield "second", self.second
+
+    record = Record(first=1, second=7)
+    results = []
+    holder = type("Holder", (), {"__module__": __name__})()
+    holder_items = lambda self: iter((("child", _scalar_dict_twice_around_a_rewrite(Record, record, results)),))
+    type(holder).json_items = holder_items
+    try:
+        _refused(lambda: _prepare(holder))
+    finally:
+        if isinstance(Record.__dict__.get("second"), property):
+            delattr(Record, "second")
+    assert results == [{"first": 1, "second": 7}, "refused"]
+    assert HOOKS == []
+
+
+def _self_narrowing_record_type():
+    """receiver を絞り込む（型の信頼を memo に残す）json_items と sized leaf の protocol を持つ record の型。"""
+
+    @dataclasses.dataclass(frozen=True)
+    class Record:
+        first: int
+        second: int
+
+        def json_items(self):
+            if not live_values.package_instance(self, Record):
+                raise TypeError("not a Record")
+            yield "first", self.first
+            yield "second", self.second
+
+    return Record
+
+
+@live_values.audited_entry
+def _audited_read(record):
+    """監査済みの entry root（test の）: record を絞り込んで field を読む。"""
+
+    if not live_values.package_instance(record, type(record)):
+        raise TypeError("unexpected")
+    second = record.second
+    if type(second) is not int:
+        raise TypeError("second is not an int")
+    return {"first": record.first, "second": second}
+
+
+_ENTRIES = {
+    "scalar_record_dict": lambda record: json_encoding.scalar_record_dict(record),
+    "walker": lambda record: _prepare(record),
+    "audited_entry": _audited_read,
+}
+
+
+def _reliance_state():
+    state = live_values.reliance()
+    return (len(state.active), getattr(state, "floor", 0), list(getattr(state, "floors", ())), len(state.walks),
+            dict(state.trusted))
+
+
+@pytest.mark.parametrize("entry", sorted(_ENTRIES))
+@pytest.mark.parametrize("outer", ["none", "activation", "walk"])
+@pytest.mark.parametrize("shape", ["same-section", "nested-sections", "exception-exit"])
+def test_every_entry_reentered_from_foreign_code_rechecks_trust_after_the_foreign_code_between(entry, outer, shape):
+    """境界の組み合わせ: 外の code（区間の中）が監査済みの code（入口ごと）を呼ぶ → 外の code が record の型へ外の getter
+    を足す → もう一度呼ぶ。1 回目は双子と同じ値、2 回目は getter の前に拒む（hook 0 回）。外側（何も無い / activation /
+    walk）・区間の形（同じ区間で 2 回 / 2 回目は入れ子の区間の中 / 1 回目が例外で終わる）に依らない。終わった後、
+    reliance の状態（activation・floor・walk・型の信頼の記録）は始める前と同じ。"""
+
+    HOOKS.clear()
+    Record = _self_narrowing_record_type()
+    record = Record(first=1, second=7)
+    call = _ENTRIES[entry]
+    results = []
+    before = _reliance_state()
+
+    def foreign_step():
+        with live_values.outside_audit():
+            if shape == "exception-exit":
+                # 1 回目は監査済みの code の中（絞り込んで型の信頼を確かめた後）の例外で終わる
+                results.append(_refused_or_raised(lambda: call(Record(first=1, second=object()))))
+            else:
+                results.append(_refused_or_raised(lambda: call(record)))
+            setattr(Record, "second", _foreign_getter(999))
+            if shape == "nested-sections":
+                with live_values.outside_audit():
+                    results.append(_refused_or_raised(lambda: call(record)))
+            else:
+                results.append(_refused_or_raised(lambda: call(record)))
+
+    try:
+        if outer == "none":
+            _refused_or_raised(foreign_step)
+        elif outer == "activation":
+            state = live_values.begin_activation()
+            try:
+                live_values.package_instance(record, Record)
+                _refused_or_raised(foreign_step)
+            finally:
+                live_values.end_activation(state)
+        else:
+            holder = type("Holder", (), {"__module__": __name__})()
+            type(holder).json_items = lambda self: iter((("child", _call_in_a_step(foreign_step)),))
+            _refused_or_raised(lambda: _prepare(holder))
+    finally:
+        if isinstance(Record.__dict__.get("second"), property):
+            delattr(Record, "second")
+    assert results[-1] == "refused"
+    if shape == "exception-exit":
+        assert results[0] == "refused"
+    elif outer == "walk" and entry == "walker":
+        # walk の中で別の walk の作業量を始めない（既存の契約: 何かを走らせる前に拒む）
+        assert results[0] == "refused"
+    else:
+        assert results[0] == {"first": 1, "second": 7}
+    assert HOOKS == []
+    assert _reliance_state() == before
+
+
+_SEQUENCE_SEEDS = range(200)
+
+
+@pytest.mark.parametrize("seed", _SEQUENCE_SEEDS)
+def test_any_sequence_of_switches_never_lets_audited_code_trust_a_type_foreign_code_rewrote(seed):
+    """外の code ⇄ 監査済みの code の切り替えの任意の列（区間に入る・出る、監査済みの code へ入る・戻る、絞り込む、外の
+    code が型を書き換える。入れ子・同じ区間の中の再入・例外での終わりを含む）で: 外の code が型を書き換えた後の、監査済み
+    の code の中の絞り込みはどれも判定不能（getter を呼ばない）。書き換えの前は双子と同じ（絞り込める）。列を終えると
+    reliance の状態は始める前と同じ。"""
+
+    import random
+
+    HOOKS.clear()
+    rng = random.Random(seed)
+
+    @dataclasses.dataclass(frozen=True)
+    class Record:
+        second: int
+
+    record = Record(second=7)
+    before = _reliance_state()
+    stack = []  # "section" / "audited"
+    rewritten = False
+    log = []
+    sections = []  # 区間ごとの {"narrowed", "rewritten"}（同じ区間の中の再入を数える）
+
+    try:
+        for _step in range(rng.randint(10, 40)):
+            ops = ["audited", "section", "narrow", "narrow", "leave"]
+            if not stack or stack[-1][0] == "section":
+                ops.append("rewrite")  # 外の code（区間の中・監査済みの code の外）だけが書き換える
+            op = rng.choice(ops)
+            if op == "audited":
+                stack.append(("audited", live_values.begin_activation()))
+            elif op == "section":
+                section = live_values.outside_audit()
+                section.__enter__()
+                stack.append(("section", section))
+                sections.append({"narrowed": False, "rewritten": False})
+            elif op == "rewrite":
+                if not rewritten:
+                    setattr(Record, "second", _foreign_getter(999))
+                    rewritten = True
+                    if sections:
+                        sections[-1]["rewritten"] = True
+            elif op == "narrow" and stack and stack[-1][0] == "audited":
+                outcome = _refused_or_raised(lambda: live_values.package_instance(record, Record))
+                log.append((rewritten, outcome))
+                if sections:
+                    if sections[-1]["narrowed"] and sections[-1]["rewritten"]:
+                        _SEQUENCE_COVERAGE.add("re-entered after a rewrite in the same section")
+                    sections[-1]["narrowed"] = True
+            elif op == "leave" and stack:
+                kind, handle = stack.pop()
+                if kind == "section":
+                    sections.pop()
+                try:
+                    if kind == "audited":
+                        live_values.end_activation(handle)
+                    else:
+                        handle.__exit__(None, None, None)
+                except live_values.UndecidableComparison:
+                    log.append((rewritten, "refused at exit"))
+        while stack:
+            kind, handle = stack.pop()
+            try:
+                if kind == "audited":
+                    live_values.end_activation(handle)
+                else:
+                    handle.__exit__(None, None, None)
+            except live_values.UndecidableComparison:
+                pass
+    finally:
+        if isinstance(Record.__dict__.get("second"), property):
+            delattr(Record, "second")
+    for was_rewritten, outcome in log:
+        if outcome == "refused at exit":
+            assert was_rewritten
+        else:
+            assert outcome == ("refused" if was_rewritten else True), log
+    assert HOOKS == []
+    assert _reliance_state() == before
+    _SEQUENCE_COVERAGE.update(outcome for was_rewritten, outcome in log if was_rewritten)
+
+
+_SEQUENCE_COVERAGE: set = set()
+
+
+def test_switch_sequences_reached_narrowing_after_a_rewrite():
+    """上の列の test が、書き換えの後の絞り込みと区間の出口での拒否の両方に届いたこと（seed の選び方の確かめ）。"""
+
+    for seed in _SEQUENCE_SEEDS:
+        test_any_sequence_of_switches_never_lets_audited_code_trust_a_type_foreign_code_rewrote(seed)
+    assert {"refused", "refused at exit", "re-entered after a rewrite in the same section"} <= _SEQUENCE_COVERAGE
+
+
+def _call_in_a_step(function):
+    """未宣言の generator（walker は 1 歩を外の code の区間で進める）の 1 歩で `function` を呼ぶ。"""
+
+    def child():
+        function()
+        yield 1
+
+    return child()
+
+
 def test_a_declared_generator_of_another_object_returned_by_json_items_rechecks_that_object():
     """独立 review: generator でない `json_items` が別の object（`inner`）の宣言した監査済みの generator を返すとき、止まって
     いる generator が頼るのは `inner`（generator の self）。子の外の code が `inner` の型へ外の property を足せば、再開の前に
