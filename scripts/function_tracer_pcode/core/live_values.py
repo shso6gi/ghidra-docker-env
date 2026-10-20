@@ -486,7 +486,7 @@ class _TypeFactTable:
     依存から落ちない）。
     """
 
-    __slots__ = ("entries", "extra")
+    __slots__ = ("entries", "extra", "stamps")
 
     def __init__(self, extra: Any = None) -> None:
         #: slot → (key, 型と依存の class の状態の確かめ（`_state_check`）, 値, 依存の class, extra の状態, extra の生かす object,
@@ -494,6 +494,8 @@ class _TypeFactTable:
         self.entries: Dict[Any, Tuple[Any, Any, Any, Tuple[type, ...], Any, Any]] = {}
         #: 判定が名前空間の値の **中身** も読むとき、その中身の状態（`(identity の tuple, 生かす list)` を返す関数）
         self.extra = extra
+        #: 監査済みの code の中で確かめた記録の epoch（slot → (記録, 数)。`_audited_span`）
+        self.stamps: Dict[Any, Tuple[Any, int]] = {}
 
     @staticmethod
     def _key(key: Any) -> Tuple[Any, type]:
@@ -510,10 +512,16 @@ class _TypeFactTable:
         same = all(map(_IS, recorded, key)) if type(key) is tuple else recorded is key
         if not same:
             return default
+        span = _audited_span()
+        stamp = self.stamps.get(slot) if span is not None else None
+        if stamp is not None and stamp[0] is entry and stamp[1] == span:
+            return entry[2]  # この監査済みの区間で確かめた記録（区間の間は外の code が走っていない）
         if not _state_holds(entry[1]):
             return default
         if self.extra is not None and self.extra(kind)[0] != entry[4]:
             return default
+        if span is not None:
+            self.stamps[slot] = (entry, span)
         nesting = _NESTING
         if nesting.active:
             # 判定の途中に記録を使った: その記録が依る class（記録の依存と key の型の MRO）は今の判定の依存
@@ -556,6 +564,7 @@ class _TypeFactTable:
         extra, extra_held = self.extra(kind) if self.extra is not None else (None, None)
         if len(self.entries) >= _TYPE_FACTS_LIMIT:
             self.entries.clear()
+            self.stamps.clear()
         objects = tuple({id(item): item for item in objects}.values())
         if not _within_scan(tuple.__len__(objects)):
             return  # 読んだ object を上限の中で確かめられない: 記録しない（毎回判定する）
@@ -563,9 +572,11 @@ class _TypeFactTable:
         if check is None:
             return
         self.entries[slot] = (key, check, value, depends, extra, extra_held, objects)
+        self.stamps.pop(slot, None)
 
     def clear(self) -> None:
         self.entries.clear()
+        self.stamps.clear()
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -1383,10 +1394,12 @@ class _LookupFactTable:
     記録が内の記録の読みを確かめないまま古くならない。
     """
 
-    __slots__ = ("entries",)
+    __slots__ = ("entries", "stamps")
 
     def __init__(self) -> None:
         self.entries: Dict[int, Tuple[type, Any, Tuple[Any, ...], Any]] = {}
+        #: 監査済みの code の中で確かめた記録の epoch（`id(key)` → (記録, 数)。`validated_in_this_span`）
+        self.stamps: Dict[int, Tuple[Any, int]] = {}
 
     def record(self, key: Any, value: Any, witness: Optional[Tuple[Tuple[dict, str, Any], ...]]) -> None:
         if witness is None:
@@ -1395,6 +1408,7 @@ class _LookupFactTable:
             raise TypeError("a lookup fact is keyed by a type")
         if len(self.entries) >= _TYPE_FACTS_LIMIT:
             self.entries.clear()
+            self.stamps.clear()
         reads = [item for item in witness if item[0] is not _MRO_READ]
         mro_reads = {id(item[1]): item for item in witness if item[0] is _MRO_READ}.values()
         raws = tuple(item[0] for item in reads)
@@ -1409,6 +1423,7 @@ class _LookupFactTable:
 
     def clear(self) -> None:
         self.entries.clear()
+        self.stamps.clear()
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -1424,6 +1439,11 @@ def lookup_fact(table: "LookupFactTable", key: Any, compute: Any, *args: Any) ->
     足すときの唯一の入口（記録の確かめを各所で書かない）。"""
 
     entry = table.entries.get(id(key))
+    span = _audited_span()
+    if span is not None and entry is not None:
+        stamp = table.stamps.get(id(key))
+        if stamp is not None and stamp[0] is entry and stamp[1] == span:
+            return entry[3]  # この監査済みの区間で確かめた記録（区間の間は外の code が走っていない: `_audited_span`）
     if entry is not None and entry[0] is key and _TYPE_MRO.__get__(key) is entry[1]:  # MRO: `__bases__` の書き換え
         raws, names, founds, watch, owners, mros = entry[2]
         if (
@@ -1440,10 +1460,28 @@ def lookup_fact(table: "LookupFactTable", key: Any, compute: Any, *args: Any) ->
             if nesting.active:
                 nesting.reads.extend(entry[1])
                 nesting.reads.extend(owners)
+            if span is not None:
+                table.stamps[id(key)] = (entry, span)
             return entry[3]
     known, witness = _witnessed(compute, *args)
     table.record(key, known, witness)
+    if span is not None:
+        recorded = table.entries.get(id(key))
+        if recorded is not None and recorded[0] is key:
+            table.stamps[id(key)] = (recorded, span)
     return known
+
+
+def _audited_span() -> Optional[int]:
+    """今が監査済みの code の続く区間の中なら、その区間の数（epoch）。外の code ⇄ 監査済みの code の切り替えのたびに数が
+    変わる（`_Reliance`）ので、同じ数の間は外の code が走っていない: その間に確かめた型の事実は確かめ直さなくてよい。
+    監査済みの code の外（外の code の区間の中・activation の無い間）と、記録の読みを外の計算へ渡す間（`_LOOKUPS` /
+    `_NESTING` が走っている間）は `None`（毎回確かめる）。"""
+
+    state = _FOREIGN_EPOCH.s
+    if len(state.active) > state.floor and _LOOKUPS.active is None and not _NESTING.active:
+        return state.count
+    return None
 
 
 #: `lookup_fact` の「記録が無い」印（記録する値は `None` もある）
