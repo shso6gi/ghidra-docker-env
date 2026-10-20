@@ -44,7 +44,7 @@ from scripts.function_tracer_pcode.core import (
     ReturnValueFlowStep,
     VarnodeFlowRef,
 )
-from scripts.function_tracer_pcode.core.structural import expression_provenance_key
+from scripts.function_tracer_pcode.core.structural import value_identity
 import scripts.function_tracer_pcode.proof.strategies.monolithic_return_width as _mx_monolithic_return_width
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
@@ -88,7 +88,7 @@ def _analysis(binary_id, entry, storage_bits, *, extension=None):
                 traversed_input_index=0,
             ),),
             extension_step_index=0,
-            payload_expression_identity=tuple(expression_provenance_key(value)),
+            payload_expression_identity=tuple(value_identity(value)),
         )
     analysis = FunctionReturnAnalysis(
         function_name="f",
@@ -148,7 +148,7 @@ def test_extension_certificate_input_defines_semantic_payload_width_and_identity
         return_input_ref=certificate.return_input_ref,
         steps=certificate.steps,
         extension_step_index=certificate.extension_step_index,
-        payload_expression_identity=tuple(expression_provenance_key(payload)),
+        payload_expression_identity=tuple(value_identity(payload)),
     )
 
     seed = extract_function_return_width_seed(
@@ -158,7 +158,7 @@ def test_extension_certificate_input_defines_semantic_payload_width_and_identity
     assert seed.complete
     assert seed.storage_width == 64
     assert seed.payload_width == 32
-    assert seed.payload_value_identity == tuple(expression_provenance_key(payload))
+    assert seed.payload_value_identity == tuple(value_identity(payload))
     assert seed.extension_evidence_source.kind == "zero_extend"
 
     proof = prove_function_return_width(analysis, seed)

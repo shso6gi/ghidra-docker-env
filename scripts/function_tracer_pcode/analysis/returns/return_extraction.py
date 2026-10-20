@@ -46,7 +46,7 @@ from scripts.function_tracer_pcode.core import (
     VarnodeFlowRef,
 )
 from scripts.function_tracer_pcode.core.structural import expression_key
-from scripts.function_tracer_pcode.core.structural import expression_provenance_key
+from scripts.function_tracer_pcode.core.structural import value_identity
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     _expressions_equivalent_under_conditions,
     lower_post_state_expression_for_smt,
@@ -248,7 +248,7 @@ def _build_return_value_flow_certificate(
         try:
             payload_expr = tracer.trace_varnode(extension_payload_varnode, use_cache=False)
             if payload_expr is not None:
-                payload_identity = tuple(expression_provenance_key(payload_expr))
+                payload_identity = tuple(value_identity(payload_expr))
         except Exception:
             payload_identity = ()
     return ReturnValueFlowCertificate(

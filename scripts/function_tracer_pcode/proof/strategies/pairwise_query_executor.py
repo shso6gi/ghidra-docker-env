@@ -29,6 +29,7 @@ from scripts.function_tracer_pcode.proof.obligations import (
     GuardOverlapGraph,
     SolverQueryExecutionReceipt,
     canonical_guard_query_digest,
+    canonical_guard_query_text,
     guard_seed,
     issue_structural_equality_receipt,
     register_structural_equality_producer,
@@ -461,6 +462,9 @@ def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full"
     cache = getattr(strategy, "_exact_query_attempt_cache", None)
     if cache is not None:
         cached = cache.get(attempt_key)
+        if cached is not None and not cached.answers(query):
+            # key は query の digest: 文字列の違う query の結果を返さない（#218 PR-D）
+            cached = None
         if cached is not None:
             result = copy.copy(cached.outcome)
             result.normalization_rules = list(cached.outcome.normalization_rules)
@@ -542,6 +546,7 @@ def solve_query_internal(strategy, query: str, pair_id: str, stage: str = "full"
                 query_size=len(query),
                 elapsed_time=elapsed,
                 retry_eligible=semantic is None,
+                query_text=query,
             ),
         )
         stats = getattr(strategy, "_active_normalization_stats", None)
@@ -571,7 +576,11 @@ def _build_canonical_guard_query_executor(solver: Any):
         runner = getattr(strategy, "solver_runner", None)
         if runner is None:
             raise RuntimeError("canonical guard solver runner is unavailable")
-        if canonical_guard_query_digest(query) != requirement.canonical_query_digest:
+        if (
+            canonical_guard_query_digest(query) != requirement.canonical_query_digest
+            or canonical_guard_query_text(query) != requirement.canonical_query_text
+        ):
+            # digest の一致だけで同じ query としない（#218 PR-D）
             raise ValueError("canonical guard query does not match requirement")
         raw = solver(
             strategy,

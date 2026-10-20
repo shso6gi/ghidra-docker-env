@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.authority.contracts import (
     VerifiedLifecycleProjection,
     assert_deep_immutable,
     authority_digest,
+    authority_identity_key,
     freeze_authority_value,
 )
 from scripts.function_tracer_pcode.authority.decision.decision import DecisionReceipt
@@ -58,12 +59,14 @@ def canonical_assumption_dependencies(
                 f"{type(premise).__name__}"
             )
         assert_deep_immutable(premise)
-        digest = authority_digest(premise)
-        if digest in seen:
+        # 同じ premise かは authority の厳密な identity で決める（digest の衝突・型を落とす preimage の
+        # 一致で別の premise を落とさない: #218 PR-D）。並びは従来どおり digest の順
+        identity = authority_identity_key(premise)
+        if identity in seen:
             continue
-        seen.add(digest)
-        ordered.append((digest, premise))
-    return tuple(premise for _digest, premise in sorted(ordered, key=lambda item: item[0]))
+        seen.add(identity)
+        ordered.append(((authority_digest(premise), len(ordered)), premise))
+    return tuple(premise for _order, premise in sorted(ordered, key=lambda item: item[0]))
 
 
 def assumption_dependencies_digest(premises: Iterable[AssumptionPremise]) -> str:

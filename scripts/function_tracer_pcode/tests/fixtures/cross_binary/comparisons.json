@@ -1331,17 +1331,17 @@
   "path": "proof/strategies/pairwise_solver_proven_rewrite.py",
   "qualname": "_exprs_match",
   "kind": "compare",
-  "digest": "9fd9192d4de0d4bf",
+  "digest": "c88ad8cfc9d3e4c0",
   "role": "single_side",
-  "why": "_exprs_match compares sub-expressions of one rewritten expression (left vs dividend)"
+  "why": "_exprs_match compares value identities of sub-expressions of one rewritten expression (left vs dividend)"
  },
  {
   "path": "proof/strategies/pairwise_solver_proven_rewrite.py",
-  "qualname": "_extract_minimal_rewrite_difference",
+  "qualname": "_same_operand",
   "kind": "compare",
-  "digest": "ee518a86aa40d485",
+  "digest": "9fd9192d4de0d4bf",
   "role": "single_side",
-  "why": "_extract_minimal_rewrite_difference: original vs rewritten expression of the same case"
+  "why": "_same_operand: rendered keys of operands of the original and rewritten expression of the same case"
  },
  {
   "path": "proof/strategies/pairwise_solver_proven_rewrite.py",

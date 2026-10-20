@@ -24,7 +24,7 @@ from scripts.function_tracer_pcode.core import (
     Expression,
     ExpressionType,
     FunctionReturnAnalysis,
-    expression_provenance_key,
+    value_identity,
 )
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.core.signature import get_declared_type_signedness
@@ -908,7 +908,7 @@ def _stage_payload(
             "pcode_op_key": _evidence_pcode_key(evidence),
             "callee_param_identities": evidence.callee_param_identities,
             "arguments": tuple(
-                expression_provenance_key(argument)
+                value_identity(argument)
                 for argument in evidence.arguments or ()
             ),
             "path_conditions": tuple(
@@ -928,14 +928,14 @@ def _stage_payload(
             "return_partitions": tuple(
                 (
                     tuple(condition_key(condition) for condition in conditions),
-                    expression_provenance_key(value),
+                    value_identity(value),
                 )
                 for conditions, value in evidence.return_partitions or ()
             ),
             "memory_effects": tuple(
                 {
                     "location": effect.location.stable_key(),
-                    "value": expression_provenance_key(effect.value),
+                    "value": value_identity(effect.value),
                     "conditions": tuple(
                         condition_key(condition)
                         for condition in effect.conditions or ()
@@ -966,7 +966,7 @@ def _stage_payload(
         "left_caller_effects": tuple(
             {
                 "location": effect.location.stable_key(),
-                "value": expression_provenance_key(effect.value),
+                "value": value_identity(effect.value),
                 "conditions": tuple(
                     condition_key(condition) for condition in effect.conditions or ()
                 ),
@@ -982,7 +982,7 @@ def _stage_payload(
         "right_caller_effects": tuple(
             {
                 "location": effect.location.stable_key(),
-                "value": expression_provenance_key(effect.value),
+                "value": value_identity(effect.value),
                 "conditions": tuple(
                     condition_key(condition) for condition in effect.conditions or ()
                 ),
@@ -1017,7 +1017,7 @@ def _stage_payload(
                 {
                     "address": item.address,
                     "conditions": tuple(condition_key(c) for c in item.conditions),
-                    "value": expression_provenance_key(item.value),
+                    "value": value_identity(item.value),
                     "return_kind": item.return_kind,
                     "acceptance_status": item.acceptance_status,
                     "validation_blockers": tuple(item.validation_blockers or ()),
@@ -1027,7 +1027,7 @@ def _stage_payload(
             "region_effects": tuple(
                 {
                     "location": item.location.stable_key(),
-                    "value": expression_provenance_key(item.value),
+                    "value": value_identity(item.value),
                     "conditions": tuple(
                         condition_key(condition)
                         for condition in item.conditions or ()
@@ -2321,7 +2321,7 @@ def _caller_call_result_definitions(
                 symbol,
                 int(observed_bits),
                 tuple(guards),
-                tuple(expression_provenance_key(value) for _conditions, value in partitions),
+                tuple(value_identity(value) for _conditions, value in partitions),
             )
         )
     return lines, frozenset(allowed), {

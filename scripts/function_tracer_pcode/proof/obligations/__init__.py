@@ -86,6 +86,7 @@ _LAZY = {
     "WorkItem": ("scripts.function_tracer_pcode.proof.obligations.worklist", "WorkItem"),
     "WorkResultRole": ("scripts.function_tracer_pcode.proof.obligations.guard_overlap", "WorkResultRole"),
     "canonical_guard_query_digest": ("scripts.function_tracer_pcode.proof.obligations.guard_overlap", "canonical_guard_query_digest"),
+    "canonical_guard_query_text": ("scripts.function_tracer_pcode.proof.obligations.guard_overlap", "canonical_guard_query_text"),
     "closure_identification_floor": ("scripts.function_tracer_pcode.proof.obligations.pair_disposition", "closure_identification_floor"),
     "guard_seed": ("scripts.function_tracer_pcode.proof.obligations.guard_overlap", "guard_seed"),
     "issue_structural_equality_receipt": ("scripts.function_tracer_pcode.proof.obligations.pair_disposition", "issue_structural_equality_receipt"),

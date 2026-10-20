@@ -50,7 +50,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 #: 子 process: digest を定数にして（SHA-256 の衝突の代わり）、指定順に key を作り JSON で返す
 _CHILD = r"""
-import json, sys
+import hashlib, json, sys
 sys.path.insert(0, {root!r})
 from scripts.function_tracer_pcode.core import structural
 from scripts.function_tracer_pcode.tests.unit.test_sn3_cross_process_identity import build
@@ -320,14 +320,14 @@ def test_the_worker_aggregate_is_built_inside_the_minting_scope(monkeypatch):
 
 
 _NONCE_CHILD = r"""
-import json, sys
+import hashlib, json, sys
 sys.path.insert(0, {root!r})
 from scripts.function_tracer_pcode.core import structural
 from scripts.function_tracer_pcode.core.semantic_projection import canonical_atom
 from scripts.function_tracer_pcode.core.expression import Expression
 tokens = [structural.unidentified_identity("probe") for _ in range(3)]
 objects = [structural.expression_key_or_identity(Expression.parameter("a", 0, size=4), budget=0) for _ in range(3)]
-hidden = [structural._digest_structural_payload(canonical_atom(token)) for token in tokens]
+hidden = [hashlib.sha256(json.dumps(canonical_atom(token)).encode()).hexdigest() for token in tokens]
 print(json.dumps({{"tokens": tokens, "objects": objects, "hidden": hidden}}))
 """
 

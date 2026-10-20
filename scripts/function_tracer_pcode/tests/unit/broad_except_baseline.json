@@ -765,8 +765,7 @@
       "_impl__storage_info_from_parameter_descriptor": {"logged": 0, "unlogged": 1}
     },
     "proof.strategies.pairwise_solver_proven_rewrite": {
-      "_exact_expr_key": {"logged": 0, "unlogged": 1},
-      "_expr_signature": {"logged": 0, "unlogged": 1}
+      "_exact_expr_key": {"logged": 0, "unlogged": 1}
     },
     "proof.strategies.proof_gates.object_keys": {
       "_impl__return_value_extension_ops_object_key": {"logged": 0, "unlogged": 1}

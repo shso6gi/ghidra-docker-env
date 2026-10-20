@@ -43,6 +43,7 @@ from scripts.function_tracer_pcode.authority.contracts import (
     SatisfactionContractDefinition,
     all_of,
     authority_digest,
+    authority_identity_key,
     any_of,
     requirement_slot,
 )
@@ -1027,15 +1028,32 @@ def summary_effect_prerequisite_signals_from_acceptance(
                     ("summary_candidate_effect_prerequisite", effect_summary_key),
                     base_evidence + (authority_digest(effect_summary_key),),
                 )
-    deduped: dict[str, SummaryEffectPrerequisiteProductionSignal] = {}
+    return _dedupe_prerequisite_signals(results)
+
+
+def _dedupe_prerequisite_signals(
+    results: Iterable["SummaryEffectPrerequisiteProductionSignal"],
+) -> tuple["SummaryEffectPrerequisiteProductionSignal", ...]:
+    """同じ (reason, target, missing) の signal を 1 つにする。
+
+    同じかは authority の厳密な identity（`authority_identity_key`）で決める（target は値・対象の
+    identity を含む。digest の一致・型を落とす preimage の一致で別の target の signal を落とさない:
+    #218 PR-D）。並びは従来どおり digest の順。
+    """
+
+    deduped: dict[Any, SummaryEffectPrerequisiteProductionSignal] = {}
+    order: dict[Any, tuple] = {}
     for signal in results:
-        key = authority_digest({
+        payload = {
             "reason_id": signal.reason_id,
             "target": signal.canonical_target_key,
             "missing": signal.missing_semantic_fact,
-        })
-        deduped.setdefault(key, signal)
-    return tuple(deduped[key] for key in sorted(deduped))
+        }
+        key = authority_identity_key(payload)
+        if key not in deduped:
+            deduped[key] = signal
+            order[key] = (authority_digest(payload), len(order))
+    return tuple(deduped[key] for key in sorted(deduped, key=order.__getitem__))
 
 
 def _summary_effect_source_members(

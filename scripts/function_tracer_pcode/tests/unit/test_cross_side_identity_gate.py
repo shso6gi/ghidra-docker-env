@@ -1607,7 +1607,7 @@ def test_the_rewrite_proof_falls_back_to_the_solver_when_the_pair_is_not_certifi
     left = _raw("f", [_d("n", 0), _d("m", 1)], _p("n", 0))
     right = _raw("g", [_d("m", 0), _d("n", 1)], _p("n", 1))
     monkeypatch.setattr(rewrite, "_build_rewrite_candidate", lambda expr, _settings: expr.clone_with())
-    monkeypatch.setattr(rewrite, "_expr_signature", lambda expr: id(expr))
+    monkeypatch.setattr(rewrite, "value_identity", lambda expr: id(expr))
     monkeypatch.setattr(rewrite, "_prove_rewrite", lambda *_a, **_k: object())
     monkeypatch.setattr(rewrite, "build_pair_query", lambda *_a, **_k: "(check-sat)")
     solved = []

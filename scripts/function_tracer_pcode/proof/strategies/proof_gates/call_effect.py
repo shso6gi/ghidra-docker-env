@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 from scripts.function_tracer_pcode.core import FunctionReturnAnalysis
+from scripts.function_tracer_pcode.core.structural import cross_side_node
 from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     CrossSideIdentification,
     certify_owner_free_identity,
@@ -1788,7 +1789,9 @@ def _impl__deferred_call_argument_keys(cls, object_target_key: Any) -> Tuple[Any
 
 
 def _impl__cross_binary_call_effect_component_key(cls, value: Any) -> Any:
-    normalized = cls._normalize_nested_tuple(value)
+    # 1 つの解析の中でだけ値を識別する token（`value_identity` の exact identity など）は左右の一致に
+    # 使わない（#218 PR-D: 規則の owner は `core.structural.cross_side_node`）
+    normalized = cross_side_node(cls._normalize_nested_tuple(value))
     if isinstance(normalized, tuple):
         if normalized and normalized[0] == "parameter" and len(normalized) >= 4:
             if (

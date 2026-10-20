@@ -842,12 +842,17 @@ class Expression:
         finally:
             meters.pop()
 
-    def __json_identity__(self) -> str:
-        """証拠の digest に流す identity（DAG のまま求める構造 digest）。"""
+    def __json_identity__(self) -> Optional[str]:
+        """証拠の digest に流す identity（DAG のまま求める構造 digest）。無ければ ``None``。
+
+        digest を持たない式（未凍結・値として固定できない部分を含む）を ``"None"`` という同じ文字列に
+        しない（#218 PR-D: 別の式の証拠が同じ fingerprint になる）。``None`` を受けた walker は、その
+        証拠に fingerprint を付けない。
+        """
 
         from scripts.function_tracer_pcode.core.structural import structural_identity_digest
 
-        return str(structural_identity_digest(self))
+        return structural_identity_digest(self)
 
     def _to_dict(self, active: Set[int]) -> Dict[str, Any]:
         node_id = id(self)

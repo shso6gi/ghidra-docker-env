@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import astuple, dataclass
 import hashlib
-import json
 import secrets
 import struct
 from typing import Any, Optional, Tuple
@@ -23,7 +22,9 @@ from scripts.function_tracer_pcode.core.atomic_tables import (
 from scripts.function_tracer_pcode.core.condition import Condition
 from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.semantic_lifecycle import is_validated
+from scripts.function_tracer_pcode.core.loop_lowering_semantics import LoweringKind
 from scripts.function_tracer_pcode.core.atom_validity import (  # noqa: F401  (tag の語彙は再 export)
+    EXACT_RECORD_TAG,
     EXACT_TAIL_TAG,
     NON_STRUCTURAL_IDENTITY_TAGS,
     PLACEHOLDER_TAGS,
@@ -35,11 +36,7 @@ from scripts.function_tracer_pcode.core.atom_validity import (  # noqa: F401  (t
     tags_of as _tags_of,
 )
 from scripts.function_tracer_pcode.core.semantic_projection import (
-    IDENTITY_EVALUATION_ERRORS,
     identity_view,
-    MAX_VALUE_DEPTH,
-    declared_method,
-    read_container,
     canonical_atom as _atom_key,
 )
 from scripts.function_tracer_pcode.core.semantic_snapshot import (
@@ -124,6 +121,9 @@ class ExactTailOptions:
     collapse_full_masks: bool = False
     include_memory_read_order: bool = True
     include_semantic_runtime_refs: bool = True
+    #: renderer が runtime ref の投影から読む成分（`_rendered_runtime_label`）を label に足す。
+    #: 値の identity（`value_identity`）だけが使う。既定の key は変えない（#218 PR-D）
+    include_rendered_runtime_refs: bool = False
 
     @classmethod
     def of(cls, **options: Any) -> "ExactTailOptions":
@@ -257,6 +257,102 @@ _VALIDATED_METADATA_MEMO = WeakKeyedTable()
 #: `expression_key_or_identity` の object identity（同じ live object → 同じ serial、
 #: serial は再利用しない。`id()` は object の死後に再利用されるので使わない）
 _PROCESS_OBJECT_SERIALS = WeakKeyedTable()
+
+
+#: `ExactRecordIntern` の digest の domain separation
+_EXACT_RECORD_DOMAIN = b"pr-d-exact-record-v1\x00"
+
+
+#: `ExactRecordIntern` の instance の通し番号（token に instance を入れる）
+_EXACT_RECORD_OWNERS = SerialCounter()
+
+
+class ExactRecordIntern:
+    """record の bytes → 厳密な identity の token（#218 PR-D）。
+
+    契約: 2 つの token が等しいのは、**同じ intern** が同じ (domain, record) に発行したときで、そのときに
+    限る。bucket は record の hash で選び、一致は bucket の中の bytes の厳密比較で決める（計画 v4 §6.4
+    の 1）。token は発行した intern の印（process の中の通し番号）を持つので、別の intern の token とは
+    等しくならない（bucket の位置は intern ごとに数えるので、印が無いと別の intern に最初に登録した別の
+    record が同じ token になる）。別の process の token と比べない（`cross_process_node`）。
+    instance の複製は同じ intern を指す（`copy` / `deepcopy` は自分を返す: 印を複製して表を分けない）。
+
+    描画した SMT の文字列のような、構造 key を持たない値の memo・cache の key に使う。record を持ち
+    続けるので、instance はそれを key にする memo・cache と同じ寿命で持つ（process 全体に置かない）。
+    token は process の中でだけ意味を持つ（`PROCESS_SCOPED_TAGS`。外へ出す値の比較は
+    `cross_process_node` が、左右の比較は `cross_side_node` が識別不能にする）。
+    """
+
+    __slots__ = ("_buckets", "_owner")
+
+    def __init__(self) -> None:
+        self._buckets = AppendOnlyBuckets()
+        self._owner = (_EXACT_RECORD_OWNERS.next(),)
+
+    def __copy__(self) -> "ExactRecordIntern":
+        return self
+
+    def __deepcopy__(self, memo: dict) -> "ExactRecordIntern":
+        return self
+
+    def token(self, domain: str, record: bytes) -> StructuralKey:
+        if type(domain) is not str or type(record) is not bytes:
+            raise TypeError("an exact record token takes a str domain and a bytes record")
+        keyed = _canonical_bytes(domain) + record
+        digest = hashlib.sha256(_EXACT_RECORD_DOMAIN + keyed).hexdigest()
+        return (EXACT_RECORD_TAG, *self._owner, digest, self._buckets.position(digest, keyed))
+
+
+def exact_occurrence_key(value: Any) -> StructuralKey:
+    """組み込みの値の厳密な identity（**同じ出現**か。#218 PR-D）。
+
+    ``("exact_occurrence", canonical bytes)``。値が型まで等しいときだけ等しい（tuple と list、True と 1、
+    "1" と 1 を分ける）。`exact_value_key` との違いは識別不能 token の扱いだけ: こちらは **同じ token の
+    写し** を同じ出現とする（1 つの計算が作った token を持つ値を、もう一度送った・もう一度読んだ、を
+    区別しない。別々に計算した token は乱数が違うので等しくならない）。「1 回だけ出す」「同じ活性化か」の
+    ような冪等性の判定が使う。値として同じか（束ね・照合）は `exact_value_key`。canonical な bytes に
+    ならない値は毎回新しい識別不能 token。
+    """
+
+    try:
+        return ("exact_occurrence", _canonical_bytes(value))
+    except (_NotCanonical, RecursionError):
+        return unidentified_identity("non_canonical_occurrence")
+
+
+def exact_value_key(value: Any) -> StructuralKey:
+    """組み込みの値（None・bool・int・str・bytes・float・tuple・list の入れ子）の厳密な identity（#218 PR-D）。
+
+    ``("exact_value", canonical bytes)``。2 つが等しい ⇔ 値が型まで等しい（tuple と list、True と 1、
+    "1" と 1 を分ける）。dict・set・class の instance・subclass の値など、canonical な bytes にならない値と、
+    識別不能 token を含む値は、毎回新しい識別不能 token（何とも、自分の再計算とも等しくならない）。
+
+    identity の値（`value_identity` / `object_target_key` の key、それを部分に持つ key）を束ねる・集合に
+    入れる・照合する consumer は、digest や JSON の文字列を自分で作らず、これ（か `dedupe_exact`）を使う。
+    hash は dict / set の bucket を選ぶだけで、一致は bytes の比較で決まる。
+    """
+
+    if key_contains_unidentified(value):
+        # 識別不能 token を含む値は identity ではない（同じ token の写しどうしでも束ねない: C-K5）
+        return unidentified_identity("unidentified_value")
+    try:
+        return ("exact_value", _canonical_bytes(value))
+    except (_NotCanonical, RecursionError):
+        return unidentified_identity("non_canonical_value")
+
+
+def dedupe_exact(values: Any) -> Tuple[Any, ...]:
+    """出現順を保って、厳密に等しい値（`exact_value_key`）の 2 つ目以降を除く。識別できない値は除かない。"""
+
+    seen: set = set()
+    result: list = []
+    for value in values:
+        key = exact_value_key(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(value)
+    return tuple(result)
 
 
 def unidentified_identity(reason: str) -> StructuralKey:
@@ -403,6 +499,71 @@ def _expression_runtime_metadata(expr: Expression) -> Tuple[tuple, bool, bool]:
     return result
 
 
+def _rendered_runtime_label(read: "_LabelReader", node: Expression, expr_type: ExpressionType) -> tuple:
+    """renderer が runtime ref の投影から読み、通常の label に無い成分（#218 PR-D の値の identity 用）。
+
+    SMT の描画（`core/render_smt`）は、次の node で ref の投影を読んで別の項を描く:
+
+    * CONSTANT: 名前付き global object のアドレス（`address_object_identity` → `gaddr_*`）
+    * VARIABLE: 定数アドレスを指す ref（address の文脈で `address_offset` / `gaddr_*`）
+    * UNKNOWN: 記号（`rtunk_*`）の名前は ref の semantic key、無ければ stable key と origin から来る
+    * INTRINSIC: loop summary の lowering（関数名と厳密 lowering は ref から来る）
+
+    通常の構造 key はこれらを見ない（UNKNOWN / MEMORY の ref の意味 key は stable key だけから作る）。
+    旧 provenance key の根の早期 return はこれらを ref の key で区別していたので、値の identity から
+    落とすと値の違う式が同じ identity になる。描画が ref を読まない node（PARAMETER・ふつうの VARIABLE・
+    PTRADD など）には何も足さない（足すと値の共有を失うだけ）。UNKNOWN と loop の INTRINSIC は、ref が
+    宣言した identity（stable / semantic / origin。描画の記号名と lowering の関数名はこれから作る）を
+    足し、固定できない ref は識別不能にする。宣言型の signedness など他の成分は PR-I（計画 v4 §6.6）。
+    """
+
+    if expr_type is ExpressionType.CONSTANT:
+        identity = semantic_projection(node).address_object_identity
+        return () if identity is None else (("rendered_address_object", identity),)
+    if expr_type is ExpressionType.VARIABLE:
+        projection = semantic_projection(node)
+        if projection.is_address_value_ref and projection.address_offset is not None:
+            return (("rendered_address_value", projection.address_offset, projection.address_object_identity),)
+        return ()
+    if expr_type is ExpressionType.UNKNOWN:
+        projection = semantic_projection(node)
+        if not projection.has_runtime_ref:
+            return ()
+        # UNKNOWN の label は ref の stable key の atom を既に持つ: 描画が読むそれ以外（semantic・origin）だけ
+        return _declared_ref_identity(read, projection, include_stable=False)
+    if expr_type is ExpressionType.INTRINSIC:
+        projection = semantic_projection(node)
+        if projection.loop_lowering.kind is LoweringKind.NONE:
+            return ()
+        return _declared_ref_identity(read, projection, include_stable=True)
+    return ()
+
+
+def _declared_ref_identity(read: "_LabelReader", projection: Any, *, include_stable: bool) -> tuple:
+    """ref が宣言した identity（stable / semantic / origin の atom）のうち label に無いものの成分。
+
+    固定できない ref は識別不能（ref を持たない式とも別の ref とも等しくしない）。足す成分が無ければ何も
+    足さない（stable key だけの UNKNOWN の key は旧 provenance key の予算内の経路と byte 一致のまま）。
+    """
+
+    if projection.runtime_identity_unfixable:
+        return (read._reject("unfixable_runtime_identity"),)
+    parts = tuple(
+        (tag, value)
+        for tag, value in (
+            ("stable", projection.runtime_stable_key if include_stable else None),
+            ("semantic", projection.runtime_semantic_key),
+            ("origin", projection.runtime_stable_origin),
+        )
+        if value is not None
+    )
+    if not parts:
+        return ()
+    component, identified, comparable = _classify_atom(("rendered_ref_identity", parts))
+    read._merge(identified, comparable)
+    return (component,)
+
+
 class _Redirect:
     """V_o(n) が別の node（全 bit の mask を剥がした operand）であること。"""
 
@@ -523,22 +684,25 @@ def _key_view(node: Expression, options: ExactTailOptions):
 
     read = _LabelReader()
     size = read.size(current.size)
+    rendered = (
+        _rendered_runtime_label(read, current, expr_type) if options.include_rendered_runtime_refs else ()
+    )
 
     if expr_type is ExpressionType.CONSTANT:
-        return read.view("leaf", ("const", read.atom(current.value), size))
+        return read.view("leaf", ("const", read.atom(current.value), size, *rendered))
 
     if expr_type is ExpressionType.LITERAL:
         return read.view("leaf", ("literal", read.atom(current.value), size))
 
     if expr_type is ExpressionType.PARAMETER or expr_type is ExpressionType.VARIABLE:
         name = read.text(current.name)
-        return read.view("leaf", (expr_type.name.lower(), name, read.atom(current.value), size))
+        return read.view("leaf", (expr_type.name.lower(), name, read.atom(current.value), size, *rendered))
 
     if expr_type is ExpressionType.UNKNOWN:
         name = read.text(current.name)
         atom = read.atom(current.value)
         runtime_metadata = read.runtime_metadata(current) if options.include_semantic_runtime_refs else ()
-        return read.view("leaf", ("unknown", name, atom, size, *runtime_metadata))
+        return read.view("leaf", ("unknown", name, atom, size, *runtime_metadata, *rendered))
 
     first = operands[0] if operands else None
 
@@ -573,7 +737,7 @@ def _key_view(node: Expression, options: ExactTailOptions):
         opcode = getattr(current, "opcode", None)
         return read.view(
             "call",
-            ("intrinsic", read.text(current.name), None if opcode is None else read.integer(opcode), size),
+            ("intrinsic", read.text(current.name), None if opcode is None else read.integer(opcode), size, *rendered),
             operands,
         )
 
@@ -1171,6 +1335,24 @@ def cross_process_node(node: Any) -> Any:
     return node
 
 
+def cross_side_node(node: Any) -> Any:
+    """左右の binary の key を比べる consumer が node ごとに通す規則（#218 PR-D）。
+
+    exact identity の token・識別不能 token・object identity token は、1 つの解析の中の値の identity で
+    ある（`value_identity` の超予算の形など）。左右の対応（InputCorrespondence）を通らずに token の一致で
+    左右を同一視すると、旧 provenance digest（ref の program id を含んだ）では一致しなかった深い式が
+    一致する。左右の値の対応は PR-H の `CorrespondenceScope` が owner になるまで、そのような node は
+    毎回新しい識別不能 token にして、左右の比較で何とも等しくならないようにする（`cross_process_node` と
+    同じ形の規則で、適用する場所が別。こちらは node の中の深さを問わない）。
+    """
+
+    if (type(node) is tuple or type(node) is list) and not key_is_process_independent(node):
+        # node の **どこか** に token があれば node 全体を識別不能にする（形を作る consumer は分岐ごとに
+        # 子の一部だけを返すことがあり、子へ降りる前に止めないと token が形の中に残る）
+        return unidentified_identity("side_local_identity")
+    return node
+
+
 def expression_key_safe(
     expr: Optional[Expression],
     *,
@@ -1230,20 +1412,105 @@ def _process_object_identity(expr: Any) -> StructuralKey:
     return (PROCESS_OBJECT_TAG, *serial)
 
 
-def expression_provenance_key(
-    expr: Optional[Expression],
-    *,
-    safe_budget: int = 256,
-    max_digest_nodes: int = 8192,
-    include_memory_read_order: bool = True,
-    include_semantic_runtime_refs: bool = True,
-) -> StructuralKey:
-    """Stable key for object-target provenance.
+# ---------------------------------------------------------------------------
+# 値の identity と対象の identity（#218 PR-D）
+# ---------------------------------------------------------------------------
+#
+# 「同じ」の関係を用途で分ける（計画 v4 §6.1）。どちらも片側（1 つの解析）・1 process の中の関係:
+#
+#   value_identity     V: 式の **値**。予算内は構造 key、超えたら exact identity（intern の厳密比較）。
+#                      早期 return を持たない: ref・storage を持つ式も、値（描画される項）で決まる。
+#                      case identity・dedup・拡張の証拠・引数や effect の値・memo の key が使う。
+#   object_target_key  T: 式が **指す対象**（reason / blocker の target・call target・store の target）。
+#                      owner つきの ref / storage の identity があればそれ、無ければ V。
+#   label_view         key の tuple を形の検査用に読む唯一の読み口（比較・identity には使わない）。
+#
+# digest は identity にしない（§6.4 の 1）: 旧 provenance key は構造 key が比較不能なとき sha256 の
+# 一致だけで同じとした。今は exact identity（record の bytes を厳密比較する intern の token）を使う。
+# token は process の中でだけ意味を持つ（`PROCESS_SCOPED_TAGS`）。結果に残った key を run の間で
+# 比べる consumer は `checker/cause_aggregate.freeze_identity` を通し、識別不能になる（Gate A）。
+#
+# digest で一致を決めていた箇所の分類（計画 v4 §7.5。PR-D で決めた）:
+#
+#   厳密比較へ移した  readonly の値の記号（`abi_width_readonly`）、
+#                     guard overlap の node（描画した条件・query の `ExactRecordIntern` の token）、
+#                     exact query の attempt cache（hit は query の文字列の一致）、書き換えの operand の
+#                     照合（値の identity）、証拠の fingerprint（digest の無い式は fingerprint を付けない）、
+#                     call effect の束ね・call の bucket・P-code の census（`dedupe_exact` /
+#                     `exact_value_key`）、production signal の「1 回だけ出す」集合（`signal_identity`）、
+#                     authority の前提 signal の束ね・conditional の前提・readonly の値の記号
+#                     （`authority.contracts.authority_identity_key`: 型を区別する authority の identity）、
+#                     共有 Z3 session の region（formula の文字列）
+#   consumer の規則   identity の値を束ねる・集合の key にする・照合する consumer は、digest や JSON の
+#                     文字列を自分で作らず、上の owner の API を使う（`test_digest_lookup_keys.py` が
+#                     digest を lookup の key にする箇所を棚卸しで固定する）
+#   封印・束縛のまま  InputCorrespondence の digest（束縛した artifact が同じ relation の下で作られたか
+#                     の確認と receipt の封印。値どうしを同じとはしない）、receipt の evidence digest、
+#                     artifact の seal
+#   範囲外（記録）    function 単位の unary artifact cache と ProofCache の key（snapshot / premise の
+#                     fingerprint の一致で再利用する。#219 の snapshot 再利用の identity と同じ族）、
+#                     Phase 7 の活性化の封印（signal digest）・CauseIdV2 の digest（authority 層の identity）
 
-    Unlike expression_key_or_identity(), this never falls back to process-local
-    object ids. If the semantic structural key is too deep or otherwise
-    uncomparable, use a stable digest over a full object-derived expression
-    payload and include source atoms for diagnostics.
+#: `value_identity` の option（予算内の key と、超えたときの exact identity が同じ T_o を見る）
+_VALUE_IDENTITY_OPTIONS = {
+    "include_memory_read_order": True,
+    "include_semantic_runtime_refs": True,
+    "include_rendered_runtime_refs": True,
+}
+
+#: `value_identity` の予算内の構造 key の予算（旧 provenance key の `safe_budget` と同じ）
+VALUE_IDENTITY_KEY_BUDGET = 256
+
+
+def value_identity(expr: Optional[Expression]) -> StructuralKey:
+    """式の値の identity（V）。等しい ⇔ option の下の展開 T_o が等しい（暗号の仮定を置かない）。
+
+    * 予算内で比較可能: ``("expression", 構造 key)``
+    * それ以外: ``("expression_exact", ("exact_identity", token))``。token は record の bytes を厳密比較
+      する intern の token で、digest が衝突しても構造の違う式は別の token になる。識別できない部分を
+      含めば識別不能 token（何とも、自分の再計算とも等しくならない）
+    * 早期 return は無い（ref・storage が同じでも値の違う式は別の identity）
+
+    label には、描画が runtime ref から読む成分（`_rendered_runtime_label`: global address・address 値・
+    UNKNOWN の記号・loop の lowering）を足す。旧 provenance key が根の早期 return で区別していた値を、
+    早期 return を外しても区別するため（I1 の全体、たとえば宣言型の signedness は PR-I の範囲で、
+    ここでは主張しない）。それらの成分を持たない式の key は、旧 provenance key の早期 return の無い
+    経路と byte 一致（D1）。
+    """
+
+    if expr is None:
+        return ("none",)
+    safe = expression_key_safe(expr, budget=VALUE_IDENTITY_KEY_BUDGET, **_VALUE_IDENTITY_OPTIONS)
+    if safe is not None:
+        return ("expression", safe)
+    return ("expression_exact", exact_structural_identity(expr, **_VALUE_IDENTITY_OPTIONS))
+
+
+def condition_value_identity(condition: Optional[Condition]) -> StructuralKey:
+    """条件の値の identity: 式の `value_identity` と否定の有無（#218 PR-D）。
+
+    条件 C と ¬C は同じ式を持つので、式の identity だけでは区別できない。条件を束ねる・key にする
+    consumer はこれを使う（式の identity を自分で取り出して否定を落とさない）。
+    """
+
+    if condition is None:
+        return ("none",)
+    return (
+        "condition",
+        value_identity(getattr(condition, "expression", None)),
+        bool(getattr(condition, "negated", False)),
+    )
+
+
+def object_target_key(expr: Optional[Expression]) -> StructuralKey:
+    """式が指す対象の identity（T）。reason / blocker の target・call target が使う。
+
+    owner つきの ref（parameter の ref・stable / semantic key）と storage の identity は、式の形に
+    依らず対象を決める（同じ parameter を読む別の式も同じ対象）。値として固定できない ref / storage
+    は識別不能 token（毎回新しい）で、ref を持たない式とも別の ref とも等しくならない。どれも無ければ
+    値の identity（`value_identity`）。
+
+    **値の比較には使わない**: 早期 return は値の違う式（`ZEXT(p)` と `SEXT(p)` など）を同じ key にする。
     """
 
     if expr is None:
@@ -1271,47 +1538,17 @@ def expression_provenance_key(
         # （Issue #215。`id()` を入れず、毎回新しい識別不能 token）
         return ("runtime_ref", unidentified_identity("unfixable_runtime_identity"))
 
-    safe = expression_key_safe(
-        expr,
-        budget=safe_budget,
-        include_memory_read_order=include_memory_read_order,
-        include_semantic_runtime_refs=include_semantic_runtime_refs,
-    )
-    if safe is not None:
-        return ("expression", safe)
-
-    if not _provenance_inputs_identified(expr):
-        # digest は値の表現の一致だけで決まる: 値として固定できない部分（型名だけの `opaque`・
-        # 識別不能な runtime ref の key・固定できない identity）を含む式の digest は、別の値を持つ式と
-        # 一致し得る（Issue #215 / #218 AC1）。何とも等しくならない token にする
-        return ("expression", unidentified_identity("unidentified_provenance_value"))
-
-    payload, source_atoms, complete = _expression_provenance_payload(
-        expr,
-        max_nodes=max_digest_nodes,
-    )
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return (
-        "expression_digest",
-        hashlib.sha256(encoded).hexdigest(),
-        ("complete", bool(complete)),
-        ("root", _expression_descriptor(expr)),
-        ("source_atoms", tuple(sorted(source_atoms, key=repr))),
-    )
+    return value_identity(expr)
 
 
-#: provenance key の中で、2 番目の要素が projection の identity（atom）である組の tag
-_PROVENANCE_IDENTITY_TAGS = frozenset({"runtime_ref", "runtime_semantic_ref"})
+#: key の中で、2 番目の要素が projection の identity（atom）である組の tag
+_LABEL_IDENTITY_TAGS = frozenset({"runtime_ref", "runtime_semantic_ref"})
 
 
-def provenance_key_view(key: Any) -> Any:
-    """provenance key（とそれを部分に持つ key）を **形の検査用** に読んだ値。比較・identity に使わない。
+def label_view(key: Any) -> Any:
+    """`object_target_key` / `value_identity` の key（とそれを部分に持つ key）を **形の検査用** に読んだ値。
 
-    `expression_provenance_key` の ``("runtime_ref", X)`` の X は projection の identity（`canonical_atom`
+    比較・identity に使わない。``("runtime_ref", X)`` の X は projection の identity（`canonical_atom`
     の atom: Issue #215）。`("parameter", program, function, index)` の program id・``opaque_unknown``
     のような schema の形を調べる consumer（cross-binary の対応候補・診断の evidence）は、atom の形を
     自分で照合せず、この読み口を通す。X は `semantic_projection.identity_view` で読み、それ以外の
@@ -1322,335 +1559,9 @@ def provenance_key_view(key: Any) -> Any:
         key = tuple(key)
     if not isinstance(key, tuple):
         return key
-    if len(key) == 2 and key[0] in _PROVENANCE_IDENTITY_TAGS:
+    if len(key) == 2 and key[0] in _LABEL_IDENTITY_TAGS:
         return (key[0], identity_view(key[1]))
-    return tuple(provenance_key_view(item) for item in key)
-
-
-def _provenance_children(node: Any) -> Tuple[Any, ...]:
-    """provenance の digest と識別の検査が辿る子（`ordered_semantic_edges` の順。欠けた子は None）。
-
-    PHI の branch（条件と値）は `operands` ではなく `value` にあるので、`operands` を辿ると PHI の中身が
-    digest にも識別の検査にも入らず、branch だけが違う PHI が同じ provenance key になる（Issue #215）。
-    構造 key・完全比較と同じ辺を辿る。辺の規則を持たない種別は従来どおり `operands`。
-    """
-
-    edges = ordered_semantic_edges(node)
-    if edges:
-        return tuple(edge.child for edge in edges)
-    return tuple(getattr(node, "operands", ()) or ())
-
-
-def _provenance_inputs_identified(expr: Expression) -> bool:
-    """provenance digest に入る値が、どの node でも値として固定できるか（明示 stack、共有 node は 1 度）。
-
-    digest の preimage に入る node ごとの値（`_stable_value_key`）・runtime ref の構造 key・
-    storage / runtime ref の identity を、構造 key と同じ判定（`core/atom_validity`）で調べる。
-    """
-
-    stack: list = [expr]
-    seen: set = set()
-    while stack:
-        node = stack.pop()
-        if node is None or id(node) in seen:
-            continue
-        seen.add(id(node))
-        projection = semantic_projection(node)
-        if projection.runtime_identity_unfixable or projection.storage_identity_unfixable:
-            return False
-        runtime_key = projection.runtime_structural_key
-        if runtime_key is not None and not atom_validity(runtime_key).identified:
-            return False
-        # 値は snapshot の判定（`value_key_is_opaque`: 型名だけの印・識別不能 token）と、digest の
-        # 表現（`_stable_value_key`）の両方で調べる
-        if projection.value_is_opaque or _value_key_has_opaque(_stable_value_key(getattr(node, "value", None))):
-            return False
-        stack.extend(_provenance_children(node))
-    return True
-
-
-def _value_key_has_opaque(key: Any) -> bool:
-    """`_stable_value_key` の表現のどこかに型名だけの ``("opaque", module, qualname)`` があるか。"""
-
-    stack = [key]
-    while stack:
-        item = stack.pop()
-        if type(item) is not tuple:
-            continue
-        if len(item) == 3 and item[0] == "opaque" and type(item[1]) is str and type(item[2]) is str:
-            return True
-        stack.extend(item)
-    return False
-
-
-def _expression_provenance_payload(
-    expr: Expression,
-    *,
-    max_nodes: int,
-) -> Tuple[StructuralKey, Tuple[StructuralKey, ...], bool]:
-    count = 0
-    complete = True
-    active: set[int] = set()
-    source_atoms: set[StructuralKey] = set()
-    digest_by_id: dict[int, str] = {}
-    stack: list[Tuple[Optional[Expression], bool]] = [(expr, False)]
-
-    none_digest = _digest_structural_payload(("none",))
-
-    while stack:
-        node, exiting = stack.pop()
-        if node is None:
-            continue
-
-        node_id = id(node)
-        if exiting:
-            active.discard(node_id)
-            operand_digests = []
-            for operand in _provenance_children(node):
-                operand_digests.append(
-                    none_digest if operand is None else digest_by_id.get(id(operand), none_digest)
-                )
-            payload = (
-                "expr",
-                _expression_descriptor(node),
-                ("value", _stable_value_key(getattr(node, "value", None))),
-                ("data_type", getattr(node, "data_type", None)),
-                ("storage", semantic_projection(node).storage_identity),
-                ("runtime_ref", semantic_projection(node).runtime_structural_key),
-                ("read_order", getattr(node, "read_order_key", None)),
-                ("opcode", getattr(node, "opcode", None)),
-                ("operands", tuple(operand_digests)),
-            )
-            digest_by_id[node_id] = _digest_structural_payload(payload)
-            continue
-
-        if node_id in digest_by_id:
-            continue
-        if count >= max_nodes:
-            complete = False
-            tail_digest, tail_source_atoms, tail_complete, tail_count = (
-                _expression_subtree_digest_and_source_atoms(node)
-            )
-            source_atoms.update(tail_source_atoms)
-            digest_by_id[node_id] = _digest_structural_payload(
-                (
-                    "truncated",
-                    _expression_descriptor(node),
-                    ("tail_digest", tail_digest),
-                    ("tail_complete", bool(tail_complete)),
-                    ("tail_nodes", int(tail_count)),
-                )
-            )
-            continue
-
-        if node_id in active:
-            complete = False
-            digest_by_id[node_id] = _digest_structural_payload(
-                ("cycle", _expression_descriptor(node))
-            )
-            continue
-
-        count += 1
-        active.add(node_id)
-        source_atom = _expression_source_atom(node)
-        if source_atom is not None:
-            source_atoms.add(source_atom)
-
-        stack.append((node, True))
-        for operand in reversed(_provenance_children(node)):
-            if operand is not None:
-                stack.append((operand, False))
-
-    root_digest = digest_by_id.get(id(expr), none_digest)
-    payload = (
-        "digest_payload",
-        root_digest,
-        ("nodes", int(count)),
-    )
-    return payload, tuple(source_atoms), bool(complete)
-
-
-def _expression_subtree_digest_and_source_atoms(
-    expr: Expression,
-) -> Tuple[str, set[StructuralKey], bool, int]:
-    count = 0
-    complete = True
-    active: set[int] = set()
-    source_atoms: set[StructuralKey] = set()
-    digest_by_id: dict[int, str] = {}
-    stack: list[Tuple[Optional[Expression], bool]] = [(expr, False)]
-    none_digest = _digest_structural_payload(("none",))
-
-    while stack:
-        node, exiting = stack.pop()
-        if node is None:
-            continue
-
-        node_id = id(node)
-        if exiting:
-            active.discard(node_id)
-            operand_digests = []
-            for operand in _provenance_children(node):
-                operand_digests.append(
-                    none_digest if operand is None else digest_by_id.get(id(operand), none_digest)
-                )
-            payload = (
-                "expr",
-                _expression_descriptor(node),
-                ("value", _stable_value_key(getattr(node, "value", None))),
-                ("data_type", getattr(node, "data_type", None)),
-                ("storage", semantic_projection(node).storage_identity),
-                ("runtime_ref", semantic_projection(node).runtime_structural_key),
-                ("read_order", getattr(node, "read_order_key", None)),
-                ("opcode", getattr(node, "opcode", None)),
-                ("operands", tuple(operand_digests)),
-            )
-            digest_by_id[node_id] = _digest_structural_payload(payload)
-            continue
-
-        if node_id in digest_by_id and node_id not in active:
-            continue
-        if node_id in active:
-            complete = False
-            digest_by_id.setdefault(
-                node_id,
-                _digest_structural_payload(("cycle", _expression_descriptor(node))),
-            )
-            continue
-
-        count += 1
-        active.add(node_id)
-        source_atom = _expression_source_atom(node)
-        if source_atom is not None:
-            source_atoms.add(source_atom)
-
-        stack.append((node, True))
-        for operand in reversed(_provenance_children(node)):
-            if operand is not None:
-                stack.append((operand, False))
-
-    return digest_by_id.get(id(expr), none_digest), source_atoms, bool(complete), int(count)
-
-
-def _digest_structural_payload(payload: StructuralKey) -> str:
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _expression_descriptor(expr: Expression) -> StructuralKey:
-    expr_type = getattr(expr, "expr_type", None)
-    expr_type_name = getattr(expr_type, "name", None) or (
-        str(expr_type) if expr_type is not None else None
-    )
-    return (
-        expr_type_name,
-        getattr(expr, "operator", None),
-        getattr(expr, "name", None),
-        int(getattr(expr, "size", 0) or 0),
-    )
-
-
-def _expression_source_atom(expr: Expression) -> Optional[StructuralKey]:
-    projection = semantic_projection(expr)
-    semantic_runtime_key = projection.runtime_structural_key
-    if projection.parameter_runtime_key is not None:
-        return ("runtime_ref", semantic_runtime_key)
-
-    if projection.storage_identity is not None:
-        return ("storage", projection.storage_identity)
-    if semantic_runtime_key is not None:
-        return ("runtime_ref", semantic_runtime_key)
-    expr_type = getattr(expr, "expr_type", None)
-    expr_type_name = getattr(expr_type, "name", None)
-    if expr_type in {
-        ExpressionType.PARAMETER,
-        ExpressionType.VARIABLE,
-        ExpressionType.UNKNOWN,
-        ExpressionType.CONSTANT,
-        ExpressionType.LITERAL,
-    }:
-        return (
-            "expr_source",
-            expr_type_name,
-            getattr(expr, "name", None),
-            _stable_value_key(getattr(expr, "value", None)),
-            int(getattr(expr, "size", 0) or 0),
-        )
-    return None
-
-
-def _stable_value_key(value: Any, _active: Optional[set] = None) -> StructuralKey:
-    """provenance digest の値の表現。値の読み方は `semantic_projection` の reader と同じ（Issue #215:
-    scalar は基底型の slot、容器は `read_container`、`stable_key` は型の宣言だけ。閉路・入れ子の上限・
-    dict の key の衝突は `canonical_atom` と同じく値として固定できない）。型名だけに落ちる
-    `("opaque", …)` の扱い（識別できない値を含む provenance key の同一視）は #218 の範囲。"""
-
-    if value is None:
-        return ("none",)
-    if value is True or value is False:
-        return ("bool", int(value))
-    scalar = live_values.json_scalar(value)
-    if scalar is not live_values.NOT_PLAIN:
-        if type(scalar) is int:
-            return ("int", scalar)
-        if type(scalar) is float:
-            return ("float", struct.pack(">d", scalar).hex())
-        if type(scalar) is bool:
-            return ("bool", int(scalar))
-        return ("str", scalar)
-    kind = type(value)
-    if issubclass(kind, bytes):
-        return ("bytes", bytes.hex(value))
-    active = set() if _active is None else _active
-    value_id = id(value)
-    if value_id in active or len(active) >= MAX_VALUE_DEPTH:
-        return ("opaque", kind.__module__, kind.__qualname__)
-    active.add(value_id)
-    try:
-        return _stable_composite_value_key(value, kind, active)
-    finally:
-        active.discard(value_id)
-
-
-def _stable_composite_value_key(value: Any, kind: type, active: set) -> StructuralKey:
-    """`_stable_value_key` の式・条件・容器・object（閉路を見張りながら呼ばれる）。"""
-
-    if kind is Expression:
-        return ("expression_ref", _expression_descriptor(value))
-    if kind is Condition:
-        return (
-            "condition",
-            _stable_value_key(value.expression, active),
-            ("negated", bool(value.negated)),
-        )
-    container = read_container(value)
-    if container is not None:
-        tag, elements = container
-        if tag == "tuple" or tag == "list":
-            return (tag, tuple(_stable_value_key(item, active) for item in elements))
-        if tag == "dict":
-            items = [(_stable_value_key(key, active), _stable_value_key(item, active)) for key, item in elements]
-            keys = [key for key, _item in items]
-            try:
-                if len(set(keys)) != len(keys):
-                    # 別の key が同じ表現になった: どの値がどの key のものかを区別できない
-                    return ("opaque", kind.__module__, kind.__qualname__)
-                items.sort()
-            except TypeError:
-                return ("opaque", kind.__module__, kind.__qualname__)
-            return ("dict", tuple(items))
-        return ("opaque", kind.__module__, kind.__qualname__)
-    stable_key = declared_method(kind, value, "stable_key")
-    if stable_key is not None:
-        try:
-            return ("stable", _stable_value_key(stable_key(), active))
-        except IDENTITY_EVALUATION_ERRORS:
-            pass
-    return ("opaque", type(value).__module__, type(value).__qualname__)
+    return tuple(label_view(item) for item in key)
 
 
 # ---------------------------------------------------------------------------

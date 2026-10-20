@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate impor
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.core.live_values import UndecidableComparison
+from scripts.function_tracer_pcode.core.structural import value_identity
 from scripts.function_tracer_pcode.proof.obligations.pair_disposition import pair_identity_subject
 from scripts.function_tracer_pcode.proof.obligations import (
     SolverQueryExecutionReceipt,
@@ -42,8 +43,10 @@ def try_solver_proven_rewrite_equivalence(
     rewritten_expr1 = _build_rewrite_candidate(case1.value_expr, settings)
     rewritten_expr2 = _build_rewrite_candidate(case2.value_expr, settings)
 
-    changed1 = _expr_signature(rewritten_expr1) != _expr_signature(case1.value_expr)
-    changed2 = _expr_signature(rewritten_expr2) != _expr_signature(case2.value_expr)
+    # 「書き換えが描画を変えたか」（変えていなければ元の式を使う: どの判定でも安全側）。描画の文字列で
+    # 比べる: 値の identity は可換の並びを正規化するので、並べ替えただけの書き換えを「変えていない」とする
+    changed1 = _exact_expr_key(rewritten_expr1) != _exact_expr_key(case1.value_expr)
+    changed2 = _exact_expr_key(rewritten_expr2) != _exact_expr_key(case2.value_expr)
     supporting_solver_receipts = []
     if not changed1 and not changed2:
         result = QueryResult(is_equivalent=None)
@@ -191,8 +194,8 @@ def try_solver_proven_rewrite_equivalence(
                 proof_kind="rewrite-structural",
                 evidence=(
                     "rewrite-structural",
-                    _expr_signature(rewritten_expr1),
-                    _expr_signature(rewritten_expr2),
+                    value_identity(rewritten_expr1),
+                    value_identity(rewritten_expr2),
                     int(base_ctx.get("return_size1", 0) or 0),
                     int(base_ctx.get("return_size2", 0) or 0),
                     bool(rewritten_case1.should_sign_extend_value()),
@@ -443,26 +446,35 @@ def _extract_binary_operands(expr: Expression, operator: str):
 
 
 def _exprs_match(left: Expression, right: Expression) -> bool:
-    return _exact_expr_key(left) == _exact_expr_key(right)
+    # 照合は値の identity（#218 PR-D）。描画した SMT の文字列は PARAMETER の幅などを持たないので、
+    # 幅だけ違う 2 つの式を同じとみなす
+    return value_identity(left) == value_identity(right)
+
+
+def _same_operand(left: Expression, right: Expression) -> bool:
+    """最小の差分の探索で飛ばしてよい operand の組か: 値も描画も同じ（#218 PR-D）。
+
+    値が同じなら飛ばしても証明は健全で、描画が違う（可換の並べ替え）組は従来どおり差分として辿る。
+    描画だけ同じで値の違う組（幅だけ違う PARAMETER）は飛ばさない。
+    """
+
+    return _exprs_match(left, right) and _exact_expr_key(left) == _exact_expr_key(right)
 
 
 def _exact_expr_key(expr: Expression) -> str:
+    """描画した文字列（**並べる順と、書き換えが描画を変えたかの検出だけ**。一致の判定・identity に使わない）。
+
+    並べた結果は書き換えの候補で、`_prove_rewrite` が元の式との等しさを solver で証明する。描画を
+    変えない書き換えは元の式のまま使う。operand の一致は `_exprs_match`（値の identity）が決める
+    （#218 PR-D。名前は broad except の baseline の key なので変えない）。
+    """
+
     try:
         return expr.to_smt(float_mode="fp")
     except Exception:
         structural_key = getattr(expr, "structural_key", None)
         if callable(structural_key):
             return repr(structural_key(budget=256))
-        return repr(expr)
-
-
-def _expr_signature(expr: Expression) -> object:
-    try:
-        return expr.to_smt(float_mode="fp")
-    except Exception:
-        structural_key = getattr(expr, "structural_key", None)
-        if callable(structural_key):
-            return structural_key(budget=256)
         return repr(expr)
 
 
@@ -564,7 +576,7 @@ def _extract_minimal_rewrite_difference(
     original_expr: Expression,
     rewritten_expr: Expression,
 ):
-    if _exact_expr_key(original_expr) == _exact_expr_key(rewritten_expr):
+    if _same_operand(original_expr, rewritten_expr):
         return original_expr, rewritten_expr
 
     if (
@@ -581,7 +593,7 @@ def _extract_minimal_rewrite_difference(
     differing_indices = [
         index
         for index, (lhs, rhs) in enumerate(zip(original_operands, rewritten_operands))
-        if _exact_expr_key(lhs) != _exact_expr_key(rhs)
+        if not _same_operand(lhs, rhs)
     ]
     if len(differing_indices) != 1:
         return original_expr, rewritten_expr

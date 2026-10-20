@@ -15,7 +15,7 @@ from scripts.function_tracer_pcode.core import (
     PostStateReadRef,
     PostStateValueRef,
     StorageInfo,
-    expression_provenance_key,
+    value_identity,
 )
 from scripts.function_tracer_pcode.core.signature import (
     get_declared_type_size_bytes,
@@ -706,7 +706,7 @@ def _impl__select_aligned_explicit_call_arguments(
 
     if len(callee_parameters) == 1 and explicit:
         explicit_keys = tuple(
-            expression_provenance_key(item) for item in explicit
+            value_identity(item) for item in explicit
         )
         if (
             len(set(explicit_keys)) == 1

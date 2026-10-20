@@ -20,7 +20,7 @@ from scripts.function_tracer_pcode.core.signature import (
     get_data_type_path,
     get_declared_type_size_bits,
 )
-from scripts.function_tracer_pcode.core.structural import expression_provenance_key
+from scripts.function_tracer_pcode.core.structural import condition_value_identity, value_identity
 from scripts.function_tracer_pcode.proof.formula.returns import get_return_size
 from scripts.function_tracer_pcode.proof.obligations.model import ProofArtifact
 from scripts.function_tracer_pcode.proof.obligations.snapshot import SnapshotFingerprintCodec
@@ -538,8 +538,8 @@ def build_call_site_return_width_receipt(
         pair_id=str(pair_id),
         observation_scope=ObservationScope.CALL_SITE_RETURN.value,
         observation_width=observation_width,
-        left_value_identity=tuple(expression_provenance_key(left_expr)),
-        right_value_identity=tuple(expression_provenance_key(right_expr)),
+        left_value_identity=tuple(value_identity(left_expr)),
+        right_value_identity=tuple(value_identity(right_expr)),
         raw_left_term=lowered_left_term,
         raw_right_term=lowered_right_term,
         projection_direction=(
@@ -1009,8 +1009,9 @@ def _extension_flow_evidence(
 def extract_function_return_width_seed(analysis: Any, case: Any) -> FunctionReturnWidthSeed:
     target = build_function_return_width_target(analysis, case)
     conditions = tuple(getattr(case, "conditions", ()) or ())
+    # guard の key は条件の identity（否定を含む: C と ¬C の領域を同じ guard にしない。#218 PR-D）
     condition_keys = tuple(
-        tuple(expression_provenance_key(getattr(condition, "expression", None)))
+        tuple(condition_value_identity(condition))
         for condition in conditions
     )
     guard = GuardRegionFact(
@@ -1028,17 +1029,17 @@ def extract_function_return_width_seed(analysis: Any, case: Any) -> FunctionRetu
         rendered_value_width = int(expression_smt_bit_width(value) or 0) or None
     except (TypeError, ValueError, AttributeError):
         rendered_value_width = None
-    value_identity = tuple(expression_provenance_key(value))
+    value_ref = tuple(value_identity(value))
     kind = _extension_kind(case, rendered_value_width, storage_width)
     producer_refs = _producer_refs(case)
-    payload_ref = value_identity
+    payload_ref = value_ref
     if (
         kind in {ExtensionKind.ZERO_EXTEND.value, ExtensionKind.SIGN_EXTEND.value}
         and str(getattr(value, "operator", "") or "").upper()
         in {"INT_ZEXT", "INT_SEXT"}
         and getattr(value, "operands", None)
     ):
-        payload_ref = tuple(expression_provenance_key(value.operands[0]))
+        payload_ref = tuple(value_identity(value.operands[0]))
     payload_width = rendered_value_width
     if kind in {ExtensionKind.ZERO_EXTEND.value, ExtensionKind.SIGN_EXTEND.value}:
         certificate = getattr(
@@ -1075,7 +1076,7 @@ def extract_function_return_width_seed(analysis: Any, case: Any) -> FunctionRetu
     else:
         evidence = ExtensionEvidenceSource(
             kind=kind,
-            storage_value_ref=value_identity,
+            storage_value_ref=value_ref,
             payload_value_ref=payload_ref,
             producer_refs=producer_refs,
             identity_flow_kind=("same_expression" if kind == ExtensionKind.SAME_WIDTH.value else None),
