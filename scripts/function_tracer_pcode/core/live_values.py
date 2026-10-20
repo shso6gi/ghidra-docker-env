@@ -880,9 +880,10 @@ def package_type(kind: type) -> bool:
         return False
     known = _PACKAGE_TYPES.get(kind)
     if known is not None:
-        if known and len(reliance_state.active) > reliance_state.floor and not _NESTING.active:
-            # 監査済みの code の中で確かめた信頼: 数が同じ間は確かめ直さない（`package_instance` の記録と同じ規則。
-            # 外の code ⇄ 監査済みの code の切り替えのたびに数が変わる）
+        if known and len(reliance_state.active) > reliance_state.floor:
+            # 監査済みの code の中で確かめた（確定した記録の）信頼: 数が同じ間は確かめ直さない（`package_instance` の記録と
+            # 同じ規則。外の code から監査済みの code へ戻るたびに数が変わる）。判定の途中でも書いてよい（確定した判定を今の
+            # 数で残すだけ）。判定の途中に **読む** ことはしない（上: 依存が抜ける）
             reliance_state.trusted[id(kind)] = (kind, reliance_state.count)
         return known
     state = _NESTING
