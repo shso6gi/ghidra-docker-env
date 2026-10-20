@@ -870,9 +870,11 @@ def package_type(kind: type) -> bool:
     # 監査済みの code の間に確かめた型（`_Reliance.trusted`: 外の code の数が同じ間だけ）。外の code は外の code の区間で
     # だけ走り、区間を抜けるたびに数が変わる: 数が同じ間は、確かめた後に型を書き換えた code は無い
     reliance_state = _FOREIGN_EPOCH.s
-    trusted = reliance_state.trusted.get(id(kind))
-    if trusted is not None and trusted[0] is kind and trusted[1] == reliance_state.count:
-        return True
+    if len(reliance_state.active) > reliance_state.floor:
+        # 記録を使うのは監査済みの code の中だけ（区間の中の外の code・監査済みの code の外は毎回確かめる）
+        trusted = reliance_state.trusted.get(id(kind))
+        if trusted is not None and trusted[0] is kind and trusted[1] == reliance_state.count:
+            return True
     if not _plain_metatype(kind):
         return False
     known = _PACKAGE_TYPES.get(kind)
@@ -3510,7 +3512,11 @@ def end_activation(state: "_Reliance") -> None:
 
     active = state.active
     active.pop()
-    if len(active) == state.floor:
+    depth = len(active)
+    if depth <= state.floor:
+        if depth < state.floor:
+            # 区間より前の activation を区間の中で降ろした（積み降ろしの順の崩れ）: 監査済みの code かの判断が狂う
+            raise undecidable("an activation below the current foreign section was ended inside it")
         state.count += 1
         if not active:
             state.trusted.clear()

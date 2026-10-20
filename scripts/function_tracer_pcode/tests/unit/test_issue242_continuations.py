@@ -1279,6 +1279,80 @@ def test_switch_sequences_reached_narrowing_after_a_rewrite():
     assert {"refused", "refused at exit", "re-entered after a rewrite in the same section"} <= _SEQUENCE_COVERAGE
 
 
+def test_a_phi_branch_subclass_with_overridden_reads_is_refused_before_its_code_runs():
+    """PHI の分岐: exact な tuple / list と `PhiBranch` は基底型の slot で読む。読みを上書きした tuple の subclass は今まで
+    どおり拒む（hook を呼ばない）。双子（exact な tuple）は同じ表現。"""
+
+    from scripts.function_tracer_pcode.core.expression import Expression, ExpressionType, PhiBranch
+
+    HOOKS.clear()
+    leaf = Expression(ExpressionType.CONSTANT, value=1)
+    twin = Expression(ExpressionType.PHI, value=[(None, leaf)]).to_dict()
+    assert Expression(ExpressionType.PHI, value=[PhiBranch(None, leaf)]).to_dict() == twin
+
+    class Lying(tuple):
+        def __iter__(self):
+            HOOKS.append("iter")
+            return iter((None, leaf))
+
+        def __getitem__(self, index):
+            HOOKS.append("getitem")
+            return (None, leaf)[index]
+
+    node = Expression(ExpressionType.PHI, value=[Lying((None, leaf))])
+    with pytest.raises(TypeError):
+        node.to_dict()
+    assert HOOKS == []
+
+
+def test_an_activation_ended_below_the_current_section_is_refused():
+    """activation の積み降ろしの順が崩れて、区間より前の activation が区間の中で降ろされたら判定不能（監査済みの code か
+    の判断を狂わせない）。"""
+
+    outer = live_values.begin_activation()
+    section = live_values.outside_audit()
+    section.__enter__()
+    try:
+        with pytest.raises(live_values.UndecidableComparison):
+            live_values.end_activation(outer)
+    finally:
+        state = live_values.reliance()
+        state.active.append([])  # 崩した stack を戻して後始末する
+        section.__exit__(None, None, None)
+        live_values.end_activation(outer)
+    assert _reliance_state()[:4] == (0, 0, [], 0)
+
+
+def test_trust_written_by_a_recheck_is_not_answered_to_foreign_code_running_afterwards():
+    """区間を抜けるときの確かめ直しは型の信頼を記録する。その後、外側の区間の中で外の code が続けて型を書き換えれば、
+    `package_type` は（監査済みの code の外なので）記録を使わずに確かめる（偽）。"""
+
+    @dataclasses.dataclass(frozen=True)
+    class Record:
+        second: int
+
+    record = Record(second=7)
+    seen = {}
+    state = live_values.begin_activation()
+    try:
+        assert live_values.package_instance(record, Record)
+        with live_values.outside_audit():
+            # 外の code が自分で入れ子の区間を開ける: 抜けるときの確かめ直しが（外側の activation が頼る）Record の信頼を
+            # 今の数で記録する。その後も外の code は同じ数のまま走り続ける
+            with live_values.outside_audit():
+                pass
+            setattr(Record, "second", _foreign_getter(999))
+            seen["foreign"] = live_values.package_type(Record)
+        seen["exit"] = "continued"
+    except live_values.UndecidableComparison:
+        seen["exit"] = "refused"
+    finally:
+        live_values.end_activation(state)
+        if isinstance(Record.__dict__.get("second"), property):
+            delattr(Record, "second")
+    assert seen == {"foreign": False, "exit": "refused"}
+
+
 def _call_in_a_step(function):
     """未宣言の generator（walker は 1 歩を外の code の区間で進める）の 1 歩で `function` を呼ぶ。"""
 

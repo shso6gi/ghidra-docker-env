@@ -906,12 +906,19 @@ class Expression:
             if expr_type is ExpressionType.PHI:
                 branches = []
                 for branch in elements_of(node_value):
-                    # 分岐は (条件, 値) の組（`PhiBranch` か組み込みの tuple / list）: 基底型の slot で読む（`read_pair`: 型の
-                    # 事実を引かない・subclass の `__iter__` / `__getitem__` を呼ばない。組でない値・長さの違う組は拒む）
-                    try:
-                        condition, value = read_pair(branch)
-                    except (TypeError, ValueError):
-                        raise TypeError("PHI branch must be a condition/value pair") from None
+                    # 分岐は (条件, 値) の組。exact な tuple / list と `PhiBranch` そのもの（package の型: 信頼を確かめる）は
+                    # 基底型の slot で読む（`read_pair`: 型の事実を引かない）。それ以外は組み込みの振る舞いを確かめてから読む
+                    # （上書きした `__iter__` / `__getitem__` を持つ subclass は今までどおり拒む）
+                    branch_kind = type(branch)
+                    if branch_kind is tuple or branch_kind is list or package_instance(branch, PhiBranch):
+                        try:
+                            condition, value = read_pair(branch)
+                        except (TypeError, ValueError):
+                            raise TypeError("PHI branch must be a condition/value pair") from None
+                    else:
+                        if not builtin_sequence(branch) or size(branch) != 2:
+                            raise TypeError("PHI branch must be a condition/value pair")
+                        condition, value = elements_of(branch)
                     if not package_instance(value, Expression):
                         raise TypeError("PHI branch value must be an Expression")
                     condition_payload = None
