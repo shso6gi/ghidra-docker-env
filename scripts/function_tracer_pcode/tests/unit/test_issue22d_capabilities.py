@@ -1036,6 +1036,10 @@ _B_FROZEN = (
     " proof の obligation の digest（`SnapshotFingerprintCodec.digest` の解析時の呼び出し）は"
     " identity の owner の範囲"
 )
+_B_READ_SKELETON = (
+    "B: 単一の読み（Issue #219 PR-219-B）の直列化の作業量が数えた walk の出力の骨格（組み込みの型そのものの"
+    " tuple / list / dict）だけを辿り、値は `_freeze_unmetered` へ委ねる"
+)
 _B_SCHEMA_ROWS = "B: G4-b（`finitize_legacy_reasons`）が出力 schema の行数へ切った列を辿る"
 _C_LAZY = "C: 1 要素ずつ yield する generator を walker へ渡す（walker が引き出すたびに数える）"
 _B_OWNER_ELEMENTS = (
@@ -1126,6 +1130,7 @@ _PROPORTIONAL_WORK_OWNERS = {
         "_tuple", "_tuple_item", "canonical_cause_tuple", "cause_key_from_dict",
     )},
     ("proof.obligations.snapshot", "SnapshotFingerprintCodec._freeze_unmetered"): _B_FROZEN,
+    ("proof.obligations.snapshot", "SnapshotFingerprintCodec._freeze_placing"): _B_READ_SKELETON,
     ("proof.obligations.snapshot", "SnapshotFingerprintCodec.sorted_mapping_items"): _B_FROZEN,
     ("proof.obligations.snapshot", "_frozen_repr"): _B_FROZEN,
     ("proof.obligations.snapshot", "_set_members"): _B_FROZEN,

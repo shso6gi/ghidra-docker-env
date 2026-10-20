@@ -565,13 +565,30 @@ class SerializationWork:
             target_key=self.target_key(), limit=limit,
         )
 
-    def tree(self, leaf: Any, *, build: bool) -> Tuple[Any, int]:
-        """sized leaf（式の木）の大きさを **作る前に** 求めて足し、`build` なら作る。"""
+    def tree(self, leaf: Any, *, build: bool, substitution: Optional["LeafSubstitution"] = None) -> Tuple[Any, int]:
+        """sized leaf（式の木）の大きさを **作る前に** 求めて足し、`build` なら作る。
+
+        `substitution` は、この葉を置く walk に、その walk を始めた呼ぶ側が **引数で** 渡した置き換え
+        （`JsonEncodingPolicy.materialize(..., leaf_substitution=...)`。`core/json_encoding._Walk` がその walk の葉に
+        だけ渡す）。作業量は置き換えを持たない: 同じ作業量で始めた別の walk（walk の中の producer が始めたもの・
+        新しい context・別 thread）は、何も渡されなければ置き換えない。尋ねるのは見積もりの後で、見積もった大きさ
+        （数えない作業量では `None`）を渡す（見積もりは置き換えの有無に依らず走るので、尋ねるために走る code は無い）。
+
+        **置き換えが変えるのは置く値だけで、数える量は変えない**: 置き換えた葉も、置き換えない葉と
+        同じく大きさを見積もって足し、distinct な node を数え、上限と比べる（作らないだけ）。この作業量の
+        量（`consumed` / `distinct_nodes`）と、超過で止まるかは、置き換えの有無に依らない。
+        """
 
         from scripts.function_tracer_pcode.core.json_encoding import RESULT_JSON_POLICY, protocol_method
 
+        # 置き換えは package の `LeafSubstitution` の protocol（型の関数を直接呼ぶ）
         # sized leaf の protocol は package の型の関数を直接呼ぶ（instance の属性を引かない）
         if not self.enabled:
+            substitute = NO_SUBSTITUTION
+            if substitution is not None:
+                substitute = protocol_method(substitution, "__leaf_substitute__")(substitution, leaf, None)
+            if substitute is not NO_SUBSTITUTION:
+                return (substitute if build else None), 0
             return (protocol_method(leaf, "__json_tree__")(leaf) if build else None), 0
         # 見積もりの作業量（runtime ref を辿る分）もこの作業量へ数える（byte の大きさとは分ける）
         size = protocol_method(leaf, "__json_tree_bytes__")(leaf, RESULT_JSON_POLICY, self.remaining(), self)
@@ -601,6 +618,11 @@ class SerializationWork:
                 target_key=self.target_key(),
                 limit=self._policy.serialization_nodes,
             )
+        substitute = NO_SUBSTITUTION
+        if substitution is not None:
+            substitute = protocol_method(substitution, "__leaf_substitute__")(substitution, leaf, size)
+        if substitute is not NO_SUBSTITUTION:
+            return (substitute if build else None), size
         if build and built is None:
             built = protocol_method(leaf, "__json_tree__")(leaf)
         return (built if build else None), size
@@ -619,6 +641,17 @@ class SerializationWork:
         policy = self._policy if policy is None else policy
         limit = policy.serialization_bytes
         return None if limit is None else max(0, limit - self.consumed)
+
+    def observed_runtime_ref(self, ref: Any, missing: Any) -> Any:
+        """この直列化が描いた runtime ref の LEGACY 表現（`runtime_ref_memo`。描いていなければ `missing`）。
+
+        memo は直列化の間だけの写しの元で、描いた表現を書き換えない（置くたびに容器を作り直す）。
+        """
+
+        entry = self.runtime_ref_memo.get(id(ref))
+        if entry is None or entry[0] is not ref:
+            return missing
+        return entry[1]
 
     def target_key(self) -> Tuple[str, str]:
         from scripts.function_tracer_pcode.core.semantic_snapshot import (
@@ -644,6 +677,44 @@ class SerializationWork:
 live_values.register_storage_meter(SerializationWork)
 
 _SERIALIZATION = threading.local()
+
+
+class _NoSubstitution:
+    """`leaf_substitution` が「この葉は置き換えない」と答える印（1 つだけ）。"""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "NO_SUBSTITUTION"
+
+
+#: `leaf_substitution` の答え: 置き換えない（葉は通常どおり見積もって作る）
+NO_SUBSTITUTION = _NoSubstitution()
+
+
+class LeafSubstitution:
+    """直列化の作業量の sized leaf の置き換えの protocol（`JsonEncodingPolicy.materialize(..., leaf_substitution=...)`）。
+
+    `__leaf_substitute__(leaf, size)` は、作業量が sized leaf の大きさを見積もって数えた後、葉を作る
+    **前** に呼ばれ、置く値か `NO_SUBSTITUTION` を返す。`size` は見積もった byte の大きさ（数えない
+    作業量では `None`）。何を置き換えるかは subclass（渡す側）が決める。呼ばれるのは、この置き換えを引数で受け取った
+    walk 自身が置く葉だけ（`SerializationWork.tree`）。置き換えはどこにも登録されない（作業量・thread・context の
+    状態に置かない）ので、渡した呼ぶ側の外の code は辿れない。上限を超えた葉には尋ねない（作業量が先に止まる）。
+
+    置き換えは置く値だけを変え、数える量は変えない: 作業量の量・上限の超過・観測値は置き換えの有無に依らない
+    （terminal な作業量でも使える）。
+    """
+
+    __slots__ = ()
+
+    def __leaf_substitute__(self, leaf: Any, size: Optional[int]) -> Any:
+        return NO_SUBSTITUTION
+
+    def __placed_values__(self) -> Tuple[Any, ...]:
+        """これまでに置いた値（`NO_SUBSTITUTION` 以外の答え）そのもの。置いた値を後で特別に扱う側（例: snapshot の
+        読みが token を codec に通す）は、型ではなくこの値の identity で照合する。"""
+
+        return ()
 
 
 def active_serialization_work() -> Optional[SerializationWork]:
@@ -762,4 +833,6 @@ __all__ = [
     "serialization_scope",
     "SerializationWork",
     "active_serialization_work",
+    "LeafSubstitution",
+    "NO_SUBSTITUTION",
 ]

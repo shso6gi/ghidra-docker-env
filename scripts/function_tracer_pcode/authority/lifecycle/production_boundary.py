@@ -41,6 +41,8 @@ from scripts.function_tracer_pcode.analysis.condition.condition_cache import (
 from scripts.function_tracer_pcode.core.condition_metrics import (
     condition_metrics_scope,
 )
+# Issue #219: 解析 snapshot の再利用の store（pair 単位の寿命）
+from scripts.function_tracer_pcode.proof.obligations.snapshot_reuse import snapshot_reuse_scope
 from scripts.function_tracer_pcode.checker.output_preparation import (
     prepare_pair_output,
 )
@@ -397,7 +399,7 @@ def run_check_from_binaries_with_v2_pilot(
         # できないので `limitation_unattributed` の ERROR になる = fail-closed）。
         with pair_failure_scope(pair_identity, None), budget_policy_scope(
             getattr(checker, "budget_policy", None)
-        ), condition_cache_scope(), condition_metrics_scope():
+        ), condition_cache_scope(), condition_metrics_scope(), snapshot_reuse_scope():
             return _run_legacy_with_pair_gate(
                 checker, program1, program2,
                 function_name1, function_name2, kwargs,
@@ -514,6 +516,8 @@ def run_check_from_binaries_with_v2_pilot(
         # （次の pair へ意味の状態も数も持ち越さない）。
         pair_scope.enter_context(condition_cache_scope())
         pair_scope.enter_context(condition_metrics_scope())
+        # Issue #219: 同じ read-set の解析 snapshot の再利用も pair 単位（次の pair へ持ち越さない）
+        pair_scope.enter_context(snapshot_reuse_scope())
         check_started = time.monotonic()
         with production_signal_scope(session):
             result = _run_legacy_with_pair_gate(

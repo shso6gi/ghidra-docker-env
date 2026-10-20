@@ -2126,8 +2126,11 @@ def test_the_snapshot_representation_is_built_only_through_the_work():
     ]
     assert len(builds) == 1
     (build,) = builds
-    assert [keyword.arg for keyword in build.keywords] == ["budget"]
+    # `leaf_substitution` は `_materialize` が受け取った引数をそのまま渡すだけ（Issue #219 PR-219-B: snapshot の
+    # 読みが意味の view の walk 1 回へ渡す置き換え。作業量は同じ `work`）
+    assert [keyword.arg for keyword in build.keywords] == ["budget", "leaf_substitution"]
     assert isinstance(build.keywords[0].value, ast.Name) and build.keywords[0].value.id == "work"
+    assert isinstance(build.keywords[1].value, ast.Name) and build.keywords[1].value.id == "leaf_substitution"
 
 
 def test_json_framing_and_separators_live_only_in_the_policy():

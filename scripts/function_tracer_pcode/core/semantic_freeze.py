@@ -963,8 +963,12 @@ def _ref_carries_semantic_values(runtime_ref: Any, staging: _LifecycleStaging) -
     return bool(found)
 
 
-def seal_runtime_ref(node: Any) -> Optional[FrozenLegacyTree]:
+def seal_runtime_ref(node: Any, observed: Optional[Callable[[Any], Any]] = None) -> Optional[FrozenLegacyTree]:
     """検証済みの node の runtime ref の表現を（まだなら）写して返す。写せなければ `None`。
+
+    `observed` を渡すと、表現を作る code を走らせない: 呼ぶ側の直列化がこの ref を描いたときの表現
+    （`observed(ref)`。描いていなければ `NOT_OBSERVED`）だけを、同じ上限で写す。描いていない ref は
+    写さずに `SEAL_PENDING` のまま残す（状態を変えない）。
 
     **表現を作る code は検証の transaction の外で、closed の問い合わせのときに 1 回だけ走る**
     （呼ぶのは `seal_serialization` だけ。直列化は状態を書かず、写す前の node は生の ref を描く）:
@@ -995,7 +999,14 @@ def seal_runtime_ref(node: Any) -> Optional[FrozenLegacyTree]:
             return None
         _SEALING[key] = True
     try:
-        record = _capture_runtime_ref(node.runtime_ref)
+        if observed is None:
+            record = _capture_runtime_ref(node.runtime_ref)
+        else:
+            legacy = observed(node.runtime_ref)
+            if legacy is NOT_OBSERVED:
+                return None
+            # 描いた表現は `_capture_runtime_ref` と同じ source・同じ walker の LEGACY（同じ上限で写す）
+            record = freeze_legacy_tree(legacy)
     finally:
         with _SEAL_LOCK:
             _SEALING.pop(key, None)
@@ -1006,6 +1017,18 @@ def seal_runtime_ref(node: Any) -> Optional[FrozenLegacyTree]:
             fields["_runtime_ref_payload"] = record if record is not None else UNSEALABLE
         stored = fields.get("_runtime_ref_payload")
     return stored if type(stored) is FrozenLegacyTree else None
+
+
+class _NotObserved:
+    """`seal_runtime_ref(observed=...)` の答え: 呼ぶ側の直列化はその ref を描いていない（1 つだけ）。"""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "NOT_OBSERVED"
+
+
+NOT_OBSERVED = _NotObserved()
 
 
 #: 写している最中の node（`id`）。入れ子の直列化は写さずに描く
@@ -1281,7 +1304,7 @@ def _fold(value: Any, dependencies: Optional[List[Any]], staging: _LifecycleStag
     return verdict
 
 
-def seal_serialization(value: Any) -> bool:
+def seal_serialization(value: Any, *, observed: Optional[Callable[[Any], Any]] = None) -> bool:
     """`value` の closed の答えを確定させて返す（**安定 interface**。closed の問い合わせの入口）。
 
     凍結は runtime ref の表現を写さないので、写せる ref を持つ値の答えは pending のまま残る。
@@ -1291,6 +1314,9 @@ def seal_serialization(value: Any) -> bool:
 
     ref の表現を作る code が「表現を作れない」以外の失敗を上げたら、そのまま上げる（直列化した
     ときと同じ失敗。確定させた値はそのまま、残りは pending のまま）。
+
+    `observed` を渡すと、ref の表現を作る code を走らせない（`seal_runtime_ref`）: 呼ぶ側の直列化が描いた
+    表現だけを写し、描いていない ref の node は pending のまま残す。
     """
 
     if value is None or type(value) not in (Expression, Condition):
@@ -1309,7 +1335,7 @@ def seal_serialization(value: Any) -> bool:
             folded = _fold(current, pending_inputs.pop(key), reader, verdicts)
             if folded == _PENDING and type(current) is Expression:
                 # 依存は確定済み: 自分の ref の表現を写せたかで決まる
-                seal_runtime_ref(current)
+                seal_runtime_ref(current, observed)
                 folded = _refold_after_seal(current, reader, verdicts)
             fields = current.__dict__
             if folded == _CLOSED:

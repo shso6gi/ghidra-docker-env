@@ -83,6 +83,9 @@ class ReplayOutcome:
     blocker: BlockedImportFinder
     identical_fast_path: bool
     analyzer_factory_calls: List[str] = field(default_factory=list)
+    #: snapshot の再利用の観測（Issue #219）: `body_executions_in_scope` は本体を外から包んで
+    #: 数えた、再利用の scope の中の実行回数。`stores` は閉じた scope ごとの計測値
+    snapshot_reuse: Dict[str, Any] = field(default_factory=dict)
 
     def accessed_object_kinds(self) -> Dict[str, set]:
         """side → 実際に member を引かれた object の kind 集合。"""
@@ -169,6 +172,7 @@ def replay_recorded_pair(
 
     collector = AnalysisSnapshotCollector()
     analyzer_factory_calls: List[str] = []
+    snapshot_reuse = _observe_snapshot_reuse(monkeypatch)
 
     def _analyzer_factory(program, **kwargs):
         analyzer_factory_calls.append(getattr(program, "_rec_object_id", "?"))
@@ -217,7 +221,35 @@ def replay_recorded_pair(
         result=result, failure=failure, checker=checker, blocker=blocker,
         identical_fast_path=bool(identical_fast_path),
         analyzer_factory_calls=analyzer_factory_calls,
+        snapshot_reuse=snapshot_reuse,
     )
+
+
+def _observe_snapshot_reuse(monkeypatch) -> Dict[str, Any]:
+    """snapshot の本体の実行を外から数え、閉じた再利用の scope の計測値を集める（判定はしない）。
+
+    数え方を再利用の判断に頼らない: canonical な経路の本体（読んだ値から snapshot を作る
+    `assemble_snapshot`）を包み、再利用の scope の中で実際に走った回数を数える。
+    """
+
+    from scripts.function_tracer_pcode.proof.obligations import snapshot_reuse as reuse
+
+    observed: Dict[str, Any] = {"body_executions_in_scope": 0, "stores": []}
+    assemble = reuse.assemble_snapshot
+    release = reuse.SnapshotReuse.release
+
+    def counted_assemble(read, **kwargs):
+        if reuse.snapshot_reuse_metrics():
+            observed["body_executions_in_scope"] += 1
+        return assemble(read, **kwargs)
+
+    def observed_release(store):
+        observed["stores"].append(store.metrics())
+        return release(store)
+
+    monkeypatch.setattr(reuse, "assemble_snapshot", counted_assemble)
+    monkeypatch.setattr(reuse.SnapshotReuse, "release", observed_release)
+    return observed
 
 
 def assert_no_real_decompiler_was_built(outcome: ReplayOutcome) -> None:
@@ -272,6 +304,7 @@ def replay_report(
             for side, program in (("left", outcome.left), ("right", outcome.right))
         },
         "analyzer_factory_calls": list(outcome.analyzer_factory_calls),
+        "snapshot_reuse": outcome.snapshot_reuse,
         "decompiler_access": outcome.decompiler_access_log(),
         "decompiled_ir_access": outcome.decompiled_ir_access_count(),
         "decompiler_module_imported": DECOMPILER_MODULE in sys.modules,

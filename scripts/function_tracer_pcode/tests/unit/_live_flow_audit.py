@@ -1411,6 +1411,8 @@ ENTRY_ROOTS = (
     ("checker.unknown_reason", "legacy_reason_index", ("legacy_reasons",)),
     ("proof.obligations.snapshot", "SnapshotFingerprintCodec.freeze", ("value",)),
     ("proof.obligations.snapshot", "SnapshotFingerprintCodec.digest", ("value",)),
+    # 単一の読みが許可を渡す凍結（Issue #219 PR-219-B: `_freeze_unmetered` からは呼ばれないので入口として辿る）
+    ("proof.obligations.snapshot", "SnapshotFingerprintCodec._freeze_placing", ("value",)),
     ("core.canonical_digest", "canonical_fingerprint", ("value",)),
     # 作業量の object の method（名前で WORK として信頼する引数の、package の側の本体）
     ("proof.obligations.snapshot", "_FreezeMeter.scalar", ("value",)),
@@ -1475,9 +1477,10 @@ def _exits(body) -> bool:
 
 
 def protocol_roots(index: PackageIndex):
-    """walker が live な値を渡して呼ぶ package の callback（record の protocol・converter・reducer）。"""
+    """walker が live な値を渡して呼ぶ package の callback（record の protocol・converter・reducer・葉の置き換え）。"""
 
     reducer = (PKG + ".core.json_encoding", "Reducer")
+    leaf_substitution = (PKG + ".core.budget_policy", "LeafSubstitution")
     for (module, qual), node in sorted(index.functions.items()):
         if module in OWNER_MODULES:
             continue
@@ -1492,6 +1495,9 @@ def protocol_roots(index: PackageIndex):
             yield (module, qual), {params[1].arg: LIVE}
         elif cls and index.subclass_of(module, cls, reducer) and last == "result":
             yield (module, qual), {}
+        elif cls and index.subclass_of(module, cls, leaf_substitution) and last == "__leaf_substitute__":
+            # 直列化の作業量が sized leaf を作る前に渡す（`core.budget_policy.LeafSubstitution`。葉は live）
+            yield (module, qual), {params[1].arg: LIVE}
         elif cls and index.is_readable_property((module, qual)) and params:
             # `live_values.attribute` が呼ぶ property（`readable_property` で宣言したものだけ。field は live）
             yield (module, qual), {params[0].arg: rec(module, cls)}
