@@ -906,9 +906,12 @@ class Expression:
             if expr_type is ExpressionType.PHI:
                 branches = []
                 for branch in elements_of(node_value):
-                    if not builtin_sequence(branch) or size(branch) != 2:
-                        raise TypeError("PHI branch must be a condition/value pair")
-                    condition, value = elements_of(branch)
+                    # 分岐は (条件, 値) の組（`PhiBranch` か組み込みの tuple / list）: 基底型の slot で読む（`read_pair`: 型の
+                    # 事実を引かない・subclass の `__iter__` / `__getitem__` を呼ばない。組でない値・長さの違う組は拒む）
+                    try:
+                        condition, value = read_pair(branch)
+                    except (TypeError, ValueError):
+                        raise TypeError("PHI branch must be a condition/value pair") from None
                     if not package_instance(value, Expression):
                         raise TypeError("PHI branch value must be an Expression")
                     condition_payload = None
@@ -1419,4 +1422,4 @@ def runtime_ref_source(value: Any) -> Any:
 
 # Re-exported for callers that import Condition from model.expression.
 from scripts.function_tracer_pcode.core.condition import Condition
-from scripts.function_tracer_pcode.core.live_values import package_instance
+from scripts.function_tracer_pcode.core.live_values import package_instance, read_pair

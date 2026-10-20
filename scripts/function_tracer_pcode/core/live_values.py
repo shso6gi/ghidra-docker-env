@@ -877,6 +877,10 @@ def package_type(kind: type) -> bool:
         return False
     known = _PACKAGE_TYPES.get(kind)
     if known is not None:
+        if known and len(reliance_state.active) > reliance_state.floor and not _NESTING.active:
+            # 監査済みの code の中で確かめた信頼: 数が同じ間は確かめ直さない（`package_instance` の記録と同じ規則。
+            # 外の code ⇄ 監査済みの code の切り替えのたびに数が変わる）
+            reliance_state.trusted[id(kind)] = (kind, reliance_state.count)
         return known
     state = _NESTING
     depth = state.active.get(kind)
