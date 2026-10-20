@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Optional, Tuple, Union
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core.json_encoding import materialize
 
@@ -21,15 +22,21 @@ def _is_jvm_not_running_error(error: Exception) -> bool:
     except ImportError:
         JVMNotRunning = ()  # type: ignore[assignment]
     return (
-        isinstance(error, JVMNotRunning)
-        or str(error) in _JVM_NOT_RUNNING_MESSAGES
+        live_values.is_kind(error, JVMNotRunning)
+        or _error_text(error) in _JVM_NOT_RUNNING_MESSAGES
     )
+
+
+def _error_text(error: BaseException) -> str:
+    """`str(error)` と同じ文字列（例外の文字列化が読む状態を基底型の値で: `live_values.exception_text`。Issue #242）。"""
+
+    return live_values.exception_text(error)
 
 
 def _safe_getattr(owner: Any, name: str) -> Any:
     """Read a proxy attribute without leaking JVM-shutdown races."""
     try:
-        return getattr(owner, name, None)
+        return live_values.attribute_of(owner, name, None)
     except Exception as error:
         if _is_jvm_not_running_error(error):
             return None
@@ -39,17 +46,19 @@ def _safe_getattr(owner: Any, name: str) -> Any:
 def _safe_offset(address_or_value: Any) -> Optional[int]:
     if address_or_value is None:
         return None
-    if isinstance(address_or_value, int):
+    # scalar の subclass（JPype の `JLong` など）は基底型の値で比べる（subclass の code を呼ばない。Issue #242）
+    address_or_value = live_values.exact_scalar(address_or_value)
+    if live_values.is_kind(address_or_value, int):
         return address_or_value if address_or_value >= 0 else None
     get_offset = _safe_getattr(address_or_value, "getOffset")
     if callable(get_offset):
         try:
-            offset = int(get_offset())
+            offset = live_values.scalar_int(get_offset())
             return offset if offset >= 0 else None
         except Exception:
             return None
     try:
-        offset = int(address_or_value)
+        offset = live_values.scalar_int(address_or_value)
         return offset if offset >= 0 else None
     except Exception:
         return None
@@ -70,7 +79,7 @@ def _safe_program_id(owner: Any) -> Optional[int]:
     get_unique_program_id = _safe_getattr(program, "getUniqueProgramID")
     if callable(get_unique_program_id):
         try:
-            return int(get_unique_program_id())
+            return live_values.scalar_int(get_unique_program_id())
         except Exception:
             return None
     return None
@@ -81,7 +90,7 @@ def _safe_bool_method(owner: Any, method_name: str) -> Optional[bool]:
     if not callable(method):
         return None
     try:
-        return bool(method())
+        return live_values.scalar_bool(method())
     except Exception:
         return None
 
@@ -103,10 +112,10 @@ def _safe_external_library_name(function: Any) -> Optional[str]:
         if not callable(method):
             continue
         try:
-            value = method()
+            value = live_values.exact_scalar(method())
         except Exception:
             value = None
-        if isinstance(value, str) and value:
+        if live_values.is_kind(value, str) and value:
             return value
     return None
 
@@ -128,6 +137,7 @@ def _safe_thunked_function(function: Any) -> Any:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class CallTargetRef:
     """Stable call target identity for runtime analysis."""
 
@@ -145,10 +155,11 @@ class CallTargetRef:
     function_obj: Any = field(default=None, compare=False, hash=False, repr=False)
 
     def __post_init__(self) -> None:
-        if self.kind not in {"function", "code_address", "unknown"}:
+        if not live_values.contains({"function", "code_address", "unknown"}, self.kind):
             raise ValueError(f"Unsupported call target kind: {self.kind}")
 
     @classmethod
+    @runtime_ref_entry
     def from_function(cls, function) -> "CallTargetRef":
         name = None
         entry_offset = None
@@ -188,6 +199,7 @@ class CallTargetRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def from_code_address(
         cls,
         address_value: int,
@@ -204,6 +216,7 @@ class CallTargetRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def from_name(
         cls,
         function_name: str,
@@ -233,6 +246,7 @@ class CallTargetRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def unknown(cls, display_hint: Optional[str] = None) -> "CallTargetRef":
         return cls(kind="unknown", display_hint=display_hint)
 
@@ -246,6 +260,7 @@ class CallTargetRef:
     def is_unknown(self) -> bool:
         return live_values.str_value(self.kind) == "unknown"
 
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[Any, ...]:
         if self.is_function():
             if self.entry_offset is not None:
@@ -266,6 +281,7 @@ class CallTargetRef:
             return ("code_address", self.program_id, self.address_offset)
         return ("unknown", self.program_id)
 
+    @runtime_ref_key(proven=True)
     def analysis_key(self) -> Optional[Tuple[Any, ...]]:
         if self.is_unknown():
             return None
@@ -327,6 +343,7 @@ class CallTargetRef:
         return materialize(self)
 
 
+@runtime_ref_entry
 def coerce_call_target_ref(target: Union["CallTargetRef", str, None]) -> Optional["CallTargetRef"]:
     if live_values.is_kind(target, CallTargetRef):
         return target
@@ -350,6 +367,7 @@ def _declared_return_data_type(function_obj: Any) -> Any:
         return_type = getter()
     except Exception:
         return None
+    # 宣言の型（API の object）は `signature` が読む（construction guard は到達した依存先も検査する）
     if return_type is None:
         return None
     from scripts.function_tracer_pcode.core.signature import (
@@ -358,7 +376,7 @@ def _declared_return_data_type(function_obj: Any) -> Any:
     )
 
     try:
-        if is_void_data_type(return_type) or is_undefined_data_type(return_type):
+        if live_values.scalar_bool(is_void_data_type(return_type)) or live_values.scalar_bool(is_undefined_data_type(return_type)):
             return None
     except Exception:
         return None
@@ -378,12 +396,12 @@ def call_target_declared_return_data_types(target_ref: Any) -> Tuple[Any, ...]:
     function_obj = _safe_getattr(target_ref, "function_obj")
     if function_obj is None:
         return ()
-    declarations: list = []
+    declarations = []
     for candidate in (_safe_thunked_function(function_obj), function_obj):
         declared = _declared_return_data_type(candidate)
         if declared is not None:
             declarations.append(declared)
-    return tuple(declarations)
+    return live_values.exact_tree(tuple(declarations))  # 外の API の値: scalar の subclass の葉は基底型の値
 
 
 def call_target_returns_floating_value(target_ref: Any) -> bool:
@@ -404,7 +422,7 @@ def call_target_returns_floating_value(target_ref: Any) -> bool:
     verdicts = set()
     for declared in declarations:
         try:
-            verdicts.add(bool(is_floating_data_type(declared)))
+            verdicts.add(live_values.scalar_bool(is_floating_data_type(declared)))
         except Exception:
             return False
     if len(verdicts) != 1:

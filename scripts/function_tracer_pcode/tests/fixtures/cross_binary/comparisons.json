@@ -160,40 +160,24 @@
   "why": "session binary content identities (SHA) must be equal"
  },
  {
+  "path": "core/runtime_refs/_reading.py",
+  "qualname": "decided_equal",
+  "kind": "helper:equal",
+  "digest": "6facdfa2a1187963",
+  "role": "candidate_filter",
+  "why": "the 3-valued equality primitive of the comparison contract (#242): decides nothing by itself; every caller is inventoried with its own role"
+ },
+ {
   "path": "core/runtime_refs/call_arguments.py",
   "qualname": "fresh_call_argument_refs_are_side_distinct",
-  "kind": "compare",
-  "digest": "c26b6cc4c5d7e746",
+  "kind": "helper:decided_equal",
+  "digest": "3af85ad4a94cf953",
   "role": "owner_bearing",
   "why": "asserts fresh refs are distinct (binary_id in stable_key)"
  },
  {
   "path": "core/runtime_refs/loops.py",
-  "qualname": "compare_loop_summaries",
-  "kind": "compare",
-  "digest": "12a540004e07aa23",
-  "role": "scalar_or_tag",
-  "why": "side-effect profile shape (profile name, flags, counts)"
- },
- {
-  "path": "core/runtime_refs/loops.py",
-  "qualname": "compare_loop_summaries",
-  "kind": "compare",
-  "digest": "4746864a8a696fec",
-  "role": "gated:G1",
-  "why": "pairwise_semantic_key equality -> 'equivalent'; same callers/gates as the Method-B key"
- },
- {
-  "path": "core/runtime_refs/loops.py",
-  "qualname": "compare_loop_summaries",
-  "kind": "compare",
-  "digest": "bf9a79621cbf0bea",
-  "role": "candidate_filter",
-  "why": "case key mismatch only returns 'incompatible' (refusal); equality alone decides nothing"
- },
- {
-  "path": "core/runtime_refs/loops.py",
-  "qualname": "compare_loop_summaries",
+  "qualname": "_loop_key_gates",
   "kind": "compare",
   "digest": "cb911b27ace03780",
   "role": "scalar_or_tag",
@@ -201,19 +185,43 @@
  },
  {
   "path": "core/runtime_refs/loops.py",
-  "qualname": "compare_loop_summaries",
-  "kind": "compare",
-  "digest": "fd3f903145f1210c",
-  "role": "gated:G1",
-  "why": "Method-B key equality -> 'equivalent'; callers _runtime_refs_shortcut_decision, _case_pair_loop_summaries_solver_equivalent, _counted_loop_refs_allow_value_proof - decisive uses only via G1/G2/G4/G6/G8; ungated _impl_check uses (safe-fallback/defer) are filters"
+  "qualname": "_loop_key_gates",
+  "kind": "helper:_decided_equal",
+  "digest": "341c65d0f140326d",
+  "role": "candidate_filter",
+  "why": "effect key mismatch only returns 'incompatible'"
  },
  {
   "path": "core/runtime_refs/loops.py",
-  "qualname": "compare_loop_summaries",
-  "kind": "compare",
-  "digest": "fdd47b8c922452c0",
+  "qualname": "_loop_key_gates",
+  "kind": "helper:_decided_equal",
+  "digest": "71f7f597b25c18f0",
   "role": "candidate_filter",
-  "why": "effect key mismatch only returns 'incompatible'"
+  "why": "case key mismatch only returns 'incompatible' (refusal); equality alone decides nothing"
+ },
+ {
+  "path": "core/runtime_refs/loops.py",
+  "qualname": "_loop_key_gates",
+  "kind": "helper:_decided_equal",
+  "digest": "9c74eae32af7cf75",
+  "role": "gated:G1",
+  "why": "pairwise_semantic_key equality -> 'equivalent'; same callers/gates as the Method-B key"
+ },
+ {
+  "path": "core/runtime_refs/loops.py",
+  "qualname": "_loop_key_gates",
+  "kind": "helper:_decided_equal",
+  "digest": "b16e39d695dec9ac",
+  "role": "scalar_or_tag",
+  "why": "side-effect profile shape (profile name, flags, counts)"
+ },
+ {
+  "path": "core/runtime_refs/loops.py",
+  "qualname": "_loop_key_gates",
+  "kind": "helper:_decided_equal",
+  "digest": "c1a4c09cbd611a5d",
+  "role": "gated:G1",
+  "why": "Method-B key equality -> 'equivalent'; callers _runtime_refs_shortcut_decision, _case_pair_loop_summaries_solver_equivalent, _counted_loop_refs_allow_value_proof - decisive uses only via G1/G2/G4/G6/G8; ungated _impl_check uses (safe-fallback/defer) are filters"
  },
  {
   "path": "proof/call_effect/candidates.py",

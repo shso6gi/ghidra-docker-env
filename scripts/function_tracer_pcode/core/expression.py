@@ -3,7 +3,7 @@
 import copy
 import weakref
 from enum import Enum, auto
-from typing import List, NamedTuple, Optional, Any, Dict, Set, Mapping
+from typing import List, NamedTuple, Optional, Any, Dict, Set, Mapping, Tuple
 
 from scripts.function_tracer_pcode.core.semantic_lifecycle import (
     SemanticLifecycle,
@@ -113,6 +113,13 @@ class ExpressionType(Enum):
     UNKNOWN = auto()
     LITERAL = auto()
 
+
+
+#: `ExpressionType` の member の名前（identity で引く: `id(member)` → (member, 名前)）。member と名前は class の定義（code）で、
+#: import の時点で読む。表現は値の型の名前空間を通らずに名前を引く（member でない値は `enum_name` で読む）
+_EXPRESSION_TYPE_NAMES: Dict[int, Tuple["ExpressionType", str]] = {
+    id(member): (member, member._name_) for member in ExpressionType.__members__.values()
+}
 
 
 #: 凍結後に書き換えてはいけない **意味 field**。ここに無い属性（診断用の
@@ -895,28 +902,38 @@ class Expression:
         # field は live な値: 型を確かめてから読む（`core.live_values` の規則。式の子は
         # `type(x) is Expression` を確かめてから自分の method を呼ぶ）
         expr_type = self.expr_type
-        if type(expr_type) is ExpressionType:
-            result: Dict[str, Any] = {"type": expr_type._name_}
-        else:
-            result = {"type": enum_name(expr_type)}
+        # enum の名前は member の表（identity）か owner の読みで読む（member の `_name_` を直接読むと、enum の型の名前空間の
+        # descriptor を通る）
+        known = _EXPRESSION_TYPE_NAMES.get(id(expr_type))
+        result: Dict[str, Any] = {"type": known[1] if known is not None and known[0] is expr_type else enum_name(expr_type)}
         node_value = self.value
         if node_value is not None:
             if expr_type is ExpressionType.PHI:
                 branches = []
                 for branch in elements_of(node_value):
-                    if not builtin_sequence(branch) or size(branch) != 2:
-                        raise TypeError("PHI branch must be a condition/value pair")
-                    condition, value = elements_of(branch)
-                    if type(value) is not Expression:
+                    # 分岐は (条件, 値) の組。exact な tuple / list と `PhiBranch` そのもの（package の型: 信頼を確かめる）は
+                    # 基底型の slot で読む（`read_pair`: 型の事実を引かない）。それ以外は組み込みの振る舞いを確かめてから読む
+                    # （上書きした `__iter__` / `__getitem__` を持つ subclass は今までどおり拒む）
+                    branch_kind = type(branch)
+                    if branch_kind is tuple or branch_kind is list or package_instance(branch, PhiBranch):
+                        try:
+                            condition, value = read_pair(branch)
+                        except (TypeError, ValueError):
+                            raise TypeError("PHI branch must be a condition/value pair") from None
+                    else:
+                        if not builtin_sequence(branch) or size(branch) != 2:
+                            raise TypeError("PHI branch must be a condition/value pair")
+                        condition, value = elements_of(branch)
+                    if not package_instance(value, Expression):
                         raise TypeError("PHI branch value must be an Expression")
                     condition_payload = None
                     if condition is not None:
                         from scripts.function_tracer_pcode.core.condition import Condition
 
-                        if type(condition) is not Condition:
+                        if not package_instance(condition, Condition):
                             raise TypeError("PHI branch condition must be a Condition")
                         condition_expression = condition.expression
-                        if type(condition_expression) is not Expression:
+                        if not package_instance(condition_expression, Expression):
                             raise TypeError("PHI branch condition must hold an Expression")
                         if collect is None:
                             condition_value = condition_expression._to_dict(active)
@@ -957,7 +974,7 @@ class Expression:
             if collect is None:
                 rendered = []
                 for op in elements_of(operands):
-                    if type(op) is not Expression:
+                    if not package_instance(op, Expression):
                         raise TypeError("Expression operands must be Expressions")
                     rendered.append(op._to_dict(active))
                 result["operands"] = rendered
@@ -969,13 +986,13 @@ class Expression:
         # storage が無い・写せなかった）は従来どおり今の `StorageInfo` を読む
         storage_payload = self._storage_payload
         if storage_payload is not None:
-            if type(storage_payload) is not FrozenStorageRecord:
+            if not package_instance(storage_payload, FrozenStorageRecord):
                 raise TypeError("Expression storage payload must be a FrozenStorageRecord")
             result["storage_info"] = storage_payload.to_dict()
         else:
             storage_info = self.storage_info
             if storage_info is not None:
-                if type(storage_info) is not StorageInfo:
+                if not package_instance(storage_info, StorageInfo):
                     raise TypeError("Expression storage_info must be a StorageInfo")
                 result["storage_info"] = storage_info.to_dict()
         if self.read_order_key is not None:
@@ -985,7 +1002,7 @@ class Expression:
         # （`semantic_freeze.seal_serialization`）だけで、直列化は状態を書かない。写しの無い node
         # （未検証・まだ写していない `SEAL_PENDING`・写せなかった `UNSEALABLE`）は生の ref を描く
         ref_payload = self._runtime_ref_payload
-        if type(ref_payload) is FrozenLegacyTree:
+        if ref_payload is not None and package_instance(ref_payload, FrozenLegacyTree):
             if collect is None:
                 result["runtime_ref"] = ref_payload.thaw()
             else:
@@ -1122,7 +1139,7 @@ def estimate_legacy_dict_bytes(
     while stack:
         node = stack.pop()
         exiting = exits.pop()
-        if type(node) is not Expression:
+        if not package_instance(node, Expression):
             raise TypeError("an Expression tree contains a non-Expression child")
         node_id = id(node)
         if exiting:
@@ -1417,3 +1434,4 @@ def runtime_ref_source(value: Any) -> Any:
 
 # Re-exported for callers that import Condition from model.expression.
 from scripts.function_tracer_pcode.core.condition import Condition
+from scripts.function_tracer_pcode.core.live_values import package_instance, read_pair

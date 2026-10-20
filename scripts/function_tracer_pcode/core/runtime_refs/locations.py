@@ -4,14 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw)
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, str_value
+from scripts.function_tracer_pcode.core.live_values import (
+    UndecidableComparison,
+    as_bool, as_int, contains, equal, exact_scalar, exact_tree, hash_tree, is_kind, method_of, scalar_int, scalar_text,
+    str_value, trusted_comparison, trusted_hash, unequal,
+)
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
 )
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class AddressValueRef:
     """Structured constant-address identity for runtime analysis."""
 
@@ -35,6 +41,7 @@ class AddressValueRef:
     object_base_offset: Optional[int] = None
     object_size: Optional[int] = None
 
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         return (
             "address",
@@ -69,7 +76,8 @@ class AddressValueRef:
         offset = int(self.address_offset) - int(self.object_base_offset)
         if offset < 0 or offset >= size:
             return None
-        return (str(self.object_symbol_name), size, offset)
+        # 注釈が str の field にも外の object が残り得る: その `__str__` の戻り値も基底型の値で読む（Issue #242）
+        return (scalar_text(self.object_symbol_name), size, offset)
 
     def is_readonly_memory(self) -> bool:
         # field の真偽は owner の API で読む（`bool(...)` と同じ値）
@@ -130,6 +138,7 @@ def _int_or_zero(value: Any) -> int:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class LocationBaseRef:
     """Structured identity for the root of a canonical memory location."""
 
@@ -146,24 +155,31 @@ class LocationBaseRef:
     display_hint: Optional[str] = None
 
     def __post_init__(self) -> None:
-        if self.kind not in {"parameter", "stack_frame", "storage", "global"}:
+        # 注釈が str の field にも外の object が残り得る（owner は scalar の subclass だけを写す）: 比較の戻り値は基底型の
+        # 値の真偽で読む（`live_values.contains` / `equal`。Issue #242）
+        if not contains({"parameter", "stack_frame", "storage", "global"}, self.kind):
             raise ValueError(f"Unsupported location base kind: {self.kind}")
-        if self.kind == "global":
-            if not self.storage_identity_key or self.storage_identity_key[0] != "global_object":
+        if self.storage_identity_key is not None:
+            # key は `==`・hash・文字列化で読む: list のまま受理した値の葉も基底型の値にする（Issue #242）
+            object.__setattr__(self, "storage_identity_key", exact_tree(self.storage_identity_key))
+        if equal(self.kind, "global"):
+            # 構築中の key は list のこともある（owner は exact な tuple だけを写す）: 要素は基底型の値で比べる
+            if not self.storage_identity_key or unequal(self.storage_identity_key[0], "global_object"):
                 raise ValueError("global location base requires a global_object identity key")
-        if self.kind == "parameter":
+        if equal(self.kind, "parameter"):
             normalized_index = None
             if self.parameter_index is not None:
                 try:
-                    candidate = int(self.parameter_index)
+                    candidate = scalar_int(self.parameter_index)
                 except Exception:
                     candidate = None
                 if candidate is not None and candidate >= 0:
                     normalized_index = candidate
-            if normalized_index != self.parameter_index:
+            if unequal(normalized_index, self.parameter_index):
                 object.__setattr__(self, "parameter_index", normalized_index)
 
     @classmethod
+    @runtime_ref_entry
     def parameter(
         cls,
         name: str,
@@ -186,6 +202,7 @@ class LocationBaseRef:
         return cls(kind="stack_frame", display_hint="stackframe")
 
     @classmethod
+    @runtime_ref_entry
     def storage(
         cls,
         *,
@@ -200,13 +217,14 @@ class LocationBaseRef:
             kind="storage",
             storage_space_id=space_id,
             storage_space=space_name or None,
-            storage_offset=int(offset),
-            storage_size=max(1, int(size or 0)),
+            storage_offset=scalar_int(offset),
+            storage_size=max(1, scalar_int(exact_scalar(size) or 0)),
             storage_identity_key=tuple(storage_identity_key) if storage_identity_key is not None else None,
             display_hint=display_hint,
         )
 
     @classmethod
+    @runtime_ref_entry
     def global_object(
         cls,
         symbol_name: str,
@@ -221,10 +239,10 @@ class LocationBaseRef:
         different binaries canonicalises to the same base (Issue #104).
         """
 
-        name = str(symbol_name or "").strip()
+        name = scalar_text(exact_scalar(symbol_name) or "").strip()
         if not name:
             raise ValueError("global location base requires a symbol name")
-        object_size = max(1, int(size or 0))
+        object_size = max(1, scalar_int(exact_scalar(size) or 0))
         return cls(
             kind="global",
             storage_space=space_name or None,
@@ -250,15 +268,22 @@ class LocationBaseRef:
     def global_symbol_name(self) -> Optional[str]:
         if not self.is_global() or not self.storage_identity_key:
             return None
-        return str(self.storage_identity_key[1])
+        return scalar_text(self.storage_identity_key[1])
 
+    @trusted_hash  # `__eq__` と同じ読み（`hash_tree`）: 登録した hash（hash で置く位置に包まずに置ける）
     def __hash__(self) -> int:
-        return hash(self.stable_key())
+        # `__eq__` が比べる成分だけ（等しい ref は同じ hash。Issue #242）。storage の位置は名前（`storage_space`）を
+        # 比べない: `stable_key` の名前を除く。読みは `__eq__` と同じ（`hash_tree`: scalar の subclass は基底型の値）
+        key = self.stable_key()
+        if equal(key[0], "storage"):
+            key = (key[0], key[1], key[3], key[4])  # ("storage", space_id, space_name, offset, size) から名前を除く
+        return hash_tree(key)
 
+    @trusted_comparison  # 本体は構築の guard が検査する（比較は `live_values` の契約で読み、組み込みの `bool` を返す）
     def __eq__(self, other: object) -> bool:
-        if not isinstance(other, LocationBaseRef):
+        if not is_kind(other, LocationBaseRef):
             return False
-        if self.kind != other.kind:
+        if unequal(self.kind, other.kind):
             return False
         if self.is_parameter():
             if self.parameter_index is not None and other.parameter_index is not None:
@@ -269,8 +294,8 @@ class LocationBaseRef:
                     or other.owner_entry_offset is not None
                 ):
                     return (
-                        self.owner_program_id == other.owner_program_id
-                        and self.owner_entry_offset == other.owner_entry_offset
+                        equal(self.owner_program_id, other.owner_program_id)
+                        and equal(self.owner_entry_offset, other.owner_entry_offset)
                         and int(self.parameter_index) == int(other.parameter_index)
                     )
                 return int(self.parameter_index) == int(other.parameter_index)
@@ -281,14 +306,15 @@ class LocationBaseRef:
             return (
                 self.storage_identity_key is not None
                 and other.storage_identity_key is not None
-                and self.storage_identity_key == other.storage_identity_key
+                and equal(self.storage_identity_key, other.storage_identity_key)
             )
         return (
-            self.storage_space_id == other.storage_space_id
+            equal(self.storage_space_id, other.storage_space_id)
             and int(self.storage_offset or 0) == int(other.storage_offset or 0)
             and int(self.storage_size or 0) == int(other.storage_size or 0)
         )
 
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         if self.is_parameter():
             if self.parameter_index is not None:
@@ -319,6 +345,7 @@ class LocationBaseRef:
             int(self.storage_size or 0),
         )
 
+    @runtime_ref_key(proven=True)
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         """Program-independent identity for comparing function-local locations.
 
@@ -363,15 +390,18 @@ class LocationBaseRef:
         if not self.is_parameter():
             return False
         try:
-            param_index = param.get("index")
+            # `param` は呼び出し元の dict: 値は基底型の値で読む（Issue #242）
+            param_index = exact_scalar(method_of(param, "get")("index"))
             if self.parameter_index is not None and param_index is not None:
                 if self.owner_program_id is not None or self.owner_entry_offset is not None:
                     return (
-                        int(param_index) == int(self.parameter_index)
-                        and param.get("owner_program_id") == self.owner_program_id
-                        and param.get("owner_entry_offset") == self.owner_entry_offset
+                        scalar_int(param_index) == int(self.parameter_index)
+                        and equal(method_of(param, "get")("owner_program_id"), self.owner_program_id)
+                        and equal(method_of(param, "get")("owner_entry_offset"), self.owner_entry_offset)
                     )
-                return int(param_index) == int(self.parameter_index)
+                return scalar_int(param_index) == int(self.parameter_index)
+        except UndecidableComparison:
+            raise  # 判定不能は「一致しない」にしない（比べる側の契約: 確定判定にしない）
         except Exception:
             pass
         return False
@@ -403,14 +433,16 @@ class LocationBaseRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class LocationStep:
     kind: str
     value: int
 
     def __post_init__(self) -> None:
-        if self.kind not in {"offset", "deref"}:
+        if not contains({"offset", "deref"}, self.kind):
             raise ValueError(f"Unsupported location step kind: {self.kind}")
 
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[str, int]:
         return (self.kind, int(self.value))
 
@@ -423,6 +455,7 @@ class LocationStep:
 
 
 @dataclass(frozen=True, init=False)
+@runtime_ref_record
 class CanonicalLocation:
     base_ref: LocationBaseRef
     offset: int
@@ -439,23 +472,25 @@ class CanonicalLocation:
     ) -> None:
         normalized_base = base_ref
         if normalized_base is None:
-            if base_param in {"stackframe", "__locbase__stackframe"}:
+            if contains({"stackframe", "__locbase__stackframe"}, base_param):
                 normalized_base = LocationBaseRef.stack_frame()
             else:
                 normalized_base = LocationBaseRef.parameter(base_param or "param")
         object.__setattr__(self, "base_ref", normalized_base)
-        object.__setattr__(self, "offset", int(offset))
-        object.__setattr__(self, "size", int(size))
+        # scalar の subclass は基底型の値にしてから整数にする（subclass の `__int__` を呼ばない。Issue #242）
+        object.__setattr__(self, "offset", scalar_int(offset))
+        object.__setattr__(self, "size", scalar_int(size))
         object.__setattr__(self, "steps", tuple(steps))
 
     @property
     def base_param(self) -> str:
-        return self.base_ref.display_name()
+        return exact_scalar(self.base_ref.display_name())  # 代わりの型の method の結果の葉を写す
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             self.base_ref.stable_key(),
-            tuple(step.stable_key() for step in self.steps),
+            tuple(method_of(step, "stable_key")() for step in self.steps),
             int(self.offset),
             int(self.size),
         )
@@ -471,6 +506,7 @@ class CanonicalLocation:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class PostStateValueRef:
     """Structured identity for a fully materialized final object-state value."""
 
@@ -479,6 +515,7 @@ class PostStateValueRef:
     source: str = "effect_summary"
     state_kind: str = "materialized_final_value"
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "post_state_value",
@@ -500,6 +537,7 @@ class PostStateValueRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class PostStateSnapshotRef:
     """Structured identity for a shared post-state memory snapshot."""
 
@@ -512,6 +550,7 @@ class PostStateSnapshotRef:
     def function_return(cls) -> "PostStateSnapshotRef":
         return cls()
 
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "post_state_snapshot",
@@ -532,6 +571,7 @@ class PostStateSnapshotRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class PostStateReadRef:
     """Structured identity for a symbolic read from a shared post-state snapshot."""
 
@@ -540,6 +580,7 @@ class PostStateReadRef:
     source: str = "effect_summary"
     state_kind: str = "symbolic_post_state_read"
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "post_state_read",
@@ -549,6 +590,7 @@ class PostStateReadRef:
             self.state_kind,
         )
 
+    @runtime_ref_entry
     def with_location(self, location: CanonicalLocation) -> "PostStateReadRef":
         return PostStateReadRef(
             location=location,
@@ -557,6 +599,7 @@ class PostStateReadRef:
             state_kind=self.state_kind,
         )
 
+    @runtime_ref_entry
     def with_snapshot(self, snapshot_ref: Optional[PostStateSnapshotRef]) -> "PostStateReadRef":
         return PostStateReadRef(
             location=self.location,
@@ -577,6 +620,7 @@ class PostStateReadRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ObservedMemoryReadRef:
     """Structured provenance for an observed LOAD-derived memory read."""
 
@@ -586,6 +630,7 @@ class ObservedMemoryReadRef:
     pcode_op_ref: Optional[PcodeOpRef] = None
     source: str = "ghidra_load"
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "observed_memory_read",
@@ -596,6 +641,7 @@ class ObservedMemoryReadRef:
             self.source,
         )
 
+    @runtime_ref_entry
     def with_location(
         self,
         location: Optional[CanonicalLocation],
@@ -610,6 +656,7 @@ class ObservedMemoryReadRef:
             source=self.source,
         )
 
+    @runtime_ref_entry
     def with_snapshot(
         self,
         snapshot_ref: Optional[PostStateSnapshotRef],

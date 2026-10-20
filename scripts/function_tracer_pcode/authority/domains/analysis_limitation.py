@@ -3,9 +3,9 @@
 
 Issue #125 PR-125-A。`core/errors.py` の `AnalysisLimitation` を判定 authority
 へ載せるための **最小の** producer 経路（domain 1 / producer site 1）。sealed
-reason は 2 つ: 解析の予算（`analysis_budget_exceeded`、#125）と式の大きさの予算
-（`expression_size_budget_exceeded`、#22 PR-22-D）。どちらも同じ site・同じ encoder・
-同じ回復契約を通る（reason が違うだけ）。
+reason は 3 つ: 解析の予算（`analysis_budget_exceeded`、#125）、式の大きさの予算
+（`expression_size_budget_exceeded`、#22 PR-22-D）、比べる側の契約の判定不能
+（`comparison_undecidable`、#242）。どれも同じ site・同じ encoder・同じ回復契約を通る（reason が違うだけ）。
 
 `analysis_budget_exceeded` は deadline 専用の reason ではない: 時間・段数の予算
 （`DeadlineExceeded`、#106）・作業量を受け取らない読みの固定の上限（`FixedReadBoundExceeded`、
@@ -60,6 +60,9 @@ ANALYSIS_BUDGET_REASON_ID = "analysis_budget_exceeded"
 #: Issue #22 PR-22-D: 式の大きさの予算（展開・solver 向け描画・直列化）を超えて
 #: 打ち切った限界。`core/errors.ExpressionSizeBudgetExceeded.REASON_ID` と同じ値。
 EXPRESSION_SIZE_BUDGET_REASON_ID = "expression_size_budget_exceeded"
+#: Issue #242 第 8 回: 比べる側の契約（`core/live_values`）が、比べる値を組み込みの code だけでは双子と同じに
+#: 比べられなかった限界。`core/comparison_limits.ComparisonUndecidable.REASON_ID` と同じ値。
+COMPARISON_UNDECIDABLE_REASON_ID = "comparison_undecidable"
 ANALYSIS_BUDGET_PROOF_KIND = "analysis_budget_proof"
 ANALYSIS_BUDGET_CONTRACT_ID = "analysis-budget-recovery"
 ANALYSIS_LIMITATION_TARGET_KIND = "analysis_limitation"
@@ -91,6 +94,16 @@ ANALYSIS_LIMITATION_REASON_REGISTRY = SealedReasonRegistry.build((
         "proof_obligation", "blocks_decision",
         frozenset((ANALYSIS_LIMITATION_TARGET_KIND,)),
         ("limitation_site", "expression_size_budget"),
+        frozenset((ANALYSIS_BUDGET_PROOF_KIND,)), True,
+        "analysis_limitation_v1", RecoveryAddressability.REQUIREMENT_REQUIRED,
+    ),
+    # 比べられなかった値の比較は、等しい側・違う側のどちらの根拠にもならないので `blocks_decision`。
+    # 回復の契約は同じ（その比較を含まずに解析を完了できたことの証明）
+    ReasonDefinition(
+        COMPARISON_UNDECIDABLE_REASON_ID, ANALYSIS_LIMITATION_DOMAIN,
+        "proof_obligation", "blocks_decision",
+        frozenset((ANALYSIS_LIMITATION_TARGET_KIND,)),
+        ("limitation_site", "comparison_undecidable"),
         frozenset((ANALYSIS_BUDGET_PROOF_KIND,)), True,
         "analysis_limitation_v1", RecoveryAddressability.REQUIREMENT_REQUIRED,
     ),
@@ -309,7 +322,7 @@ ANALYSIS_LIMITATION_OBSERVED_SITE = AnalysisLimitationProducerSiteSpec(
     "analysis-limitation-observed",
     ANALYSIS_LIMITATION_PRODUCER_ID,
     "ELIGIBLE",
-    (ANALYSIS_BUDGET_REASON_ID, EXPRESSION_SIZE_BUDGET_REASON_ID),
+    (ANALYSIS_BUDGET_REASON_ID, EXPRESSION_SIZE_BUDGET_REASON_ID, COMPARISON_UNDECIDABLE_REASON_ID),
 )
 
 ANALYSIS_LIMITATION_PRODUCER_SITE_SPECS = (ANALYSIS_LIMITATION_OBSERVED_SITE,)

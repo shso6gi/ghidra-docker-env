@@ -30,6 +30,7 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _stable_target_expression_key,
     _try_get_order_key,
 )
+from scripts.function_tracer_pcode.core.live_values import package_instance
 
 _UNKNOWN_EFFECT_ORDER_KEY = -1
 
@@ -78,7 +79,7 @@ class StoreEffectProvenance:
             return False
         if self.producer_block_ref is None:
             return False
-        if type(op) is PcodeOpRef:
+        if package_instance(op, PcodeOpRef):
             if (
                 op.binary_id is None
                 or op.function_entry_space is None
@@ -106,7 +107,7 @@ class StoreEffectProvenance:
             return False
         if source_kind == "call_derived":
             target = self.call_target_ref
-            if type(target) is not CallTargetRef:
+            if not package_instance(target, CallTargetRef):
                 return False
             if target.is_unknown():
                 return False
@@ -114,7 +115,7 @@ class StoreEffectProvenance:
             if index is None or as_int(index) < 0:
                 return False
             nested = self.nested_effect_provenance
-            if type(nested) is not StoreEffectProvenance:
+            if not package_instance(nested, StoreEffectProvenance):
                 return False
             return nested.is_complete()
         return (
@@ -588,7 +589,7 @@ def _store_effect_source(effect: "StoreEffect") -> object:
     要素は `StoreEffect` だけ（型を確かめてから field を読む。それ以外は `TypeError`）。
     """
 
-    if type(effect) is not StoreEffect:
+    if not package_instance(effect, StoreEffect):
         raise TypeError("a memory effect is not a StoreEffect")
     return inline(
         ("location", effect.location),

@@ -12,6 +12,7 @@ from enum import Enum
 from typing import Any, Dict, Mapping, Tuple, Union
 
 import scripts.function_tracer_pcode.core.live_values as live_values
+from scripts.function_tracer_pcode.core.live_values import package_instance
 
 
 CAUSE_IDENTITY_SCHEMA_VERSION = 1
@@ -202,19 +203,18 @@ def cause_key_from_dict(payload: Mapping[str, Any]) -> CauseKey:
 
 def canonical_cause_tuple(value: CauseKey) -> Tuple[Any, ...]:
     # field は exact な型の `json_items`（dataclass の field の順）で読む（`to_dict()` を呼ばない）
-    if type(value) is UnaryCauseKey:
-        pairs = value.json_items()
-    elif type(value) is RelationalCauseKey:
-        pairs = value.json_items()
-    elif type(value) is ExecutionCauseKey:
-        pairs = value.json_items()
-    else:
+    if not (
+        package_instance(value, UnaryCauseKey)
+        or package_instance(value, RelationalCauseKey)
+        or package_instance(value, ExecutionCauseKey)
+    ):
         raise TypeError(f"{live_values.type_name(type(value))} is not a typed cause key")
     names = []
     items = []
-    for name, item in pairs:
+    # field は dataclass の field の順（`json_items` と同じ名前・順）で、owner の読みで読む（generator を持たない）
+    for name in live_values.dataclass_field_names(value):
         names.append(live_values.as_str(name))
-        items.append(item)
+        items.append(live_values.field_value(value, name))
     order = sorted(range(len(names)), key=names.__getitem__)
     return tuple((names[index], _tuple_item(items[index])) for index in order)
 
@@ -253,7 +253,7 @@ class ProofRequirementId:
     ) -> "ProofRequirementId":
         contract_key = (
             proof_contract.to_key()
-            if type(proof_contract) is ProofRequirementContract
+            if package_instance(proof_contract, ProofRequirementContract)
             else _tuple(proof_contract)
         )
         target = _tuple(proof_target_key)

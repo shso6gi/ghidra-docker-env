@@ -86,6 +86,8 @@ from scripts.function_tracer_pcode.authority.decision.conditional import (  # no
     assumption_premise_max_bytes,
     max_assumption_premises,
 )
+from scripts.function_tracer_pcode.core.live_values import package_instance
+from scripts.function_tracer_pcode.core.live_values import audited_entry
 #: 失敗の自由文（`error_message` / `failure_message`）の文字数
 MESSAGE_MAX_CHARS = 2048
 #: 切り詰めた診断の marker に残す、JSON にならない値を拒んだ場所（path）の文字数
@@ -149,6 +151,7 @@ def conditional_receipt_max_bytes(policy: JsonEncodingPolicy) -> int:
 SUPERSEDED_UNAVAILABLE_MAX_CHARS = 64
 
 
+@audited_entry
 def superseded_decision_receipt_record(result: Any) -> Optional[Dict[str, Any]]:
     """出力の契約違反の ERROR が持つ、取って代わられた判定（無条件と conditional の receipt）。
 
@@ -174,12 +177,12 @@ def superseded_decision_receipt_record(result: Any) -> Optional[Dict[str, Any]]:
 
     try:
         # receipt の owner へは exact な receipt の型だけを渡す（それ以外は作れなかった形）
-        if type(receipt) is not DecisionReceipt:
+        if not package_instance(receipt, DecisionReceipt):
             raise TypeError("superseded decision receipt is not an exact DecisionReceipt")
         record: Dict[str, Any] = {"decision_receipt": decision_receipt_payload(receipt)}
         conditional = live_values.attribute(result, "conditional_decision_receipt")
         if conditional is not None:
-            if type(conditional) is not ConditionalDecisionReceipt:
+            if not package_instance(conditional, ConditionalDecisionReceipt):
                 raise TypeError("superseded conditional receipt is not an exact ConditionalDecisionReceipt")
             record["conditional_decision_receipt"] = conditional_decision_receipt_payload(conditional)
         return record

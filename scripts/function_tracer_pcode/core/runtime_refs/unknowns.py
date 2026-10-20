@@ -2,16 +2,28 @@
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import json
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from scripts.function_tracer_pcode.core.runtime_ref_record import exact_field_value, runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.live_values import (
+    defined_attribute,
+    method_of,
+    scalar_repr,
+    attribute_of,
+    is_kind,
     NOT_PLAIN,
     as_bool,
     as_int,
     attribute,
     elements_of,
+    exact_scalar,
+    exact_tree,
+    scalar_bool,
+    scalar_int,
+    scalar_text,
     str_value,
     type_module,
     type_name,
@@ -21,12 +33,15 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     as_list, builtin_str, inline, is_json_record, materialize, raw,
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef, coerce_call_target_ref
+from scripts.function_tracer_pcode.core.runtime_refs._reading import items as _items, optional_items as _optional_items, pairs as _pairs
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PcodeOpRef,
 )
+from scripts.function_tracer_pcode.core.live_values import package_instance
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class DeferredCallRef:
     """Structured identity for a deferred call site."""
 
@@ -39,6 +54,7 @@ class DeferredCallRef:
     def __post_init__(self) -> None:
         object.__setattr__(self, "target_ref", coerce_call_target_ref(self.target_ref))
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "deferred_call_site",
@@ -55,7 +71,7 @@ class DeferredCallRef:
         target_name = _call_target_display_name(target) if target is not None else "unknown"
         op = self.pcode_op_ref
         if op is not None:
-            offset = op.address_offset if type(op) is PcodeOpRef else attribute(op, "address_offset")
+            offset = op.address_offset if package_instance(op, PcodeOpRef) else attribute(op, "address_offset")
             if offset is not None:
                 return f"{builtin_str(target_name)}@0x{as_int(offset):x}"
         return target_name
@@ -76,7 +92,7 @@ class DeferredCallRef:
 def _call_target_display_name(target: Any) -> Any:
     """`target.display_name()`（`__post_init__` が正規化した `CallTargetRef` だけ。それ以外は `TypeError`）。"""
 
-    if type(target) is CallTargetRef:
+    if package_instance(target, CallTargetRef):
         return target.display_name()
     raise TypeError(f"{type_name(type(target))} is not a CallTargetRef")
 
@@ -84,23 +100,30 @@ def _call_target_display_name(target: Any) -> Any:
 def _deferred_call_display_name(ref: Any) -> Any:
     """`ref.display_name()`（`DeferredCallRef` だけ。それ以外は `TypeError`。live な値の method を呼ばない）。"""
 
-    if type(ref) is DeferredCallRef:
+    if package_instance(ref, DeferredCallRef):
         return ref.display_name()
     raise TypeError(f"{type_name(type(ref))} is not a DeferredCallRef")
 
 
 def _runtime_ref_stable_key_or_repr(value: Any) -> Optional[Tuple[Any, ...]]:
+    """main の `stable_key` / `repr` の規則を双子の値で（Issue #242）。
+
+    注釈が Any の値: scalar の subclass は基底型の値にしてから（葉だけ。容器は元の型のまま `stable_key` と型の名前を
+    読む）。`stable_key()` の結果は組み込みの木、`repr` は葉に scalar の subclass が在るときだけ写した木の `repr`。
+    """
+
+    value = exact_scalar(value)
     if value is None:
         return None
-    stable_key = getattr(value, "stable_key", None)
+    stable_key = attribute_of(value, "stable_key", None)
     if callable(stable_key):
         try:
             key = stable_key()
         except (AttributeError, TypeError, ValueError, RecursionError):
             key = None
         if key is not None:
-            return ("stable", key)
-    return ("repr", type(value).__module__, type(value).__qualname__, repr(value))
+            return ("stable", exact_tree(key))
+    return ("repr", type_module(type(value)), type_name(type(value)), scalar_repr(value))
 
 
 def _runtime_ref_origin_source(value: Any) -> Tuple[Any, ...]:
@@ -114,6 +137,7 @@ def _runtime_ref_origin_source(value: Any) -> Tuple[Any, ...]:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class UnknownValueRef:
     """Structured identity for UNKNOWN expressions used at runtime."""
 
@@ -130,6 +154,7 @@ class UnknownValueRef:
         object.__setattr__(self, "target_ref", normalized_target)
 
     @classmethod
+    @runtime_ref_entry
     def deferred_call(
         cls,
         *,
@@ -159,6 +184,7 @@ class UnknownValueRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def out_of_scope_call(
         cls,
         *,
@@ -175,6 +201,7 @@ class UnknownValueRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def budget_exceeded(
         cls,
         *,
@@ -192,6 +219,7 @@ class UnknownValueRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def opaque(
         cls,
         *,
@@ -210,6 +238,7 @@ class UnknownValueRef:
         )
 
     @classmethod
+    @runtime_ref_entry
     def phi_circular(
         cls,
         *,
@@ -223,17 +252,18 @@ class UnknownValueRef:
             origin_ref=pcode_op_ref,
         )
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         target_key = self.target_ref.stable_key() if self.target_ref is not None else None
         origin_key = None
-        stable_key = getattr(self.origin_ref, "stable_key", None)
+        stable_key = attribute_of(self.origin_ref, "stable_key", None)
         if callable(stable_key):
             try:
                 candidate_key = stable_key()
             except (AttributeError, TypeError, ValueError, RecursionError):
                 candidate_key = None
             if candidate_key is not None:
-                origin_key = ("stable", candidate_key)
+                origin_key = ("stable", exact_tree(candidate_key))
         return (
             self.kind,
             self.reason,
@@ -243,6 +273,7 @@ class UnknownValueRef:
             origin_key,
         )
 
+    @runtime_ref_key(proven=True)
     def diagnostic_key(self) -> Tuple[Any, ...]:
         key = self.stable_key()
         if self.origin_kind is None and self.origin_ref is None:
@@ -321,6 +352,11 @@ EXPANSION_BUDGET_TRUNCATION_SURFACES = frozenset({
 _CANONICAL_BUDGET_MAX_DEPTH = 12
 
 
+#: `items` の組み込みの実装（dict と `OrderedDict`）
+_DICT_ITEMS = dict.__dict__["items"]
+_ODICT_ITEMS = collections.OrderedDict.__dict__["items"]
+
+
 def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
     """決定的な JSON 化（producer 時点の identity: `stable_key` / `event_id`）。
 
@@ -334,27 +370,36 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
     （組み込みの値だけの値）を読むだけ（bounded path で identity を組み立てない）。
     """
 
-    if value is None or isinstance(value, (bool, int, str)):
+    # scalar の subclass は基底型の値で書く（subclass の code を呼ばず、写しに subclass を残さない。Issue #242）
+    value = exact_scalar(value)
+    depth = scalar_int(depth)
+    if value is None or is_kind(value, (bool, int, str)):
         return value
     if depth >= _CANONICAL_BUDGET_MAX_DEPTH:
-        return ["depth_limited", type(value).__module__, type(value).__qualname__]
-    if isinstance(value, float):
+        return ["depth_limited", type_module(type(value)), type_name(type(value))]
+    if is_kind(value, float):
         return repr(value)
-    if isinstance(value, bytes):
+    if is_kind(value, bytes):
         return ["bytes", value.hex()]
-    if isinstance(value, (list, tuple)):
+    if is_kind(value, (list, tuple)):
         return [_canonical_budget_value(item, depth + 1) for item in value]
-    if isinstance(value, (set, frozenset)):
+    if is_kind(value, (set, frozenset)):
         return sorted(
             (_canonical_budget_value(item, depth + 1) for item in value),
             key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True),
         )
-    if isinstance(value, Mapping):
+    if is_kind(value, Mapping):
+        # `items` を上書きしない dict（`OrderedDict` の C の `items` を含む: 組の集合は同じで、下で並べ替える）は基底型の
+        # slot で読む（`OrderedDict.items()` の反復は key を hash で引き直す）。上書きした `items` と dict でない mapping
+        # は、その型の `items()`（双子と同じ外の code）
+        slot = defined_attribute(type(value), "items", None) if is_kind(value, dict) else None
+        plain_items = slot is not None and (slot is _DICT_ITEMS or slot is _ODICT_ITEMS)
+        entries = _pairs(dict.items(value) if plain_items else method_of(value, "items")())
         return {
-            str(key): _canonical_budget_value(item, depth + 1)
-            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            _budget_key_text(key): _canonical_budget_value(item, depth + 1)
+            for key, item in sorted(entries, key=lambda pair: _budget_key_text(pair[0]))
         }
-    stable_key = getattr(value, "stable_key", None)
+    stable_key = attribute_of(value, "stable_key", None)
     if callable(stable_key):
         try:
             key = stable_key()
@@ -362,7 +407,14 @@ def _canonical_budget_value(value: Any, depth: int = 0) -> Any:
             key = None
         if key is not None:
             return ["stable", _canonical_budget_value(key, depth + 1)]
-    return ["opaque", type(value).__module__, type(value).__qualname__]
+    return ["opaque", type_module(type(value)), type_name(type(value))]
+
+
+def _budget_key_text(key: Any) -> str:
+    """mapping の key の文字列（`str(key)` と同じ。tuple の key は葉を基底型の値にしてから文字列にする:
+    subclass の `__repr__` / `__str__` を呼ばない。Issue #242）。"""
+
+    return scalar_text(exact_field_value(key, "tuple"))
 
 
 def _canonical_budget_json(payload: Any) -> str:
@@ -375,6 +427,7 @@ def _canonical_budget_json(payload: Any) -> str:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ExpansionBudgetTruncation:
     """1 件の切り捨て事実。
 
@@ -395,20 +448,19 @@ class ExpansionBudgetTruncation:
     referenced_event_ids: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "kind", str(self.kind))
+        object.__setattr__(self, "kind", scalar_text(self.kind))
         if self.surface is not None:
-            object.__setattr__(self, "surface", str(self.surface))
+            object.__setattr__(self, "surface", scalar_text(self.surface))
         if self.label is not None:
-            object.__setattr__(self, "label", str(self.label))
-        for name in ("dedup", "paths", "conditions"):
-            counts = getattr(self, name)
+            object.__setattr__(self, "label", scalar_text(self.label))
+        for name, counts in (("dedup", self.dedup), ("paths", self.paths), ("conditions", self.conditions)):
             if counts is None:
                 continue
-            object.__setattr__(self, name, tuple(int(item) for item in counts))
+            object.__setattr__(self, name, tuple(scalar_int(item) for item in counts))
         object.__setattr__(
             self,
             "referenced_event_ids",
-            tuple(sorted({str(item) for item in (self.referenced_event_ids or ())})),
+            tuple(sorted({scalar_text(item) for item in (self.referenced_event_ids or ())})),
         )
         # identity（owner #194 の規則 `_canonical_budget_value`）は構築のときに 1 度だけ作る。
         # 出力（`json_items`）はこの写し（組み込みの値だけの値）を読むだけで、bounded path で
@@ -419,6 +471,7 @@ class ExpansionBudgetTruncation:
             _canonical_budget_json(self.stable_key()).encode("utf-8")
         ).hexdigest())
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         """発生事実キー。``event_id`` と参照先 event の内容は含めない。"""
 
@@ -439,6 +492,7 @@ class ExpansionBudgetTruncation:
     def event_id(self) -> str:
         return self._event_id_cache
 
+    @runtime_ref_entry
     def with_binding(
         self,
         *,
@@ -455,7 +509,8 @@ class ExpansionBudgetTruncation:
         bound_owner = (
             self.owner_scope_key if self.owner_scope_key is not None else owner_scope_key
         )
-        if bound_surface == self.surface and bound_owner == self.owner_scope_key:
+        # 束縛済みの欄は自分の値そのもの（同じ object）なので identity で比べる（key の要素を比べない）
+        if bound_surface is self.surface and bound_owner is self.owner_scope_key:
             return self
         return replace(self, surface=bound_surface, owner_scope_key=bound_owner)
 
@@ -501,6 +556,7 @@ class ExpansionBudgetTruncation:
         return materialize(self)
 
 
+@runtime_ref_entry
 def normalize_expansion_budget_truncations(
     items: Optional[Iterable[ExpansionBudgetTruncation]],
 ) -> Tuple[ExpansionBudgetTruncation, ...]:
@@ -546,6 +602,7 @@ def _plain_event_id(value: Any) -> str:
     return text
 
 
+@runtime_ref_entry
 def merge_expansion_budget_truncations(
     *groups: Optional[Iterable[ExpansionBudgetTruncation]],
 ) -> Tuple[ExpansionBudgetTruncation, ...]:
@@ -563,7 +620,8 @@ def merge_expansion_budget_truncations(
 def expansion_budget_event_ids(
     items: Optional[Iterable[ExpansionBudgetTruncation]],
 ) -> Tuple[str, ...]:
-    return tuple(sorted({item.event_id for item in (items or ()) if item is not None}))
+    # 記録は代わりの型かもしれない: 容器と id は基底型の値で読む（Issue #242）
+    return tuple(sorted({scalar_text(attribute_of(item, "event_id")) for item in _optional_items(items) if item is not None}))
 
 
 class ExpansionBudgetCollector:
@@ -579,22 +637,25 @@ class ExpansionBudgetCollector:
         self._records: List[ExpansionBudgetTruncation] = []
         self._seen: set = set()
 
+    @runtime_ref_entry
     def record(self, truncation: Optional[ExpansionBudgetTruncation]) -> None:
         if truncation is None:
             return
-        event_id = truncation.event_id
+        # 記録は代わりの型かもしれない: id は基底型の値で読む（Issue #242）
+        event_id = scalar_text(truncation.event_id)
         if event_id in self._seen:
             existing_index = next(
                 index
                 for index, item in enumerate(self._records)
-                if item.event_id == event_id
+                if scalar_text(item.event_id) == event_id
             )
             existing = self._records[existing_index]
+            existing_ids = tuple(scalar_text(item) for item in _items(existing.referenced_event_ids))
             union = tuple(sorted(
-                set(existing.referenced_event_ids)
-                | set(truncation.referenced_event_ids)
+                set(existing_ids)
+                | {scalar_text(item) for item in _items(truncation.referenced_event_ids)}
             ))
-            if union != existing.referenced_event_ids:
+            if union != existing_ids:
                 self._records[existing_index] = replace(
                     existing, referenced_event_ids=union
                 )
@@ -602,8 +663,9 @@ class ExpansionBudgetCollector:
         self._seen.add(event_id)
         self._records.append(truncation)
 
+    @runtime_ref_entry
     def extend(self, items: Optional[Iterable[ExpansionBudgetTruncation]]) -> None:
-        for item in items or ():
+        for item in _optional_items(items):
             self.record(item)
 
     @property

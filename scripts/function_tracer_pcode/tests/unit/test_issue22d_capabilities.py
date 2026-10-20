@@ -1902,8 +1902,12 @@ def test_owner_lookups_never_run_the_code_of_stored_keys():
     # 値を作るときの hash は test の code（owner が呼ぶかだけを見る）
     _LoudKey.calls.clear()
     _LoudIntKey.calls.clear()
-    assert live_values.attribute(holder, "status") is None
-    assert live_values.attribute(holder, "plain") == 2
+    # Issue #242 第 8 回: 組み込みの `str` でない key を持つ instance の `__dict__` は読まない（Python の属性の読みは
+    # hash の等しい key の `__eq__` を key の文字列に依らず呼ぶ: どの値を読むか決めない）
+    with pytest.raises(TypeError):
+        live_values.attribute(holder, "status")
+    with pytest.raises(TypeError):
+        live_values.attribute(holder, "plain")
     with pytest.raises(TypeError):
         live_values.set_state(holder, "plain", 3)
     assert live_values.lookup(loud_mapping, "k") is None

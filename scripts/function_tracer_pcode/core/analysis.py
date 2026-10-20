@@ -19,11 +19,13 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     RESULT_JSON_POLICY,
     as_dict,
     as_list,
+    audited_generator,
     each,
     identity_key_of,
     materialize,
     nested,
     pairs_of,
+    receiver_items,
 )
 from scripts.function_tracer_pcode.core.signature import (
     clone_parameter_descriptor,
@@ -63,6 +65,7 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
     UnknownValueRef,
     normalize_expansion_budget_truncations,
 )
+from scripts.function_tracer_pcode.core.live_values import package_instance
 
 
 def _jsonable_nested_tuple(value: Any) -> Any:
@@ -723,7 +726,7 @@ class DeferredCallInfo:
         if hint is not None and live_values.as_bool(hint):
             return hint
         deferred_call_ref = self.deferred_call_ref
-        if type(deferred_call_ref) is DeferredCallRef:
+        if package_instance(deferred_call_ref, DeferredCallRef):
             return deferred_call_ref.display_name()
         # 呼び出し地点の参照は `DeferredCallRef`（`__init__` が作る）。それ以外の値の method は呼ばない
         raise TypeError(f"deferred_call_ref is not a DeferredCallRef ({live_values.type_name(type(deferred_call_ref))})")
@@ -765,7 +768,7 @@ class DeferredCallInfo:
     @property
     def target_name(self) -> str:
         target_ref = self.target_ref
-        if type(target_ref) is CallTargetRef:
+        if package_instance(target_ref, CallTargetRef):
             return target_ref.display_name()
         # 呼び出し先の参照は `CallTargetRef`（`__init__` が正規化する）。それ以外の値の method は呼ばない
         raise TypeError(f"target_ref is not a CallTargetRef ({live_values.type_name(type(target_ref))})")
@@ -1718,13 +1721,15 @@ class FunctionReturnAnalysis:
             ),
         ) as work:
             return RESULT_JSON_POLICY.materialize(
-                pairs_of(self._json_items(include_derived_proof=include_derived_proof)),
+                receiver_items(self, "_json_items", include_derived_proof=include_derived_proof),
                 budget=work,
             )
 
     def json_items(self):
-        return self._json_items(include_derived_proof=True)
+        # 委ねる（`yield from`）: walker はこの generator を record を receiver として進め、再開の前に確かめ直す
+        yield from self._json_items(include_derived_proof=True)
 
+    @audited_generator
     def _json_items(self, *, include_derived_proof: bool):
         """表現の schema（1 つだけ）。値は source で渡し、walker が 1 要素ずつ写す。"""
 

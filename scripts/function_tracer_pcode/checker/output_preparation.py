@@ -100,6 +100,8 @@ from scripts.function_tracer_pcode.core.json_encoding import (
     pairs_of,
     text,
 )
+from scripts.function_tracer_pcode.core.live_values import package_instance
+from scripts.function_tracer_pcode.core.live_values import audited_entry
 
 
 #: 準備した payload の大きさを予算と比べる観測点。
@@ -243,7 +245,7 @@ class PreparedField:
     @property
     def encoded_bytes(self) -> int:
         prepared = self.json
-        if type(prepared) is PreparedJson:
+        if package_instance(prepared, PreparedJson):
             return live_values.as_int(prepared.encoded_bytes)
         return 0
 
@@ -260,7 +262,7 @@ class PreparedField:
         """準備した値の複製（`PreparedJson.value`）。"""
 
         prepared = self.json
-        if type(prepared) is not PreparedJson:
+        if not package_instance(prepared, PreparedJson):
             raise TypeError(f"{builtin_str(self.key)}: the field has no prepared JSON")
         return prepared.value()
 
@@ -313,7 +315,7 @@ def _truncation_marker(
 def _prepare_json(encoding: Any, source: Any, *, max_bytes: Optional[int]) -> PreparedJson:
     """`encoding`（`JsonEncodingPolicy` そのもの）の walker で `source` を `max_bytes` まで準備する。"""
 
-    if type(encoding) is not JsonEncodingPolicy:
+    if not package_instance(encoding, JsonEncodingPolicy):
         raise TypeError("output preparation needs an exact JsonEncodingPolicy")
     return encoding.prepare(source, max_bytes=max_bytes)
 
@@ -350,7 +352,7 @@ def _prepare_member(
         remaining = field_max_bytes if remaining is None else min(remaining, field_max_bytes)
     rejected: Optional[JsonValueRejected] = None
     try:
-        if type(source) is _ReadFailed:
+        if package_instance(source, _ReadFailed):
             raise source.rejected
         if remaining is not None and remaining < 0:
             raise JsonBudgetExhausted(consumed_bytes=0, max_bytes=remaining)
@@ -496,7 +498,7 @@ def _result_method(result: Any, name: str) -> Any:
 
     from scripts.function_tracer_pcode.checker.result import EquivalenceResult
 
-    if type(result) is not EquivalenceResult:
+    if not package_instance(result, EquivalenceResult):
         raise TypeError(f"{live_values.type_name(type(result))} is not an EquivalenceResult")
     if name == "is_timeout":
         return result.is_timeout()
@@ -565,7 +567,7 @@ def _decision_receipt(r: Any, _o: OutputOptions) -> Any:
         from scripts.function_tracer_pcode.authority.decision.production_cutover import decision_receipt_payload
         from scripts.function_tracer_pcode.checker.result import decided_outcome_of
 
-        if type(receipt) is not DecisionReceipt:
+        if not package_instance(receipt, DecisionReceipt):
             raise TypeError("the decision receipt column requires an exact DecisionReceipt")
         decided_outcome_of(r)
         return decision_receipt_payload(receipt)
@@ -583,7 +585,7 @@ def _conditional_decision_receipt(r: Any, _o: OutputOptions) -> Any:
             conditional_decision_receipt_payload,
         )
 
-        if type(receipt) is not ConditionalDecisionReceipt:
+        if not package_instance(receipt, ConditionalDecisionReceipt):
             raise TypeError("the conditional column requires an exact ConditionalDecisionReceipt")
         return conditional_decision_receipt_payload(receipt)
     if live_values.attribute(r, "conditional_outcome") is not None:
@@ -830,7 +832,7 @@ class SerializationPlan:
 
     def encoder(self) -> JsonEncodingPolicy:
         encoding = self.encoding
-        if type(encoding) is not JsonEncodingPolicy:
+        if not package_instance(encoding, JsonEncodingPolicy):
             raise TypeError("a serialization plan needs an exact JsonEncodingPolicy")
         return encoding
 
@@ -919,13 +921,13 @@ class PreparedSemanticPayload:
 
     def payload_plan(self) -> SerializationPlan:
         plan = self.plan
-        if type(plan) is not SerializationPlan:
+        if not package_instance(plan, SerializationPlan):
             raise TypeError("prepared payload needs its SerializationPlan")
         return plan
 
     def output_options(self) -> OutputOptions:
         options = self.options
-        if type(options) is not OutputOptions:
+        if not package_instance(options, OutputOptions):
             raise TypeError("prepared payload needs its OutputOptions")
         return options.plain()
 
@@ -1316,6 +1318,7 @@ def _record_preparation_bug(exc: BaseException) -> None:
     record_internal_bug(InternalError(exc, site=PREPARATION_SITE), site=PREPARATION_SITE)
 
 
+@audited_entry
 def finitize_legacy_reasons(result: Any, *, authority_projects_reasons: bool) -> None:
     """G4-b（B5）: legacy reason / recovery action を、件数と重い field の両方で有界にする。
 
@@ -1422,6 +1425,7 @@ def _finitized_actions(actions: Any, *, work: JsonBudget) -> List[Any]:
     return kept
 
 
+@audited_entry
 def check_prepared_field_bounds(result: Any, *, authority_projects_reasons: bool) -> None:
     """authority 確定 **前** に分かる B の field の大きさを、出力 schema の上限と比べる（G4-b）。
 
@@ -1452,6 +1456,7 @@ def check_prepared_field_bounds(result: Any, *, authority_projects_reasons: bool
             )
 
 
+@audited_entry
 def prepare_pair_output(
     checker: Any,
     result: Any,
@@ -1573,7 +1578,7 @@ def prepared_payload_for(
     if prepared is None:
         policy = fallback_policy if fallback_policy is not None else active_budget_policy()
         return OutputPreparer(policy).prepare(result)
-    if type(prepared) is not PreparedSemanticPayload:
+    if not package_instance(prepared, PreparedSemanticPayload):
         raise TypeError("result.prepared_semantic_payload must be a PreparedSemanticPayload")
     return prepared
 
@@ -1665,13 +1670,13 @@ def _budget_limit(members: Any) -> Optional[int]:
 def _object_budget(members: Any) -> JsonObjectBudget:
     """組んだ preimage の勘定（`JsonObjectBudget` そのもの）。"""
 
-    if type(members) is not JsonObjectBudget:
+    if not package_instance(members, JsonObjectBudget):
         raise TypeError("the composed preimage needs its JsonObjectBudget")
     return members
 
 
 def _checked_payload(prepared: Any) -> PreparedSemanticPayload:
-    if type(prepared) is not PreparedSemanticPayload:
+    if not package_instance(prepared, PreparedSemanticPayload):
         raise TypeError("result.prepared_semantic_payload must be a PreparedSemanticPayload")
     return prepared
 
@@ -1831,7 +1836,7 @@ class OutputMetadata:
             # 予約・組み直しの見積もり（`freeable`）・schema の headroom は同じ 1 つの上限
             marker_bytes = truncation_marker_max_bytes(encoding, item.key)
             try:
-                if type(source) is _ReadFailed:
+                if package_instance(source, _ReadFailed):
                     raise source.rejected
                 small = _prepare_json(encoding, source, max_bytes=marker_bytes)
             except (JsonBudgetExhausted, JsonValueRejected):
@@ -1928,6 +1933,7 @@ class ComposedPreimage:
         return live_values.as_int(self.freeable_bytes)
 
 
+@audited_entry
 def compose_result_preimage(
     result: Any, *, fallback_policy: Optional[BudgetPolicy] = None, bundle_reserve: Optional[int] = None,
 ) -> ComposedPreimage:
@@ -1943,7 +1949,7 @@ def compose_result_preimage(
     members = JsonObjectBudget(plan.encoder(), limit)
     parts: Dict[str, Any] = {}
     for item in live_values.elements_of(prepared.fields):
-        if type(item) is not PreparedField:
+        if not package_instance(item, PreparedField):
             raise TypeError("prepared payload fields must be PreparedField")
         if not item.has_json():
             continue
@@ -2011,6 +2017,7 @@ class AuthoritySeal:
         )
 
 
+@audited_entry
 def build_final_result_envelope(
     result: Any,
     *,
@@ -2061,7 +2068,7 @@ def finalize_result_envelope(
     ので、作り直した封印も残りの予算の中で準備し直し、それでも収まらなければ出力の契約違反。
     """
 
-    if type(composed) is not ComposedPreimage:
+    if not package_instance(composed, ComposedPreimage):
         raise TypeError("the final envelope is built from a ComposedPreimage")
     plan = composed.payload_plan()
     preimage = composed.preimage()

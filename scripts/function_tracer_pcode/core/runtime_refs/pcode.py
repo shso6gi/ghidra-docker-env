@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.live_values import (
+    attribute_of, equal, exact_scalar, exact_tree, inert, inert_key, is_kind, method_of, scalar_int, scalar_text,
+)
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
 
 
@@ -11,10 +15,12 @@ _MAX_PARENT_PCODE_OP_SCAN = 10000
 
 
 def _coerce_nonnegative_int(value: Any) -> Optional[int]:
-    if value is None or isinstance(value, bool):
+    if type(value) is int:
+        return value if value >= 0 else None  # exact な整数（最も多い形: API の offset / seq）
+    if value is None or is_kind(value, bool):
         return None
     try:
-        coerced = int(value)
+        coerced = scalar_int(value)
     except (TypeError, ValueError):
         return None
     return coerced if coerced >= 0 else None
@@ -23,30 +29,32 @@ def _coerce_nonnegative_int(value: Any) -> Optional[int]:
 def _coerce_optional_text(value: Any) -> Optional[str]:
     if value is None:
         return None
-    text = str(value)
+    text = scalar_text(value)
     return text if text else None
 
 
 def _coerce_opcode(value: Any) -> Optional[Any]:
-    if value is None or isinstance(value, bool):
+    if value is None or is_kind(value, bool):
         return None
     try:
-        return int(value)
+        return scalar_int(value)
     except (TypeError, ValueError):
-        return str(value)
+        return scalar_text(value)
 
 
 def _address_components(address: Any) -> Tuple[Optional[str], Optional[int]]:
     if address is None:
         return None, None
     space_name = None
+    # 受け手は 1 度だけ葉を写して読む（`method_of` と同じ読み: 親の block の走査の hot path なので method ごとに写さない）
+    address = exact_scalar(address)
     try:
         space = address.getAddressSpace()
     except Exception:
         space = None
     if space is not None:
         try:
-            space_name = space.getName()
+            space_name = exact_scalar(space).getName()
         except Exception:
             space_name = None
     try:
@@ -56,73 +64,120 @@ def _address_components(address: Any) -> Tuple[Optional[str], Optional[int]]:
     return _coerce_optional_text(space_name), _coerce_nonnegative_int(offset)
 
 
-def _pcode_op_ordinal_signature(pcode_op: Any) -> Tuple[Any, ...]:
+def _pcode_op_ordinal_signature(pcode_op: Any, target: Optional[Tuple[Any, ...]] = None) -> Optional[Tuple[Any, ...]]:
+    """op の (target_space, target_offset, seq_time, seq_order, opcode, mnemonic)。
+
+    `target` を渡すと、親の block の走査の候補の比較: field を違いが出やすい順（seq の order・time、target、opcode、
+    mnemonic）に読み、`target` の field と違う最初の field で読むのを止めて `None` を返す（同じ block の他の op は多く
+    order で違う: 候補ごとに 6 つの field 全部を読まない）。違わなければ signature（`== target`）。field の値はどれも
+    写した組み込みの値なので、読む順も止める位置も、`signature == target` の真偽を変えない。
+    """
+
+    if target is not None:
+        target = exact_tree(target)  # 比べる前の読み（呼ぶ側が渡す値: 組み込みの木）
+        shape = type(target)
+        if shape is not tuple or len(target) != 6:
+            return None  # signature（6 つの field の tuple）と等しくなり得ない値
+        if not inert(target):
+            # 葉に外の object を持つ target: field ごとに止める比べ方は、tuple の比較（左から順に、外の object の
+            # `__eq__` を呼ぶ）と例外の起き方が違う。signature 全体を `equal`（tuple の比較の規則）で比べる
+            signature = _pcode_op_ordinal_signature(pcode_op)
+            return signature if signature is not None and equal(signature, target) else None
+        target = inert_key(target)  # 不活性な木（field の比較は組み込みの code だけ）
     target_space = None
     target_offset = None
     seq_time = None
     seq_order = None
+    # 受け手は 1 度だけ葉を写して読む（`_address_components` と同じ）
+    pcode_op = exact_scalar(pcode_op)
     try:
         seq = pcode_op.getSeqnum()
     except Exception:
         seq = None
     if seq is not None:
-        try:
-            target_space, target_offset = _address_components(seq.getTarget())
-        except Exception:
-            target_space, target_offset = None, None
-        try:
-            seq_time = _coerce_nonnegative_int(seq.getTime())
-        except Exception:
-            seq_time = None
+        seq = exact_scalar(seq)
         try:
             seq_order = _coerce_nonnegative_int(seq.getOrder())
         except Exception:
             seq_order = None
+        if target is not None and seq_order != target[3]:
+            return None
+        try:
+            seq_time = _coerce_nonnegative_int(seq.getTime())
+        except Exception:
+            seq_time = None
+        if target is not None and seq_time != target[2]:
+            return None
+        try:
+            target_space, target_offset = _address_components(seq.getTarget())
+        except Exception:
+            target_space, target_offset = None, None
+    if target is not None and (
+        target_offset != target[1] or target_space != target[0] or seq_time != target[2] or seq_order != target[3]
+    ):
+        return None
     try:
         opcode = _coerce_opcode(pcode_op.getOpcode())
     except Exception:
         opcode = None
+    if target is not None and opcode != target[4]:
+        return None
     try:
         mnemonic = _coerce_optional_text(pcode_op.getMnemonic())
     except Exception:
         mnemonic = None
+    if target is not None and mnemonic != target[5]:
+        return None
     return (target_space, target_offset, seq_time, seq_order, opcode, mnemonic)
 
 
 def _local_op_ordinal_from_parent(pcode_op: Any) -> Optional[int]:
     try:
-        parent = pcode_op.getParent()
+        parent = method_of(pcode_op, "getParent")()
     except Exception:
         parent = None
     if parent is None:
         return None
-    iterator = getattr(parent, "getIterator", lambda: None)()
+    iterator = attribute_of(parent, "getIterator", lambda: None)()
     if iterator is None:
         return None
+    iterator = exact_scalar(iterator)  # 受け手は 1 度だけ葉を写す（候補ごとに写さない）
     target_signature = _pcode_op_ordinal_signature(pcode_op)
+    # `pcode_op` の読み（初めて要るときに 1 度だけ: 走査の op ごとに読み直さない）
+    target_tree = None
+    target_read = False
     ordinal = 0
     while ordinal < _MAX_PARENT_PCODE_OP_SCAN:
         try:
             has_next = iterator.hasNext()
         except Exception:
             return None
-        if not isinstance(has_next, bool):
-            return None
-        if not has_next:
+        # 組み込みの bool だけを受ける（`bool` は subclass を作れないので、真偽は identity で読める）
+        if has_next is not True:
             return None
         try:
             candidate = iterator.next()
         except Exception:
             return None
-        if candidate is pcode_op or candidate == pcode_op:
+        # API の object どうしの等しさ（Java の equals）。どちらかが scalar の subclass でも、その `__eq__` を呼ばない。
+        # 比較の戻り値（暗黙の callback の値）も基底型の値で読む
+        if candidate is pcode_op:
             return ordinal
-        if _pcode_op_ordinal_signature(candidate) == target_signature:
+        candidate_tree = exact_tree(candidate)  # 読む順は変えない（候補が先）
+        if not target_read:
+            target_tree = exact_tree(pcode_op)
+            target_read = True
+        # 葉の外の object（Java の object）の `__eq__` の戻り値は基底型の値の真偽で読む（`live_values.equal`）
+        if equal(candidate_tree, target_tree):
+            return ordinal
+        if _pcode_op_ordinal_signature(candidate, target_signature) is not None:
             return ordinal
         ordinal += 1
     return None
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class PcodeOpRef:
     """Stable identity for a concrete Ghidra P-code operation."""
 
@@ -143,17 +198,20 @@ class PcodeOpRef:
     program_uid: Optional[int] = None
 
     def __post_init__(self) -> None:
+        # `binary_id` は注釈が Any だが stable key の scalar（側の識別子）: 基底型の値で持つ（Issue #242。
+        # stable key を並べる・比べる読み手が subclass の code を呼ばない）
+        object.__setattr__(self, "binary_id", exact_tree(self.binary_id))
         normalized_input_sizes = []
         for size in tuple(self.input_sizes or ()):
             try:
-                int_size = int(size)
+                int_size = scalar_int(size)
             except (TypeError, ValueError):
                 continue
             if int_size > 0:
                 normalized_input_sizes.append(int_size)
         object.__setattr__(self, "input_sizes", tuple(normalized_input_sizes))
         try:
-            output_size = int(self.output_size) if self.output_size is not None else None
+            output_size = scalar_int(self.output_size) if self.output_size is not None else None
         except (TypeError, ValueError):
             output_size = None
         object.__setattr__(self, "output_size", output_size if output_size and output_size > 0 else None)
@@ -179,11 +237,12 @@ class PcodeOpRef:
 
     def input_size(self, index: int = 0) -> Optional[int]:
         try:
-            return self.input_sizes[int(index)]
+            return self.input_sizes[scalar_int(index)]
         except (IndexError, TypeError, ValueError):
             return None
 
     @classmethod
+    @runtime_ref_entry
     def from_pcode_op(
         cls,
         pcode_op: Any,
@@ -210,63 +269,63 @@ class PcodeOpRef:
         opcode = None
 
         try:
-            mnemonic = pcode_op.getMnemonic()
+            mnemonic = method_of(pcode_op, "getMnemonic")()
         except Exception:
             mnemonic = None
         try:
-            opcode = pcode_op.getOpcode()
+            opcode = method_of(pcode_op, "getOpcode")()
         except Exception:
             opcode = None
 
         try:
-            seq = pcode_op.getSeqnum()
+            seq = method_of(pcode_op, "getSeqnum")()
         except Exception:
             seq = None
         if seq is not None:
             try:
-                target = seq.getTarget()
+                target = method_of(seq, "getTarget")()
                 target_space, address_offset = _address_components(target)
             except Exception:
                 address_offset = None
             try:
-                time = getattr(seq, "getTime", lambda: None)()
-                seq_time = None if time is None else int(time)
+                time = attribute_of(seq, "getTime", lambda: None)()
+                seq_time = None if time is None else scalar_int(time)
             except Exception:
                 seq_time = None
             try:
-                order = seq.getOrder()
-                seq_order = None if order is None else int(order)
+                order = method_of(seq, "getOrder")()
+                seq_order = None if order is None else scalar_int(order)
             except Exception:
                 seq_order = None
 
         try:
-            parent = pcode_op.getParent()
+            parent = method_of(pcode_op, "getParent")()
         except Exception:
             parent = None
         if parent is not None:
             try:
-                block_index = int(parent.getIndex())
+                block_index = scalar_int(method_of(parent, "getIndex")())
             except Exception:
                 block_index = None
         if local_op_ordinal is None:
             local_op_ordinal = _local_op_ordinal_from_parent(pcode_op)
 
         try:
-            num_inputs = int(pcode_op.getNumInputs())
+            num_inputs = scalar_int(method_of(pcode_op, "getNumInputs")())
         except Exception:
             num_inputs = 0
         for input_index in range(max(0, num_inputs)):
             try:
-                input_varnode = pcode_op.getInput(input_index)
-                input_size = int(input_varnode.getSize())
+                input_varnode = method_of(pcode_op, "getInput")(input_index)
+                input_size = scalar_int(method_of(input_varnode, "getSize")())
             except Exception:
                 continue
             if input_size > 0:
                 input_sizes.append(input_size)
 
         try:
-            output_varnode = pcode_op.getOutput()
-            output_size = int(output_varnode.getSize()) if output_varnode is not None else None
+            output_varnode = method_of(pcode_op, "getOutput")()
+            output_size = scalar_int(method_of(output_varnode, "getSize")()) if output_varnode is not None else None
         except Exception:
             output_size = None
 
@@ -296,6 +355,7 @@ class PcodeOpRef:
             local_op_ordinal=local_op_ordinal,
         )
 
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[Any, ...]:
         if self._has_full_identity_context():
             return (
@@ -369,6 +429,7 @@ class PcodeOpRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class PcodeBlockRef:
     """Stable identity for a concrete Ghidra decompiler basic block."""
 
@@ -378,6 +439,11 @@ class PcodeBlockRef:
     function_entry_space: Optional[str] = None
     function_entry_offset: Optional[int] = None
 
+    def __post_init__(self) -> None:
+        # `binary_id` は stable key の scalar（`PcodeOpRef` と同じ読み方。Issue #242）
+        object.__setattr__(self, "binary_id", exact_tree(self.binary_id))
+
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[Any, ...]:
         if (
             self.binary_id is not None

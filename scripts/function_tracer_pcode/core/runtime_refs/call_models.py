@@ -25,15 +25,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record, runtime_ref_key
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
-from scripts.function_tracer_pcode.core.live_values import is_kind
+from scripts.function_tracer_pcode.core.live_values import exact_scalar, exact_tree, is_kind
+from scripts.function_tracer_pcode.core.runtime_refs._reading import decided_equal
 
 
 CALL_MODEL_CANDIDATE_KIND = "call_model_candidate"
 
 
 def _required_text(value: Any, field_name: str) -> str:
-    if not isinstance(value, str):
+    if not is_kind(value, str):
         raise TypeError(f"call model candidate {field_name} must be a str")
     text = value.strip()
     if not text:
@@ -42,11 +44,11 @@ def _required_text(value: Any, field_name: str) -> str:
 
 
 def _frozen_key(value: Any, field_name: str) -> Tuple[Any, ...]:
-    """list / tuple を再帰的に tuple 化した決定的キーを返す。"""
-    if not isinstance(value, (tuple, list)):
+    """list / tuple を再帰的に tuple 化した決定的キーを返す（葉の scalar は基底型の値。Issue #242）。"""
+    if not is_kind(value, (tuple, list)):
         raise TypeError(f"call model candidate {field_name} must be a tuple")
     frozen = tuple(
-        _frozen_key(item, field_name) if isinstance(item, (tuple, list)) else item
+        _frozen_key(item, field_name) if is_kind(item, (tuple, list)) else exact_tree(item)
         for item in value
     )
     if not frozen:
@@ -55,6 +57,7 @@ def _frozen_key(value: Any, field_name: str) -> Tuple[Any, ...]:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class CallModelCandidateRef:
     """One callsite's decision-neutral call-model candidate classification.
 
@@ -95,14 +98,16 @@ class CallModelCandidateRef:
         )
         supplied = self.candidate_key
         if supplied is not None:
-            if not isinstance(supplied, (tuple, list)):
+            if not is_kind(supplied, (tuple, list)):
                 raise TypeError("call model candidate candidate_key must be a tuple")
-            if _frozen_key(supplied, "candidate_key") != derived:
+            # 等しいと決まらなければ（違う・組み込みの code だけでは比べられない）受理しない（Issue #242）
+            if decided_equal(_frozen_key(supplied, "candidate_key"), derived) is not True:
                 raise ValueError(
                     "call model candidate candidate_key does not match its derivation"
                 )
         object.__setattr__(self, "candidate_key", derived)
 
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[Any, ...]:
         return self.candidate_key
 
@@ -130,6 +135,6 @@ def _jsonable_key_source(value: Any) -> Any:
 
 
 def _jsonable_key(value: Any) -> Any:
-    if isinstance(value, tuple):
+    if is_kind(value, tuple):
         return [_jsonable_key(item) for item in value]
     return value

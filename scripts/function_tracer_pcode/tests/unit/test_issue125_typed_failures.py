@@ -114,7 +114,7 @@ def test_analysis_limitation_defaults_keep_a_non_empty_missing_fact():
 
 # --- 新 domain の sealed registry ---------------------------------------------
 
-def test_analysis_limitation_registry_is_sealed_and_owns_two_reasons():
+def test_analysis_limitation_registry_is_sealed_and_owns_its_reasons():
     from scripts.function_tracer_pcode.authority.domains.analysis_limitation import (
         ANALYSIS_LIMITATION_DOMAIN,
         ANALYSIS_LIMITATION_REASON_REGISTRY,
@@ -125,9 +125,9 @@ def test_analysis_limitation_registry_is_sealed_and_owns_two_reasons():
     )
 
     # Issue #22 PR-22-D が式サイズ予算の reason を足した（reason 2 / site 1 /
-    # 回復契約 1）。2 つとも同じ扱い: blocks_decision・同じ target kind・同じ
-    # proof kind。reason を増やす PR はここへ 1 つ足す。
-    expected = ("analysis_budget_exceeded", "expression_size_budget_exceeded")
+    # 回復契約 1）。Issue #242（第 8 回）が比べる側の契約の判定不能の reason を足した。どれも同じ扱い:
+    # blocks_decision・同じ target kind・同じ proof kind。reason を増やす PR はここへ 1 つ足す。
+    expected = ("analysis_budget_exceeded", "comparison_undecidable", "expression_size_budget_exceeded")
     definitions = ANALYSIS_LIMITATION_REASON_REGISTRY.snapshot()
     assert tuple(definition.reason_id for definition in definitions) == expected
     for definition in definitions:
@@ -519,7 +519,8 @@ PRODUCER_SITES_ADDED_AFTER_ISSUE125 = (
 #: slot を足す PR はここへ reason id を足す（それ以外の contract 変化は落とす）。
 CAUSE_SLOTS_ADDED_AFTER_ISSUE125 = {
     # Issue #22 PR-22-D: 式サイズ予算。analysis-limitation の site を共有する。
-    NEW_PRODUCER_SITE_ID: ("expression_size_budget_exceeded",),
+    # Issue #242（第 8 回）: 比べる側の契約の判定不能。同じ site を共有する。
+    NEW_PRODUCER_SITE_ID: ("expression_size_budget_exceeded", "comparison_undecidable"),
 }
 
 #: 現在期待される producer site 総数。

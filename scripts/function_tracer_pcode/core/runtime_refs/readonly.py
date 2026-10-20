@@ -4,10 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_entry, runtime_ref_key, runtime_ref_record
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, builtin_str, each, inline, is_json_record, mapping_of, materialize, nested, raw, source_converter)
-from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, type_name
+from scripts.function_tracer_pcode.core.live_values import as_bool, as_int, contains, exact_scalar, exact_tree, scalar_bool, scalar_int, scalar_int_or, scalar_repr, scalar_text, type_name, is_kind, attribute_of, method_of
 from scripts.function_tracer_pcode.core.runtime_refs.locations import (
     LocationBaseRef,
+)
+from scripts.function_tracer_pcode.core.runtime_refs._reading import (
+    decided_equal as _decided_equal,
+    items as _items,
+    optional_rows as _optional_rows,
+    rows as _scalar_rows,
 )
 from scripts.function_tracer_pcode.core.runtime_refs.loops import (
     LoopSideEffectProfileRef,
@@ -19,21 +26,41 @@ from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
 )
 
 
+def _term_keys(terms: Any) -> Tuple[Any, ...]:
+    """項の stable key の列。項は代わりの型かもしれないので、比べる前に基底型の値で読む（Issue #242）。"""
+
+    return tuple(exact_tree(method_of(term, "stable_key")()) for term in terms)
+
+
+def _witness_terms(witness: Any) -> Tuple[Any, ...]:
+    """`tuple(witness.terms)` と同じ要素（subclass の code を呼ばない reader で読む）。"""
+
+    return _items(attribute_of(witness, "terms"))
+
+
+def _witness_count(witness: Any) -> int:
+    """`int(attribute_of(witness, "exact_count", 0) or 0)`（基底型の値で読む）。"""
+
+    return scalar_int_or(attribute_of(witness, "exact_count", 0))
+
+
 def _location_base_display_name(ref: Any) -> Any:
     """`ref.display_name()`（`LocationBaseRef` だけ。それ以外は `TypeError`。live な値の method を呼ばない）。"""
 
-    if type(ref) is LocationBaseRef:
+    if package_instance(ref, LocationBaseRef):
         return ref.display_name()
     raise TypeError(f"{type_name(type(ref))} is not a LocationBaseRef")
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ReadonlyReductionTermRef:
     """Object-centric description of one scalar term in a memory reduction."""
 
     byte_offset: int
     access_size: int
 
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "readonly_reduction_term",
@@ -51,6 +78,7 @@ class ReadonlyReductionTermRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ReadonlyReductionWitness:
     """Concrete count-parameter witness for a readonly reduction."""
 
@@ -58,12 +86,13 @@ class ReadonlyReductionWitness:
     terms: Tuple[ReadonlyReductionTermRef, ...]
     count_semantics: str = "count_parameter"
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "readonly_reduction_witness",
             self.count_semantics,
             int(self.exact_count),
-            tuple(term.stable_key() for term in self.terms),
+            tuple(method_of(term, "stable_key")() for term in self.terms),
         )
 
     def json_items(self):
@@ -77,6 +106,7 @@ class ReadonlyReductionWitness:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ReductionAccumulatorProof:
     """Object-centric proof that a loop accumulator is a readonly reduction.
 
@@ -125,15 +155,15 @@ class ReductionAccumulatorProof:
     source: str = "recurrence_summary"
 
     def __post_init__(self) -> None:
-        if int(self.stride) <= 0:
+        if scalar_int(self.stride) <= 0:
             raise ValueError("ReductionAccumulatorProof requires a positive stride")
-        if int(self.element_size) <= 0:
+        if scalar_int(self.element_size) <= 0:
             raise ValueError("ReductionAccumulatorProof requires a positive element_size")
-        if int(self.result_size) <= 0:
+        if scalar_int(self.result_size) <= 0:
             raise ValueError("ReductionAccumulatorProof requires a positive result_size")
-        if int(self.index_step) <= 0:
+        if scalar_int(self.index_step) <= 0:
             raise ValueError("ReductionAccumulatorProof requires a positive index_step")
-        if self.seed_term_count is not None and int(self.seed_term_count) < 0:
+        if self.seed_term_count is not None and scalar_int(self.seed_term_count) < 0:
             raise ValueError("ReductionAccumulatorProof requires a non-negative seed_term_count")
         if self.count_parameter_storage_identity_key is not None:
             object.__setattr__(
@@ -141,31 +171,36 @@ class ReductionAccumulatorProof:
                 "count_parameter_storage_identity_key",
                 _normalize_storage_identity_key(self.count_parameter_storage_identity_key),
             )
-        object.__setattr__(self, "constant_bias", _bias_key(int(self.constant_bias), int(self.result_size))[1])
+        object.__setattr__(self, "constant_bias", _bias_key(scalar_int(self.constant_bias), scalar_int(self.result_size))[1])
+        # 項は list で来ることもある（owner は exact な tuple だけを写す）: 要素は基底型の値で読む（Issue #242）
         lane_terms = tuple(
-            sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
+            sorted(
+                (scalar_int(offset), max(1, scalar_int(exact_scalar(size) or 0)))
+                for offset, size in _optional_rows(self.lane_terms, 2)
+            )
         )
         if lane_terms:
-            start_offset = int(self.start_offset)
+            start_offset = scalar_int(self.start_offset)
             min_offset = min(offset for offset, _size in lane_terms)
             if start_offset != 0 and min_offset == start_offset:
                 lane_terms = tuple((offset - start_offset, size) for offset, size in lane_terms)
             object.__setattr__(self, "lane_terms", lane_terms)
         return_op_refs = tuple(
             sorted(
-                (ref for ref in (self.return_op_refs or ()) if isinstance(ref, PcodeOpRef)),
-                key=lambda ref: repr(ref.stable_key()),
+                (ref for ref in (self.return_op_refs or ()) if is_kind(ref, PcodeOpRef)),
+                key=lambda ref: scalar_repr(exact_tree(ref.stable_key())),
             )
         )
         object.__setattr__(self, "return_op_refs", return_op_refs)
         return_value_op_refs = tuple(
             sorted(
-                (ref for ref in (self.return_value_op_refs or ()) if isinstance(ref, PcodeOpRef)),
-                key=lambda ref: repr(ref.stable_key()),
+                (ref for ref in (self.return_value_op_refs or ()) if is_kind(ref, PcodeOpRef)),
+                key=lambda ref: scalar_repr(exact_tree(ref.stable_key())),
             )
         )
         object.__setattr__(self, "return_value_op_refs", return_value_op_refs)
 
+    @runtime_ref_key
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         limit_key = _loop_object_key(self.limit_expr)
         guard_keys = tuple(_loop_object_key(guard) for guard in self.guard_constraints)
@@ -188,23 +223,23 @@ class ReductionAccumulatorProof:
             int(self.index_step),
             int(self.index_scale or self.stride),
             bool(self.signed_counter),
-            tuple(term.stable_key() for term in self.seed_terms)
+            tuple(method_of(term, "stable_key")() for term in self.seed_terms)
             if tuple(self.seed_terms or ())
             else (
                 (("seed_term_count", int(self.seed_term_count)),)
                 if self.seed_term_count is not None
                 else ()
             ),
-            tuple((int(offset), max(1, int(size or 0))) for offset, size in self.lane_terms),
-            tuple(witness.stable_key() for witness in self.loop_body_witnesses),
-            tuple(witness.stable_key() for witness in self.exact_return_witnesses),
+            tuple((int(offset), max(1, int(size or 0))) for offset, size in _scalar_rows(self.lane_terms, 2)),
+            tuple(method_of(witness, "stable_key")() for witness in self.loop_body_witnesses),
+            tuple(method_of(witness, "stable_key")() for witness in self.exact_return_witnesses),
             guard_keys,
             side_effect_key,
             int(self.constant_bias),
             self.induction_phi_ref.stable_key() if self.induction_phi_ref is not None else None,
             self.accumulator_phi_ref.stable_key() if self.accumulator_phi_ref is not None else None,
             self.update_op_ref.stable_key() if self.update_op_ref is not None else None,
-            tuple(ref.stable_key() for ref in self.load_op_refs),
+            tuple(method_of(ref, "stable_key")() for ref in self.load_op_refs),
             tuple(ref.stable_key() for ref in self.return_op_refs),
             tuple(ref.stable_key() for ref in self.return_value_op_refs),
             self.entry_block_ref.stable_key() if self.entry_block_ref is not None else None,
@@ -235,9 +270,12 @@ class ReductionAccumulatorProof:
         lane_terms = tuple(self.lane_terms or ())
         return int(start_index) + len(seed_terms) + int(implicit_seed_count) + len(lane_terms)
 
+    @runtime_ref_key(proven=True)
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         return self.readonly_term_sequence_contract_key()
 
+    @runtime_ref_key(proven=True)
+    @runtime_ref_entry
     def readonly_term_sequence_contract_key(
         self,
         *,
@@ -257,9 +295,9 @@ class ReductionAccumulatorProof:
         target_result_size = self._readonly_contract_result_size(result_size)
         if target_result_size is None:
             return None
-        if self.side_effect_profile.requires_effect_proof():
+        if scalar_bool(self.side_effect_profile.requires_effect_proof()):
             return None
-        pointer_key = self.pointer_base_ref.semantic_key()
+        pointer_key = exact_tree(self.pointer_base_ref.semantic_key())
         count_identity = self.count_parameter_semantic_identity()
         if count_identity is None:
             return None
@@ -271,7 +309,7 @@ class ReductionAccumulatorProof:
             if count_storage_key is None:
                 return None
             limit_key = ("loop_limit_count_storage_identity", count_storage_key)
-        side_effect_key = self.side_effect_profile.semantic_key()
+        side_effect_key = exact_tree(self.side_effect_profile.semantic_key())
         if pointer_key is None or limit_key is None or side_effect_key is None:
             return None
         geometry = self._readonly_contract_scalar_geometry(target_result_size)
@@ -291,7 +329,7 @@ class ReductionAccumulatorProof:
             term_start_offset=term_start_offset,
             scalar_stride=scalar_stride,
         )
-        seed_keys = tuple(term.stable_key() for term in remaining_seed_terms)
+        seed_keys = _term_keys(remaining_seed_terms)
         return (
             "readonly_reduction_term_sequence_contract",
             self.reduction_kind,
@@ -319,7 +357,7 @@ class ReductionAccumulatorProof:
             return None
         if (
             target_result_size < proof_result_size
-            and self.reduction_kind not in {"sum", "memory_sum"}
+            and not contains({"sum", "memory_sum"}, self.reduction_kind)
             and not self._readonly_reduction_uses_distinct_term_width()
         ):
             return None
@@ -364,7 +402,7 @@ class ReductionAccumulatorProof:
         return term_start_offset, index_scale
 
     def _readonly_reduction_uses_distinct_term_width(self) -> bool:
-        return str(self.reduction_kind or "").startswith("fp_")
+        return scalar_text(self.reduction_kind or "").startswith("fp_")
 
     def _readonly_term_access_size(self) -> int:
         if self._readonly_reduction_uses_distinct_term_width():
@@ -377,7 +415,7 @@ class ReductionAccumulatorProof:
     ) -> Tuple[Tuple[int, int], ...]:
         target_result_size = max(1, int(target_result_size))
         normalized_lanes = tuple(
-            sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
+            sorted((int(offset), max(1, int(size or 0))) for offset, size in _optional_rows(self.lane_terms, 2))
         )
         if not normalized_lanes:
             return ()
@@ -406,11 +444,11 @@ class ReductionAccumulatorProof:
         if explicit_seed_terms:
             normalized_terms = []
             for term in explicit_seed_terms:
-                if max(1, int(getattr(term, "access_size", 0) or 0)) != term_access_size:
+                if max(1, scalar_int_or(attribute_of(term, "access_size", 0))) != term_access_size:
                     return None
                 normalized_terms.append(
                     ReadonlyReductionTermRef(
-                        byte_offset=int(getattr(term, "byte_offset")),
+                        byte_offset=scalar_int(attribute_of(term, "byte_offset")),
                         access_size=term_access_size,
                     )
                 )
@@ -445,7 +483,7 @@ class ReductionAccumulatorProof:
         index_step = int(self.index_step)
         remaining_seed_terms = sorted(
             tuple(seed_terms or ()),
-            key=lambda term: (int(term.byte_offset), int(term.access_size)),
+            key=lambda term: (int(attribute_of(term, "byte_offset")), int(term.access_size)),
         )
         while remaining_seed_terms:
             previous_index = canonical_start - index_step
@@ -468,6 +506,7 @@ class ReductionAccumulatorProof:
         return canonical_start, tuple(remaining_seed_terms)
 
     def trip_count_for_count_value(self, count_value: int) -> Optional[int]:
+        count_value = scalar_int(count_value)  # 呼び出し元の値（公開の method）: 基底型の値で読む
         if int(count_value) <= 0:
             return None
         start_index = int(self.start_index)
@@ -479,6 +518,7 @@ class ReductionAccumulatorProof:
         distance = int(count_value) - start_index
         return (distance + index_step - 1) // index_step
 
+    @runtime_ref_entry
     def loop_body_terms_for_count_value(self, count_value: int) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
         trip_count = self.trip_count_for_count_value(count_value)
         if trip_count is None:
@@ -509,6 +549,7 @@ class ReductionAccumulatorProof:
             for index in range(trip_count)
         )
 
+    @runtime_ref_entry
     def full_terms_for_count_value(self, count_value: int) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
         seed_terms = self.seed_terms_for_count_value(count_value)
         if seed_terms is None:
@@ -555,13 +596,14 @@ class ReductionAccumulatorProof:
             )
             for index in range(count_value)
         )
-        expected_prefix_key = tuple(term.stable_key() for term in expected_prefix)
+        expected_prefix_key = _term_keys(expected_prefix)
         for witness in sorted(
             tuple(self.exact_return_witnesses or ()),
-            key=lambda item: int(getattr(item, "exact_count", 0) or 0),
+            key=_witness_count,
         ):
-            exact_count = int(getattr(witness, "exact_count", 0) or 0)
-            terms = tuple(getattr(witness, "terms", ()) or ())
+            exact_count = _witness_count(witness)
+            raw_terms = attribute_of(witness, "terms", ())
+            terms = _items(raw_terms) if scalar_bool(raw_terms) else ()
             if exact_count < count_value or len(terms) < exact_count:
                 continue
             expected_witness = tuple(
@@ -571,57 +613,65 @@ class ReductionAccumulatorProof:
                 )
                 for index in range(exact_count)
             )
-            if tuple(term.stable_key() for term in terms[:exact_count]) != tuple(
+            # 判定できない比較は、次の witness へ進む根拠にも返す根拠にもしない: その場で見つからない（Issue #242）
+            decision = _decided_equal(_term_keys(terms[:exact_count]), tuple(
                 term.stable_key() for term in expected_witness
-            ):
+            ))
+            if decision is None:
+                return None
+            if decision is False:
                 continue
             candidate = tuple(terms[:count_value])
-            if tuple(term.stable_key() for term in candidate) == expected_prefix_key:
+            decision = _decided_equal(_term_keys(candidate), expected_prefix_key)
+            if decision is None:
+                return None
+            if decision is True:
                 return candidate
         return None
 
+    @runtime_ref_entry
     def seed_terms_for_count_value(self, count_value: int) -> Optional[Tuple[ReadonlyReductionTermRef, ...]]:
         seed_terms = tuple(self.seed_terms or ())
         if not seed_terms:
             seed_term_count = self.seed_term_count
             if seed_term_count is not None:
-                count_value = int(count_value)
+                count_value = scalar_int(count_value)
                 if count_value <= 0:
                     return None
-                start_index = int(self.start_index)
+                start_index = scalar_int(self.start_index)
                 if start_index <= 0:
                     return ()
-                seed_term_count_value = int(seed_term_count)
+                seed_term_count_value = scalar_int(seed_term_count)
                 if seed_term_count_value < 0 or seed_term_count_value > start_index:
                     return None
-                index_scale = int(self.index_scale or self.stride)
+                index_scale = scalar_int(self.index_scale or self.stride)
                 if index_scale <= 0:
                     return None
                 if count_value >= start_index:
                     return ()
-                term_start_offset = int(self.start_offset) - int(self.start_index) * index_scale
-                selected_count = min(int(count_value), seed_term_count_value)
+                term_start_offset = scalar_int(self.start_offset) - scalar_int(self.start_index) * index_scale
+                selected_count = min(scalar_int(count_value), seed_term_count_value)
                 return tuple(
                     ReadonlyReductionTermRef(
-                        byte_offset=int(term_start_offset) + index * index_scale,
+                        byte_offset=scalar_int(term_start_offset) + index * index_scale,
                         access_size=self._readonly_term_access_size(),
                     )
                     for index in range(selected_count)
                 )
             return ()
-        count_value = int(count_value)
+        count_value = scalar_int(count_value)
         if count_value <= 0:
             return None
-        start_index = int(self.start_index)
+        start_index = scalar_int(self.start_index)
         if count_value >= start_index:
             return seed_terms
-        index_scale = int(self.index_scale or self.stride)
+        index_scale = scalar_int(self.index_scale or self.stride)
         if index_scale <= 0:
             return None
-        term_start_offset = int(self.start_offset) - int(self.start_index) * index_scale
+        term_start_offset = scalar_int(self.start_offset) - scalar_int(self.start_index) * index_scale
         selected = []
         for term in seed_terms:
-            byte_offset = int(term.byte_offset)
+            byte_offset = scalar_int(attribute_of(term, "byte_offset"))
             logical_delta = byte_offset - term_start_offset
             if logical_delta < 0 or logical_delta % index_scale != 0:
                 return None
@@ -656,7 +706,7 @@ class ReductionAccumulatorProof:
         )
 
     def _readonly_lowering_failure_reason(self) -> Optional[str]:
-        if self.side_effect_profile.requires_effect_proof():
+        if scalar_bool(self.side_effect_profile.requires_effect_proof()):
             return "side_effects_not_representable"
         return None
 
@@ -716,6 +766,7 @@ class ReductionAccumulatorProof:
     def lower_to_loop_summary_ref(self) -> Optional["LoopSummaryRef"]:
         return self._build_loop_summary_ref()
 
+    @runtime_ref_entry
     def with_runtime_evidence(
         self,
         *,
@@ -760,9 +811,9 @@ class ReductionAccumulatorProof:
         ):
             return self
         exact_witnesses = {
-            int(witness.exact_count): tuple(witness.terms)
+            scalar_int(attribute_of(witness, "exact_count")): _witness_terms(witness)
             for witness in self.exact_return_witnesses or ()
-            if int(getattr(witness, "exact_count", 0) or 0) > 0
+            if _witness_count(witness) > 0
         }
         if not exact_witnesses:
             return self
@@ -775,9 +826,12 @@ class ReductionAccumulatorProof:
                 )
                 for index in range(count_value)
             )
-            if tuple(term.stable_key() for term in terms) == tuple(
+            decision = _decided_equal(_term_keys(terms), tuple(
                 term.stable_key() for term in expected_terms
-            ):
+            ))
+            if decision is None:
+                return self  # 判定できない witness を「一致しない」として残りで書き換えない（Issue #242）
+            if decision is True:
                 matching_counts.append(int(count_value))
         if not matching_counts:
             return self
@@ -822,7 +876,7 @@ class ReductionAccumulatorProof:
         lane_count = stride // access_size
         if lane_count <= 1:
             return ()
-        witnesses_by_count = {int(witness.exact_count): tuple(witness.terms) for witness in witnesses or ()}
+        witnesses_by_count = {scalar_int(attribute_of(witness, "exact_count")): _witness_terms(witness) for witness in witnesses or ()}
         for count in range(1, lane_count + 1):
             terms = witnesses_by_count.get(count)
             expected = tuple(
@@ -832,9 +886,9 @@ class ReductionAccumulatorProof:
                 )
                 for index in range(count)
             )
-            if terms is None or tuple(term.stable_key() for term in terms) != tuple(
+            if terms is None or _decided_equal(_term_keys(terms), tuple(
                 term.stable_key() for term in expected
-            ):
+            )) is not True:
                 return ()
         return tuple((index * access_size, access_size) for index in range(lane_count))
 
@@ -878,7 +932,7 @@ class ReductionAccumulatorProof:
         require_witness_prefix: bool,
     ) -> Tuple[Tuple[int, int], ...]:
         normalized_lanes = tuple(
-            sorted((int(offset), max(1, int(size or 0))) for offset, size in (self.lane_terms or ()))
+            sorted((int(offset), max(1, int(size or 0))) for offset, size in _optional_rows(self.lane_terms, 2))
         )
         if not normalized_lanes:
             return ()
@@ -897,7 +951,7 @@ class ReductionAccumulatorProof:
             if int(self.start_index) != 0:
                 return ()
             witnesses_by_count = {
-                int(witness.exact_count): tuple(witness.terms)
+                scalar_int(attribute_of(witness, "exact_count")): _witness_terms(witness)
                 for witness in self.loop_body_witnesses or ()
             }
             for count in range(1, len(offsets)):
@@ -909,9 +963,9 @@ class ReductionAccumulatorProof:
                     )
                     for index in range(count)
                 )
-                if terms is None or tuple(term.stable_key() for term in terms) != tuple(
+                if terms is None or _decided_equal(_term_keys(terms), tuple(
                     term.stable_key() for term in expected
-                ):
+                )) is not True:
                     return ()
         return normalized_lanes
 
@@ -931,7 +985,7 @@ class ReductionAccumulatorProof:
         if candidate_start_index <= 0:
             return self
         exact_witnesses = {
-            int(witness.exact_count): tuple(witness.terms)
+            scalar_int(attribute_of(witness, "exact_count")): _witness_terms(witness)
             for witness in self.exact_return_witnesses or ()
         }
         for count_value in range(1, candidate_start_index + 1):
@@ -945,9 +999,9 @@ class ReductionAccumulatorProof:
                 )
                 for index in range(count_value)
             )
-            if tuple(term.stable_key() for term in witness_terms) != tuple(
+            if _decided_equal(_term_keys(witness_terms), tuple(
                 term.stable_key() for term in expected_terms
-            ):
+            )) is not True:
                 return self
         seed_terms = tuple(
             ReadonlyReductionTermRef(
@@ -1003,6 +1057,7 @@ class ReductionAccumulatorProof:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ReadonlyReductionRef:
     """Structured identity for a readonly pointer-reduction summary."""
 
@@ -1023,8 +1078,8 @@ class ReadonlyReductionRef:
     constant_bias: int = 0
 
     def __post_init__(self) -> None:
-        result_size = max(1, int(self.result_size or 0))
-        ref_bias = _bias_key(int(self.constant_bias), result_size)[1]
+        result_size = max(1, scalar_int(self.result_size or 0))
+        ref_bias = _bias_key(scalar_int(self.constant_bias), result_size)[1]
         loop_summary = self.loop_summary
         accumulator_proof = self.accumulator_proof
         if self.count_parameter_storage_identity_key is not None:
@@ -1035,25 +1090,23 @@ class ReadonlyReductionRef:
             )
         source_biases = []
         if loop_summary is not None:
-            summary_result_size_raw = int(
-                getattr(getattr(loop_summary, "term_descriptor", None), "result_size", 0) or 0
-            )
+            summary_result_size_raw = scalar_int_or(attribute_of(attribute_of(loop_summary, "term_descriptor", None), "result_size", 0))
             if summary_result_size_raw > 0 and summary_result_size_raw != result_size:
                 raise ValueError("ReadonlyReductionRef.result_size must match loop_summary term result_size")
-            if summary_result_size_raw <= 0 and int(getattr(loop_summary, "constant_bias", 0) or 0) != 0:
+            if summary_result_size_raw <= 0 and scalar_int_or(attribute_of(loop_summary, "constant_bias", 0)) != 0:
                 raise ValueError("ReadonlyReductionRef cannot align biased loop_summary without term result_size")
             summary_result_size = result_size if summary_result_size_raw <= 0 else summary_result_size_raw
             summary_bias = _bias_key(
-                int(getattr(loop_summary, "constant_bias", 0) or 0),
+                scalar_int_or(attribute_of(loop_summary, "constant_bias", 0)),
                 summary_result_size,
             )[1]
             source_biases.append(("loop_summary.constant_bias", summary_bias))
         if accumulator_proof is not None:
-            proof_result_size = max(1, int(getattr(accumulator_proof, "result_size", 0) or 0))
+            proof_result_size = max(1, scalar_int_or(attribute_of(accumulator_proof, "result_size", 0)))
             if proof_result_size != result_size:
                 raise ValueError("ReadonlyReductionRef.result_size must match accumulator_proof.result_size")
             proof_bias = _bias_key(
-                int(getattr(accumulator_proof, "constant_bias", 0) or 0),
+                scalar_int_or(attribute_of(accumulator_proof, "constant_bias", 0)),
                 proof_result_size,
             )[1]
             source_biases.append(("accumulator_proof.constant_bias", proof_bias))
@@ -1065,6 +1118,7 @@ class ReadonlyReductionRef:
                 raise ValueError(f"ReadonlyReductionRef.constant_bias must match {name}")
         object.__setattr__(self, "constant_bias", ref_bias)
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         loop_summary_key = self.loop_summary.stable_key() if self.loop_summary is not None else None
         proof_key = self.accumulator_proof.stable_key() if self.accumulator_proof is not None else None
@@ -1096,6 +1150,8 @@ class ReadonlyReductionRef:
             f"bias={as_int(self.constant_bias)})"
         )
 
+    @runtime_ref_key
+    @runtime_ref_entry
     def readonly_term_sequence_contract_key(
         self,
         *,
@@ -1109,7 +1165,7 @@ class ReadonlyReductionRef:
         if target_result_size > ref_result_size:
             return None
         if self.accumulator_proof is not None:
-            proof_key_fn = getattr(self.accumulator_proof, "readonly_term_sequence_contract_key", None)
+            proof_key_fn = attribute_of(self.accumulator_proof, "readonly_term_sequence_contract_key", None)
             if callable(proof_key_fn):
                 try:
                     proof_key = proof_key_fn(result_size=target_result_size)
@@ -1123,7 +1179,7 @@ class ReadonlyReductionRef:
                     self.loop_summary,
                     target_result_size,
                 )
-            loop_key_fn = getattr(self.loop_summary, "pairwise_semantic_key", None)
+            loop_key_fn = attribute_of(self.loop_summary, "pairwise_semantic_key", None)
             if callable(loop_key_fn):
                 try:
                     loop_key = loop_key_fn()
@@ -1133,6 +1189,7 @@ class ReadonlyReductionRef:
                     return loop_key
         return None
 
+    @runtime_ref_key
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         proof_key = (
             self.readonly_term_sequence_contract_key()
@@ -1185,7 +1242,7 @@ class ReadonlyReductionRef:
             max(1, int(self.result_size or 0)),
             int(self.start_offset),
             _bias_key(int(self.constant_bias), self.result_size),
-            tuple(witness.stable_key() for witness in witness_prefix),
+            tuple(method_of(witness, "stable_key")() for witness in witness_prefix),
         )
 
     def count_parameter_semantic_identity(self) -> Optional[Tuple[Any, ...]]:
@@ -1207,20 +1264,20 @@ class ReadonlyReductionRef:
         """Relative precision of this readonly reduction contract."""
 
         if self.accumulator_proof is not None:
-            score_fn = getattr(
+            score_fn = attribute_of(
                 self.accumulator_proof,
                 "readonly_term_sequence_specificity_score",
                 None,
             )
             if callable(score_fn):
                 try:
-                    return max(0, int(score_fn()))
+                    return max(0, scalar_int(score_fn()))
                 except (TypeError, ValueError):
                     return 0
         witness_counts = {
-            int(witness.exact_count)
+            scalar_int(attribute_of(witness, "exact_count"))
             for witness in (self.semantic_witnesses or ())
-            if getattr(witness, "exact_count", None) is not None
+            if attribute_of(witness, "exact_count", None) is not None
         }
         return len(witness_counts)
 
@@ -1233,9 +1290,9 @@ class ReadonlyReductionRef:
         if not self.semantic_witnesses:
             return None
         witnesses_by_count = {
-            int(witness.exact_count): witness
+            scalar_int(attribute_of(witness, "exact_count")): witness
             for witness in self.semantic_witnesses
-            if int(getattr(witness, "exact_count", 0) or 0) > 0
+            if _witness_count(witness) > 0
         }
         prefix = []
         next_count = 1
@@ -1248,11 +1305,13 @@ class ReadonlyReductionRef:
             return None
         return tuple(prefix)
 
+    @runtime_ref_key(proven=True)
     def pairwise_exact_key(self) -> Optional[Tuple[Any, ...]]:
         if self.loop_summary is not None and self.loop_summary.pairwise_exact_key() is None:
             return None
         return self.stable_key()
 
+    @runtime_ref_key(proven=True)
     def pairwise_semantic_key(self) -> Optional[Tuple[Any, ...]]:
         return self.semantic_key()
 
@@ -1283,6 +1342,7 @@ class ReadonlyReductionRef:
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class ReadonlyReductionLowering:
     """Materialized readonly lowering produced from a reduction proof."""
 
@@ -1291,6 +1351,7 @@ class ReadonlyReductionLowering:
     readonly_reduction: ReadonlyReductionRef
     lowering_kind: str = "readonly_reduction"
 
+    @runtime_ref_key
     def stable_key(self) -> Optional[Tuple[Any, ...]]:
         proof_key = self.proof.stable_key()
         loop_key = self.loop_summary.stable_key()
@@ -1305,6 +1366,7 @@ class ReadonlyReductionLowering:
             readonly_key,
         )
 
+    @runtime_ref_key
     def semantic_key(self) -> Optional[Tuple[Any, ...]]:
         proof_key = self.proof.semantic_key()
         loop_key = self.loop_summary.semantic_key()
@@ -1346,3 +1408,4 @@ from scripts.function_tracer_pcode.core.runtime_refs.loops import (
     _normalize_storage_identity_key,
     loop_summary_method_b_key_at_result_size,
 )
+from scripts.function_tracer_pcode.core.live_values import package_instance

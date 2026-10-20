@@ -284,7 +284,7 @@ def test_class_chains_are_checked_once_per_class():
 
 
 def test_non_str_namespaces_are_bounded_across_the_whole_mro():
-    """組み込みの `str` でない key の namespace を key で探すときは、MRO 全体の和で上限と比べる。"""
+    """組み込みの `str` でない key の namespace は key を辿らない（当たった class で TypeError: 量は class の数だけ）。"""
 
     kinds = [object]
     for index in range(40):
@@ -292,7 +292,7 @@ def test_non_str_namespaces_are_bounded_across_the_whole_mro():
         namespace[1] = "not a str key"
         kinds.append(type(f"Odd{index}", (kinds[-1],), namespace))
     outcome = _quick(live_values.type_attribute, kinds[-1], "missing", seconds=0.5)
-    assert isinstance(outcome, TypeError) and "non-str namespaces" in str(outcome)
+    assert isinstance(outcome, TypeError) and "not a builtin str" in str(outcome)
 
 
 def test_nested_type_references_stop_at_the_nesting_limit():
@@ -321,6 +321,11 @@ _AMORTIZED = (
     "入れ子の上限で切った判定は残さないので、切られる形の型は問い合わせごとに辿り直す（既存の設計）"
 )
 
+_RELIANCE = (
+    "R: 走っている監査済みの code が記録した頼る事実（walker の receiver と `package_instance` の絞り込み。1 つの値は "
+    "activation に 1 度だけ）だけを辿る: 量は監査済みの code が数え済みの自分の仕事（絞り込んだ値の数）の中"
+)
+
 LIVE_VALUES_WORK_OWNERS = {
     "package_file": _A,
     "_package_type_uncached": _B,
@@ -329,7 +334,6 @@ LIVE_VALUES_WORK_OWNERS = {
     "_trusted_class_body_values": _B,
     "_type_lookup": _B,
     "_exact_str_raw": _B_CALLER,
-    "_str_key_value": _B_CALLER,
     "_builtin_hashed_type": _A,
     "_one_of": _A,
     "_in_mro": _B,
@@ -355,6 +359,123 @@ LIVE_VALUES_WORK_OWNERS = {
     "_StorageRead.admit": _A,
     "_registered_meter": _A,
     "register_storage_meter": _A,
+    # Issue #242: 構築の中で受理した値を読む reader（反復の確かめ。辿る数を値の storage の読みの上限と比べる）
+    "_exact_tree_read": _B,
+    # 型の tuple（呼ぶ側が書いた固定の組）だけ
+    "is_kind": _A,
+    # 固定の組（`_TREE_BASES`）だけ。結果は型ごとに memo（`id(型)` の数の上限まで）
+    "_kind_entry": _A,
+    # 既に組み込みの木かを確かめる（辿った数を `SCAN_LIMIT` と比べ、超えれば遅い経路の読みへ）
+    "_already_plain": _B,
+    "_tree_children": _B_CALLER,
+    "_tree_rebuild": _B_CALLER,
+    "defined_attribute": _B,
+    # 写した木と元の値のどちらかの `repr`（読みは `_exact_tree_read`）
+    "scalar_repr": _A,
+    # 組み込みの例外の型（`__str__` を定義する組み込みの class）の MRO と名前空間の field だけ
+    "exception_text": _A,
+    "_exception_fields": _A,
+    # 例外の状態（組み込みの例外の field・instance の `__dict__`・中の例外）: 写す値は `exact_tree` が上限の中で読む
+    # MRO の長さを `SCAN_LIMIT` と比べてから辿る
+    "_new_exception": _B,
+    "_exception_instance_dict": _A,
+    # 辿る数を `SCAN_LIMIT` と比べる（超えれば `TypeError`: 文字列化できない印）
+    "_nested_exceptions": _B,
+    "_replace_exceptions": _B,
+    # 平らな tuple の確かめ（長さを `SCAN_LIMIT` と比べてから辿る）。それ以外は `_exact_tree_read`
+    "exact_tree_in": _B,
+    # MRO の長さを `SCAN_LIMIT` と比べてから辿る
+    "_defining_class": _B,
+    # Issue #242 第 6 回: 比べる側の契約（辿る数・容器の長さを `SCAN_LIMIT` と比べる。超えれば判定しない:
+    # `UndecidableComparison`）
+    "inert": _B,
+    "sorted_trees": _B,
+    "_exact_elements": _B_CALLER,
+    # Issue #242 第 7 回: 比較は組み込みの演算に任せる（写しと包み・写しの有効性の確かめ。辿る数・容器の数を
+    # `SCAN_LIMIT` と比べる）
+    "_covered": _B,
+    "_comparison_shape": _B,
+    "_resolved_dunder": _B,
+    "_require_same_comparison": _A,
+    "_plain_operands": _B,
+    "_CopyFrame._read": _B,
+    "_leaf_trust": _A,  # 条件つきの実装の列（高々 `names` の数: module の定数）だけを辿る
+    "_leaf_type_trust": _B,
+    # 登録した比較・自己完結の組み込みの型（書いた数の組）だけ
+    "_classify_dunder": _A,
+    # 比べる 2 つの値だけ
+    "_leaf_operands": _A,
+    "_plain_tree": _B,
+    "_CopyFrame.__init__": _B,
+    "_checked": _B,
+    # 登録した比較の実装（package の関数: 書いた数）だけ
+    # Issue #242 第 8 回: 型の事実の表（引くたびに型の状態を確かめる）と名前空間の読み（key の hook を呼ばない）
+    "_TypeFactTable._key": _A,
+    "_TypeFactTable.get": _A,
+    "_class_snapshot": _B,
+    "_namespace_part": _B,
+    # 記録した snapshot だけを辿る（snapshot を作るときに上限と比べた）
+    "_state_check": _B,
+    "_state_holds": _B,
+    "_merged_watch": _B,
+    "_accessors_hold": _B,
+    "_builtin_enum_type_checked": _A,
+    "outside_audit.__exit__": _A,
+    # Issue #242 第 11 回: 走っている監査済みの code が頼る事実（activation の記録）だけを辿る
+    "_recheck_reliance": _RELIANCE,
+    "end_reliance": _RELIANCE,
+    # `zip` が包む iterator の数を `SCAN_LIMIT` と比べてから辿る
+    "builtin_iterator": _B,
+    "audited_entry": _A,
+    "_lru_callee": _A,
+    # 判定が値から読む状態（書いた数の slot だけ）・記録した値の列（名前空間の上限の中: 呼ぶ側が比べた）
+    "_watch": _B,
+    "_watch_holds": _B,
+    "_object_state": _A,
+    "_dataclass_table_state": _B,
+    # 依存の class の列は `record` が上限と比べてから持つ（`_state` はその列だけを辿る）
+    "_TypeFactTable.record": _B,
+    # dataclass の field の表（長さを上限と比べてから読む）と `Field` の slot（書いた 3 つの名前）
+    "dataclass_field_specs": _B,
+    "_field_slots": _A,
+    # 比べる 2 つの葉だけ・型の MRO（長さを上限と比べてから辿る）
+    "_require_explicit_ne": _A,
+    "_resolved_comparison": _B,
+    # 条件つきの自己完結の実装（`Enum.__hash__`）: 型の MRO（長さを上限と比べてから辿る）と書いた 3 つの名前
+    "_self_contained_for": _B,
+    # 名前の引きだけで決まる型の事実の表: 計算が引いた名前の記録（計算の引きの数: 型の MRO の上限の中）を確かめる
+    "_remember_plain_mro": _B_CALLER,
+    "_fixed_dict_entries": _B,
+    "_LookupFactTable.record": _B_CALLER,
+    "_witnessed": _B,
+    "lookup_fact": _A,
+    # 基底型の書いた数の名前だけ・型の MRO（長さを上限と比べてから辿る）
+    "_same_behaviour": _A,
+    "plain_attribute_lookup": _B,
+    "class_defines": _A,
+    # 比較の分類（使う時点の分類・hash で置く位置の値・作り直しの規則）と hash の読み（NaN の印）
+    "_strongest_trust": _B,
+    "_hashed_members": _B,
+    "_rebuild_container": _B,
+    "_rebuildable": _B,
+    "_require_hashed_lookups": _B,
+    "_flat_exact": _B,
+    "_CopyFrame.unchanged": _B,
+    # 例外の読みだけの field（型が決める field の数）だけ
+    "_readonly_positions": _A,
+    "_readonly_exceptions": _A,
+    "_readonly_values": _A,
+    # 例外の状態の木（例外の数を `SCAN_LIMIT` と比べる。値は `exact_tree` が 1 回の読みで写す）
+    "_exception_graph": _B,
+    "_graph_values": _B,
+    "_copy_graph": _B,
+    # 例外の状態（型が決める field の数・型の traverse が辿る参照の数）だけ
+    "_none_referents": _A,
+    # 割り当ての候補は `_ASSIGNMENT_LIMIT`（固定の数）まで: 型が決める field の数
+    "_none_assignments": _A,
+    "_exception_state_matches": _A,
+    # 例外の状態の (元, 写し) の木を辿る（`_StorageRead` で辿る数を確かめる）
+    "_identity_kept": _B,
 }
 
 #: `core/read_limits`（作業量を受け取らない読みの固定の上限の owner）の入力に比例する関数

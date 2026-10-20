@@ -7,7 +7,10 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Mapping, TYPE_CHECKING, Tuple
 from scripts.function_tracer_pcode.core import live_values
 from scripts.function_tracer_pcode.core import read_limits
-from scripts.function_tracer_pcode.core.json_encoding import as_dict, each, mapping_of, materialize, source_converter
+from scripts.function_tracer_pcode.core.json_encoding import (
+    as_dict, audited_generator, each, mapping_of, materialize, source_converter,
+)
+from scripts.function_tracer_pcode.core.runtime_refs._reading import items as _items
 
 if TYPE_CHECKING:
     from scripts.function_tracer_pcode.core.analysis import FunctionReturnAnalysis
@@ -15,7 +18,8 @@ if TYPE_CHECKING:
 
 def normalize_type_name(type_name: Optional[str]) -> str:
     """型名を比較しやすい形に正規化する。"""
-    return (type_name or "").strip().lower()
+    # 型名は API の戻り値かもしれない: 葉を写してから読む（Issue #242: str の subclass の method を呼ばない）
+    return (live_values.exact_scalar(type_name) or "").strip().lower()
 
 
 def get_data_type_display_name(
@@ -23,12 +27,13 @@ def get_data_type_display_name(
     fallback_name: Optional[str] = None,
 ) -> Optional[str]:
     """表示用の型名を取得する。"""
+    fallback_name = live_values.exact_scalar(fallback_name)  # 呼ぶ側の名前も葉を写して返す（Issue #242）
     if data_type_obj is not None:
         name = _call_zero_arg(data_type_obj, "getName")
-        if name:
-            return str(name)
+        if live_values.scalar_bool(name):
+            return live_values.scalar_text(name)
         try:
-            return str(data_type_obj)
+            return live_values.scalar_text(data_type_obj)
         except Exception:
             pass
     return fallback_name
@@ -40,7 +45,7 @@ def get_data_type_path(data_type_obj: Any = None) -> Optional[str]:
     if path_obj is None:
         return None
     try:
-        return str(path_obj)
+        return live_values.scalar_text(path_obj)
     except Exception:
         return None
 
@@ -68,7 +73,7 @@ def _resolve_runtime_data_type_obj(
     """解析時に使う DataType object を解決する。"""
     if data_type_obj is not None:
         return data_type_obj
-    if program is None or not fallback_name:
+    if program is None or not live_values.scalar_bool(fallback_name):
         return None
     resolved = resolve_type_spec(
         fallback_name,
@@ -76,7 +81,14 @@ def _resolve_runtime_data_type_obj(
     )
     if resolved is None:
         return None
-    return resolved.data_type_obj
+    return live_values.attribute_of(resolved, "data_type_obj")
+
+
+def _base_or_self(data_type_obj: Any) -> Any:
+    """`_get_base_data_type(x) or x`（基底の型の真偽も葉を写してから読む）。"""
+
+    base = _get_base_data_type(data_type_obj)
+    return base if live_values.scalar_bool(base) else data_type_obj
 
 
 def _get_base_data_type(data_type_obj: Any = None) -> Any:
@@ -99,9 +111,9 @@ def _iter_float_data_types(data_type_manager: Any = None) -> Tuple[Any, ...]:
     try:
         from ghidra.program.model.data import AbstractFloatDataType  # type: ignore[import]
 
-        candidates = AbstractFloatDataType.getFloatDataTypes(data_type_manager)
+        candidates = AbstractFloatDataType.getFloatDataTypes(live_values.exact_tree(data_type_manager))
         if candidates is not None:
-            return tuple(candidates)
+            return _items(candidates)
     except Exception:
         pass
 
@@ -109,7 +121,7 @@ def _iter_float_data_types(data_type_manager: Any = None) -> Tuple[Any, ...]:
     if candidates is None:
         return ()
     try:
-        return tuple(candidates)
+        return _items(candidates)
     except Exception:
         return ()
 
@@ -127,17 +139,17 @@ def is_void_data_type(
         program=program,
     )
     if resolved is not None:
-        base = _get_base_data_type(resolved) or resolved
+        base = _base_or_self(resolved)
         try:
             from ghidra.program.model.data import VoidDataType  # type: ignore[import]
 
-            return bool(VoidDataType.isVoidDataType(base))
+            return live_values.scalar_bool(VoidDataType.isVoidDataType(live_values.exact_tree(base)))
         except Exception:
             pass
         length = _call_zero_arg(base, "getLength")
         if length is not None:
             try:
-                return int(length) == 0
+                return live_values.scalar_int(length) == 0
             except Exception:
                 pass
     return False
@@ -156,16 +168,16 @@ def is_undefined_data_type(
         program=program,
     )
     if resolved is not None:
-        base = _get_base_data_type(resolved) or resolved
+        base = _base_or_self(resolved)
         try:
             from ghidra.program.model.data import Undefined  # type: ignore[import]
 
-            return bool(Undefined.isUndefined(base))
+            return live_values.scalar_bool(Undefined.isUndefined(live_values.exact_tree(base)))
         except Exception:
             pass
         is_undefined = _call_zero_arg(base, "isUndefined")
         if is_undefined is not None:
-            return bool(is_undefined)
+            return live_values.scalar_bool(is_undefined)
     return False
 
 
@@ -207,17 +219,17 @@ def is_pointer_data_type(
         program=program,
     )
     if resolved is not None:
-        base = _get_base_data_type(resolved) or resolved
+        base = _base_or_self(resolved)
         try:
             from ghidra.program.model.data import Pointer  # type: ignore[import]
 
-            if isinstance(base, Pointer):
+            if live_values.is_kind(base, Pointer):
                 return True
         except Exception:
             pass
         is_pointer = _call_zero_arg(base, "isPointer")
         if is_pointer is not None:
-            return bool(is_pointer)
+            return live_values.scalar_bool(is_pointer)
         data_type_manager = get_data_type_manager_for_reference(
             base,
             program=program,
@@ -228,10 +240,10 @@ def is_pointer_data_type(
             if pointer_candidate is not None:
                 equivalent = _call_one_arg(pointer_candidate, "isEquivalent", base)
                 if equivalent is not None:
-                    return bool(equivalent)
+                    return live_values.scalar_bool(equivalent)
                 equivalent = _call_one_arg(base, "isEquivalent", pointer_candidate)
                 if equivalent is not None:
-                    return bool(equivalent)
+                    return live_values.scalar_bool(equivalent)
     return False
 
 
@@ -249,11 +261,11 @@ def is_floating_data_type(
     )
     if resolved is None:
         return False
-    base = _get_base_data_type(resolved) or resolved
+    base = _base_or_self(resolved)
     try:
         from ghidra.program.model.data import AbstractFloatDataType  # type: ignore[import]
 
-        if isinstance(base, AbstractFloatDataType):
+        if live_values.is_kind(base, AbstractFloatDataType):
             return True
     except Exception:
         pass
@@ -265,11 +277,11 @@ def is_floating_data_type(
     for candidate in _iter_float_data_types(data_type_manager):
         equivalent = _call_one_arg(base, "isEquivalent", candidate)
         if equivalent is not None:
-            if bool(equivalent):
+            if live_values.scalar_bool(equivalent):
                 return True
             continue
         equivalent = _call_one_arg(candidate, "isEquivalent", base)
-        if equivalent is not None and bool(equivalent):
+        if equivalent is not None and live_values.scalar_bool(equivalent):
             return True
     return False
 
@@ -297,7 +309,7 @@ def is_integral_data_type(
     if is_floating_data_type(resolved):
         return False
 
-    base = _get_base_data_type(resolved) or resolved
+    base = _base_or_self(resolved)
     try:
         from ghidra.program.model.data import AbstractIntegerDataType  # type: ignore[import]
 
@@ -333,7 +345,7 @@ def is_unsigned_data_type(
     if is_pointer_data_type(resolved):
         return False
     if resolved is not None:
-        base = _get_base_data_type(resolved) or resolved
+        base = _base_or_self(resolved)
         signed_value = _call_zero_arg(base, "isSigned")
         if signed_value is not None:
             return not bool(signed_value)
@@ -357,10 +369,10 @@ def get_declared_type_signedness(
         return False
     if is_pointer_data_type(resolved):
         return False
-    base = _get_base_data_type(resolved) or resolved
+    base = _base_or_self(resolved)
     signed_value = _call_zero_arg(base, "isSigned")
     if signed_value is not None:
-        return bool(signed_value)
+        return live_values.scalar_bool(signed_value)
     return fallback_signed
 
 
@@ -380,11 +392,11 @@ def get_declared_type_size_bytes(
     if is_void_data_type(resolved):
         return 0
 
-    base = _get_base_data_type(resolved) or resolved
+    base = _base_or_self(resolved)
     length = _call_zero_arg(base, "getLength")
     if length is not None:
         try:
-            length = int(length)
+            length = live_values.scalar_int(length)
             if length >= 0:
                 return length
         except Exception:
@@ -483,6 +495,7 @@ def parameter_descriptor_source(param: Dict[str, Any]) -> Any:
     return pairs_of(_parameter_descriptor_pairs(param), _parameter_value_source)
 
 
+@audited_generator
 def _parameter_descriptor_pairs(param: Any):
     """`param` の (key, 値) のうち `data_type_obj` 以外（mapping は owner の API で 1 組ずつ読む）。"""
 
@@ -505,7 +518,8 @@ def _parameter_value_source(value: Any) -> Any:
 
 def _call_zero_arg(obj: Any, method_name: str) -> Any:
     """0 引数メソッドを安全に呼び出す。"""
-    method = getattr(obj, method_name, None)
+    # 名前は値の葉を写してから読む（Issue #242: scalar の subclass の `__getattr__` を呼ばない）
+    method = live_values.attribute_of(obj, method_name, None)
     if not callable(method):
         return None
     try:
@@ -516,11 +530,11 @@ def _call_zero_arg(obj: Any, method_name: str) -> Any:
 
 def _call_one_arg(obj: Any, method_name: str, arg: Any) -> Any:
     """1 引数メソッドを安全に呼び出す。"""
-    method = getattr(obj, method_name, None)
+    method = live_values.attribute_of(obj, method_name, None)
     if not callable(method):
         return None
     try:
-        return method(arg)
+        return method(live_values.exact_tree(arg))
     except Exception:
         return None
 
@@ -614,6 +628,7 @@ def _resolved_type_spec_from_data_type(
     source: str = "ghidra_datatype",
 ) -> ResolvedTypeSpec:
     """Ghidra DataType から overlay 用の型情報を抽出する。"""
+    type_name = live_values.exact_scalar(type_name)
     resolved_name = get_data_type_display_name(data_type, type_name) or type_name
     size = get_declared_type_size_bytes(data_type, type_name)
     is_signed = get_declared_type_signedness(
@@ -694,10 +709,11 @@ def _parse_data_type_with_ghidra(
     except Exception:
         return None
 
-    allowed_types = getattr(DataTypeParser.AllowedDataTypes, "ALL", None)
+    allowed_types = live_values.attribute_of(DataTypeParser.AllowedDataTypes, "ALL", None)
     try:
-        parser = DataTypeParser(data_type_manager, data_type_manager, None, allowed_types)
-        return parser.parse(type_name)
+        manager = live_values.exact_tree(data_type_manager)
+        parser = DataTypeParser(manager, manager, None, live_values.exact_tree(allowed_types))
+        return live_values.method_of(parser, "parse")(live_values.exact_tree(type_name))
     except Exception:
         return None
 
@@ -707,6 +723,7 @@ def _lookup_data_type_directly(
     type_name: str,
 ) -> Any:
     """DataTypeManager から直接型名を引く。"""
+    type_name = live_values.exact_scalar(type_name)  # 葉を写す（str の subclass の method を呼ばない）
     candidates = [type_name]
     stripped = type_name.strip()
     if stripped and stripped not in candidates:
@@ -733,6 +750,7 @@ def resolve_type_spec(
     fallback_signed: bool = True,
 ) -> Optional[ResolvedTypeSpec]:
     """型名を Program/ABI 文脈で具体化する。"""
+    type_name = live_values.exact_scalar(type_name)  # 呼ぶ側・API の名前の葉を写す（Issue #242）
     normalized = normalize_type_name(get_data_type_display_name(data_type_obj, type_name))
     if not normalized and data_type_obj is None:
         return None

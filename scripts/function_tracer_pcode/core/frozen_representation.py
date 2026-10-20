@@ -28,6 +28,7 @@ walker が数えた後で中身が変わり得るので、walker の勘定では
 from __future__ import annotations
 
 from typing import Any, List, NamedTuple, Optional, Tuple
+from scripts.function_tracer_pcode.core.live_values import package_instance
 
 #: 写してよい表現の大きさの上限（JSON の byte）。runtime ref の表現は field の値の分しかなく
 #: 通常は数百 byte。これを超える表現は写さない（その node は closed にならないだけ）
@@ -149,7 +150,7 @@ def _thaw(frozen: Any) -> Any:
     while stack:
         node = stack.pop()
         exiting = exits.pop()
-        if type(node) is FrozenDict:
+        if package_instance(node, FrozenDict):
             keys = node.keys
             values = node.values
             if type(keys) is not tuple:
@@ -168,7 +169,7 @@ def _thaw(frozen: Any) -> Any:
             else:
                 _push_children(stack, exits, node, values)
             continue
-        if type(node) is FrozenList:
+        if package_instance(node, FrozenList):
             items = node.items
             if type(items) is not tuple:
                 raise TypeError("a frozen list holds a tuple of items")
@@ -177,7 +178,7 @@ def _thaw(frozen: Any) -> Any:
             else:
                 _push_children(stack, exits, node, items)
             continue
-        if type(node) is FrozenTuple:
+        if package_instance(node, FrozenTuple):
             items = node.items
             if type(items) is not tuple:
                 raise TypeError("a frozen tuple holds a tuple of items")

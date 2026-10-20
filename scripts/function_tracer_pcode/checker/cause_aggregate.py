@@ -108,6 +108,8 @@ from scripts.function_tracer_pcode.proof.unknown_reason import (
     UnknownReasonId,
     UnknownRecoveryActionStatus,
 )
+from scripts.function_tracer_pcode.core.live_values import package_instance
+from scripts.function_tracer_pcode.core.live_values import audited_entry
 
 
 UNKNOWN_CAUSE_AGGREGATE_SCHEMA = "unknown-cause-aggregate-v1"
@@ -541,7 +543,7 @@ def _requirement_key(requirement: Any) -> Tuple[Any, ...]:
     """proof requirement の payload の key（`ProofRequirementId.from_dict(...).to_key()`）。"""
 
     requirement_id = ProofRequirementId.from_dict(requirement)
-    if type(requirement_id) is not ProofRequirementId:
+    if not package_instance(requirement_id, ProofRequirementId):
         raise TypeError("proof requirement is not a ProofRequirementId")
     # target は構造 key を持ち得る: 別 process の結果と比べる key なので、owner の昇格規則を
     # 通す `freeze_identity` の写しにする（Issue #215 Gate A）
@@ -1047,6 +1049,7 @@ def _inc_row(counts: Dict[Tuple[str, ...], int], key: Tuple[str, ...], amount: i
 # aggregate の生成
 # ---------------------------------------------------------------------------
 
+@audited_entry
 def attach_cause_aggregate(result: Any) -> None:
     """canonical bundle を組む前に aggregate を確定して結果へ載せる。
 
@@ -1074,7 +1077,7 @@ def attach_cause_aggregate(result: Any) -> None:
             aggregate = build_unknown_cause_aggregate(result)
             # 載せる先は package の結果の型だけ（その型の `__setattr__` だけが走る）。それ以外の
             # object には載せない（`to_dict()` 相当の出力はその場で集計を組む）
-            if type(result) is EquivalenceResult:
+            if package_instance(result, EquivalenceResult):
                 live_values.set_state(result, "unknown_cause_aggregate", aggregate)
     except Exception:  # 診断は判定を壊さない
         return
@@ -1125,6 +1128,7 @@ def aggregate_is_usable(aggregate: Any) -> bool:
 TRACE_CAUSE_EVIDENCE_SCHEMA = "unknown-cause-trace-evidence-v1"
 
 
+@audited_entry
 def build_trace_cause_evidence(
     result: Any,
     *,
@@ -1352,7 +1356,7 @@ def _prepared_trace_evidence(result: Any) -> Any:
     prepared = attribute(result, "prepared_semantic_payload")
     cause_evidence = attribute(prepared, "cause_evidence") if prepared is not None else None
     # 準備済みの値（`PreparedJson`: owner の型）だけを読む
-    if type(cause_evidence) is not json_encoding.PreparedJson:
+    if not package_instance(cause_evidence, json_encoding.PreparedJson):
         return None
     return cause_evidence.value()
 

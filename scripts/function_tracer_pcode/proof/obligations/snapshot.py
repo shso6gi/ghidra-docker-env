@@ -7,7 +7,8 @@ import hashlib
 from types import MappingProxyType
 from typing import Any, Mapping, Tuple
 
-from scripts.function_tracer_pcode.core import json_encoding
+from scripts.function_tracer_pcode.core import json_encoding, live_values
+from scripts.function_tracer_pcode.core.live_values import package_instance
 from scripts.function_tracer_pcode.core.budget_policy import serialization_scope
 from scripts.function_tracer_pcode.core.json_encoding import (
     LEGACY,
@@ -40,6 +41,7 @@ from scripts.function_tracer_pcode.core.live_values import (
     type_name,
 )
 from scripts.function_tracer_pcode.proof.obligations.model import SemanticFactProvenance
+from scripts.function_tracer_pcode.core.live_values import audited_entry
 
 
 SEMANTIC_ANALYSIS_NOTES = frozenset({
@@ -189,7 +191,7 @@ _FINGERPRINT_JSON = json_encoding.JsonEncodingPolicy(ensure_ascii=True, item_sep
 def _fingerprint_json(value: Any) -> str:
     """凍結した値の fingerprint の JSON（`json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=True)`）。"""
 
-    return json_encoding.JsonEncodingPolicy.dumps(_FINGERPRINT_JSON, value)
+    return json_encoding.JsonEncodingPolicy.dumps_frozen(_FINGERPRINT_JSON, value)
 
 
 def _enum_payload(value: Any) -> Any:
@@ -240,7 +242,7 @@ def _frozen_repr(value: Any) -> str:
     while pending:
         item = pending.pop()
         kind = type(item)
-        if kind is _Text:
+        if package_instance(item, _Text):
             pieces.append(as_str(item.text))
         elif kind is tuple:
             count = size(item)
@@ -304,6 +306,7 @@ class SnapshotFingerprintCodec:
     """
 
     @classmethod
+    @audited_entry
     def freeze(cls, value: Any, *, budget: Any = None) -> Any:
         """値の canonical な写し。`budget` を渡すと、写す値の byte を写しながら足す。
 
@@ -312,11 +315,13 @@ class SnapshotFingerprintCodec:
         は walker が同じ `budget` で数えながら作る（作ってから数えない）。
         """
 
-        if budget is None:
-            return cls._freeze_unmetered(value)
-        # 値の storage の読みも固定の上限を超えた分は同じ予算へ（超えればその予算の超過）
-        with metered_storage_reads(budget):
-            return cls._freeze(value, _FreezeMeter(budget))
+        # J19 の監査の entry root: 写す間は監査済みの区間（型の protocol の判定は区間の間 1 度: `live_values.audited_region`）
+        with live_values.audited_region():
+            if budget is None:
+                return cls._freeze_unmetered(value)
+            # 値の storage の読みも固定の上限を超えた分は同じ予算へ（超えればその予算の超過）
+            with metered_storage_reads(budget):
+                return cls._freeze(value, _FreezeMeter(budget))
 
     @classmethod
     def _freeze_unmetered(cls, value: Any) -> Any:
@@ -458,7 +463,14 @@ class SnapshotFingerprintCodec:
         keyed = []
         # 位置は数えながら持つ（組ごとに列の長さを読み直さない）
         count = 0
-        for key, _item in items:
+        if type(items) is not tuple:
+            raise TypeError("frozen mapping items must be a builtin tuple")
+        for pair in items:
+            if type(pair) is tuple:
+                key, _item = pair  # 凍結した組（exact な tuple の unpack は Python の code を呼ばない。長さの違いは ValueError）
+            else:
+                # exact な tuple でない組: 全部の組を基底型の slot で読んだ列で並べ直す（凍結した組では起きない）
+                return cls.sorted_mapping_items(tuple([live_values.read_pair(pair) for pair in items]))
             keyed.append((_fingerprint_json(key), count))
             count += 1
         keyed.sort()
@@ -472,6 +484,7 @@ class SnapshotFingerprintCodec:
         return _fingerprint_json(value)
 
     @classmethod
+    @audited_entry
     def digest(cls, value: Any) -> str:
         frozen = cls.freeze(value)
         payload = _fingerprint_json(frozen)

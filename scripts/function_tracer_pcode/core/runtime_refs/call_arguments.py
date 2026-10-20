@@ -25,8 +25,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
+from scripts.function_tracer_pcode.core.runtime_ref_record import runtime_ref_record, runtime_ref_key
 from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inline, is_json_record, mapping_of, materialize, nested, raw)
-from scripts.function_tracer_pcode.core.live_values import as_int, as_str, attribute
+from scripts.function_tracer_pcode.core.live_values import as_int, as_str, attribute, exact_tree, scalar_int, scalar_text, is_kind, method_of
+from scripts.function_tracer_pcode.core.runtime_refs._reading import decided_equal
 
 
 _ABI_SLOT_KIND = "abi_argument_slot"
@@ -36,20 +38,21 @@ _FRESH_ARGUMENT_KIND = "fresh_call_argument"
 def _optional_text(value: Any) -> Optional[str]:
     if value is None:
         return None
-    text = str(value).strip()
+    text = scalar_text(value).strip()
     return text or None
 
 
 def _optional_int(value: Any) -> Optional[int]:
-    if value is None or isinstance(value, bool):
+    if value is None or is_kind(value, bool):
         return None
     try:
-        return int(value)
+        return scalar_int(value)
     except (TypeError, ValueError):
         return None
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class AbiArgumentSlotRef:
     """One ABI-determined argument slot of a call site.
 
@@ -65,7 +68,7 @@ class AbiArgumentSlotRef:
     declared_type_name: Optional[str] = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "ordinal", int(self.ordinal))
+        object.__setattr__(self, "ordinal", scalar_int(self.ordinal))
         object.__setattr__(self, "storage_class", _optional_text(self.storage_class))
         object.__setattr__(self, "width_bits", _optional_int(self.width_bits))
         object.__setattr__(self, "declared_type_name", _optional_text(self.declared_type_name))
@@ -73,9 +76,10 @@ class AbiArgumentSlotRef:
         object.__setattr__(
             self,
             "storage_identity_key",
-            tuple(key) if isinstance(key, (tuple, list)) else None,
+            tuple(key) if is_kind(key, (tuple, list)) else None,
         )
 
+    @runtime_ref_key(proven=True)
     def stable_key(self) -> Tuple[Any, ...]:
         """Cross-binary comparable identity.
 
@@ -91,6 +95,7 @@ class AbiArgumentSlotRef:
             self.width_bits,
         )
 
+    @runtime_ref_key
     def provenance_key(self) -> Tuple[Any, ...]:
         """Full per-side detail, including the concrete storage identity.
 
@@ -128,6 +133,7 @@ class MissingSideDiscriminator(ValueError):
 
 
 @dataclass(frozen=True)
+@runtime_ref_record
 class FreshCallArgumentRef:
     """A side-specific free symbol standing for one unrecovered call argument.
 
@@ -155,11 +161,12 @@ class FreshCallArgumentRef:
         object.__setattr__(
             self,
             "call_site_key",
-            tuple(key) if isinstance(key, (tuple, list)) else None,
+            tuple(key) if is_kind(key, (tuple, list)) else None,
         )
-        if not isinstance(self.slot, AbiArgumentSlotRef):
+        if not is_kind(self.slot, AbiArgumentSlotRef):
             raise TypeError("fresh call argument requires an AbiArgumentSlotRef slot")
 
+    @runtime_ref_key
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             _FRESH_ARGUMENT_KIND,
@@ -169,6 +176,7 @@ class FreshCallArgumentRef:
             self.reason,
         )
 
+    @runtime_ref_key
     def identity_correspondence_key(self) -> Tuple[Any, ...]:
         """The slot identity this fresh value occupies.
 
@@ -208,4 +216,5 @@ def fresh_call_argument_refs_are_side_distinct(
 
     if left is None or right is None:
         return False
-    return left.stable_key() != right.stable_key()
+    # 違うと決まったときだけ真（組み込みの code だけでは比べられない key は「違うと保証できない」。Issue #242）
+    return decided_equal(method_of(left, "stable_key")(), method_of(right, "stable_key")()) is False

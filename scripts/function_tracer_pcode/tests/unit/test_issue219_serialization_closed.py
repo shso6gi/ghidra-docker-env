@@ -597,7 +597,6 @@ _EXPRESSION_LOCAL_READS = {
     ("condition_expression", "_to_dict"): _CHILD,
     ("condition", "expression"): _CONDITION_FIELD,
     ("condition", "negated"): _CONDITION_FIELD,
-    ("expr_type", "_name_"): "enum の member の名前（class の定義 = code。SCALAR の規則が型を固定する）",
     ("storage_payload", "to_dict"): "凍結時の写し（`FrozenStorageRecord`、STORAGE の規則）",
     ("ref_payload", "thaw"): "closed の問い合わせで作った runtime ref の表現の写し（`FrozenLegacyTree`、RUNTIME_REF の規則）",
     ("storage_info", "to_dict"): "未凍結の node だけが読む生の storage（closed にならない経路）",
