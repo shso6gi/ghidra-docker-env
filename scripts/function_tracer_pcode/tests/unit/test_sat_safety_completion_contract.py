@@ -29,6 +29,7 @@ from scripts.function_tracer_pcode.authority.domains.sat_safety_sites import (
 from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     SafeCounterexampleProductionSignal,
     SatSafetyBlockerProductionSignal,
+    committed_safe_counterexample,
     complete_observed_sat_safety_for_counterexample,
     emit_sat_safety_completion_if_observed,
     emit_sat_safety_signal,
@@ -2049,11 +2050,11 @@ def test_a_safe_counterexample_that_fails_after_its_commit_can_be_published_agai
         before = session.recorder.event_count
         emit_safe_counterexample_production_signal(safety_receipt=first)
         assert failures and session.recorder.event_count == before
-        assert "sat_safety_safe_counterexample_committed" not in session.domain_signal_state
+        assert committed_safe_counterexample(session) is None
         assert "sat_safety_committed_transactions" not in session.domain_signal_state
         emit_safe_counterexample_production_signal(safety_receipt=retry)
         assert session.recorder.event_count == before + 1
-        assert session.domain_signal_state.get("sat_safety_safe_counterexample_committed")
+        assert committed_safe_counterexample(session) is not None
         assert "sat_safety_committed_transactions" not in session.domain_signal_state
     assert session.domain_signal_error_kinds == ["RuntimeError"]
 

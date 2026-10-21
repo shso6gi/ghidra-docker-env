@@ -18,8 +18,11 @@ from scripts.function_tracer_pcode.authority.contracts import (
     requirement_slot,
 )
 from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+    SAFE_COUNTEREXAMPLE_COMMITTED_KEY,
+    CommittedSafeCounterexample,
     SafeCounterexampleProductionSignal,
     SatSafetyBlockerProductionSignal,
+    committed_safe_counterexample,
 )
 from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
     SAT_SAFETY_TYPED_REASON_IDS,
@@ -172,9 +175,7 @@ class SatSafetyPilotEncoder:
                 raise ValueError(
                     "safe counterexample signal lacks validated receipt authority"
                 )
-            if session.domain_signal_state.get(
-                "sat_safety_safe_counterexample_committed"
-            ):
+            if committed_safe_counterexample(session) is not None:
                 return ()
             return (EventIntent(
                 EventType.COUNTEREXAMPLE,
@@ -237,18 +238,18 @@ class SatSafetyPilotEncoder:
         if type(signal) is SafeCounterexampleProductionSignal:
             if len(intents) != 1 or intents[0].event_type is not EventType.COUNTEREXAMPLE:
                 raise ValueError("safe counterexample emission transaction is invalid")
-            if session.domain_signal_state.get(
-                "sat_safety_safe_counterexample_committed"
-            ):
+            if committed_safe_counterexample(session) is not None:
                 raise ValueError("safe counterexample was already committed")
             committed = session.domain_signal_state.setdefault(_COMMITTED_TRANSACTIONS_KEY, {})
             if id(signal) in committed:
                 raise ValueError("SAT safety signal already owns a committed transaction")
             # 後段の失敗で戻せるよう、この取引の分の写し（commit の前は未設定）を残す。
             committed[id(signal)] = _SAFE_COUNTEREXAMPLE_UNSET
-            session.domain_signal_state[
-                "sat_safety_safe_counterexample_committed"
-            ] = signal.proof_artifact_digest
+            session.domain_signal_state[SAFE_COUNTEREXAMPLE_COMMITTED_KEY] = (
+                CommittedSafeCounterexample(
+                    signal.proof_artifact_digest, signal.counterexample_binding,
+                )
+            )
             return
         if type(signal) is not SatSafetyBlockerProductionSignal:
             return
@@ -301,7 +302,7 @@ class SatSafetyPilotEncoder:
             if committed.pop(id(signal), None) is _SAFE_COUNTEREXAMPLE_UNSET:
                 # commit の後でこの取引が失敗した: 決め手の印を commit の前（未設定）へ戻す
                 # （残すと、再試行が重複として黙って捨てられる）。
-                session.domain_signal_state.pop("sat_safety_safe_counterexample_committed", None)
+                session.domain_signal_state.pop(SAFE_COUNTEREXAMPLE_COMMITTED_KEY, None)
             if not committed:
                 session.domain_signal_state.pop(_COMMITTED_TRANSACTIONS_KEY, None)
             return

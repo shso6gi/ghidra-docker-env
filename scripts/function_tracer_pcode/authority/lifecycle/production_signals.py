@@ -535,6 +535,52 @@ class SafeCounterexampleProductionSignal:
         }
 
 
+#: session の ``domain_signal_state`` で、decisive として commit した安全な counterexample を
+#: 持つ key。書くのは SAT-safety の encoder（commit / rollback）だけで、読むのは
+#: ``committed_safe_counterexample`` だけ（key の直読みをしない）。
+SAFE_COUNTEREXAMPLE_COMMITTED_KEY = "sat_safety_safe_counterexample_committed"
+
+
+@dataclass(frozen=True)
+class CommittedSafeCounterexample:
+    """この pair で decisive として commit した安全な counterexample（authority の記録）。
+
+    ``proof_artifact_digest`` は commit した COUNTEREXAMPLE event の証明の digest、
+    ``counterexample_binding`` はその witness（formula・model・premise・pair）。commit の後に
+    その witness を止める blocker は、この binding に束縛する。
+    """
+
+    proof_artifact_digest: str
+    counterexample_binding: SatCounterexampleEvidenceBinding
+
+    def __post_init__(self) -> None:
+        if type(self.proof_artifact_digest) is not str or not self.proof_artifact_digest:
+            raise TypeError("committed counterexample lacks its proof artifact digest")
+        if type(self.counterexample_binding) is not SatCounterexampleEvidenceBinding:
+            raise TypeError("committed counterexample lacks its witness binding")
+
+
+def committed_safe_counterexample(
+    session: Any = None,
+) -> Optional[CommittedSafeCounterexample]:
+    """commit 済みの安全な counterexample（無ければ ``None``）。
+
+    ``session`` を省くと active な production session を読む（session が無ければ ``None``）。
+    記録が ``CommittedSafeCounterexample`` でなければ、commit の有無を判断できないので
+    ``TypeError``（fail-closed。「無い」として扱わない）。
+    """
+    if session is None:
+        session = active_production_pilot_session()
+        if session is None:
+            return None
+    committed = session.domain_signal_state.get(SAFE_COUNTEREXAMPLE_COMMITTED_KEY)
+    if committed is None:
+        return None
+    if type(committed) is not CommittedSafeCounterexample:
+        raise TypeError("committed safe counterexample record is not exact")
+    return committed
+
+
 _PENDING_EQ_CLOSURE_TOKEN = object()
 _POST_CLEANUP_EQ_RECEIPT_TOKEN = object()
 
@@ -1482,9 +1528,7 @@ def emit_sat_safety_signal(
     if type(signal) is SafeCounterexampleProductionSignal:
         if not signal.validates():
             raise ValueError("safe counterexample signal authority is invalid")
-        if session.domain_signal_state.get(
-            "sat_safety_safe_counterexample_committed"
-        ):
+        if committed_safe_counterexample(session) is not None:
             # A prior validated receipt already made NOT_EQ decisive.  Retry
             # phases may independently rediscover a counterexample, but must
             # not open a second Phase 7 activation for the encoder's no-op.
