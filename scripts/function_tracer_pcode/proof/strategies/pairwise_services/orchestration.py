@@ -474,6 +474,14 @@ def _impl_check(
     )
     sat_unsafety_reasons.extend(input_correspondence_reasons)
     equivalence_blocking_reasons.extend(input_correspondence_reasons)
+    # 対応の証拠の無い自由入力に依存する SAT は NOT_EQ にしない（EQ 側は変えない）。
+    sat_unsafety_reasons.extend(
+        self._unpaired_input_unsafety_reasons(
+            base_ctx.get("extra_vars1"),
+            base_ctx.get("extra_vars2"),
+            query_correspondence=base_ctx.get("input_correspondence"),
+        )
+    )
     if self.debug and type(input_correspondence) is InputCorrespondenceSet:
         self._debug_print(input_correspondence.diagnostic_line())
 

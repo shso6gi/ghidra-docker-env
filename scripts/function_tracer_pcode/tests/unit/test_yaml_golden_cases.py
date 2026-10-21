@@ -399,9 +399,13 @@ class TestMonolithicStrategyBackwardCompatibility:
             ]
         )
 
+        from scripts.function_tracer_pcode.core import Expression, ReturnInfo
+
         strategy = MonolithicStrategy(formula_builder, solver_runner, debug=False)
-        analysis1 = create_mock_analysis(function_name="func1")
-        analysis2 = create_mock_analysis(function_name="func2")
+        # 両側 0 parameter（入力を読まない戻り値）。
+        constant_return = [ReturnInfo(address="0x00401000", conditions=[], value=Expression.constant(0, 4))]
+        analysis1 = create_mock_analysis(function_name="func1", parameters=[], returns=constant_return)
+        analysis2 = create_mock_analysis(function_name="func2", parameters=[], returns=constant_return)
 
         result = strategy.check(analysis1, analysis2)
 

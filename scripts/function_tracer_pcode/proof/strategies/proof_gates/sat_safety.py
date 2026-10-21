@@ -94,6 +94,68 @@ def _is_input_correspondence_reason(reason: Any) -> bool:
     )
 
 
+#: decisive gate が、relation で覆われない左右別の自由入力記号を示す reason の種類。
+UNPAIRED_INPUT_REASON_KIND = "unpaired_input"
+
+
+def _impl__unpaired_input_unsafety_reasons(
+    self,
+    query_free_inputs1: Sequence[Any],
+    query_free_inputs2: Sequence[Any],
+    *,
+    query_correspondence: Any,
+) -> List[str]:
+    """SAT を NOT_EQ と確定するには、query の自由入力記号がすべて relation で覆われていること。
+
+    ``query_free_inputs1`` / ``query_free_inputs2`` は、判定に使った query が左右別に宣言した
+    自由入力記号（今は builder の extra variable の情報。``original_name`` を持つ）。
+    ``query_correspondence`` はその query の premise を描いた ``InputCorrespondenceSet``。
+
+    SAT の model はこの記号に左右で別々の値を与えてよい。relation（parameter の対応の証拠）が
+    覆わない記号は、その値の組が実際の実行で起こり得ること（左右の入力が対応しているか、
+    そもそも同じ値になるか）を示す根拠が無いので、model は非等価の witness にならない。
+    counterexample の replay は model の値を固定して同じ式を評価し直すだけなので、この不足は
+    replay では解消しない（解析の不安全。``sat_safety_resolution`` が ref から型を決める）。
+
+    覆う記号の集合は ``InputCorrespondenceSet.covered_input_names`` が決める。記号を左右で
+    共有・対応付ける仕組みを足すときは、その集合を広げればこの規則は変えなくてよい。
+    UNSAT（EQ）は独立な値すべてについて成り立つ命題なので、この reason は SAT 側だけに入れる。
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
+        LEFT,
+        RIGHT,
+        InputCorrespondenceSet,
+    )
+
+    label = INPUT_CORRESPONDENCE_REASON_LABEL
+    kind = UNPAIRED_INPUT_REASON_KIND
+    reasons: List[str] = []
+    for side, free_inputs in ((LEFT, query_free_inputs1), (RIGHT, query_free_inputs2)):
+        if free_inputs is None:
+            # query が宣言した記号の記録が無い（配線漏れ。0 件であるべき）。
+            reasons.append(f"{label}:{kind}:unavailable:{side}")
+            continue
+        covered = (
+            query_correspondence.covered_input_names(side)
+            if type(query_correspondence) is InputCorrespondenceSet
+            else frozenset()
+        )
+        names = sorted({str(item.original_name) for item in free_inputs})
+        reasons.extend(
+            f"{label}:{kind}:{side}:{name}"
+            for name in names
+            if name not in covered
+        )
+    return reasons
+
+
+def _is_unpaired_input_reason(reason: Any) -> bool:
+    return str(reason or "").startswith(
+        f"{INPUT_CORRESPONDENCE_REASON_LABEL}:{UNPAIRED_INPUT_REASON_KIND}:"
+    )
+
+
 def _impl__pair_return_width_unsafety_reasons(
     self,
     base_ctx: Mapping[str, Any],
@@ -1056,6 +1118,8 @@ def _impl__sat_unsafety_reason_object_target_key(
     analysis = analysis1 if label == "function1" else analysis2 if label == "function2" else None
     if _is_input_correspondence_reason(reason):
         return ("input_correspondence_unsafety", str(reason))
+    if _is_unpaired_input_reason(reason):
+        return ("unpaired_input_unsafety", str(reason))
     if analysis is None:
         return ("global_unsafety", reason_kind)
     canonical_reason = f"{label}:{reason_kind}" if label else reason_kind

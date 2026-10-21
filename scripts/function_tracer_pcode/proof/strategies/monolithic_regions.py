@@ -527,4 +527,6 @@ class RegionExecutionMixin:
             sat_replay_formula=sat_replay_formula,
             sat_replay_census=sat_replay_census,
             input_correspondence=base_ctx.get("input_correspondence"),
+            extra_vars1=base_ctx.get("extra_vars1"),
+            extra_vars2=base_ctx.get("extra_vars2"),
         )

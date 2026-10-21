@@ -114,6 +114,7 @@ from scripts.function_tracer_pcode.proof.strategies.monolithic_support import (
     _MonolithicDecisionExecutionContext,
     _MonolithicRegionPlan,
     _MonolithicRegionExecution,
+    region_query_free_inputs,
     region_query_input_correspondence,
 )
 
@@ -585,14 +586,33 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                 ]
             # Issue #167: 判定に使った query の premise を決めた relation が、
             # この check の relation と同一で、しかも十分なときだけ確定させる。
-            input_correspondence_reasons = self._input_correspondence_unsafety_reasons(
+            query_correspondence = (
                 region_query_input_correspondence(region_execution, region_base_ctx)
                 if region_execution is not None
-                else getattr(result, "input_correspondence", None),
+                else getattr(result, "input_correspondence", None)
+            )
+            input_correspondence_reasons = self._input_correspondence_unsafety_reasons(
+                query_correspondence,
                 authority_correspondence=input_correspondence,
             )
             sat_unsafety_reasons.extend(input_correspondence_reasons)
             equivalence_blocking_reasons.extend(input_correspondence_reasons)
+            # 対応の証拠の無い自由入力に依存する SAT は NOT_EQ にしない（EQ 側は変えない）。
+            query_free_inputs1, query_free_inputs2 = (
+                region_query_free_inputs(region_execution, region_base_ctx)
+                if region_execution is not None
+                else (
+                    getattr(result, "extra_vars1", None),
+                    getattr(result, "extra_vars2", None),
+                )
+            )
+            sat_unsafety_reasons.extend(
+                self._unpaired_input_unsafety_reasons(
+                    query_free_inputs1,
+                    query_free_inputs2,
+                    query_correspondence=query_correspondence,
+                )
+            )
             if self.debug and input_correspondence is not None:
                 self._debug_print(input_correspondence.diagnostic_line())
             coverage_unsafety_reasons = []

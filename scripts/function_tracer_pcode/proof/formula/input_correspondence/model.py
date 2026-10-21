@@ -186,6 +186,26 @@ class InputCorrespondenceSet:
             refs.append(f"input_correspondence:{item.label}:{item.kind.value}:{detail}")
         return tuple(refs)
 
+    def covered_input_names(self, side: str) -> frozenset:
+        """その側の入力記号のうち、十分な relation が対応を与えるものの名前（parameter 名）。
+
+        decisive gate はこの集合に無い自由入力記号に依存する SAT を確定させない。
+        """
+
+        if side not in _SIDES:
+            raise ValueError(f"unknown side: {side!r}")
+        stored = self.left_parameters if side == LEFT else self.right_parameters
+        names_by_index = {param.index: param.original_name for param in stored}
+        covered = set()
+        for item in self.correspondences:
+            if not item.decisive_sufficient or item.kind is InputRelationKind.MISSING_SIDE:
+                continue
+            parameter = item.left if side == LEFT else item.right
+            if parameter is None or parameter.index not in names_by_index:
+                continue
+            covered.add(names_by_index[parameter.index])
+        return frozenset(covered)
+
     def authorization(self, side: str) -> RewriteAuthorization:
         if side not in _SIDES:
             raise ValueError(f"unknown side: {side!r}")
