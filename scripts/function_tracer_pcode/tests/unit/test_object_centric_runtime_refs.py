@@ -2610,7 +2610,7 @@ def _analysis_with_return(function_name: str, value: Expression, conditions=()) 
 def _pairwise_strategy_for_full_path() -> PairwiseStrategy:
     runner = ParallelSolverRunner(timeout=5)
     runner.run_sequential = Mock(wraps=runner.run_sequential)
-    strategy = PairwiseStrategy(echo_input_correspondence(Mock()), runner, debug=False)
+    strategy = PairwiseStrategy(echo_input_correspondence(Mock(), declare_parameters=True), runner, debug=False)
     strategy.formula_builder.build_base_context.return_value = {
         "header_lines": [],
         "params1": [],

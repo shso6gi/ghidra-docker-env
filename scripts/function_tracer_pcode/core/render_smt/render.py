@@ -247,6 +247,28 @@ class UnsupportedSmtOperatorError(UnsupportedSmtSemanticsError):
         )
 
 
+class UndeclaredSmtSymbolError(UnsupportedSmtSemanticsError):
+    """宣言の無い入力記号を描こうとしたときの型つきの拒否（Issue #16）。
+
+    symbol mapping を持つ描画は、query が宣言した入力記号（parameter・extra variable）を mapping に
+    載せている。mapping に無い VARIABLE / PARAMETER の節点を素の名前で描くと、solver は未宣言の
+    定数として parse に失敗するか、別の記号と取り違える。描画はその記号を出さずにここで拒否し、
+    strategy は他の拒否と同じ UNKNOWN にする。宣言を自分で持つ記号（runtime ref の
+    ``declares_variable_symbol``）と、address 文脈で literal に描いた節点は対象外。
+    判定は節点の種類と mapping の有無だけで行い、記号の名前や由来では決めない。
+    """
+
+    refusal_evidence_ref = "undeclared_smt_symbol"
+
+    def __init__(self, *, symbol_kind: str, symbol: str) -> None:
+        self.symbol_kind = symbol_kind
+        self.symbol = symbol
+        super().__init__(f"{symbol_kind} {symbol} is not declared by the query's symbol mapping")
+
+    def refusal_target_fields(self) -> tuple:
+        return (self.refusal_evidence_ref, self.symbol_kind, self.symbol)
+
+
 #: 正確な SMT の意味が無いことを示す型つきの拒否の全て（strategy が UNKNOWN にする族）。
 #: ``UnknownSmtExtensionWidthError`` は歴史的に ``UnsupportedSmtSemanticsError`` の外にあるので並べる。
 SMT_SEMANTICS_REFUSALS = (UnsupportedSmtSemanticsError, UnknownSmtExtensionWidthError)
@@ -982,7 +1004,9 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
         name = expr.name if expr.name else f"param_{expr.value}"
         if symbol_name_mapping is None:
             return name
-        return symbol_name_mapping.get(name, name)
+        if name not in symbol_name_mapping:
+            raise UndeclaredSmtSymbolError(symbol_kind="PARAMETER", symbol=name)
+        return symbol_name_mapping[name]
 
     if expr_type == expr_kind.VARIABLE:
         if address_context:
@@ -996,7 +1020,11 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
         name = expr.name if expr.name else "var"
         if symbol_name_mapping is None:
             return name
-        return symbol_name_mapping.get(name, name)
+        if name in symbol_name_mapping:
+            return symbol_name_mapping[name]
+        if not semantic_projection(expr).declares_variable_symbol:
+            raise UndeclaredSmtSymbolError(symbol_kind="VARIABLE", symbol=name)
+        return name
 
     if expr_type == expr_kind.UNKNOWN:
         return _unknown_smt_symbol_name(expr)

@@ -181,6 +181,59 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
     def _save_unknown_query(self, query: str, pair_id: str, stage: str) -> None:
         del query, pair_id, stage
 
+    def _smt_semantics_refusal_result(
+        self,
+        refusal,
+        analysis1: FunctionReturnAnalysis,
+        analysis2: FunctionReturnAnalysis,
+        *,
+        dispatch_frame,
+        frozen_surface,
+        canonical_census,
+    ) -> StrategyResult:
+        """正確な SMT の意味が無い式の型つきの拒否（``SMT_SEMANTICS_REFUSALS``）を UNKNOWN の結果にする。
+
+        check のどの区間で描画が拒否されても、結果は同じ reason と、この比較の inconclusive な
+        receipt を持つ（EQ も NOT_EQ も主張しない）。
+        """
+
+        from scripts.function_tracer_pcode.proof.call_effect.preflight import (
+            issue_inconclusive_monolithic_receipts,
+        )
+
+        message = str(refusal)
+        self._debug_print(
+            f"Monolithic check blocked by unsupported SMT semantics: {message}"
+        )
+        blocked_result = StrategyResult(
+            is_equivalent=None,
+            solver_results=ParallelResult(results=[]),
+            smt_formula=None,
+            counterexample_raw=None,
+            return_var1=None,
+            return_var2=None,
+            constrained_fragments=[],
+            unknown_reasons=[
+                make_internal_v2_reason_diagnostic(
+                    "expression_semantics_unsupported",
+                    stage="S_MONOLITHIC_FALLBACK",
+                    evidence_refs=(refusal.refusal_evidence_ref,),
+                    object_target_key=(
+                        *refusal.refusal_target_fields(),
+                        tuple(analysis1.outcome_function_identity()),
+                        tuple(analysis2.outcome_function_identity()),
+                    ),
+                    detail=message,
+                )
+            ],
+        )
+        if dispatch_frame is not None and dispatch_frame.receipt is None:
+            issue_inconclusive_monolithic_receipts(
+                dispatch_frame, frozen_surface, canonical_census, message
+            )
+            blocked_result.comparison_execution_receipt = dispatch_frame.receipt
+        return blocked_result
+
     def check(
         self,
         analysis1: FunctionReturnAnalysis,
@@ -272,27 +325,39 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
         call_width_receipt_assertion_digests = ()
         canonical_width_observation = None
         if dispatch_frame is not None and dispatch_frame.projection.semantic_bindings:
-            call_base_ctx = self.formula_builder.build_base_context(
-                analysis1, analysis2, input_correspondence=input_correspondence
-            )
-            call_replace1 = build_symbol_replacer(
-                call_base_ctx["params1"],
-                call_base_ctx.get("extra_vars1", []),
-                float_mode="fp",
-            )
-            call_replace2 = build_symbol_replacer(
-                call_base_ctx["params2"],
-                call_base_ctx.get("extra_vars2", []),
-                float_mode="fp",
-            )
-            lowered_call_projection = lower_call_projection_for_case_pair(
-                dispatch_frame,
-                analysis1,
-                analysis2,
-                pair_id="monolithic",
-                render_fn1=call_replace1,
-                render_fn2=call_replace2,
-            )
+            # 下の try より前で描画するので、型つきの拒否はここで同じ UNKNOWN にする（strategy の外へ
+            # 出すと authority の event を持たない結果になり、ERROR になる）。
+            try:
+                call_base_ctx = self.formula_builder.build_base_context(
+                    analysis1, analysis2, input_correspondence=input_correspondence
+                )
+                call_replace1 = build_symbol_replacer(
+                    call_base_ctx["params1"],
+                    call_base_ctx.get("extra_vars1", []),
+                    float_mode="fp",
+                )
+                call_replace2 = build_symbol_replacer(
+                    call_base_ctx["params2"],
+                    call_base_ctx.get("extra_vars2", []),
+                    float_mode="fp",
+                )
+                lowered_call_projection = lower_call_projection_for_case_pair(
+                    dispatch_frame,
+                    analysis1,
+                    analysis2,
+                    pair_id="monolithic",
+                    render_fn1=call_replace1,
+                    render_fn2=call_replace2,
+                )
+            except SMT_SEMANTICS_REFUSALS as e:
+                return self._smt_semantics_refusal_result(
+                    e,
+                    analysis1,
+                    analysis2,
+                    dispatch_frame=dispatch_frame,
+                    frozen_surface=frozen_surface,
+                    canonical_census=canonical_census,
+                )
             if lowered_call_projection.status != "proven":
                 blocked_result = StrategyResult(
                     is_equivalent=None,
@@ -1429,38 +1494,14 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
             return blocked_result
 
         except SMT_SEMANTICS_REFUSALS as e:
-            message = str(e)
-            self._debug_print(
-                f"Monolithic check blocked by unsupported SMT semantics: {message}"
+            return self._smt_semantics_refusal_result(
+                e,
+                analysis1,
+                analysis2,
+                dispatch_frame=dispatch_frame,
+                frozen_surface=frozen_surface,
+                canonical_census=canonical_census,
             )
-            blocked_result = StrategyResult(
-                is_equivalent=None,
-                solver_results=ParallelResult(results=[]),
-                smt_formula=None,
-                counterexample_raw=None,
-                return_var1=None,
-                return_var2=None,
-                constrained_fragments=[],
-                unknown_reasons=[
-                    make_internal_v2_reason_diagnostic(
-                        "expression_semantics_unsupported",
-                        stage="S_MONOLITHIC_FALLBACK",
-                        evidence_refs=(e.refusal_evidence_ref,),
-                        object_target_key=(
-                            *e.refusal_target_fields(),
-                            tuple(analysis1.outcome_function_identity()),
-                            tuple(analysis2.outcome_function_identity()),
-                        ),
-                        detail=message,
-                    )
-                ],
-            )
-            if dispatch_frame is not None and dispatch_frame.receipt is None:
-                issue_inconclusive_monolithic_receipts(
-                    dispatch_frame, frozen_surface, canonical_census, message
-                )
-                blocked_result.comparison_execution_receipt = dispatch_frame.receipt
-            return blocked_result
 
         except ReturnAbiAuthorityInvalid as e:
             self._debug_print(f"Monolithic check has invalid return ABI authority: {e}")
