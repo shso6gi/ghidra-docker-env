@@ -52,6 +52,7 @@ from scripts.function_tracer_pcode.proof.return_width.pipeline import (
     prepare_pair_return_observation,
 )
 from scripts.function_tracer_pcode.tests.unit._production_check_harness import run_production_check
+from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_of
 from scripts.function_tracer_pcode.tests.unit.test_unknown_taxonomy_v2_phase6_abi_width_readonly import (
     _width_seed,
 )
@@ -140,13 +141,15 @@ def _run_pair(case_id, left_analysis, right_analysis, *, decisive):
     right_seed = _width_seed("right", function_identity=right_analysis.outcome_function_identity())
     left_case, right_case = object(), object()
     incomplete_proof = SimpleNamespace(complete=False, blocker_kind="test-stop")
+    # production registers the proof plan inside the strategy's comparison (Issue #207)
     with production_signal_scope(session):
-        prepare_pair_return_observation(
-            left_analysis, right_analysis, left_case, right_case,
-            PreparedFunctionReturnWidths({id(left_case): left_seed}, {id(left_case): incomplete_proof}),
-            PreparedFunctionReturnWidths({id(right_case): right_seed}, {id(right_case): incomplete_proof}),
-            return_coverage_ids=(),
-        )
+        with comparison_of(left_analysis, right_analysis):
+            prepare_pair_return_observation(
+                left_analysis, right_analysis, left_case, right_case,
+                PreparedFunctionReturnWidths({id(left_case): left_seed}, {id(left_case): incomplete_proof}),
+                PreparedFunctionReturnWidths({id(right_case): right_seed}, {id(right_case): incomplete_proof}),
+                return_coverage_ids=(),
+            )
         encoder.finalize_open_execution_history(session)
     projection = session.preview_lifecycle_projection()
     active = tuple(row.reason_id for row in projection.c_active_base)

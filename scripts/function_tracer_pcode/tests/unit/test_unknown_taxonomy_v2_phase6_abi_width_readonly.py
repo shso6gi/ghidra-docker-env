@@ -1859,6 +1859,7 @@ def test_prepare_pair_return_observation_routes_typed_abi_authority(
         production_signal_scope,
     )
     from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import comparison_of
 
     def analysis_and_seed(side, *, calling_status="PRESENT", storage="same"):
         analysis = FunctionReturnAnalysis(
@@ -1913,7 +1914,8 @@ def test_prepare_pair_return_observation_routes_typed_abi_authority(
             AbiWidthReadonlyBlockerSignal: AbiWidthReadonlyPilotEncoder(),
         }),
     ).begin({"case": "typed-abi-production-route"})
-    with production_signal_scope(session):
+    # production registers the proof plan inside the strategy's comparison (Issue #207)
+    with production_signal_scope(session), comparison_of(left_analysis, right_analysis):
         if malformed:
             with pytest.raises(ReturnAbiAuthorityInvalid):
                 prepare_pair_return_observation(
