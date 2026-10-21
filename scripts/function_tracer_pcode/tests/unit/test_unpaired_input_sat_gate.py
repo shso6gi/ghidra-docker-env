@@ -96,35 +96,64 @@ _UNPAIRED_CASES = {
 }
 
 
-@contextmanager
-def _strategy(name):
-    """checker の strategy を固定する（既定は pairwise。monolithic は直接選ぶ）。"""
-
-    from scripts.function_tracer_pcode.checker import EquivalenceChecker
-
-    if name == "pairwise":
-        yield
-        return
-    original = EquivalenceChecker.__init__
-
-    def init(self, *args, **kwargs):
-        kwargs["strategy"] = name
-        original(self, *args, **kwargs)
-
-    EquivalenceChecker.__init__ = init
-    try:
-        yield
-    finally:
-        EquivalenceChecker.__init__ = original
-
+#: 比べる構成: (strategy, monolithic の query mode)。pairwise は既定の構成のまま走らせる。
+_CONFIGS = {
+    "pairwise": ("pairwise", None),
+    "monolithic-split": ("monolithic", "split"),
+    "monolithic-legacy": ("monolithic", "legacy"),
+}
 
 #: 選んだ strategy が実際に最初の段として走ったことの確認に使う。
 _FIRST_STAGE = {"pairwise": "S_PAIRWISE", "monolithic": "S_MONOLITHIC_FALLBACK"}
 
 
-def _run(case_id, strategy, left, right):
-    with _strategy(strategy):
-        return run_production_check(f"u21-{strategy}-{case_id}", _side("f", left), _side("g", right))
+@contextmanager
+def _configured(strategy, query_mode):
+    """checker の strategy と monolithic の query mode を固定し、region split の実行を記録する。
+
+    記録は monolithic の region split の実行結果の列（例外で落ちた実行は ``None``）。split は
+    region 実行が成功したこと、legacy は region 実行が 1 度も無いことで、指定した mode が
+    実際に使われたと確かめる（split は失敗すると黙って legacy の formula へ戻るため）。
+    """
+
+    from scripts.function_tracer_pcode.checker import EquivalenceChecker
+    from scripts.function_tracer_pcode.proof.strategies.monolithic import MonolithicStrategy
+
+    region_runs = []
+    original_init = EquivalenceChecker.__init__
+    original_region = MonolithicStrategy._execute_region_plan
+
+    def init(self, *args, **kwargs):
+        if strategy != "pairwise":
+            kwargs["strategy"] = strategy
+            kwargs["monolithic_query_mode"] = query_mode
+        original_init(self, *args, **kwargs)
+
+    def execute_region_plan(self, *args, **kwargs):
+        region_runs.append(None)
+        execution = original_region(self, *args, **kwargs)
+        region_runs[-1] = execution
+        return execution
+
+    EquivalenceChecker.__init__ = init
+    MonolithicStrategy._execute_region_plan = execute_region_plan
+    try:
+        yield region_runs
+    finally:
+        EquivalenceChecker.__init__ = original_init
+        MonolithicStrategy._execute_region_plan = original_region
+
+
+def _run(case_id, config, left, right):
+    strategy, query_mode = _CONFIGS[config]
+    with _configured(strategy, query_mode) as region_runs:
+        result = run_production_check(f"u21-{config}-{case_id}", _side("f", left), _side("g", right))
+    assert result["stage_path"][0] == _FIRST_STAGE[strategy], result["stage_path"]
+    if query_mode == "split":
+        assert region_runs and all(run is not None for run in region_runs), region_runs
+    elif query_mode == "legacy":
+        assert region_runs == []
+    return result
 
 
 def _strings(value):
@@ -149,14 +178,13 @@ def _active(result):
     return sorted({str(row.get("reason_id")) for row in result.get("c_active_base") or ()})
 
 
-@pytest.mark.parametrize("strategy", ["pairwise", "monolithic"])
+@pytest.mark.parametrize("config", sorted(_CONFIGS))
 @pytest.mark.parametrize("case_id", sorted(_UNPAIRED_CASES))
-def test_sat_on_an_input_no_relation_covers_is_not_a_disequivalence(case_id, strategy):
-    """修正前は 4 ケースとも両 strategy で最終 NOT_EQ（SMT は SAT、model は左右別の値）。"""
+def test_sat_on_an_input_no_relation_covers_is_not_a_disequivalence(case_id, config):
+    """修正前は 4 ケースとも pairwise と monolithic（split / legacy）で最終 NOT_EQ（SMT は SAT、model は左右別の値）。"""
 
     left, right = _UNPAIRED_CASES[case_id]()
-    result = _run(case_id, strategy, left, right)
-    assert result["stage_path"][0] == _FIRST_STAGE[strategy], result["stage_path"]
+    result = _run(case_id, config, left, right)
     assert result["final_outcome"] == "UNKNOWN", (result["final_outcome"], _active(result))
     assert COUNTEREXAMPLE_ANALYSIS_SAFETY_UNPROVEN in _active(result)
     refs = _unpaired_refs(result)
@@ -170,13 +198,12 @@ def test_equal_parameter_returns_stay_equivalent():
     assert result["final_outcome"] == "EQUIVALENT", _active(result)
 
 
-@pytest.mark.parametrize("strategy", ["pairwise", "monolithic"])
-def test_parameter_only_disequivalence_stays_not_eq(strategy):
+@pytest.mark.parametrize("config", sorted(_CONFIGS))
+def test_parameter_only_disequivalence_stays_not_eq(config):
     """対照: relation が覆う parameter だけの SAT（``n`` と ``n + 1``）は NOT_EQ のまま。"""
 
     right = Expression.binary_op("INT_ADD", _param(), Expression.constant(1, 4))
-    result = _run("param_vs_successor", strategy, _param(), right)
-    assert result["stage_path"][0] == _FIRST_STAGE[strategy], result["stage_path"]
+    result = _run("param_vs_successor", config, _param(), right)
     assert result["final_outcome"] == "NOT_EQ", _active(result)
     assert not _unpaired_refs(result)
 
