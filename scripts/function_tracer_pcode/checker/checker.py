@@ -73,6 +73,7 @@ from scripts.function_tracer_pcode.checker.result_assembly import (
     unsupported_smt_result,
 )
 from scripts.function_tracer_pcode.checker.pair_execution import (
+    pair_counterexample_committed,
     pair_failure_result_from_check,
     raise_pending_pair_failure,
 )
@@ -780,7 +781,12 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                 # branch decision.  The pair-local authority names the exact
                 # blockers observed above and is intentionally absent from the
                 # function-local unary artifact.
-                if getattr(self, "_active_recurrence_promotion_authority", None) is None:
+                # #130 S3 / A-5: 安全な counterexample を commit した後は昇格した pair の
+                # 比較（新しい意味解析）を始めない。
+                if (
+                    getattr(self, "_active_recurrence_promotion_authority", None) is None
+                    and not pair_counterexample_committed()
+                ):
                     # 6b-4: (1)(2) は段関数、(3) の facade write はその直後・(4) より前に check() が書く。
                     with stage_region("recurrence_promotion"):
                         promotion = prepare_recurrence_promotion(

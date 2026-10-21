@@ -122,16 +122,16 @@ def _active(result):
     return sorted({str(row.get("reason_id")) for row in result.get("c_active_base") or ()})
 
 
-def _run(case_id, config, pair, *, veto=False, eq_only=False, manifest_failure=False):
+def _run(case_id, config, pair, *, veto=False, eq_only=False, manifest_failure=False, debug=False):
     strategy, query_mode = _CONFIGS[config]
     left, right = pair()
     with _configured(strategy, query_mode) as region_runs, _final_gate(veto=veto, eq_only=eq_only) as calls:
         if manifest_failure:
             with call_effect_manifest_failure(lambda _a, _b: True) as injected:
-                result = run_production_check(f"u14-{config}-{case_id}", left, right)
+                result = run_production_check(f"u14-{config}-{case_id}", left, right, debug=debug)
             assert injected, "the manifest failure was not injected"
         else:
-            result = run_production_check(f"u14-{config}-{case_id}", left, right)
+            result = run_production_check(f"u14-{config}-{case_id}", left, right, debug=debug)
     assert result["stage_path"][0] == _FIRST_STAGE[strategy], result["stage_path"]
     if query_mode == "split":
         assert region_runs and all(run is not None for run in region_runs), region_runs

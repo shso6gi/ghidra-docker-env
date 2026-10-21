@@ -69,9 +69,43 @@ def pair_stop_state() -> PairStopState:
     return PairStopState.NONE if ledger is None else ledger.stop_state()
 
 
+#: 新しい意味解析を始めない理由（``semantic_analysis_stop_reason`` の値）。
+#: pair が terminal（限界 / deadline / 内部バグ。Issue #106）。
+SEMANTIC_ANALYSIS_STOP_PAIR_TERMINAL = "pair_terminal"
+#: この pair で安全な counterexample を commit 済み（#130 S3 / A-5）。
+SEMANTIC_ANALYSIS_STOP_COUNTEREXAMPLE_COMMITTED = "counterexample_committed"
+
+
+def pair_counterexample_committed(session: Any = None) -> bool:
+    """この pair で安全な counterexample を decisive として commit 済みか（authority の記録）。
+
+    commit の後は新しい意味解析（次の phase・SAT の後の再試行・stage の fallback・再帰の
+    昇格・conditional lane）を始めない（#130 S3 / A-5）。commit した判定は消えないので、
+    後の解析は判定を変えられず、ERROR / UNKNOWN への劣化と無駄な解析だけを生む。legacy の
+    結果の値（bool）では判定しない。
+
+    ``session`` を省くと active な production session の記録を読む。signal scope の外
+    （確定処理の後の conditional lane）では、その pair の session を渡す。
+    """
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        committed_safe_counterexample,
+    )
+
+    return committed_safe_counterexample(session) is not None
+
+
+def semantic_analysis_stop_reason(session: Any = None):
+    """新しい意味解析を始めない理由（始めてよければ ``None``）。terminal を先に見る。"""
+    if not pair_stop_state().allows_semantic_analysis():
+        return SEMANTIC_ANALYSIS_STOP_PAIR_TERMINAL
+    if pair_counterexample_committed(session):
+        return SEMANTIC_ANALYSIS_STOP_COUNTEREXAMPLE_COMMITTED
+    return None
+
+
 def pair_allows_semantic_analysis() -> bool:
     """新しい意味解析を始めてよいか（phase 再解析 / conditional lane の前に読む）。"""
-    return pair_stop_state().allows_semantic_analysis()
+    return semantic_analysis_stop_reason() is None
 
 
 def raise_pending_pair_failure() -> None:
@@ -346,11 +380,13 @@ __all__ = [
     "apply_pair_failure_gate",
     "binary_display_name",
     "pair_allows_semantic_analysis",
+    "pair_counterexample_committed",
     "pair_failure_result",
     "pair_failure_result_for_exception",
     "pair_failure_result_from_check",
     "pair_stop_state",
     "pending_pair_failure",
     "raise_pending_pair_failure",
+    "semantic_analysis_stop_reason",
 ]
 

@@ -733,7 +733,7 @@ def test_o2_authority_additions_after_preparation_do_not_re_expand_payload(monke
         result.counterexample = counterexample
         return result
 
-    def _lane(checker, result, *, projection):
+    def _lane(checker, result, *, projection, session=None):
         result.diagnostics = {**(result.diagnostics or {}), "conditional_lane": {"ran": True}}
 
     monkeypatch.setattr(production_boundary, "_run_conditional_lane", _lane)

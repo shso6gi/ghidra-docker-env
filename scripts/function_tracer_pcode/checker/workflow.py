@@ -33,6 +33,7 @@ from scripts.function_tracer_pcode.checker.pair_execution import (
     pair_allows_semantic_analysis,
     pair_failure_result_for_exception,
     pair_stop_state,
+    semantic_analysis_stop_reason,
 )
 from scripts.function_tracer_pcode.core.errors import AnalysisFailureError
 from scripts.function_tracer_pcode.core.deadline import checkpoint as deadline_checkpoint
@@ -271,13 +272,16 @@ def _run_phase_stages(
     for phase_spec in DEFAULT_PHASE_PLAN.copy():
         phase_id = phase_spec.phase_id
 
-        if not first_phase and not pair_allows_semantic_analysis():
+        stop_reason = None if first_phase else semantic_analysis_stop_reason()
+        if stop_reason is not None:
             # Issue #106 PR-106-0: pair が terminal になったら次の phase を
             # 始めない。限界が深部で握り潰されて result が普通に返ってきた場合
             # （例外が消えている場合）でも、台帳には残っているのでここで止まる。
+            # #130 S3 / A-5: 安全な counterexample を commit した後も始めない
+            # （final gate の veto で legacy の結果が None になっていても）。
             checker._debug_print(
-                f"Stopping before phase {phase_id.value}: "
-                f"pair execution is terminal ({pair_stop_state().value})"
+                f"Stopping before phase {phase_id.value}: {stop_reason} "
+                f"({pair_stop_state().value})"
             )
             break
         # Issue #106 PR-106-A: 期限を過ぎていれば phase を始めない（台帳にまだ何も無くても）
@@ -392,12 +396,15 @@ def _run_phase_stages(
         )
         attempt_id += 1
 
-        if not pair_allows_semantic_analysis():
+        stop_reason = semantic_analysis_stop_reason()
+        if stop_reason is not None:
             # Issue #106 PR-106-0: この phase の途中で pair が terminal に
-            # なった。SAT 後の再試行（4-B / 4-C / 4-A）も次の phase も始めず、
+            # なった。SAT 後の再試行（4-C / 4-A）も次の phase も始めず、
             # 得られた結果のまま境界へ返す（判定の差し替えは G3 が行う）。
+            # #130 S3 / A-5: この phase の中で安全な counterexample を commit した
+            # ときも同じ（commit した判定は後の解析で変わらない）。
             checker._debug_print(
-                f"Phase {phase_id.value}: pair execution is terminal "
+                f"Phase {phase_id.value}: {stop_reason} "
                 f"({pair_stop_state().value}) - stopping"
             )
             return _attach_trace_and_return(

@@ -743,7 +743,18 @@ def run_obligation_branch_plan(
             branch_id, ActivationState.COMPLETED, outcome, view_id,
             project_proof_gates(result),
         ))
-        if outcome != FunctionProofOutcome.INCONCLUSIVE or not continue_fallback:
+        from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+            committed_safe_counterexample,
+        )
+
+        if (
+            outcome != FunctionProofOutcome.INCONCLUSIVE
+            or not continue_fallback
+            # #130 S3 / A-5: 安全な counterexample を commit した後は次の branch（新しい
+            # 意味解析）を始めない。final gate の veto で結果が INCONCLUSIVE になっていても、
+            # commit した判定は後の branch で変わらない。
+            or committed_safe_counterexample() is not None
+        ):
             controller.next_branch()
             break
 
