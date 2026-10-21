@@ -111,6 +111,23 @@ class ReturnAbiAuthorityInvalid(ValueError):
 
 
 
+def _registering_comparison() -> Any:
+    """The comparison binding a comparison-dependent plan is registered under.
+
+    Registration outside a comparison is refused: production registers only from
+    the strategies, which run inside their comparison scope (Issue #207).
+    """
+
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
+        current_comparison,
+    )
+
+    binding = current_comparison()
+    if binding is None:
+        raise ValueError("return-observation proof plan has no comparison authority")
+    return binding
+
+
 def _positional_parameter_identity_holds(index: int) -> bool:
     from scripts.function_tracer_pcode.proof.formula.input_correspondence.binding import (
         current_relation,
@@ -3793,26 +3810,65 @@ class AbiWidthReadonlyPilotEncoder:
             != projection_seed.seed_digest
         ):
             raise TypeError("return-observation proof plan authority is invalid")
+        # Issue #207: the plan's value depends on the comparison (its analyses), but
+        # the projection seed does not, so the registry is keyed by seed and then by
+        # the comparison that registered the plan.  Several comparisons of one pair
+        # (raw, recursive abstraction) may share the seed; within one comparison a
+        # different plan for the same seed is still drift.  The binding is stored as
+        # the key because completion runs after every comparison scope has closed.
+        binding = _registering_comparison()
         pending = session.domain_signal_state.setdefault(
             "return_observation_proof_plans", {}
         )
-        existing = pending.setdefault(
-            projection_seed.seed_digest, (projection_seed, assessment)
-        )
+        by_comparison = pending.setdefault(projection_seed.seed_digest, {})
+        if any(seed != projection_seed for seed, _plan in by_comparison.values()):
+            raise ValueError("return-observation proof plan seed collided")
+        existing = by_comparison.setdefault(binding, (projection_seed, assessment))
         if existing != (projection_seed, assessment):
             raise ValueError("return-observation proof plan drifted")
 
-    def _complete_registered_return_abi_relations(self, session: Any) -> None:
+    @staticmethod
+    def _registered_return_observation_occurrences(session: Any) -> tuple:
+        """``(seed_digest, seed, assessments)`` per registered projection seed.
+
+        ``assessments`` are the plans of every comparison that registered the seed
+        (i.e. every comparison that emitted its ``return_abi_relation_unproven``
+        occurrence), ordered by the comparison binding digest so the result does not
+        depend on registration order.
+        """
+
         plans = session.domain_signal_state.get("return_observation_proof_plans", {})
+        occurrences = []
+        for seed_digest, by_comparison in tuple(sorted(plans.items())):
+            rows = tuple(
+                plan for _binding, plan in sorted(
+                    by_comparison.items(), key=lambda item: item[0].digest
+                )
+            )
+            occurrences.append((
+                seed_digest, rows[0][0], tuple(assessment for _seed, assessment in rows)
+            ))
+        return tuple(occurrences)
+
+    def _complete_registered_return_abi_relations(self, session: Any) -> None:
         completed = session.domain_signal_state.setdefault(
             "return_observation_abi_relation_completed", set()
         )
-        for seed_digest, (seed, assessment) in tuple(sorted(plans.items())):
+        for seed_digest, seed, assessments in (
+            self._registered_return_observation_occurrences(session)
+        ):
             if seed_digest in completed:
                 continue
-            relation = assessment.relation_assessment
-            if relation.status is not ReturnAbiRelationStatus.PROVED:
+            # The occurrence is shared by every comparison that emitted it, so it is
+            # proved only when every one of their relations is PROVED.
+            if any(
+                assessment.relation_assessment.status
+                is not ReturnAbiRelationStatus.PROVED
+                for assessment in assessments
+            ):
                 continue
+            assessment = assessments[0]
+            relation = assessment.relation_assessment
             blocker = AbiWidthReadonlyBlockerSignal.from_projection_seed(
                 "return_abi_relation_unproven", seed
             )
@@ -3832,14 +3888,15 @@ class AbiWidthReadonlyPilotEncoder:
             completed.add(seed_digest)
 
     def _complete_registered_observation_contracts(self, session: Any) -> None:
-        plans = session.domain_signal_state.get("return_observation_proof_plans", {})
         candidates = tuple(session.domain_signal_state.get(
             "abi_width_readonly_completion_candidates", ()
         ))
         completed = session.domain_signal_state.setdefault(
             "return_observation_contract_completed", set()
         )
-        for seed_digest, (seed, _assessment) in tuple(sorted(plans.items())):
+        for seed_digest, seed, _assessments in (
+            self._registered_return_observation_occurrences(session)
+        ):
             if seed_digest in completed:
                 continue
             high_bit_rows = tuple(
