@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """Condition 等価性とシンボル置換のリグレッションテスト."""
 
+import pytest
+
+from scripts.function_tracer_pcode.core.render_smt import UndeclaredSmtSymbolError
 from scripts.function_tracer_pcode.proof.formula.symbol_replace import build_symbol_replacer
 from scripts.function_tracer_pcode.proof.formula.types import ParameterInfo
 from scripts.function_tracer_pcode.core import CanonicalLocation, Condition, Expression
@@ -156,7 +159,9 @@ def test_symbol_replacer_handles_ast_and_string_without_collision():
     )
 
     assert replace_symbol(published(expr)) == "(bvadd p_1 p1_1)"
-    assert replace_symbol(published(Expression.parameter("p_abc", 0, size=4))) == "p_abc"
+    # mapping に無い parameter は、前方一致で別の記号に写さず、描画を拒否する（Issue #16）。
+    with pytest.raises(UndeclaredSmtSymbolError):
+        replace_symbol(published(Expression.parameter("p_abc", 0, size=4)))
     assert replace_symbol(" (and p p1 p_1 p1_1)") == " (and p_1 p1_1 p_1 p1_1)"
 
 

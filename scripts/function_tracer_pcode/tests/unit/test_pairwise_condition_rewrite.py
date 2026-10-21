@@ -65,6 +65,12 @@ def _binary(op: str, left: Expression, right: Expression) -> Expression:
     return Expression.binary_op(op, left, right)
 
 
+def _declared_param(name: str, smt_name: str) -> ParameterInfo:
+    """mock の base context が宣言する parameter（mapping に無い parameter の描画は拒否される）。"""
+
+    return ParameterInfo(original_name=name, smt_name=smt_name, bit_width=64, index=0)
+
+
 def _sized_param(name: str, size: int) -> Expression:
     return Expression.parameter(name, index=-1, size=size, runtime_ref=None)
 
@@ -240,8 +246,8 @@ def test_pairwise_strategy_marks_unresolved_cases_unknown_without_invoking_solve
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = {
         "header_lines": [],
-        "params1": [],
-        "params2": [],
+        "params1": [_declared_param("param_1", "param_1_1")],
+        "params2": [_declared_param("param_1", "param_1_2")],
         "extra_vars1": [],
         "extra_vars2": [],
     }
@@ -339,8 +345,8 @@ def test_pairwise_strategy_reduces_phi_unknown_under_pair_conditions():
     formula_builder = Mock()
     formula_builder.build_base_context.return_value = {
         "header_lines": [],
-        "params1": [],
-        "params2": [],
+        "params1": [_declared_param("param_1", "param_1_1")],
+        "params2": [_declared_param("param_1", "param_1_2")],
         "extra_vars1": [],
         "extra_vars2": [],
     }

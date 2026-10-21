@@ -547,7 +547,11 @@ def create_mock_analysis(
     ★ [P1] 修正: パラメータ情報を正しく設定してP4B検証を可能にする
     """
     if parameters is None:
-        parameters = []
+        # 既定の戻り値は param_1 を返すので、その parameter を表に載せる（表に無い parameter は
+        # query の入力として対応が取れず、SAT も描画も確定に使えない）。
+        parameters = (
+            [{"name": "param_1", "index": 0, "data_type": "int"}] if returns is None else []
+        )
     dtm = create_mock_data_type_manager()
     
     if returns is None:

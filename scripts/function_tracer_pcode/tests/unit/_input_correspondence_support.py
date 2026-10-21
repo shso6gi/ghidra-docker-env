@@ -21,7 +21,13 @@ from typing import Any, Iterator
 from scripts.function_tracer_pcode.proof.formula.types import FormulaBuilderResult
 
 
-def echo_input_correspondence(builder: Any) -> Any:
+def echo_input_correspondence(builder: Any, *, declare_parameters: bool = False) -> Any:
+    """``declare_parameters``: 本物と同じく、relation の parameter 表を ``params1`` / ``params2`` に載せる。
+
+    本物の base context の symbol mapping は relation の parameter を必ず含む。mapping に無い
+    parameter の描画は拒否される（Issue #16）ので、parameter を式に使う test はこれを指定する。
+    """
+
     base_context = builder.build_base_context
 
     def build_base_context(*_args: Any, **kwargs: Any) -> Any:
@@ -29,7 +35,16 @@ def echo_input_correspondence(builder: Any) -> Any:
         if isinstance(value, dict):
             # 本物と同じく caller が後から書き足す dict そのものを返す（test が
             # 読み戻す key があるので複製しない）。
-            value["input_correspondence"] = kwargs.get("input_correspondence")
+            correspondence = kwargs.get("input_correspondence")
+            value["input_correspondence"] = correspondence
+            if declare_parameters and correspondence is not None:
+                from scripts.function_tracer_pcode.proof.formula.input_correspondence import LEFT, RIGHT
+
+                # test が自分で書いた表はそのまま使う（空の側だけ relation から埋める）。
+                if not value.get("params1"):
+                    value["params1"] = correspondence.parameter_infos(LEFT, "_1")
+                if not value.get("params2"):
+                    value["params2"] = correspondence.parameter_infos(RIGHT, "_2")
         return value
 
     base_context.side_effect = build_base_context

@@ -4,6 +4,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import pickle
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -76,6 +77,13 @@ from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSna
 from scripts.function_tracer_pcode.proof.recurrence_promotion import RecurrenceSidePromotion
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
 
+
+
+
+def _model_binding_declared_inputs(query):
+    """fixture の SAT model: query が宣言した入力をすべて束縛する（replay は宣言の完全な束縛を要求する）。"""
+
+    return {name: 0 for name in re.findall(r"^\(declare-const\s+([^\s()]+)\s", query, re.M)}
 
 def test_phi_return_authority_serialization_is_recursive_and_canonical():
     branch_condition = Condition(Expression.binary_op(
@@ -986,7 +994,8 @@ def test_loop_solver_sat_never_completes_unknown_and_requires_safety_handoff(mon
         "_PINNED_PARALLEL_RUN_IMPL",
         lambda _runner, _query, timeout: ParallelResult(results=[
             SolverResult(
-                "z3", SolverStatus.SAT, elapsed_time=0.001, model={}
+                "z3", SolverStatus.SAT, elapsed_time=0.001,
+                model=_model_binding_declared_inputs(_query),
             ),
         ]),
     )
@@ -1058,17 +1067,18 @@ def test_loop_sat_refutation_fails_closed_when_fixed_model_replay_is_not_sat(
         key_id, (), 3600, "test-revocation",
     ))
     calls = iter((
-        ParallelResult(results=[SolverResult(
-            "z3", SolverStatus.SAT, elapsed_time=0.001, model={}
+        lambda query: ParallelResult(results=[SolverResult(
+            "z3", SolverStatus.SAT, elapsed_time=0.001,
+            model=_model_binding_declared_inputs(query),
         )]),
-        ParallelResult(results=[SolverResult(
+        lambda _query: ParallelResult(results=[SolverResult(
             "z3", SolverStatus.UNSAT, elapsed_time=0.001
         )]),
     ))
     monkeypatch.setattr(
         execution_module,
         "_PINNED_PARALLEL_RUN_IMPL",
-        lambda _runner, _query, timeout: next(calls),
+        lambda _runner, _query, timeout: next(calls)(_query),
     )
     blocker, encoder, session, projection, query, membership, _ = (
         _loop_solver_runtime_fixture("loop-sat-replay-negative-result")
@@ -1135,7 +1145,10 @@ def test_loop_solver_batch_commit_failure_rolls_back_stream_and_all_ledgers(
         execution_module,
         "_PINNED_PARALLEL_RUN_IMPL",
         lambda _runner, _query, timeout: ParallelResult(results=[
-            SolverResult("z3", SolverStatus.SAT, elapsed_time=0.001, model={}),
+            SolverResult(
+                "z3", SolverStatus.SAT, elapsed_time=0.001,
+                model=_model_binding_declared_inputs(_query),
+            ),
         ]),
     )
     loop_encoder = LoopRecurrencePilotEncoder()
@@ -1629,18 +1642,20 @@ def test_loop_timeout_retry_history_uses_census_order_and_live_frontier(
         "loop-retry-policy-" + suffix, 1, "test-owner", "test-source",
         key_id, (), 3600, "test-revocation",
     ))
-    tail = SolverResult(
-        "z3",
-        SolverStatus[tail_status.upper()],
-        elapsed_time=0.001,
-        model={} if tail_status == "sat" else None,
-    )
+    def tail(query):
+        return SolverResult(
+            "z3",
+            SolverStatus[tail_status.upper()],
+            elapsed_time=0.001,
+            model=_model_binding_declared_inputs(query) if tail_status == "sat" else None,
+        )
+
     monkeypatch.setattr(
         execution_module,
         "_PINNED_PARALLEL_RUN_IMPL",
         lambda _runner, _query, timeout: ParallelResult(results=[
             SolverResult("z3", SolverStatus.TIMEOUT, elapsed_time=timeout),
-            tail,
+            tail(_query),
         ]),
     )
     blocker, encoder, session, projection, query, membership, _ = (
@@ -1940,7 +1955,10 @@ def test_loop_sat_refutation_enters_phase6_1_safety_backlog(monkeypatch):
         execution_module,
         "_PINNED_PARALLEL_RUN_IMPL",
         lambda _runner, _query, timeout: ParallelResult(results=[
-            SolverResult("z3", SolverStatus.SAT, elapsed_time=0.001, model={}),
+            SolverResult(
+                "z3", SolverStatus.SAT, elapsed_time=0.001,
+                model=_model_binding_declared_inputs(_query),
+            ),
         ]),
     )
     loop_encoder = LoopRecurrencePilotEncoder()

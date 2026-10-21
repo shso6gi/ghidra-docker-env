@@ -66,11 +66,18 @@ def readonly_sum_expr(loop_summary: LoopSummaryRef) -> Expression:
     )
 
 
+#: ``loop_exact_fixture`` の case が使う parameter（解析の parameter 表と case の式を一致させる）。
+LOOP_FIXTURE_PARAMETERS = (
+    {"name": "base", "index": 0, "data_type": "int *", "size": 8, "is_signed": False},
+    {"name": "count", "index": 1, "data_type": "int", "size": 4, "is_signed": True},
+)
+
+
 def loop_function_analysis(name: str = "loop_fn") -> FunctionReturnAnalysis:
     return raw_function_analysis(
         function_name=name,
         entry_point="0x1000",
-        parameters=[],
+        parameters=[dict(item) for item in LOOP_FIXTURE_PARAMETERS],
         returns=[],
         binary_id="binary-content-a",
     )
@@ -108,10 +115,7 @@ def loop_exact_fixture():
         ),
         False,
     )
-    parameters = [
-        {"name": "base", "index": 0, "data_type": "int *", "size": 8},
-        {"name": "count", "index": 1, "data_type": "int", "size": 4},
-    ]
+    parameters = [dict(item) for item in LOOP_FIXTURE_PARAMETERS]
     exact_return = ReturnInfo(
         address="0x1010",
         value=exact_value,

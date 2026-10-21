@@ -183,6 +183,9 @@ class _MonolithicRegionExecution:
     sat_replay_census: Any = field(default=None, repr=False, compare=False)
     # Issue #167: region query の premise を描いた base context の最終 relation。
     input_correspondence: Any = field(default=None, repr=False, compare=False)
+    # region query が左右別に宣言した自由入力記号（base context の extra variable）。
+    extra_vars1: Any = field(default=None, repr=False, compare=False)
+    extra_vars2: Any = field(default=None, repr=False, compare=False)
 
 
 
@@ -199,3 +202,17 @@ def region_query_input_correspondence(region_execution: Any, region_base_ctx: An
     if region_base_ctx is not None:
         return region_base_ctx.get("input_correspondence")
     return getattr(region_execution, "input_correspondence", None)
+
+
+def region_query_free_inputs(region_execution: Any, region_base_ctx: Any) -> Tuple[Any, Any]:
+    """region split の query が左右別に宣言した自由入力記号（``region_query_input_correspondence`` と同じ出所）。
+
+    記録が無い側は None（decisive gate は ``unavailable`` で塞ぐ）。
+    """
+
+    if region_base_ctx is not None:
+        return region_base_ctx.get("extra_vars1"), region_base_ctx.get("extra_vars2")
+    return (
+        getattr(region_execution, "extra_vars1", None),
+        getattr(region_execution, "extra_vars2", None),
+    )

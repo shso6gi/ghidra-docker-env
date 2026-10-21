@@ -71,6 +71,7 @@ from scripts.function_tracer_pcode.core.render_smt.loop_lowering import (  # noq
 )
 from scripts.function_tracer_pcode.core.render_smt.render import (  # noqa: F401
     SMT_SEMANTICS_REFUSALS,
+    UndeclaredSmtSymbolError,
     UnknownSmtExtensionWidthError,
     UnsupportedSmtIntrinsicError,
     UnsupportedSmtOperatorError,
