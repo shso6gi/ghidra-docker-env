@@ -42,10 +42,12 @@ of them can move ``--fail-on-change``:
     earlier run (``verified_skipped_pair_status_paths``) all keep the tree from
     being called ``complete``.
 ``--runtime-metrics``
-    Wall-clock deltas from ``.runtime-metrics/<pair>.runtime.json``.  Purely
-    informational: it never changes an exit code, it reports how much of each
-    tree it could actually see, and a pair without a receipt is never read as
-    zero seconds.
+    Wall-clock deltas from ``.runtime-metrics/<pair>.runtime.json``, comparing
+    only what each tree's latest run measured itself (receipts retained from an
+    earlier run for reused pairs are counted, not compared; Issue #160).
+    Purely informational: it never changes an exit code, it reports how much
+    of each tree it could actually see, and a pair without a measurement is
+    never read as zero seconds.
 
 Issue #105 / PR-105-B adds one more opt-in section:
 
@@ -74,6 +76,11 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
     FINALIZATION_DURABLE,
     FINALIZATION_UNVERIFIED,
+)
+from scripts.function_tracer_pcode.reporting.pair_runtime_receipt import (
+    RUNTIME_METRICS_DIR,
+    RUNTIME_SUFFIX as RUNTIME_METRICS_SUFFIX,
+    load_tree_measurements,
 )
 from scripts.function_tracer_pcode.reporting.pair_outcomes import (
     LABEL_EQ,
@@ -1009,8 +1016,9 @@ COMPLETENESS_COMPLETE = "complete"
 COMPLETENESS_PARTIAL = "partial"
 COMPLETENESS_UNKNOWN = "unknown"
 PUBLICATION_MANIFEST_FILE = "matrix-publication-manifest.json"
-RUNTIME_METRICS_DIR = ".runtime-metrics"
-RUNTIME_METRICS_SUFFIX = ".runtime.json"
+# Issue #160: the receipt contract (path layout and execution binding) is owned
+# by ``pair_runtime_receipt``; ``RUNTIME_METRICS_DIR`` / ``RUNTIME_METRICS_SUFFIX``
+# are re-exported from it for existing callers.
 
 
 @dataclass(frozen=True)
@@ -1141,70 +1149,35 @@ def combine_completeness(parts: Sequence[TreeCompleteness]) -> Tuple[str, str]:
     return COMPLETENESS_COMPLETE, ""
 
 
-def _runtime_identity(root: Path, path: Path) -> Optional[PairKey]:
-    """``(sample, function, left, right)`` of a ``.runtime.json``, from its path.
-
-    The path layout is the contract (``<sample>/<function>/.runtime-metrics/
-    <function>_<left>_<right>.runtime.json``); the receipt's own identity
-    fields are then required to agree, and a receipt that disagrees is dropped
-    rather than guessed at.
-    """
-    from scripts.function_tracer_pcode.reporting.pair_outcomes import (
-        identity_from_status_path,
-    )
-
-    relative = path.relative_to(root)
-    if len(relative.parts) < 4 or relative.parts[-2] != RUNTIME_METRICS_DIR:
-        return None
-    status_like = root.joinpath(
-        *relative.parts[:-2],
-        relative.name[: -len(RUNTIME_METRICS_SUFFIX)] + PAIR_STATUS_SUFFIX,
-    )
-    try:
-        return identity_from_status_path(root, status_like)
-    except ValueError:
-        return None
-
-
 def load_runtime_metrics(root: Path) -> Tuple[Dict[PairKey, float], int]:
-    """``(elapsed seconds per pair, number of unusable receipts)``."""
-    root = Path(root)
-    elapsed: Dict[PairKey, float] = {}
-    unusable = 0
-    for path in sorted(root.rglob(f"*{RUNTIME_METRICS_SUFFIX}")):
-        key = _runtime_identity(root, path)
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            payload = None
-        if key is None or not isinstance(payload, Mapping):
-            unusable += 1
-            continue
-        identity_matches = (
-            payload.get("function_name") == key[1]
-            and payload.get("left_binary_id") == key[2]
-            and payload.get("right_binary_id") == key[3]
-        )
-        seconds = payload.get("elapsed_seconds")
-        if not identity_matches or not isinstance(seconds, (int, float)):
-            unusable += 1
-            continue
-        elapsed[key] = float(seconds)
-    return elapsed, unusable
+    """``(seconds per pair measured by the tree's latest run, unusable receipts)``.
+
+    Acceptance is ``pair_runtime_receipt.load_tree_measurements``: a receipt
+    retained from an earlier run (a reused pair) is neither a measurement here
+    nor unusable; ``build_runtime_metrics`` reports it separately.
+    """
+    measurements = load_tree_measurements(root)
+    return dict(measurements.measured), measurements.unusable
+
 
 @dataclass(frozen=True)
 class RuntimeMetricsReport:
-    """Wall-clock deltas, and how much of each run they actually cover.
+    """Wall-clock deltas between the measurements each run made itself.
 
-    Informational only.  The report always states its own coverage, because a
-    pair without a receipt must not be read as zero seconds and a partially
-    instrumented run must not be read as a complete measurement.  It never
-    contributes to an exit code.
+    Informational only; it never contributes to an exit code.  What is compared
+    is fixed (Issue #160): per pair, the receipt measured by the run that last
+    wrote each tree.  A receipt the tree retained from an earlier run -- the
+    pair was reused, so the latest run measured nothing for it -- is counted on
+    its own and never enters the deltas, the coverage or the medians.  The
+    denominator is every pair of the comparison, so a pair without a measurement
+    on both sides keeps the coverage incomplete instead of being read as zero.
     """
 
     pairs: int
-    before_seen: int
-    after_seen: int
+    before_measured: int
+    after_measured: int
+    before_retained: int
+    after_retained: int
     before_unusable: int
     after_unusable: int
     deltas: Tuple[Tuple[PairKey, float, float], ...]
@@ -1232,10 +1205,13 @@ class RuntimeMetricsReport:
 
     def as_dict(self) -> Dict[str, Any]:
         return {
+            "compared": "measurements made by the latest run of each tree",
             "pairs": self.pairs,
-            "pairs_with_both_receipts": len(self.deltas),
-            "before_receipts": self.before_seen,
-            "after_receipts": self.after_seen,
+            "pairs_measured_on_both_sides": len(self.deltas),
+            "before_measured": self.before_measured,
+            "after_measured": self.after_measured,
+            "before_retained_from_earlier_runs": self.before_retained,
+            "after_retained_from_earlier_runs": self.after_retained,
             "before_unusable_receipts": self.before_unusable,
             "after_unusable_receipts": self.after_unusable,
             "coverage_complete": self.complete,
@@ -1251,19 +1227,21 @@ def build_runtime_metrics(
     after_root: Path,
     keys: Sequence[PairKey],
 ) -> RuntimeMetricsReport:
-    before_elapsed, before_unusable = load_runtime_metrics(before_root)
-    after_elapsed, after_unusable = load_runtime_metrics(after_root)
+    before = load_tree_measurements(before_root)
+    after = load_tree_measurements(after_root)
     deltas = tuple(
-        (key, before_elapsed[key], after_elapsed[key])
+        (key, before.measured[key], after.measured[key])
         for key in keys
-        if key in before_elapsed and key in after_elapsed
+        if key in before.measured and key in after.measured
     )
     return RuntimeMetricsReport(
         pairs=len(keys),
-        before_seen=len(before_elapsed),
-        after_seen=len(after_elapsed),
-        before_unusable=before_unusable,
-        after_unusable=after_unusable,
+        before_measured=len(before.measured),
+        after_measured=len(after.measured),
+        before_retained=len(before.retained),
+        after_retained=len(after.retained),
+        before_unusable=before.unusable,
+        after_unusable=after.unusable,
         deltas=deltas,
     )
 
@@ -1560,13 +1538,18 @@ def format_runtime_metrics(report: RuntimeMetricsReport) -> List[str]:
     lines = [
         "",
         "Runtime metrics (informational only -- never part of an exit code):",
-        f"  pairs: {report.pairs}; with a usable receipt on both sides: {len(report.deltas)}",
-        f"  receipts read: before {report.before_seen}, after {report.after_seen} "
-        f"(unusable: before {report.before_unusable}, after {report.after_unusable})",
+        "  compared: the measurement each tree's latest run made itself",
+        f"  pairs: {report.pairs}; measured on both sides: {len(report.deltas)}",
+        f"  measured by the latest run: before {report.before_measured}, "
+        f"after {report.after_measured}",
+        f"  retained from earlier runs (reused pairs, not compared): "
+        f"before {report.before_retained}, after {report.after_retained}",
+        f"  unusable receipts: before {report.before_unusable}, "
+        f"after {report.after_unusable}",
         f"  coverage complete: {report.complete}",
         f"  faster: {report.faster}  slower: {report.slower}  "
         f"median delta: {'n/a' if median is None else f'{median:+.2f}s'}",
-        "  a pair without a receipt is not counted as zero seconds, and wall clock "
+        "  a pair without a measurement is not counted as zero seconds, and wall clock "
         "varies between runs, so a delta alone is not evidence of a code effect.",
     ]
     return lines

@@ -1340,13 +1340,19 @@ PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE=/dev/null
 PAIR_STATUS_VERIFICATION_KEY_FILE=/dev/null
 PAIR_PRIVATE_KEY=/dev/null; PAIR_PUBLIC_KEY=/dev/null
 EQBENCH_DEBUG=0; EQBENCH_PROGRESS_INTERVAL_SECONDS=1
+# Issue #160: run_pair passes these to the runtime receipt writer, and times every
+# supervisor invocation with the common GNU time prefix (the runner sources the common file).
+EQBENCH_CPU_TOKENS=16; EQBENCH_PAIR_CPU_TOKENS=8; PARALLEL_JOBS=2; PARALLEL_JOBS_REQUESTED=2
+RUNTIME_RUN_ID=harness-run
+source "__COMMON__"
 FT_EXPANDER_DEDUP_CASE_LIMIT=0; FT_CALLEE_UNBOUND_REUSE=0
 FT_CALLEE_UNBOUND_REUSE_SHADOW=0
 EQBENCH_TMPDIR="__TMP__/runtmp"; PROCESS_CLEANUP_FAILURES="__TMP__/cleanup-failures"
 SOURCE_PAIR_COUNT=1
 
 # runner の他の関数はこの test の対象ではないので握り潰す。
-write_pair_progress_receipt() { :; }
+validation_write_pair_runtime_receipt() { :; }
+validation_reset_pair_runtime_receipts() { :; }
 supervisor_projection_is_terminal() { return 0; }
 validate_current_pair_status() { printf 'UNKNOWN'; }
 cleanup_pair_process_authority_with_run_health() { return 0; }
@@ -1355,7 +1361,9 @@ progress_update() { :; }
 __FUNCTION__
 
 run_pair __ARGS__ || true
-"""
+""".replace(
+    "__COMMON__", str(REPO_ROOT / "scripts" / "validation_matrix_common.sh")
+)
 
 _PYTHON_PROBE = """#!/bin/sh
 # 最初に child 側の python が呼ばれた時点で、前回 execution の成果物が

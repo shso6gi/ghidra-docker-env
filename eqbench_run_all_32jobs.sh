@@ -120,6 +120,11 @@ if [[ ! "$EQBENCH_MAX_SAMPLES" =~ ^[0-9]+$ ]]; then
     echo "Error: EQBENCH_MAX_SAMPLES must be a non-negative integer" >&2
     exit 1
 fi
+# Issue #160: FULL_EQBENCH は凍結した census の全 pair を実行する。実行対象を絞る入力は
+# pair を 1 つも始めずに拒否する（規則は Eq / Neq 共通の 1 箇所）。
+validation_refuse_narrowed_full_scope "$EQBENCH_RUN_SCOPE" "$EQBENCH_MAX_SAMPLES" \
+    "$EQBENCH_SAMPLE_FILTER" "$EQBENCH_PAIR_FILTER" "$EQBENCH_RERUN_MANIFEST" \
+    "$ERROR_ONLY_RERUN" || exit 1
 if [[ ! "$PAIR_PROCESS_TIMEOUT_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]] \
     || [[ ! "$PAIR_PROCESS_KILL_AFTER_SECONDS" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     echo "Error: pair process timeout values must be seconds, for example 300s" >&2
@@ -460,77 +465,6 @@ required_binary_ids() {
 
 EXPECTED_PAIRS_PER_FUNCTION="$(selected_pair_count)"
 
-write_pair_progress_receipt() {
-    local receipt_path="$1"
-    local state="$2"
-    local function_name="$3"
-    local left_id="$4"
-    local right_id="$5"
-    local started_at="$6"
-    local finished_at="$7"
-    local elapsed_seconds="$8"
-    local max_rss_kb="$9"
-    local status="${10}"
-    local error_kind="${11}"
-    local child_returncode="${12}"
-    local timed_command_pid="${13}"
-    local temporary_path
-    temporary_path="${receipt_path}.tmp.$$"
-    "$PYTHON_BIN" - "$temporary_path" "$receipt_path" "$state" \
-        "$function_name" "$left_id" "$right_id" "$started_at" \
-        "$finished_at" "$elapsed_seconds" "$max_rss_kb" \
-        "$status" "$error_kind" "$child_returncode" \
-        "$timed_command_pid" \
-        "$EQBENCH_CPU_TOKENS" "$EQBENCH_PAIR_CPU_TOKENS" \
-        "$PARALLEL_JOBS_REQUESTED" "$PARALLEL_JOBS" <<'PY'
-import json
-import os
-import sys
-
-(
-    temporary_path, receipt_path, state, function_name, left_id, right_id,
-    started_at, finished_at, elapsed_seconds, max_rss_kb, status, error_kind,
-    child_returncode, timed_command_pid, cpu_tokens, pair_cpu_tokens,
-    requested_jobs, effective_jobs,
-) = sys.argv[1:]
-
-def number(value):
-    if value in {"", "-", "None"}:
-        return None
-    try:
-        return float(value) if "." in value else int(value)
-    except ValueError:
-        return None
-
-payload = {
-    "schema": "eqbench-pair-progress-receipt-v1",
-    "state": state,
-    "function_name": function_name,
-    "left_binary_id": left_id,
-    "right_binary_id": right_id,
-    "started_at_epoch": number(started_at),
-    "finished_at_epoch": number(finished_at),
-    "elapsed_seconds": number(elapsed_seconds),
-    "max_rss_kb": number(max_rss_kb),
-    "status": None if status == "-" else status,
-    "error_kind": None if error_kind == "-" else error_kind,
-    "child_returncode": number(child_returncode),
-    "cpu_tokens": int(cpu_tokens),
-    "pair_cpu_tokens": int(pair_cpu_tokens),
-    "parallel_jobs_requested": int(requested_jobs),
-    "parallel_jobs_effective": int(effective_jobs),
-    "writer_pid": os.getpid(),
-    "timed_command_pid": number(timed_command_pid),
-}
-with open(temporary_path, "w", encoding="utf-8") as handle:
-    json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
-    handle.write("\n")
-    handle.flush()
-    os.fsync(handle.fileno())
-os.replace(temporary_path, receipt_path)
-PY
-}
-
 run_pair() {
     local sample_label="$1"
     local function_name="$2"
@@ -553,7 +487,7 @@ run_pair() {
     rm -f -- "$stage_journal_file"
     local pair_tmpdir
     pair_tmpdir="$(mktemp -d "$EQBENCH_RUN_TMPDIR/pair.XXXXXX")"
-    local runtime_metrics_dir progress_receipt runtime_metrics_file
+    local runtime_metrics_dir
     runtime_metrics_dir="${output_dir}/.runtime-metrics"
     mkdir -p "$runtime_metrics_dir"
     # journal と同じ execution 境界。まだ dump を退避しない（PR-124-C の責務）が、
@@ -570,13 +504,12 @@ run_pair() {
     # evidence の読み。store は cleanup で消える）。前回 execution の record も同じ境界で捨てる。
     local classification_failure="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.classification-failure.json"
     rm -f -- "$classification_failure"
-    progress_receipt="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.progress.json"
-    runtime_metrics_file="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.runtime.json"
-    local started_at finished_at elapsed_seconds max_rss_kb
+    # Issue #160: 前回 execution の runtime receipt も同じ境界で捨てる（残すと、この execution が
+    # receipt を書けなかったときに前回の計測値が current の pair に見える）。
+    local pair_stem="${function_name}_${left_id}_${right_id}"
+    validation_reset_pair_runtime_receipts "$runtime_metrics_dir" "$pair_stem"
+    local started_at finished_at
     started_at="$(date +%s.%N)"
-    write_pair_progress_receipt "$progress_receipt" "RUNNING" \
-        "$function_name" "$left_id" "$right_id" "$started_at" \
-        "-" "-" "-" "-" "-" "-" "-"
     local result_entry_occurrence_nonce
     result_entry_occurrence_nonce="$("$PYTHON_BIN" -c \
         'import secrets; print(secrets.token_hex(24))')"
@@ -595,6 +528,18 @@ run_pair() {
     checkpoint_root="${EQBENCH_RUN_TMPDIR}/process-authority"
     authority_output="${checkpoint_root}/${execution_nonce}/supervisor-projection.json"
     mkdir -p "$checkpoint_root"
+    # Issue #160: receipt は pair-status と同じ execution_nonce で束縛する。値は引数で渡す。
+    local -a receipt_args=(
+        --metrics-dir "$runtime_metrics_dir" --stem "$pair_stem"
+        --function-name "$function_name" --left-binary-id "$left_id"
+        --right-binary-id "$right_id" --execution-nonce "$execution_nonce"
+        --run-id "$RUNTIME_RUN_ID"
+        --started-at-epoch "$started_at" --cpu-tokens "$EQBENCH_CPU_TOKENS"
+        --pair-cpu-tokens "$EQBENCH_PAIR_CPU_TOKENS"
+        --parallel-jobs-requested "$PARALLEL_JOBS_REQUESTED"
+        --parallel-jobs-effective "$PARALLEL_JOBS"
+    )
+    validation_write_pair_runtime_receipt "$PYTHON_BIN" --state RUNNING "${receipt_args[@]}"
     # Issue #124 PR-124-B: pair ごとの診断出力先。journal は log の隣に置き、
     # stack dump は checkpoint 配下（cleanup で消える）に書かせて、cleanup 後も
     # 残る run dir 側の artifact path を journal の正本として渡す。
@@ -655,11 +600,12 @@ run_pair() {
         -- "${equiv_cmd[@]}"
     )
 
-    local ec command_pid resource_metrics_file
-    resource_metrics_file="${pair_tmpdir}/resource-usage.txt"
-    /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kb=%M' \
-        -o "$resource_metrics_file" "${supervisor_cmd[@]}" \
-        > "$log_file" 2>&1 &
+    # Issue #160: この execution の計測は supervisor の全呼び出し（初回と再開）。呼び出しごとに
+    # 別の usage file に測り、集約は receipt writer に任せる（再開分で初回を上書きしない）。
+    local ec command_pid
+    local -a usage_args=(--resource-usage "${pair_tmpdir}/resource-usage.1.txt")
+    "${VALIDATION_SUPERVISOR_TIME[@]}" -o "${pair_tmpdir}/resource-usage.1.txt" \
+        "${supervisor_cmd[@]}" > "$log_file" 2>&1 &
     command_pid=$!
     # Refresh the RUNNING receipt from a helper loop while waiting on the pair
     # process itself: polling the process with `sleep` held every scheduler
@@ -670,9 +616,8 @@ run_pair() {
             sleep "$EQBENCH_PROGRESS_INTERVAL_SECONDS" &
             wait $! 2>/dev/null || break
             kill -0 "$command_pid" 2>/dev/null || break
-            write_pair_progress_receipt "$progress_receipt" "RUNNING" \
-                "$function_name" "$left_id" "$right_id" "$started_at" \
-                "-" "-" "-" "-" "-" "-" "$command_pid"
+            validation_write_pair_runtime_receipt "$PYTHON_BIN" --state RUNNING \
+                "${receipt_args[@]}" --timed-command-pid "$command_pid"
         done
     ) &
     local progress_writer_pid=$!
@@ -687,18 +632,15 @@ run_pair() {
     if ! supervisor_projection_is_terminal "$authority_output"; then
         echo "Supervisor recovery: resuming non-terminal projection before classification" \
             >> "$log_file"
-        if "${supervisor_cmd[@]}" >> "$log_file" 2>&1; then
+        usage_args+=(--resource-usage "${pair_tmpdir}/resource-usage.2.txt")
+        if "${VALIDATION_SUPERVISOR_TIME[@]}" -o "${pair_tmpdir}/resource-usage.2.txt" \
+            "${supervisor_cmd[@]}" >> "$log_file" 2>&1; then
             ec=0
         else
             ec=$?
         fi
     fi
     finished_at="$(date +%s.%N)"
-    elapsed_seconds="$(awk -F= '$1 == "elapsed_seconds" {print $2}' "$resource_metrics_file" 2>/dev/null || true)"
-    max_rss_kb="$(awk -F= '$1 == "max_rss_kb" {print $2}' "$resource_metrics_file" 2>/dev/null || true)"
-    [[ -n "$elapsed_seconds" ]] || elapsed_seconds="-"
-    [[ -n "$max_rss_kb" ]] || max_rss_kb="-"
-    rm -rf -- "$pair_tmpdir"
 
     if (( ec == 124 || ec == 137 )); then
         {
@@ -771,11 +713,12 @@ run_pair() {
     else
         cleanup_ec=$?
     fi
-    write_pair_progress_receipt "$progress_receipt" "COMPLETED" \
-        "$function_name" "$left_id" "$right_id" "$started_at" \
-        "$finished_at" "$elapsed_seconds" "$max_rss_kb" \
-        "$status" "$error_kind" "$child_returncode" "$command_pid"
-    cp "$progress_receipt" "$runtime_metrics_file"
+    validation_write_pair_runtime_receipt "$PYTHON_BIN" --state COMPLETED \
+        "${receipt_args[@]}" "${usage_args[@]}" --finished-at-epoch "$finished_at" \
+        --status "$status" --error-kind "$error_kind" \
+        --child-returncode "$child_returncode" --timed-command-pid "$command_pid"
+    # usage file は receipt を書くまで残す（pair_tmpdir は child の TMPDIR でもある）。
+    rm -rf -- "$pair_tmpdir"
     printf '[%s] [%s %s/%s] %s <-> %s : %s' \
         "$sample_label" "$function_name" "$count" "$total" "$left_id" "$right_id" "$status"
     printf ' (error_kind=%s child_exit=%s supervisor_exit=%s)' \
@@ -868,10 +811,6 @@ printf '%s\n' "${PREFILTER_SOURCE_PATHS[@]}" > "$PREFILTER_SOURCE_CENSUS_FILE"
 PREFILTER_SOURCE_CENSUS_DIGEST="$(sha256sum "$PREFILTER_SOURCE_CENSUS_FILE" | awk '{print $1}')"
 
 if [[ "$EQBENCH_RUN_SCOPE" == "FULL_EQBENCH" ]]; then
-    if (( EQBENCH_MAX_SAMPLES != 0 )) || [[ -n "$EQBENCH_SAMPLE_FILTER" || -n "$EQBENCH_PAIR_FILTER" ]]; then
-        echo "Error: FULL_EQBENCH requires EQBENCH_MAX_SAMPLES=0 and empty sample/pair filters" >&2
-        exit 1
-    fi
     mapfile -t EXPECTED_FULL_SOURCES < <(
         "$PYTHON_BIN" -c \
             'import json,sys; print("\n".join(json.load(open(sys.argv[1]))["source_paths"]))' \
@@ -906,9 +845,89 @@ if (( EQBENCH_MAX_SAMPLES > 0 && ${#SAMPLE_SOURCES[@]} > EQBENCH_MAX_SAMPLES ));
     SAMPLE_SOURCES=("${SAMPLE_SOURCES[@]:0:EQBENCH_MAX_SAMPLES}")
 fi
 
-mkdir -p "$OUTPUT_BASE_DIR"
 OUTPUT_BASE_DIR="$(realpath -m "$OUTPUT_BASE_DIR")"
 AUTHORITY_KEYSET_ID="${EQBENCH_AUTHORITY_KEYSET_ID:-$(printf '%s' "$OUTPUT_BASE_DIR" | sha256sum | awk '{print $1}')}"
+ANALYSIS_SOURCE_DIGEST_START="$("$PYTHON_BIN" -m \
+    scripts.function_tracer_pcode.reporting.execution_identity \
+    --repo-root "$SCRIPT_DIR" --print-source-digest)"
+# Issue #123: この run を出した作業ツリー・時刻・ホストを manifest に残す。
+# analysis_config_digest は固定 key 集合からしか作られないので、これらの行を
+# 足しても判定系 digest は変わらない。
+RUN_START_TIME_UTC="$(validation_utc_timestamp)"
+RUN_HOSTNAME="$(validation_run_hostname)"
+RUN_GIT_STATE_LINES="$(validation_run_git_state_lines "$PYTHON_BIN" "$SCRIPT_DIR")"
+RUNNER_SCRIPT_SHA256="$(sha256sum "$SCRIPT_DIR/eqbench_run_all_32jobs.sh" | awk '{print $1}')"
+# Issue #160: この run の id。各 runtime receipt に入り、consumer はこれで「この run が計測した
+# pair」と「再利用した pair が以前の run から持ち越した計測」を区別する。
+RUNTIME_RUN_ID="$(validation_new_runtime_run_id "$PYTHON_BIN")" || exit 1
+PAIR_PROCESS_DEADLINE_POLICY_DIGEST="$(printf '%s' \
+    "phase8:${PAIR_PROCESS_TIMEOUT_SECONDS}:${PAIR_PROCESS_KILL_AFTER_SECONDS}" \
+    | sha256sum | awk '{print $1}')"
+# Issue #160: run manifest は出力先の外（run の tmp）で先に組み立て、FULL scope ではそれを
+# 出力先の受理判定にかける。出力先へは判定の後で初めて書く（拒否した dir は変えない）。
+CANDIDATE_RUN_MANIFEST_FILE="$EQBENCH_RUN_TMPDIR/run_manifest.candidate.txt"
+cat > "$CANDIDATE_RUN_MANIFEST_FILE" <<EOF
+run_kind=eqbench_all_eq_matrix_current
+run_scope=$EQBENCH_RUN_SCOPE
+build_policy=$EQBENCH_BUILD_POLICY
+eqbench_root=$EQBENCH_ROOT
+output_base_dir=$OUTPUT_BASE_DIR
+python_bin=$PYTHON_BIN
+parallel_jobs=$PARALLEL_JOBS
+parallel_jobs_requested=$PARALLEL_JOBS_REQUESTED
+resource_admission_enabled=$EQBENCH_RESOURCE_ADMISSION
+resource_admission_jobs=$RESOURCE_ADMISSION_JOBS
+cpu_tokens=$EQBENCH_CPU_TOKENS
+pair_cpu_tokens=$EQBENCH_PAIR_CPU_TOKENS
+progress_interval_seconds=$EQBENCH_PROGRESS_INTERVAL_SECONDS
+validation_summary_level=$VALIDATION_SUMMARY_LEVEL
+pair_process_timeout=$PAIR_PROCESS_TIMEOUT
+pair_process_kill_after=$PAIR_PROCESS_KILL_AFTER
+pair_stack_dump_lead=$PAIR_STACK_DUMP_LEAD
+pair_process_timeout_seconds=$PAIR_PROCESS_TIMEOUT_SECONDS
+pair_process_kill_after_seconds=$PAIR_PROCESS_KILL_AFTER_SECONDS
+$ANALYSIS_TIMEOUT_MANIFEST_LINES
+equiv_timeout=$EQUIV_TIMEOUT
+decompile_timeout=$DECOMPILE_TIMEOUT
+pairwise_timeout=$PAIRWISE_TIMEOUT
+pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD
+expander_dedup_case_limit_requested=$(validation_manifest_value "$FT_EXPANDER_DEDUP_CASE_LIMIT_REQUESTED")
+expander_dedup_case_limit_effective=$FT_EXPANDER_DEDUP_CASE_LIMIT
+callee_unbound_reuse=$FT_CALLEE_UNBOUND_REUSE
+callee_unbound_reuse_shadow=$FT_CALLEE_UNBOUND_REUSE_SHADOW
+skip_completed_results=$SKIP_COMPLETED_RESULTS
+error_only_rerun=$ERROR_ONLY_RERUN
+debug=$EQBENCH_DEBUG
+analysis_config_schema=eqbench-analysis-config-v4
+identical_fast_path=$EQBENCH_IDENTICAL_FAST_PATH
+eqbench_tmpdir=$EQBENCH_TMPDIR
+authority_keyset_id=$AUTHORITY_KEYSET_ID
+compile_axes=arm64,mips64 x clang,gcc x O0,O1,O2,O3
+prefilter_source_count=${#PREFILTER_SOURCE_PATHS[@]}
+prefilter_source_census_digest=$PREFILTER_SOURCE_CENSUS_DIGEST
+max_samples=$EQBENCH_MAX_SAMPLES
+target_sources=${#SAMPLE_SOURCES[@]}
+function_policy=all top-level source-defined functions except main
+binary_policy=verified build receipt first; isolated fresh build fallback
+sample_filter=$EQBENCH_SAMPLE_FILTER
+pair_filter=$EQBENCH_PAIR_FILTER
+runner_script_sha256=$RUNNER_SCRIPT_SHA256
+start_time_utc=$RUN_START_TIME_UTC
+hostname=$RUN_HOSTNAME
+$RUN_GIT_STATE_LINES
+analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST_START
+runtime_run_id=$RUNTIME_RUN_ID
+dry_run=$DRY_RUN
+EOF
+ANALYSIS_CONFIG_DIGEST="$("$PYTHON_BIN" -m \
+    scripts.function_tracer_pcode.reporting.execution_receipt \
+    --run-manifest "$CANDIDATE_RUN_MANIFEST_FILE" --print-analysis-config-digest)"
+printf 'analysis_config_digest=%s\n' "$ANALYSIS_CONFIG_DIGEST" >> "$CANDIDATE_RUN_MANIFEST_FILE"
+if [[ "$EQBENCH_RUN_SCOPE" == "FULL_EQBENCH" ]]; then
+    validation_admit_full_scope_output "$PYTHON_BIN" "$OUTPUT_BASE_DIR" \
+        "$CANDIDATE_RUN_MANIFEST_FILE" || exit 1
+fi
+mkdir -p "$OUTPUT_BASE_DIR"
 # Issue #170: keyset（秘密鍵の置き場所）は共通の owner が組み立てて判定する（正規化した private
 # root の直下の 1 component で、OUTPUT と分離している）。runner は root/id を自分で組み立てない。
 PROCESS_AUTHORITY_ROOT="$(validation_resolve_authority_keyset \
@@ -962,19 +981,6 @@ STACK_DUMP_ARTIFACT_STATE_FILE="$OUTPUT_BASE_DIR/stack_dump_artifact_state.tsv"
 : > "$STACK_DUMP_ARTIFACT_STATE_FILE"
 USED_BUILD_RECEIPTS_FILE="$OUTPUT_BASE_DIR/used_build_receipts.jsonl"
 : > "$USED_BUILD_RECEIPTS_FILE"
-ANALYSIS_SOURCE_DIGEST_START="$("$PYTHON_BIN" -m \
-    scripts.function_tracer_pcode.reporting.execution_identity \
-    --repo-root "$SCRIPT_DIR" --print-source-digest)"
-# Issue #123: この run を出した作業ツリー・時刻・ホストを manifest に残す。
-# analysis_config_digest は固定 key 集合からしか作られないので、これらの行を
-# 足しても判定系 digest は変わらない。
-RUN_START_TIME_UTC="$(validation_utc_timestamp)"
-RUN_HOSTNAME="$(validation_run_hostname)"
-RUN_GIT_STATE_LINES="$(validation_run_git_state_lines "$PYTHON_BIN" "$SCRIPT_DIR")"
-RUNNER_SCRIPT_SHA256="$(sha256sum "$SCRIPT_DIR/eqbench_run_all_32jobs.sh" | awk '{print $1}')"
-PAIR_PROCESS_DEADLINE_POLICY_DIGEST="$(printf '%s' \
-    "phase8:${PAIR_PROCESS_TIMEOUT_SECONDS}:${PAIR_PROCESS_KILL_AFTER_SECONDS}" \
-    | sha256sum | awk '{print $1}')"
 export PROCESS_SUPERVISOR_KEY_ID PROCESS_WORKER_KEY_ID
 export PROCESS_SUPERVISOR_KEY_FILE PROCESS_WORKER_KEY_FILE
 export PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE PAIR_STATUS_VERIFICATION_KEY_FILE
@@ -985,62 +991,7 @@ PREVIOUS_RUN_MANIFEST_FILE="$EQBENCH_RUN_TMPDIR/previous-run-manifest.txt"
 if [[ -s "$RUN_MANIFEST_FILE" ]]; then
     cp "$RUN_MANIFEST_FILE" "$PREVIOUS_RUN_MANIFEST_FILE"
 fi
-cat > "$RUN_MANIFEST_FILE" <<EOF
-run_kind=eqbench_all_eq_matrix_current
-run_scope=$EQBENCH_RUN_SCOPE
-build_policy=$EQBENCH_BUILD_POLICY
-eqbench_root=$EQBENCH_ROOT
-output_base_dir=$OUTPUT_BASE_DIR
-python_bin=$PYTHON_BIN
-parallel_jobs=$PARALLEL_JOBS
-parallel_jobs_requested=$PARALLEL_JOBS_REQUESTED
-resource_admission_enabled=$EQBENCH_RESOURCE_ADMISSION
-resource_admission_jobs=$RESOURCE_ADMISSION_JOBS
-cpu_tokens=$EQBENCH_CPU_TOKENS
-pair_cpu_tokens=$EQBENCH_PAIR_CPU_TOKENS
-progress_interval_seconds=$EQBENCH_PROGRESS_INTERVAL_SECONDS
-validation_summary_level=$VALIDATION_SUMMARY_LEVEL
-pair_process_timeout=$PAIR_PROCESS_TIMEOUT
-pair_process_kill_after=$PAIR_PROCESS_KILL_AFTER
-pair_stack_dump_lead=$PAIR_STACK_DUMP_LEAD
-pair_process_timeout_seconds=$PAIR_PROCESS_TIMEOUT_SECONDS
-pair_process_kill_after_seconds=$PAIR_PROCESS_KILL_AFTER_SECONDS
-$ANALYSIS_TIMEOUT_MANIFEST_LINES
-equiv_timeout=$EQUIV_TIMEOUT
-decompile_timeout=$DECOMPILE_TIMEOUT
-pairwise_timeout=$PAIRWISE_TIMEOUT
-pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD
-expander_dedup_case_limit_requested=$(validation_manifest_value "$FT_EXPANDER_DEDUP_CASE_LIMIT_REQUESTED")
-expander_dedup_case_limit_effective=$FT_EXPANDER_DEDUP_CASE_LIMIT
-callee_unbound_reuse=$FT_CALLEE_UNBOUND_REUSE
-callee_unbound_reuse_shadow=$FT_CALLEE_UNBOUND_REUSE_SHADOW
-skip_completed_results=$SKIP_COMPLETED_RESULTS
-error_only_rerun=$ERROR_ONLY_RERUN
-debug=$EQBENCH_DEBUG
-analysis_config_schema=eqbench-analysis-config-v4
-identical_fast_path=$EQBENCH_IDENTICAL_FAST_PATH
-eqbench_tmpdir=$EQBENCH_TMPDIR
-authority_keyset_id=$AUTHORITY_KEYSET_ID
-compile_axes=arm64,mips64 x clang,gcc x O0,O1,O2,O3
-prefilter_source_count=${#PREFILTER_SOURCE_PATHS[@]}
-prefilter_source_census_digest=$PREFILTER_SOURCE_CENSUS_DIGEST
-max_samples=$EQBENCH_MAX_SAMPLES
-target_sources=${#SAMPLE_SOURCES[@]}
-function_policy=all top-level source-defined functions except main
-binary_policy=verified build receipt first; isolated fresh build fallback
-sample_filter=$EQBENCH_SAMPLE_FILTER
-pair_filter=$EQBENCH_PAIR_FILTER
-runner_script_sha256=$RUNNER_SCRIPT_SHA256
-start_time_utc=$RUN_START_TIME_UTC
-hostname=$RUN_HOSTNAME
-$RUN_GIT_STATE_LINES
-analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST_START
-dry_run=$DRY_RUN
-EOF
-ANALYSIS_CONFIG_DIGEST="$("$PYTHON_BIN" -m \
-    scripts.function_tracer_pcode.reporting.execution_receipt \
-    --run-manifest "$RUN_MANIFEST_FILE" --print-analysis-config-digest)"
-printf 'analysis_config_digest=%s\n' "$ANALYSIS_CONFIG_DIGEST" >> "$RUN_MANIFEST_FILE"
+cp "$CANDIDATE_RUN_MANIFEST_FILE" "$RUN_MANIFEST_FILE"
 PAIR_STATUS_RESUME_COMPAT_ARGS=()
 SUMMARY_SHORTCUT_AUTHORIZED=0
 if compatible_identity="$("$PYTHON_BIN" -m \
