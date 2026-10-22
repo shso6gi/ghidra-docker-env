@@ -220,10 +220,11 @@ def write_publication_manifest(tree: Path, expected, skipped=(), *, schema=None)
 
 
 def write_runtime_receipt(tree: Path, sample, function, left, right, seconds, **override):
-    """A COMPLETED receipt bound (Issue #160) to the pair status next to it.
+    """A COMPLETED receipt measured (Issue #160) by the run that last wrote ``tree``.
 
-    The pair status written by ``write_pair`` gets the receipt's
-    ``execution_nonce`` so the binding holds unless a test overrides it.
+    It is bound to the pair status written by ``write_pair`` (the status gets
+    the receipt's ``execution_nonce``) and to the tree's ``runtime_run_id``
+    (added to ``run_manifest.txt`` if absent), unless a test overrides either.
     """
     directory = tree / sample / function / ot.RUNTIME_METRICS_DIR
     directory.mkdir(parents=True, exist_ok=True)
@@ -233,10 +234,15 @@ def write_runtime_receipt(tree: Path, sample, function, left, right, seconds, **
         status = json.loads(status_path.read_text(encoding="utf-8"))
         status.setdefault("execution_nonce", nonce)
         status_path.write_text(json.dumps(status), encoding="utf-8")
+    manifest = tree / "run_manifest.txt"
+    text = manifest.read_text(encoding="utf-8") if manifest.is_file() else ""
+    if "runtime_run_id=" not in text:
+        manifest.write_text(text + "runtime_run_id=fixture-run\n", encoding="utf-8")
     payload = {
         "schema": "eqbench-pair-progress-receipt-v2",
         "function_name": function, "left_binary_id": left, "right_binary_id": right,
         "elapsed_seconds": seconds, "state": "COMPLETED", "execution_nonce": nonce,
+        "run_id": "fixture-run", "measurement_complete": True,
     }
     payload.update(override)
     (directory / f"{function}_{left}_{right}{ot.RUNTIME_METRICS_SUFFIX}").write_text(

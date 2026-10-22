@@ -508,7 +508,7 @@ run_pair() {
     # receipt を書けなかったときに前回の計測値が current の pair に見える）。
     local pair_stem="${function_name}_${left_id}_${right_id}"
     validation_reset_pair_runtime_receipts "$runtime_metrics_dir" "$pair_stem"
-    local started_at finished_at elapsed_seconds max_rss_kb
+    local started_at finished_at
     started_at="$(date +%s.%N)"
     local result_entry_occurrence_nonce
     result_entry_occurrence_nonce="$("$PYTHON_BIN" -c \
@@ -533,6 +533,7 @@ run_pair() {
         --metrics-dir "$runtime_metrics_dir" --stem "$pair_stem"
         --function-name "$function_name" --left-binary-id "$left_id"
         --right-binary-id "$right_id" --execution-nonce "$execution_nonce"
+        --run-id "$RUNTIME_RUN_ID"
         --started-at-epoch "$started_at" --cpu-tokens "$EQBENCH_CPU_TOKENS"
         --pair-cpu-tokens "$EQBENCH_PAIR_CPU_TOKENS"
         --parallel-jobs-requested "$PARALLEL_JOBS_REQUESTED"
@@ -599,11 +600,12 @@ run_pair() {
         -- "${equiv_cmd[@]}"
     )
 
-    local ec command_pid resource_metrics_file
-    resource_metrics_file="${pair_tmpdir}/resource-usage.txt"
-    /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kb=%M' \
-        -o "$resource_metrics_file" "${supervisor_cmd[@]}" \
-        > "$log_file" 2>&1 &
+    # Issue #160: この execution の計測は supervisor の全呼び出し（初回と再開）。呼び出しごとに
+    # 別の usage file に測り、集約は receipt writer に任せる（再開分で初回を上書きしない）。
+    local ec command_pid
+    local -a usage_args=(--resource-usage "${pair_tmpdir}/resource-usage.1.txt")
+    "${VALIDATION_SUPERVISOR_TIME[@]}" -o "${pair_tmpdir}/resource-usage.1.txt" \
+        "${supervisor_cmd[@]}" > "$log_file" 2>&1 &
     command_pid=$!
     # Refresh the RUNNING receipt from a helper loop while waiting on the pair
     # process itself: polling the process with `sleep` held every scheduler
@@ -630,18 +632,15 @@ run_pair() {
     if ! supervisor_projection_is_terminal "$authority_output"; then
         echo "Supervisor recovery: resuming non-terminal projection before classification" \
             >> "$log_file"
-        if "${supervisor_cmd[@]}" >> "$log_file" 2>&1; then
+        usage_args+=(--resource-usage "${pair_tmpdir}/resource-usage.2.txt")
+        if "${VALIDATION_SUPERVISOR_TIME[@]}" -o "${pair_tmpdir}/resource-usage.2.txt" \
+            "${supervisor_cmd[@]}" >> "$log_file" 2>&1; then
             ec=0
         else
             ec=$?
         fi
     fi
     finished_at="$(date +%s.%N)"
-    elapsed_seconds="$(awk -F= '$1 == "elapsed_seconds" {print $2}' "$resource_metrics_file" 2>/dev/null || true)"
-    max_rss_kb="$(awk -F= '$1 == "max_rss_kb" {print $2}' "$resource_metrics_file" 2>/dev/null || true)"
-    [[ -n "$elapsed_seconds" ]] || elapsed_seconds="-"
-    [[ -n "$max_rss_kb" ]] || max_rss_kb="-"
-    rm -rf -- "$pair_tmpdir"
 
     if (( ec == 124 || ec == 137 )); then
         {
@@ -715,10 +714,11 @@ run_pair() {
         cleanup_ec=$?
     fi
     validation_write_pair_runtime_receipt "$PYTHON_BIN" --state COMPLETED \
-        "${receipt_args[@]}" --finished-at-epoch "$finished_at" \
-        --elapsed-seconds "$elapsed_seconds" --max-rss-kb "$max_rss_kb" \
+        "${receipt_args[@]}" "${usage_args[@]}" --finished-at-epoch "$finished_at" \
         --status "$status" --error-kind "$error_kind" \
         --child-returncode "$child_returncode" --timed-command-pid "$command_pid"
+    # usage file は receipt を書くまで残す（pair_tmpdir は child の TMPDIR でもある）。
+    rm -rf -- "$pair_tmpdir"
     printf '[%s] [%s %s/%s] %s <-> %s : %s' \
         "$sample_label" "$function_name" "$count" "$total" "$left_id" "$right_id" "$status"
     printf ' (error_kind=%s child_exit=%s supervisor_exit=%s)' \
@@ -857,6 +857,9 @@ RUN_START_TIME_UTC="$(validation_utc_timestamp)"
 RUN_HOSTNAME="$(validation_run_hostname)"
 RUN_GIT_STATE_LINES="$(validation_run_git_state_lines "$PYTHON_BIN" "$SCRIPT_DIR")"
 RUNNER_SCRIPT_SHA256="$(sha256sum "$SCRIPT_DIR/eqbench_run_all_32jobs.sh" | awk '{print $1}')"
+# Issue #160: この run の id。各 runtime receipt に入り、consumer はこれで「この run が計測した
+# pair」と「再利用した pair が以前の run から持ち越した計測」を区別する。
+RUNTIME_RUN_ID="$(validation_new_runtime_run_id "$PYTHON_BIN")" || exit 1
 PAIR_PROCESS_DEADLINE_POLICY_DIGEST="$(printf '%s' \
     "phase8:${PAIR_PROCESS_TIMEOUT_SECONDS}:${PAIR_PROCESS_KILL_AFTER_SECONDS}" \
     | sha256sum | awk '{print $1}')"
@@ -913,6 +916,7 @@ start_time_utc=$RUN_START_TIME_UTC
 hostname=$RUN_HOSTNAME
 $RUN_GIT_STATE_LINES
 analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST_START
+runtime_run_id=$RUNTIME_RUN_ID
 dry_run=$DRY_RUN
 EOF
 ANALYSIS_CONFIG_DIGEST="$("$PYTHON_BIN" -m \

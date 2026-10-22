@@ -1420,7 +1420,8 @@ def test_eqbench_runner_clamps_parallelism_and_records_pair_progress_contract(
     assert 'write_pair_progress_receipt' not in script
     assert 'validation_write_pair_runtime_receipt "$PYTHON_BIN" --state COMPLETED' in script
     assert 'eqbench-pair-progress-receipt-v2' in receipt_module
-    assert "/usr/bin/time -f 'elapsed_seconds=%e\\nmax_rss_kb=%M'" in script
+    assert "VALIDATION_SUPERVISOR_TIME=(/usr/bin/time -f 'elapsed_seconds=%e\\nmax_rss_kb=%M')" in common
+    assert '"${VALIDATION_SUPERVISOR_TIME[@]}" -o' in script
     assert '"writer_pid": os.getpid()' in receipt_module
     assert '"timed_command_pid"' in receipt_module
     assert '"supervisor_pid"' not in receipt_module

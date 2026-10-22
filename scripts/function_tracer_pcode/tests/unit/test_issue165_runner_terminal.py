@@ -78,8 +78,11 @@ PROCESS_WORKER_KEY_ID=t18-worker; PROCESS_WORKER_KEY_FILE="__TMP__/keys/worker.k
 PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE="__TMP__/keys/pair-status.key"
 PAIR_STATUS_VERIFICATION_KEY_FILE="__TMP__/keys/pair-status-verification-key.json"
 EQBENCH_DEBUG=0; EQBENCH_PROGRESS_INTERVAL_SECONDS=1; EQBENCH_IDENTICAL_FAST_PATH=1
-# Issue #160: run_pair passes these to the runtime receipt writer.
+# Issue #160: run_pair passes these to the runtime receipt writer, and times every
+# supervisor invocation with the common GNU time prefix (the runner sources the common file).
 EQBENCH_CPU_TOKENS=16; EQBENCH_PAIR_CPU_TOKENS=8; PARALLEL_JOBS=2; PARALLEL_JOBS_REQUESTED=2
+RUNTIME_RUN_ID=harness-run
+source "__COMMON__"
 FT_EXPANDER_DEDUP_CASE_LIMIT=0; FT_CALLEE_UNBOUND_REUSE=0; FT_CALLEE_UNBOUND_REUSE_SHADOW=0
 STACK_DUMP_ARTIFACT_STATE_FILE="__TMP__/stack-dump-state.tsv"
 export ISSUE165_HARNESS_RECORDS="__TMP__/harness"
@@ -109,7 +112,9 @@ done
 pair_scheduler_close_group sample
 pair_scheduler_finalize
 printf 'RUN_PAIR_FAILURES=%s\\n' "$RUN_PAIR_FAILURES"
-"""
+""".replace(
+    "__COMMON__", str(REPO_ROOT / "scripts" / "validation_matrix_common.sh")
+)
 
 
 def _extract(source: str, name: str) -> str:

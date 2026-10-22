@@ -145,6 +145,28 @@ validation_admit_full_scope_output() {
 # 書けなくても pair と run の exit code は変えない（警告だけ出して 0 を返す）。
 # ---------------------------------------------------------------------------
 
+# 1 回の supervisor 呼び出しを測る GNU time の前置き。使い方: "${VALIDATION_SUPERVISOR_TIME[@]}" -o <usage> <cmd...>
+# 同じ execution の呼び出し（初回と、非終端 projection からの各再開）はそれぞれ別の usage file に
+# 書き、全部を writer の --resource-usage へ渡す。集約（経過時間は和、最大 RSS は最大、1 つでも
+# 読めなければ null）は pair_runtime_receipt.aggregate_resource_usage が持つ。format はその parser が
+# 読む形（同 module の RUNTIME_USAGE_TIME_FORMAT と同じ。test で固定）。
+VALIDATION_SUPERVISOR_TIME=(/usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kb=%M')
+
+# run の開始時に 1 回呼び、run manifest の runtime_run_id と各 receipt の --run-id に使う。
+# receipt がこの run の計測か（再利用した pair の、以前の run の計測か）を consumer が区別する根拠。
+#   RUNTIME_RUN_ID="$(validation_new_runtime_run_id "$PYTHON_BIN")" || exit 1
+validation_new_runtime_run_id() {
+    local python_bin="$1" run_id
+    [[ "$python_bin" != */* || "$python_bin" == /* ]] || python_bin="$PWD/$python_bin"
+    run_id="$(cd "$_VALIDATION_REPO_ROOT" && "$python_bin" -B -m \
+        scripts.function_tracer_pcode.reporting.pair_runtime_receipt new-run-id)" || run_id=""
+    if [[ ! "$run_id" =~ ^[0-9a-f]{32}$ ]]; then
+        echo "Error: cannot create the runtime run id" >&2
+        return 1
+    fi
+    printf '%s\n' "$run_id"
+}
+
 # 前回 execution の receipt を捨てる。run_pair の中、新しい child を起こす前（journal と同じ境界）で呼ぶ。
 #   validation_reset_pair_runtime_receipts <metrics_dir> <pair_stem>
 validation_reset_pair_runtime_receipts() {
@@ -156,7 +178,8 @@ validation_reset_pair_runtime_receipts() {
 # receipt を 1 つ書く。値はすべて引数で渡す（runner の global を読まない）。
 # 引数は pair_runtime_receipt の `write` subcommand の option をそのまま渡す。
 #   validation_write_pair_runtime_receipt <python_bin> --metrics-dir D --stem S --state RUNNING|COMPLETED \
-#       --function-name F --left-binary-id L --right-binary-id R --execution-nonce N [--<field> V ...]
+#       --function-name F --left-binary-id L --right-binary-id R --execution-nonce N --run-id RUN \
+#       [--resource-usage <usage file of each supervisor invocation> ...] [--<field> V ...]
 validation_write_pair_runtime_receipt() {
     local python_bin="$1"
     shift

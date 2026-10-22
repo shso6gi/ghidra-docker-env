@@ -242,6 +242,9 @@ ANALYSIS_SOURCE_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporti
 RUN_START_TIME_UTC="$(validation_utc_timestamp)"
 RUN_HOSTNAME="$(validation_run_hostname)"
 RUN_GIT_STATE_LINES="$(validation_run_git_state_lines "$PYTHON_BIN" "$SCRIPT_DIR")"
+# Issue #160: この run の id。各 runtime receipt に入り、consumer はこれで「この run が計測した
+# pair」と「再利用した pair が以前の run から持ち越した計測」を区別する。
+RUNTIME_RUN_ID="$(validation_new_runtime_run_id "$PYTHON_BIN")" || exit 1
 # Issue #160: run manifest のうち関数選択より前に決まる行（analysis config を含む）を、出力先の外で
 # 先に組み立てる。FULL_NEQ ではこれを出力先の受理判定にかけ、後で同じ file を manifest の先頭にする。
 # ERROR_ONLY_RERUN is receipt-bound scheduling policy, not part of the
@@ -299,6 +302,7 @@ start_time_utc=$RUN_START_TIME_UTC
 hostname=$RUN_HOSTNAME
 $RUN_GIT_STATE_LINES
 analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST
+runtime_run_id=$RUNTIME_RUN_ID
 EOF
 CONFIG_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt --run-manifest "$RUN_MANIFEST_HEAD" --print-analysis-config-digest)"
 if [[ "$NEQ_RUN_SCOPE" == FULL_NEQ ]]; then
@@ -612,7 +616,7 @@ run_pair() {
     classification_failure="$metrics_dir/$function"_"$left_id"_"$right_id.classification-failure.json"
     rm -f -- "$classification_failure"
     # Issue #160: 前回 execution の runtime receipt も同じ境界で捨てる（Eq と同じ writer・schema・path）。
-    local pair_stem="$function"_"$left_id"_"$right_id" started_at finished_at elapsed_seconds max_rss_kb
+    local pair_stem="$function"_"$left_id"_"$right_id" started_at finished_at
     validation_reset_pair_runtime_receipts "$metrics_dir" "$pair_stem"
     started_at="$(date +%s.%N)"
     local nonce identity result_id source_fp stream exec_nonce checkpoint authority status_file detail ec=0
@@ -625,6 +629,7 @@ run_pair() {
         --metrics-dir "$metrics_dir" --stem "$pair_stem"
         --function-name "$function" --left-binary-id "$left_id"
         --right-binary-id "$right_id" --execution-nonce "$exec_nonce"
+        --run-id "$RUNTIME_RUN_ID"
         --started-at-epoch "$started_at" --cpu-tokens "$EQBENCH_CPU_TOKENS"
         --pair-cpu-tokens "$EQBENCH_PAIR_CPU_TOKENS"
         --parallel-jobs-requested "$PARALLEL_JOBS_REQUESTED"
@@ -641,17 +646,18 @@ run_pair() {
     supervisor_cmd+=( ${ANALYSIS_TIMEOUT_CLI_ARGS[@]+"${ANALYSIS_TIMEOUT_CLI_ARGS[@]}"} )
     if [[ "$EQBENCH_IDENTICAL_FAST_PATH" == "0" ]]; then supervisor_cmd+=( --no-identical-fast-path ); fi
     if [[ "$EQBENCH_DEBUG" == "1" ]]; then supervisor_cmd+=( -d ); fi
-    # Issue #160: pair の wall clock / max RSS は Eq と同じく GNU time で supervisor ごと測る。
-    local resource_metrics_file="$pair_tmp/resource-usage.txt"
-    /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kb=%M' -o "$resource_metrics_file" \
+    # Issue #160: この execution の計測は supervisor の全呼び出し（初回と再開）。Eq と同じく呼び出しごとに
+    # 別の usage file に GNU time で測り、集約は receipt writer に任せる（再開分で初回を上書きしない）。
+    local -a usage_args=(--resource-usage "$pair_tmp/resource-usage.1.txt")
+    "${VALIDATION_SUPERVISOR_TIME[@]}" -o "$pair_tmp/resource-usage.1.txt" \
         "${supervisor_cmd[@]}" > "$log" 2>&1 || ec=$?
     if ! supervisor_projection_is_terminal "$authority"; then
         echo "Supervisor recovery: resuming non-terminal projection before classification" >> "$log"
-        if "${supervisor_cmd[@]}" >> "$log" 2>&1; then ec=0; else ec=$?; fi
+        usage_args+=(--resource-usage "$pair_tmp/resource-usage.2.txt")
+        if "${VALIDATION_SUPERVISOR_TIME[@]}" -o "$pair_tmp/resource-usage.2.txt" \
+            "${supervisor_cmd[@]}" >> "$log" 2>&1; then ec=0; else ec=$?; fi
     fi
     finished_at="$(date +%s.%N)"
-    elapsed_seconds="$(awk -F= '$1 == "elapsed_seconds" {print $2}' "$resource_metrics_file" 2>/dev/null || true)"
-    max_rss_kb="$(awk -F= '$1 == "max_rss_kb" {print $2}' "$resource_metrics_file" 2>/dev/null || true)"
     status_file="$out/$function"_"$left_id"_"$right_id.pair-status.json"
     "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.canonical_result --classify-pair-log "$log" --supervisor-projection "$authority" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --pair-status-signing-private-key-file "$PAIR_PRIVATE_KEY" --pair-status-verification-key-file "$PAIR_PUBLIC_KEY" --pair-execution-target-file "$target" --classification-diagnostic-log "$log" --classification-failure-output "$classification_failure" > "$status_file" || ec=1
     if detail="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.pair_status_authority --validate-pair-status "$status_file" --public-key "$PAIR_PUBLIC_KEY" --expected-pair-target "$target" --allow-operational-diagnostic 2>&1)"; then
@@ -665,14 +671,14 @@ run_pair() {
     # cleanup 自体は従来どおり必ず実行し、失敗の扱いも変えない。
     validation_record_stack_dump_state "$STACK_DUMP_ARTIFACT_STATE_FILE" "$sample" "$function"_"$left_id"_"$right_id" "$dump_status" "$dump_artifact" "$log"
     "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.process_authority_cleanup --tmp-root "$EQBENCH_TMPDIR" --run-tmpdir "$RUN_TMP" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" || { printf '%s\t%s\t%s\n' "$sample" "$function" "$exec_nonce" >> "$PROCESS_CLEANUP_FAILURES"; ec=1; }
-    rm -rf "$pair_tmp"
     local error_kind child_returncode
     error_kind="$("$PYTHON_BIN" -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("error_kind") or "-")' "$status_file" 2>/dev/null || echo -)"
     child_returncode="$("$PYTHON_BIN" -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("child_returncode", "-"))' "$status_file" 2>/dev/null || echo -)"
     validation_write_pair_runtime_receipt "$PYTHON_BIN" --state COMPLETED \
-        "${receipt_args[@]}" --finished-at-epoch "$finished_at" \
-        --elapsed-seconds "${elapsed_seconds:--}" --max-rss-kb "${max_rss_kb:--}" \
+        "${receipt_args[@]}" "${usage_args[@]}" --finished-at-epoch "$finished_at" \
         --status "$status" --error-kind "$error_kind" --child-returncode "$child_returncode"
+    # usage file は receipt を書くまで残す（pair_tmp は child の TMPDIR でもある）。
+    rm -rf "$pair_tmp"
     progress_update "$sample" "$function" "$left_id" "$right_id" "$status"
     printf '[%s/%s] [%s %s/%s pair=%s/%s] %s <-> %s : %s\n' \
         "$sample_position" "$SOURCE_PAIR_COUNT" "$sample" \

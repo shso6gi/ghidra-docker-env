@@ -128,8 +128,11 @@ PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE=/dev/null
 PAIR_STATUS_VERIFICATION_KEY_FILE=/dev/null
 PAIR_PRIVATE_KEY=/dev/null; PAIR_PUBLIC_KEY=/dev/null
 EQBENCH_DEBUG=0; EQBENCH_PROGRESS_INTERVAL_SECONDS=1
-# Issue #160: run_pair passes these to the runtime receipt writer.
+# Issue #160: run_pair passes these to the runtime receipt writer, and times every
+# supervisor invocation with the common GNU time prefix (the runner sources the common file).
 EQBENCH_CPU_TOKENS=16; EQBENCH_PAIR_CPU_TOKENS=8; PARALLEL_JOBS=2; PARALLEL_JOBS_REQUESTED=2
+RUNTIME_RUN_ID=harness-run
+source "__COMMON__"
 EQBENCH_IDENTICAL_FAST_PATH=1
 FT_EXPANDER_DEDUP_CASE_LIMIT=0; FT_CALLEE_UNBOUND_REUSE=0
 FT_CALLEE_UNBOUND_REUSE_SHADOW=0
@@ -159,7 +162,9 @@ cleanup_pair_process_authority_with_run_health() {
 __FUNCTION__
 
 run_pair __ARGS__ || true
-"""
+""".replace(
+    "__COMMON__", str(REPO_ROOT / "scripts" / "validation_matrix_common.sh")
+)
 
 _PYTHON_STUB = """#!/bin/sh
 # neq runner は cleanup を `$PYTHON_BIN -m ...process_authority_cleanup` で直接
