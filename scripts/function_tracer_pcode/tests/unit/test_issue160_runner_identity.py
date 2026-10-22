@@ -781,6 +781,7 @@ exit 0
 """
 
 
+@pytest.mark.wall_clock  # GNU time measures real sleeps in the child processes
 @pytest.mark.parametrize("runner", [EQ_RUNNER, NEQ_RUNNER])
 @pytest.mark.parametrize("recovery", [False, True])
 def test_the_receipt_measures_the_execution_including_its_recovery(
