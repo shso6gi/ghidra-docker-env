@@ -48,20 +48,27 @@ def _head_state(commit=HEAD, dirty=GIT_DIRTY_NO):
 
 
 def write_pair(tree: Path, sample: str, function: str, left: str, right: str,
-               outcome: str, *, reasons=None, payload: bool = True) -> str:
-    """1 pair の status（と、必要なら result payload を含む log）を置く。"""
+               outcome: str, *, reasons=None, payload: bool = True,
+               execution_nonce=None) -> str:
+    """1 pair の status（と、必要なら result payload を含む log）を置く。
+
+    `execution_nonce` を渡すと、その execution の nonce を status に持たせる（本番の
+    pair-status と同じ field）。runtime receipt をその status に束縛する test が使う。
+    """
     directory = tree / sample / function
     directory.mkdir(parents=True, exist_ok=True)
     name = f"{function}_{left}_{right}"
+    status = {
+        "canonical_outcome": outcome,
+        "pair_execution_target": {
+            "sample_identity": sample, "function_name": function,
+            "left_binary_id": left, "right_binary_id": right,
+        },
+    }
+    if execution_nonce is not None:
+        status["execution_nonce"] = execution_nonce
     (directory / f"{name}.pair-status.json").write_text(
-        json.dumps({
-            "canonical_outcome": outcome,
-            "pair_execution_target": {
-                "sample_identity": sample, "function_name": function,
-                "left_binary_id": left, "right_binary_id": right,
-            },
-        }),
-        encoding="utf-8",
+        json.dumps(status), encoding="utf-8",
     )
     log = directory / f"{name}.log"
     if payload:
@@ -126,6 +133,11 @@ def write_ground_truth(tree: Path, functions) -> None:
         }),
         encoding="utf-8",
     )
+
+
+def pair_execution_nonce(sample: str, function: str, left: str, right: str) -> str:
+    """fixture の pair に与える決定的な execution nonce（`execution_nonces=True` のとき）。"""
+    return f"nonce:{sample}:{function}_{left}_{right}"
 
 
 def write_run_manifest(tree: Path, **fields) -> None:
@@ -282,12 +294,19 @@ def full_run(tmp_path):
               run_scope=None, run_manifest_scope=None, outcomes=None,
               with_publication=True, mutate=None, rebind_receipt=True,
               receipt_mutate=None, with_public_key=True,
-              run_manifest_overrides=None, census_overrides=None):
+              run_manifest_overrides=None, census_overrides=None,
+              execution_nonces=False):
         run_dir = tmp_path / name
         declared = run_scope or verification_ledger.RUN_SCOPE_BY_FULL_SCOPE.get(scope, scope)
         sample = EQ_SAMPLE if declared == "FULL_EQBENCH" else NEQ_SAMPLE
         paths = [
-            write_pair(run_dir, sample, function, left, right, outcome)
+            write_pair(
+                run_dir, sample, function, left, right, outcome,
+                execution_nonce=(
+                    pair_execution_nonce(sample, function, left, right)
+                    if execution_nonces else None
+                ),
+            )
             for function, left, right, outcome in (
                 outcomes or [("f", "B1", "B2", "EQUIVALENT")]
             )
@@ -344,7 +363,8 @@ def full_run(tmp_path):
 def subset_run(tmp_path):
     """eq/neq 両半分を持つ最小の subset run（すべて期待どおり揃っている）。"""
     def build(name, *, commit=HEAD, dirty=GIT_DIRTY_NO, eq_outcomes=None,
-              neq_outcomes=None, reasons=None, skipped=()):
+              neq_outcomes=None, reasons=None, skipped=(), execution_nonces=False,
+              runtime_run_id=None):
         run_dir = tmp_path / name
         expected = {}
         for half, outcomes, sample in (
@@ -357,6 +377,10 @@ def subset_run(tmp_path):
                     tree, sample, function, left, right, outcome,
                     reasons=(reasons or {}).get((half, function, left, right), ()),
                     payload=outcome != "TIMEOUT",
+                    execution_nonce=(
+                        pair_execution_nonce(sample, function, left, right)
+                        if execution_nonces else None
+                    ),
                 )
                 for function, left, right, outcome in outcomes
             ]
@@ -366,6 +390,7 @@ def subset_run(tmp_path):
                 tree, git_commit=commit, git_dirty=dirty,
                 analysis_source_digest_start="s", analysis_source_digest_end="s",
                 analysis_config_digest="c",
+                **({} if runtime_run_id is None else {"runtime_run_id": runtime_run_id}),
             )
             write_ground_truth(tree, [
                 (NEQ_SAMPLE, "g", "changed", "MAY_AFFECT", "UNKNOWN"),
