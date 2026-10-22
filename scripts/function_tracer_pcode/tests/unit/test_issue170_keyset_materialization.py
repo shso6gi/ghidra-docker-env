@@ -52,6 +52,11 @@ _STUB = r"""#!/usr/bin/env bash
 # PYTHON_BIN stub: 鍵 CLI は実物へ通す（barrier 付き）。鍵の窓を抜けたら exit 77。
 G="${GATE_DIR:?}"; L="${GATE_LABEL:?}"; a="$*"
 log() { printf '%s %s\n' "$L" "$*" >> "$G/events.log"; }
+# Issue #160: runner は出力先へ書く前（鍵の窓より前）に source digest を取る。tmp の repo は
+# git 管理外なので、ここでは固定値を返す（鍵の窓の検査には関係しない）。
+case "$a" in
+  *execution_identity*--print-source-digest*) printf '%064d\n' 0; exit 0 ;;
+esac
 op=""
 case "$a" in
   *pair_status_authority*--generate-private-key*) op=gen ;;
