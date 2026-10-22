@@ -12,7 +12,7 @@
     信じない）。canonical でない backend の model は落とす
 * **producer が合成した結果**（複数の query / region / case の証拠）: 直接構築し、backend の
   集約規則を適用しない。異なる region の SAT と UNSAT は食い違いではなく、反例は後段
-  （MIPS64 Phase 4-B）まで残る
+  （結果の組み立て）まで残る
 * 1 query の実行は必ず factory を通る（runner と monolithic の共有 session）
 """
 
@@ -22,7 +22,6 @@ import ast
 import itertools
 import pathlib
 import threading
-from types import SimpleNamespace
 
 import pytest
 
@@ -294,15 +293,6 @@ def test_a_composite_result_with_sat_and_unsat_regions_is_not_a_backend_conflict
     assert aggregate.is_equivalent is False
     assert aggregate.get_counterexample() == {"param_1_1": 7}
 
-
-def test_the_mips64_phase4b_gate_still_sees_the_counterexample_of_a_composite_not_eq():
-    from scripts.function_tracer_pcode.checker.phases.handler import PhaseHandler
-
-    handler = PhaseHandler.__new__(PhaseHandler)
-    handler.arch_detector = SimpleNamespace(is_mips64=lambda _program: True)
-    previous = SimpleNamespace(is_equivalent=False, solver_results=_monolithic_style_aggregate())
-    ctx = SimpleNamespace(program1=object(), program2=object(), analysis1=object(), analysis2=object())
-    assert handler.should_run_phase4_retry(previous, ctx) is True
 
 
 def test_the_monolithic_region_aggregate_is_built_as_a_composite():

@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "eb257b3224cffe4e601d61a21cdfe0f9b9e4e72361dd3817c1780f656cdca841",
+  "manifest_digest": "78737bf5736b0895984000b08e13a1e0674f72e2c8a47ba804767246f952d4c5",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 34,
   "sites": [
@@ -153,10 +153,10 @@
       "emitter": "emit_call_effect_signal",
       "enclosing_function": "_call_effect_shadow_manifest",
       "expected_cause_slots": [],
-      "line": 405,
+      "line": 425,
       "path": "scripts/function_tracer_pcode/checker/preflight_gate.py",
       "producer_site_manifest_id": "checker-call-effect-proof-batch",
-      "source_sha256": "44a243d75f0c89d7833fd340040f42282d2d55172521823c9b434f1844e2c1df"
+      "source_sha256": "78c18a3b57759e69469afe18699be3d26b386d2766d8f3c0184425469c017617"
     },
     {
       "allowed_dispositions": [
@@ -605,10 +605,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 2092,
+      "line": 2156,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "pairwise-loop-sat-safety-observed",
-      "source_sha256": "d65697194d2bd5e84da72489317acad2faaf78ad61b4d4175f34b0307ea4a986"
+      "source_sha256": "db80c66fc16dea8ae39bb425d4c90ea6c35c9fbe70287cc84dd12de4907b81e7"
     },
     {
       "allowed_dispositions": [
@@ -1210,10 +1210,10 @@
       "emitter": "emit_sat_safety_signal",
       "enclosing_function": "emit_safe_counterexample_production_signal",
       "expected_cause_slots": [],
-      "line": 824,
+      "line": 821,
       "path": "scripts/function_tracer_pcode/proof/obligations/pair_disposition.py",
       "producer_site_manifest_id": "safe-counterexample-pairwise-production",
-      "source_sha256": "ef2268cf1961685df09eac3e256dc490f2614e5fd4118d207b2af28b00c83ea1"
+      "source_sha256": "ac963c6a3d2ad007baf8ac88a72d66e9a8fa4e6c8b0a0ff657ed2c9d8b572845"
     },
     {
       "allowed_dispositions": [
@@ -1228,10 +1228,10 @@
       "emitter": "emit_sat_safety_completion_if_observed",
       "enclosing_function": "_emit_v2_sat_safety_ambiguity_if_observed",
       "expected_cause_slots": [],
-      "line": 1406,
+      "line": 1453,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-ambiguity-completed",
-      "source_sha256": "3a48ea53978ba553d63ddaeb3502636508b59b3c9c739219438bb911e5881ad7"
+      "source_sha256": "e8e0cc6366bf0ac3dd5e13534d766e76a273db24811ae2c3363f0e9a57d37432"
     },
     {
       "allowed_dispositions": [
@@ -1257,10 +1257,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 1385,
+      "line": 1432,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-ambiguity-observed",
-      "source_sha256": "3a48ea53978ba553d63ddaeb3502636508b59b3c9c739219438bb911e5881ad7"
+      "source_sha256": "e8e0cc6366bf0ac3dd5e13534d766e76a273db24811ae2c3363f0e9a57d37432"
     },
     {
       "allowed_dispositions": [
@@ -1275,10 +1275,10 @@
       "emitter": "emit_sat_safety_completion_if_observed",
       "enclosing_function": "_emit_v2_sat_safety_blockers_completed_if_observed",
       "expected_cause_slots": [],
-      "line": 1365,
+      "line": 1412,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-blocker-completed",
-      "source_sha256": "3a48ea53978ba553d63ddaeb3502636508b59b3c9c739219438bb911e5881ad7"
+      "source_sha256": "e8e0cc6366bf0ac3dd5e13534d766e76a273db24811ae2c3363f0e9a57d37432"
     },
     {
       "allowed_dispositions": [
@@ -1317,7 +1317,7 @@
       "line": 1341,
       "path": "scripts/function_tracer_pcode/proof/strategies/proof_gates/sat_safety.py",
       "producer_site_manifest_id": "sat-safety-blocker-observed",
-      "source_sha256": "3a48ea53978ba553d63ddaeb3502636508b59b3c9c739219438bb911e5881ad7"
+      "source_sha256": "e8e0cc6366bf0ac3dd5e13534d766e76a273db24811ae2c3363f0e9a57d37432"
     },
     {
       "allowed_dispositions": [
@@ -1332,10 +1332,10 @@
       "emitter": "emit_sat_safety_completion_if_observed",
       "enclosing_function": "_complete_observed_sat_safety_in_transaction",
       "expected_cause_slots": [],
-      "line": 1682,
+      "line": 1746,
       "path": "scripts/function_tracer_pcode/authority/lifecycle/production_signals.py",
       "producer_site_manifest_id": "sat-safety-counterexample-bound-completed",
-      "source_sha256": "d65697194d2bd5e84da72489317acad2faaf78ad61b4d4175f34b0307ea4a986"
+      "source_sha256": "db80c66fc16dea8ae39bb425d4c90ea6c35c9fbe70287cc84dd12de4907b81e7"
     }
   ]
 }

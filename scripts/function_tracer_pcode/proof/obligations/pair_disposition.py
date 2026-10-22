@@ -809,14 +809,11 @@ def emit_safe_counterexample_production_signal(
 
     from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
         SafeCounterexampleProductionSignal,
-        active_production_pilot_session,
+        committed_safe_counterexample,
         emit_sat_safety_signal,
     )
 
-    session = active_production_pilot_session()
-    if session is not None and session.domain_signal_state.get(
-        "sat_safety_safe_counterexample_committed"
-    ):
+    if committed_safe_counterexample() is not None:
         return 0
     signal = SafeCounterexampleProductionSignal.from_pairwise_receipt(
         safety_receipt

@@ -544,7 +544,7 @@ def create_mock_analysis(
 ) -> FunctionReturnAnalysis:
     """モック解析結果を作成
     
-    ★ [P1] 修正: パラメータ情報を正しく設定してP4B検証を可能にする
+    ★ [P1] 修正: パラメータ情報を正しく設定する
     """
     if parameters is None:
         # 既定の戻り値は param_1 を返すので、その parameter を表に載せる（表に無い parameter は

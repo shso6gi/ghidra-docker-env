@@ -32,8 +32,12 @@ from scripts.function_tracer_pcode.authority.domains.call_effect_sites import (
 from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
     CallEffectProofBatchProductionSignal,
     build_active_call_effect_execution_context,
+    committed_safe_counterexample,
     emit_call_effect_signal,
     record_production_pilot_shadow_error,
+)
+from scripts.function_tracer_pcode.proof.strategies.proof_gates.sat_safety import (
+    emit_post_commit_veto_blocker,
 )
 from scripts.function_tracer_pcode.proof.call_effect.preflight import (
     PreparedDispatchFrame,
@@ -285,6 +289,22 @@ class PreflightGateMixin:
             self._veto_unproven_cross_side_identity(strategy_result, frame)
 
         if blockers:
+            committed = committed_safe_counterexample()
+            if committed is not None:
+                # U-14 / N-4: この比較の中で commit した witness は veto で前提を失う。
+                # legacy の結果を None にするだけでは authority に届かない（EQ だけを止める
+                # cause が別にあると、commit した witness で NOT_EQ が確定する）ので、
+                # その witness を止める blocker を authority へ出す。
+                emit_post_commit_veto_blocker(
+                    blockers,
+                    committed,
+                    comparison_session_id=frame.comparison_session_id,
+                    branch_id=frame.branch_id,
+                    generation=frame.generation,
+                    comparison_receipt_id=(
+                        receipt.receipt_id if receipt_valid else None
+                    ),
+                )
             if getattr(strategy_result, "is_equivalent", None) in {True, False}:
                 strategy_result.is_equivalent = None
             existing = {

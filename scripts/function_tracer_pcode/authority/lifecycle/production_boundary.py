@@ -16,9 +16,9 @@ from scripts.function_tracer_pcode.checker.workflow import (
 from scripts.function_tracer_pcode.checker.pair_execution import (
     apply_pair_failure_gate,
     binary_display_name,
-    pair_allows_semantic_analysis,
     pair_failure_result_for_exception,
     pair_stop_state,
+    semantic_analysis_stop_reason,
 )
 from scripts.function_tracer_pcode.core.errors import (
     AnalysisFailureError,
@@ -244,7 +244,9 @@ def _attach_boundary_seconds(result: Any, seconds: Dict[str, float]) -> None:
         return
 
 
-def _run_conditional_lane(checker: Any, result: Any, *, projection: Any) -> None:
+def _run_conditional_lane(
+    checker: Any, result: Any, *, projection: Any, session: Any = None,
+) -> None:
     """conditional lane を起動し、診断だけ結果へ残す（判定は変えない）。
 
     lane 自身が fail closed（例外を投げず、条件を満たさなければ列を作らない）
@@ -260,7 +262,9 @@ def _run_conditional_lane(checker: Any, result: Any, *, projection: Any) -> None
         run_production_conditional_lane,
     )
 
-    if pair_allows_semantic_analysis():
+    # lane は signal scope の外（確定処理の後）で走るので、commit の記録は pair の session から読む。
+    stop_reason = semantic_analysis_stop_reason(session)
+    if stop_reason is None:
         diagnostics = run_production_conditional_lane(
             result,
             projection=projection,
@@ -274,8 +278,9 @@ def _run_conditional_lane(checker: Any, result: Any, *, projection: Any) -> None
             debug=bool(getattr(checker, "debug", False)),
         )
     else:
+        # pair が terminal（G4-c）か、安全な counterexample を commit 済み（#130 S3 / A-5）。
         diagnostics = {
-            "skipped": "pair_terminal",
+            "skipped": stop_reason,
             "pair_stop_state": pair_stop_state().value,
         }
     if diagnostics is None:
@@ -673,6 +678,7 @@ def run_check_from_binaries_with_v2_pilot(
                     checker,
                     result,
                     projection=evidence.pilot_result.reduction.projection,
+                    session=session,
                 )
                 boundary_seconds["conditional_lane"] = (
                     time.monotonic() - conditional_lane_started

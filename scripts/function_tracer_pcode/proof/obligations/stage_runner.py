@@ -117,6 +117,16 @@ def project_proof_gates(result: Any) -> Tuple[ProofGateProjection, ...]:
     return tuple(projections)
 
 
+def _counterexample_commit_stop_reason() -> Optional[str]:
+    """A-5 の規則（authority の ``counterexample_commit_stop_reason``）を読む。この module は
+    authority を lazy に import する（他の箇所と同じ）。"""
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        counterexample_commit_stop_reason,
+    )
+
+    return counterexample_commit_stop_reason()
+
+
 def _outcome(result: Any) -> FunctionProofOutcome:
     is_timeout = getattr(result, "is_timeout", None)
     if callable(is_timeout) and is_timeout():
@@ -475,8 +485,16 @@ def run_obligation_branch_plan(
                 # Evidence may derive a new analysis view only for an
                 # inconclusive branch.  The old ledger is superseded and the same
                 # pairwise branch is then executed against the successor view.
+                # #130 S3 / A-5: a successor view, its affected queries and the
+                # replan on it are new semantic analysis, so none starts after a
+                # counterexample commit (a final-gate veto inside the branch can
+                # leave a committed result inconclusive).  The gates above only
+                # validate recorded evidence and keep running.
                 produced_views = ()
-                if _outcome(result) == FunctionProofOutcome.INCONCLUSIVE:
+                if (
+                    _outcome(result) == FunctionProofOutcome.INCONCLUSIVE
+                    and _counterexample_commit_stop_reason() is None
+                ):
                     produced_views = branch_runtime.apply_completed_evidence(
                         getattr(result, "completed_recovery_proof_evidence", ()) or (),
                         reasons=getattr(result, "unknown_reasons", ()) or (),
@@ -743,7 +761,14 @@ def run_obligation_branch_plan(
             branch_id, ActivationState.COMPLETED, outcome, view_id,
             project_proof_gates(result),
         ))
-        if outcome != FunctionProofOutcome.INCONCLUSIVE or not continue_fallback:
+        if (
+            outcome != FunctionProofOutcome.INCONCLUSIVE
+            or not continue_fallback
+            # #130 S3 / A-5: 安全な counterexample を commit した後は次の branch（新しい
+            # 意味解析）を始めない。final gate の veto で結果が INCONCLUSIVE になっていても、
+            # commit した判定は後の branch で変わらない。
+            or _counterexample_commit_stop_reason() is not None
+        ):
             controller.next_branch()
             break
 

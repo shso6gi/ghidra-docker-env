@@ -552,9 +552,6 @@
     "authority.process.worker_runtime": {
       "PreparedWorkerCheckpoint.persist": {"logged": 0, "unlogged": 1}
     },
-    "checker.abi_retry": {
-      "AbiRetryMixin._retry_with_abi_constraints": {"logged": 0, "unlogged": 1}
-    },
     "checker.arch.detector": {
       "ArchitectureDetector.is_mips64": {"logged": 0, "unlogged": 1}
     },

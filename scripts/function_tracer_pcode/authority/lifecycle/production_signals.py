@@ -535,6 +535,72 @@ class SafeCounterexampleProductionSignal:
         }
 
 
+#: session の ``domain_signal_state`` で、decisive として commit した安全な counterexample を
+#: 持つ key。書くのは SAT-safety の encoder（commit / rollback）だけで、読むのは
+#: ``committed_safe_counterexample`` だけ（key の直読みをしない）。
+SAFE_COUNTEREXAMPLE_COMMITTED_KEY = "sat_safety_safe_counterexample_committed"
+
+
+@dataclass(frozen=True)
+class CommittedSafeCounterexample:
+    """この pair で decisive として commit した安全な counterexample（authority の記録）。
+
+    ``proof_artifact_digest`` は commit した COUNTEREXAMPLE event の証明の digest、
+    ``counterexample_binding`` はその witness（formula・model・premise・pair）。commit の後に
+    その witness を止める blocker は、この binding に束縛する。
+    """
+
+    proof_artifact_digest: str
+    counterexample_binding: SatCounterexampleEvidenceBinding
+
+    def __post_init__(self) -> None:
+        if type(self.proof_artifact_digest) is not str or not self.proof_artifact_digest:
+            raise TypeError("committed counterexample lacks its proof artifact digest")
+        if type(self.counterexample_binding) is not SatCounterexampleEvidenceBinding:
+            raise TypeError("committed counterexample lacks its witness binding")
+
+
+def committed_safe_counterexample(
+    session: Any = None,
+) -> Optional[CommittedSafeCounterexample]:
+    """commit 済みの安全な counterexample（無ければ ``None``）。
+
+    ``session`` を省くと active な production session を読む（session が無ければ ``None``）。
+    記録が ``CommittedSafeCounterexample`` でなければ、commit の有無を判断できないので
+    ``TypeError``（fail-closed。「無い」として扱わない）。
+    """
+    if session is None:
+        session = active_production_pilot_session()
+        if session is None:
+            return None
+    committed = session.domain_signal_state.get(SAFE_COUNTEREXAMPLE_COMMITTED_KEY)
+    if committed is None:
+        return None
+    if type(committed) is not CommittedSafeCounterexample:
+        raise TypeError("committed safe counterexample record is not exact")
+    return committed
+
+
+#: 新しい意味解析を始めない理由のうち、commit によるもの（#130 S3 / A-5）。
+COUNTEREXAMPLE_COMMITTED_STOP = "counterexample_committed"
+
+
+def counterexample_commit_stop_reason(session: Any = None) -> Optional[str]:
+    """A-5 の規則の唯一の owner: commit 済みなら ``COUNTEREXAMPLE_COMMITTED_STOP``、無ければ ``None``。
+
+    commit した判定は authority の記録で、後の解析では消えない。commit の後に新しい意味解析
+    （新しい比較・派生 view・その依存 query・次の phase / branch・SAT の後の再試行・再帰の昇格・
+    conditional lane）を始めても判定は変わらず、ERROR / UNKNOWN への劣化と無駄な解析だけを生む。
+    既にある証拠の検証と確定（proof gate・集約・receipt・final gate・authority の確定処理）は
+    止めない。legacy の結果の値（bool）では判定しない。開始点はこの関数を読む（checker の開始点は
+    ``checker.pair_execution.semantic_analysis_stop_reason`` 経由）。新しい比較の唯一の入口
+    ``EquivalenceChecker.check`` は、commit の後の開始を内部バグとして拒否する（迂回の backstop）。
+    """
+    if committed_safe_counterexample(session) is None:
+        return None
+    return COUNTEREXAMPLE_COMMITTED_STOP
+
+
 _PENDING_EQ_CLOSURE_TOKEN = object()
 _POST_CLEANUP_EQ_RECEIPT_TOKEN = object()
 
@@ -1482,9 +1548,7 @@ def emit_sat_safety_signal(
     if type(signal) is SafeCounterexampleProductionSignal:
         if not signal.validates():
             raise ValueError("safe counterexample signal authority is invalid")
-        if session.domain_signal_state.get(
-            "sat_safety_safe_counterexample_committed"
-        ):
+        if committed_safe_counterexample(session) is not None:
             # A prior validated receipt already made NOT_EQ decisive.  Retry
             # phases may independently rediscover a counterexample, but must
             # not open a second Phase 7 activation for the encoder's no-op.

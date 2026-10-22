@@ -687,53 +687,6 @@ def test_formula_builder_does_not_emit_signedness_constraints_for_width_only_hin
     assert "; count_1: constrain to unsigned 32-bit semantic value" not in formula
 
 
-def test_mips64_spurious_detection_uses_signed_or_guard_evidence():
-    handler = MIPS64Handler(debug=True)
-
-    analysis_wide = create_mock_analysis(
-        function_name="branch_multi_guard_like",
-        parameters=[
-            {"name": "param_1", "data_type": "long", "size": 8, "index": 0},
-            {"name": "param_2", "data_type": "long", "size": 8, "index": 1},
-        ],
-        returns=[
-            ReturnInfo(
-                address="0x1000",
-                conditions=[_or_guard_condition("param_1", "param_2", index1=0, index2=1)],
-                value=_binary(
-                    "INT_OR",
-                    _mask32("param_1", index=0),
-                    _mask32("param_2", index=1),
-                    8,
-                ),
-            )
-        ],
-    )
-    analysis_narrow = create_mock_analysis(
-        function_name="branch_multi_guard_like",
-        parameters=[
-            {"name": "param_1", "data_type": "uint", "size": 4, "index": 0},
-            {"name": "param_2", "data_type": "uint", "size": 4, "index": 1},
-        ],
-    )
-
-    counterexample = {
-        "param_1_1": 0x0000000080000000,
-        "param_1_2": 0x80000000,
-        "param_2_1": 0x0,
-        "param_2_2": 0x0,
-    }
-
-    constraints = handler.detect_spurious_counterexample(
-        counterexample,
-        analysis_wide,
-        analysis_narrow,
-        is_mips64_1=True,
-        is_mips64_2=False,
-    )
-
-    assert constraints == {}
-
 
 def test_mips64_type_mismatch_uses_counterpart_semantic_width_hint_even_when_both_types_are_long():
     handler = MIPS64Handler(debug=True)

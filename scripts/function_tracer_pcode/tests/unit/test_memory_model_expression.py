@@ -18,35 +18,6 @@ def test_additive_signature_does_not_require_to_string(monkeypatch):
     assert len(terms) == 1
     assert width == 4
 
-def test_mips64_handler_detects_spurious_same_pattern_extension_violation():
-    handler = MIPS64Handler(debug=False)
-    counterexample = {"param_1_1": 0x400000000002, "param_1_2": 0x400000000002}
-    analysis1 = FunctionReturnAnalysis(
-        function_name="f1",
-        entry_point="0x0",
-        parameters=[{"name": "param_1", "data_type": "long", "size": 8, "index": 0, "is_signed": True}],
-        returns=[],
-    )
-    analysis2 = FunctionReturnAnalysis(
-        function_name="f2",
-        entry_point="0x0",
-        parameters=[{"name": "param_1", "data_type": "long", "size": 8, "index": 0, "is_signed": True}],
-        returns=[],
-    )
-
-    handler._analyze_parameter_usage = lambda analysis: {
-        ("parameter_index", 0): ParameterSemanticHint(narrow_bits=32, signedness="signed")
-    }
-
-    constraints = handler.detect_spurious_counterexample(
-        counterexample,
-        analysis1,
-        analysis2,
-        is_mips64_1=True,
-        is_mips64_2=True,
-    )
-
-    assert constraints == {"param_1_1": ("signed", 32), "param_1_2": ("signed", 32)}
 
 def test_mips64_width_alignment_does_not_narrow_fp_parameter_by_ordinal_peer():
     handler = MIPS64Handler(debug=False)

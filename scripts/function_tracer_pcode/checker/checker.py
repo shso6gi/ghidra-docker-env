@@ -55,7 +55,6 @@ from scripts.function_tracer_pcode.proof.call_effect.preflight import CallProofD
 
 # Re-exports kept for callers that import these names from this module.
 from scripts.function_tracer_pcode.smt import SolverResult
-from scripts.function_tracer_pcode.checker.abi_retry import AbiRetryMixin
 from scripts.function_tracer_pcode.proof.obligations.branch_context import (
     BranchCheckContext,
     build_branch_check_context,
@@ -75,6 +74,10 @@ from scripts.function_tracer_pcode.checker.result_assembly import (
 from scripts.function_tracer_pcode.checker.pair_execution import (
     pair_failure_result_from_check,
     raise_pending_pair_failure,
+    refuse_comparison_after_commit,
+)
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+    counterexample_commit_stop_reason,
 )
 from scripts.function_tracer_pcode.checker.strategy_execution import (
     build_prepared_dispatch_frame,
@@ -152,7 +155,7 @@ def _finalize_observation_contract(
     return contract
 
 
-class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, RecoveryProofMixin, RecurrenceStageMixin):
+class EquivalenceChecker(PreflightGateMixin, RootCauseMixin, RecoveryProofMixin, RecurrenceStageMixin):
     """等価性判定を行うクラス"""
     
     def __init__(
@@ -471,12 +474,9 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
         result: EquivalenceResult,
         retry_with_type_fix: bool,
         phase_id: Optional[str] = None,
-        will_try_phase4b: bool = False
     ) -> str:
         """結果から遷移理由を取得する互換ラッパー"""
-        return get_transition_reason(
-            result, retry_with_type_fix, phase_id=phase_id, will_try_phase4b=will_try_phase4b
-        )
+        return get_transition_reason(result, retry_with_type_fix, phase_id=phase_id)
     
     # ★ 新規: Attempt を記録（汎用版）
     def _record_attempt(
@@ -646,6 +646,9 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                 original_signature2 = FunctionSignature.from_analysis(analysis2)
 
             try:
+                # #130 S3 / A-5: check() は新しい比較の唯一の入口。安全な counterexample を
+                # commit した後に呼ばれたら、止め忘れた開始点がある（内部バグとして ERROR へ）。
+                refuse_comparison_after_commit("EquivalenceChecker.check")
                 # strategy を選択
                 strategy = force_strategy if force_strategy is not None else self.check_strategy
 
@@ -780,7 +783,12 @@ class EquivalenceChecker(AbiRetryMixin, PreflightGateMixin, RootCauseMixin, Reco
                 # branch decision.  The pair-local authority names the exact
                 # blockers observed above and is intentionally absent from the
                 # function-local unary artifact.
-                if getattr(self, "_active_recurrence_promotion_authority", None) is None:
+                # #130 S3 / A-5: 安全な counterexample を commit した後は昇格した pair の
+                # 比較（新しい意味解析）を始めない。
+                if (
+                    getattr(self, "_active_recurrence_promotion_authority", None) is None
+                    and counterexample_commit_stop_reason() is None
+                ):
                     # 6b-4: (1)(2) は段関数、(3) の facade write はその直後・(4) より前に check() が書く。
                     with stage_region("recurrence_promotion"):
                         promotion = prepare_recurrence_promotion(

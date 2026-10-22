@@ -1350,6 +1350,53 @@ def _emit_v2_sat_safety_blockers_observed(
         ), producer_site_manifest_id="sat-safety-blocker-observed")
 
 
+#: commit 済みの witness を出した比較を final gate が veto したことを表す evidence ref の接頭辞。
+#: ``post_commit_veto:<veto の blocker>``。replay 型の ref ではないので、分類は解析の不安全
+#: （``counterexample_analysis_safety_unproven``。replay では解消せず、完了もしない）。
+POST_COMMIT_VETO_REF_PREFIX = "post_commit_veto:"
+
+
+def emit_post_commit_veto_blocker(
+    veto_blockers: Sequence[str],
+    committed: Any,
+    *,
+    comparison_session_id: str,
+    branch_id: str,
+    generation: int,
+    comparison_receipt_id: Optional[str],
+) -> Tuple[str, ...]:
+    """commit 済みの witness を出した比較が final gate で veto された: その witness を止める。
+
+    veto は「この比較の結果の前提が崩れた」ことを示すので、その比較の中で commit した
+    witness で NOT_EQ を確定させない（U-14 / N-4）。legacy の結果の値（bool）は読まない:
+    commit の有無は authority の記録（``committed``: ``CommittedSafeCounterexample``）から、
+    veto は gate の blocker から決まる。
+
+    blocker は既存の SAT-safety の観測の経路で出す。対象は commit の digest と比較
+    （session・branch・generation・receipt）に、counterexample は commit した witness に
+    束縛する。出した evidence ref の組を返す（veto が無ければ何も出さず空）。
+    """
+    refs = tuple(
+        POST_COMMIT_VETO_REF_PREFIX + blocker
+        for blocker in dict.fromkeys(str(item) for item in veto_blockers)
+    )
+    if not refs:
+        return ()
+    _emit_v2_sat_safety_blockers_observed(
+        refs,
+        (
+            "post_commit_preflight_veto",
+            str(committed.proof_artifact_digest),
+            str(comparison_session_id),
+            str(branch_id),
+            int(generation),
+            None if comparison_receipt_id is None else str(comparison_receipt_id),
+        ),
+        counterexample_binding=committed.counterexample_binding,
+    )
+    return refs
+
+
 def _emit_v2_sat_safety_blockers_completed_if_observed(
     reason_refs: Sequence[str],
     object_target_key: Any,

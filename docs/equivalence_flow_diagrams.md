@@ -20,27 +20,33 @@ flowchart TD
     H --> I{"strategy = pairwise ?"}
     I -->|Yes| J["Stage S_PAIRWISE"]
     J --> K{"結果は UNKNOWN/TIMEOUT ?"}
-    K -->|Yes| L["Stage S_MONOLITHIC_FALLBACK"]
+    K -->|"Yes（commit が無いときだけ）"| L["Stage S_MONOLITHIC_FALLBACK"]
     K -->|No| M["stage plan 終了"]
     I -->|No| N["Stage S_MONOLITHIC_FALLBACK のみ実行"]
     L --> M
     N --> M
 
-    M --> O{"結果は EQUIVALENT ?"}
+    M --> CM{"安全な反例を commit 済み ?<br/>(authority の記録。legacy の値は見ない)"}
+    CM -->|Yes| CS["新しい意味解析を始めない<br/>(次の phase・SAT 後の再試行・stage の fallback・<br/>派生 view と依存 query・replan・再帰の昇格・conditional lane)"]
+    CS --> CF["既存の証拠の検証と確定は続ける<br/>(proof gate・集約・receipt・final gate・authority の確定)"]
+    CF --> CV{"commit した witness を止める blocker がある ?<br/>(final gate の veto → post_commit_veto:* など)"}
+    CV -->|Yes| CU["終了: UNKNOWN<br/>(commit は NOT_EQ の十分条件ではない)"]
+    CV -->|No| CN["終了: NOT EQUIVALENT"]
+    CM -->|No| O
+
+    O{"結果は EQUIVALENT ?"}
     O -->|Yes| P["終了: EQUIVALENT"]
     O -->|No| Q{"critical error ?"}
+    %% Phase 4-B（MIPS64 の ABI 制約の retry）は撤去した（#184）
     Q -->|Yes| R["終了: ERROR/UNKNOWN"]
     Q -->|No| S{"結果は SAT<br/>(is_equivalent == False) ?"}
 
-    S -->|Yes| T{"retry_with_type_fix かつ<br/>Phase 4-B 候補あり ?"}
-    T -->|Yes| U["Phase 4-B: MIPS64 偽反例判定"]
-    U --> V{"ABI 制約あり ?"}
-    V -->|Yes| W["ABI 制約付きで再solve"]
+    S -->|Yes| U{"retry_with_type_fix かつ<br/>戻り値型が怪しい ?"}
+    U -->|Yes| W["P4C: 戻り値型の修正 → P4-A tail"]
     W --> X{"再結果は EQUIVALENT ?"}
     X -->|Yes| P
-    X -->|No| Y["終了: NOT EQUIVALENT"]
-    V -->|No| Y
-    T -->|No| Y
+    X -->|No| Y["終了: legacy の SAT<br/>(commit が無いので authority は NOT_EQ を確定しない)"]
+    U -->|No| Y
 
     S -->|No| Z{"通常 retry 可 ?<br/>(UNKNOWN/TIMEOUT のみ)"}
     Z -->|No| R
@@ -52,7 +58,7 @@ flowchart TD
     AD -->|No| AE["attempt 記録のみして次へ"]
     AD -->|Yes| AF["仮説 overlay 済み analysis view を再利用"]
     AF --> AG["再デコンパイルせず stage plan 再実行"]
-    AG --> O
+    AG --> CM
     AE --> AH["Phase P2_PATTERN_INT"]
 
     AH --> AI["戻り値 pattern fix<br/>+ 引数 type fix"]
@@ -60,7 +66,7 @@ flowchart TD
     AJ -->|No| AK["P4-A tail 判定へ"]
     AJ -->|Yes| AL["仮説 overlay 済み analysis view を再利用"]
     AL --> AM["再デコンパイルせず stage plan 再実行"]
-    AM --> O
+    AM --> CM
 
     AK --> AN{"P4-A MIPS64 ABI fix を<br/>保守的に適用できる ?"}
     AN -->|No| AO["最後の結果で終了"]
@@ -68,9 +74,9 @@ flowchart TD
     AP --> AQ{"変更が入った ?"}
     AQ -->|No| AO
     AQ -->|Yes| AR["analysis overlay reuse + stage plan 再実行"]
-    AR --> AS{"結果は SAT かつ<br/>Phase 4-B 候補あり ?"}
-    AS -->|Yes| U
-    AS -->|No| AT{"結果は EQUIVALENT ?"}
+    AR --> AQC{"安全な反例を commit 済み ?"}
+    AQC -->|Yes| CS
+    AQC -->|No| AT{"結果は EQUIVALENT ?"}
     AT -->|Yes| P
     AT -->|No| AO
 ```
