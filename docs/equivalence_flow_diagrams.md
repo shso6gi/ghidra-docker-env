@@ -29,18 +29,18 @@ flowchart TD
     M --> O{"結果は EQUIVALENT ?"}
     O -->|Yes| P["終了: EQUIVALENT"]
     O -->|No| Q{"critical error ?"}
+    %% Phase 4-B（MIPS64 の ABI 制約の retry）は撤去した（#184）
     Q -->|Yes| R["終了: ERROR/UNKNOWN"]
     Q -->|No| S{"結果は SAT<br/>(is_equivalent == False) ?"}
 
-    S -->|Yes| T{"retry_with_type_fix かつ<br/>Phase 4-B 候補あり ?"}
-    T -->|Yes| U["Phase 4-B: MIPS64 偽反例判定"]
-    U --> V{"ABI 制約あり ?"}
-    V -->|Yes| W["ABI 制約付きで再solve"]
+    S -->|Yes| T{"安全な反例を commit 済み ?<br/>(authority の記録)"}
+    T -->|Yes| Y["終了: NOT EQUIVALENT<br/>(commit の後は新しい解析を始めない)"]
+    T -->|No| U{"retry_with_type_fix かつ<br/>戻り値型が怪しい ?"}
+    U -->|Yes| W["P4C: 戻り値型の修正 → P4-A tail"]
     W --> X{"再結果は EQUIVALENT ?"}
     X -->|Yes| P
-    X -->|No| Y["終了: NOT EQUIVALENT"]
-    V -->|No| Y
-    T -->|No| Y
+    X -->|No| Y
+    U -->|No| Y
 
     S -->|No| Z{"通常 retry 可 ?<br/>(UNKNOWN/TIMEOUT のみ)"}
     Z -->|No| R
@@ -68,9 +68,7 @@ flowchart TD
     AP --> AQ{"変更が入った ?"}
     AQ -->|No| AO
     AQ -->|Yes| AR["analysis overlay reuse + stage plan 再実行"]
-    AR --> AS{"結果は SAT かつ<br/>Phase 4-B 候補あり ?"}
-    AS -->|Yes| U
-    AS -->|No| AT{"結果は EQUIVALENT ?"}
+    AR --> AT{"結果は EQUIVALENT ?"}
     AT -->|Yes| P
     AT -->|No| AO
 ```

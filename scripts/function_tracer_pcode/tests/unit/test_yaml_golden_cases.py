@@ -4,8 +4,8 @@
 import pytest
 from conftest import load_golden_cases, create_mock_result, create_mock_analysis, MockProgram
 
-from scripts.function_tracer_pcode.checker.phases.handler import PhaseHandler, PhaseContext
-from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixerConfig, TypeFixResult
+from scripts.function_tracer_pcode.checker.phases.handler import PhaseHandler
+from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixerConfig
 
 
 class TestYAMLGoldenCases:
@@ -36,7 +36,7 @@ class TestYAMLGoldenCases:
         
         should_retry = handler.should_retry(result)
         
-        # ★ [P2] 修正: should_retry は SAT時に常にFalse（P4Bは別ゲート）
+        # ★ [P2] 修正: should_retry は SAT時に常にFalse
         if status_str == "SAT":
             assert should_retry is False, \
                 f"Case {case['id']}: SAT always blocks normal retry (should_retry=False)"
@@ -51,80 +51,6 @@ class TestYAMLGoldenCases:
                 assert should_retry is True, \
                     f"Case {case['id']}: UNKNOWN/TIMEOUT allows normal retry (should_retry=True)"
     
-    @pytest.mark.parametrize("case", [
-        pytest.param(case, id=case['id'])
-        for case in load_golden_cases()
-        if 'P4B_MIPS64_SPURIOUS' in case['expected'].get('allowed_recovery_phases', [])
-    ], indirect=False)
-    def test_phase4b_special_gate(self, case, solver_status_map, is_equiv_map):
-        """★ [重要度2] 修正: P4B特殊ゲートの検証を厳格化"""
-        handler = PhaseHandler(TypeFixerConfig(), debug=True)
-        
-        phase0 = case['phase0']
-        expected = case['expected']
-        
-        status_str = phase0.get('status', 'UNKNOWN')
-        is_equiv = is_equiv_map[status_str]
-        status = solver_status_map[status_str]
-        
-        counterexample = phase0.get('counterexample')
-        
-        result = create_mock_result(
-            is_equivalent=is_equiv,
-            solver_status=status,
-            counterexample=counterexample
-        )
-        
-        # ★ P4BケースではSAT
-        assert status_str == "SAT", \
-            f"Case {case['id']}: P4B is only allowed for SAT results"
-        
-        # ★ MIPS64アーキテクチャを設定
-        arch = case.get('architecture', {})
-        binary1_arch = arch.get('binary1', 'x86:LE:64:default')
-        binary2_arch = arch.get('binary2', 'x86:LE:64:default')
-        
-        # ★ proper な analysis を作成
-        analysis1 = create_mock_analysis(
-            function_name="func1",
-            parameters=[{"name": "param_1", "data_type": "long", "size": 8}]
-        )
-        
-        analysis2 = create_mock_analysis(
-            function_name="func2",
-            parameters=[{"name": "param_1", "data_type": "long", "size": 8}]
-        )
-        
-        ctx = PhaseContext(
-            program1=MockProgram(name="binary1", architecture=binary1_arch),
-            program2=MockProgram(name="binary2", architecture=binary2_arch),
-            function_name1="func1",
-            function_name2="func2",
-            binary1_name="binary1",
-            binary2_name="binary2",
-            decompile_timeout=60,
-            save_formula=False,
-            type_fix_result=TypeFixResult(),
-            original_signature1=None,
-            original_signature2=None,
-            analysis1=analysis1,
-            analysis2=analysis2
-        )
-        
-        # ★ 通常ゲートはブロック
-        should_retry_normal = handler.should_retry(result)
-        assert should_retry_normal is False, \
-            f"Case {case['id']}: SAT blocks normal retry"
-        
-        # ★ [重要度2] 修正: P4B特殊ゲートの期待値を厳格にassert
-        expected_phase4b = expected.get('phase4b_gate_allowed', True)  # デフォルトはTrue（後方互換）
-        
-        can_retry_p4b = handler.should_run_phase4_retry(result, ctx)
-        
-        assert can_retry_p4b is expected_phase4b, \
-            f"Case {case['id']}: P4B gate should be {expected_phase4b}, got {can_retry_p4b}"
-        
-        print(f"\n[P4B GATE] Case {case['id']}: can_retry_p4b={can_retry_p4b} (expected={expected_phase4b})")
     
     @pytest.mark.parametrize("case", [
         pytest.param(case, id=case['id'])

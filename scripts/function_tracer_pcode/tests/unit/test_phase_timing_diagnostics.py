@@ -275,7 +275,6 @@ class TestPhaseTimingThroughTheWorkflow:
         phase_handler.execute_phase.return_value = phase_result
         phase_handler.should_retry.side_effect = [True, False]
         phase_handler.get_retry_reason.side_effect = ["UNKNOWN", "UNKNOWN"]
-        phase_handler.run_phase4_mips64_retry.return_value = None
         checker.phase_handler = phase_handler
 
         with patch(
@@ -499,7 +498,6 @@ class TestPhaseTimingThroughTheWorkflow:
         phase_handler.should_fix_return_type.return_value = True
         phase_handler.run_phase2_return_type_fix.return_value = return_type_fix
         phase_handler.execute_phase.return_value = p4a_result
-        phase_handler.run_phase4_mips64_retry.return_value = None
         checker.phase_handler = phase_handler
 
         with patch(

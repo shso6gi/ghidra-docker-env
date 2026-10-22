@@ -236,6 +236,8 @@ def _run_phase_stages(
     primary_phases = [phase_spec.phase_id.value for phase_spec in DEFAULT_PHASE_PLAN]
     debug_trace = DebugTrace(
         planned_phases=primary_phases,
+        # "P4B_MIPS64_SPURIOUS" は撤去した Phase 4-B（#184）の名前。debug trace の phase usage の
+        # schema を変えないため既知の phase として残す（到達しない）。
         known_phases=primary_phases + [
             PhaseID.P4A_MIPS64_ABI.value,
             "P4B_MIPS64_SPURIOUS",
@@ -376,13 +378,8 @@ def _run_phase_stages(
             ctx.analysis1 = analysis1
             ctx.analysis2 = analysis2
 
-        will_try_phase4b = False
-        if result.is_equivalent is False and retry_with_type_fix:
-            abi_constraints_check = checker.phase_handler.run_phase4_mips64_retry(result, ctx)
-            will_try_phase4b = abi_constraints_check is not None
-
         transition_reason = checker._get_transition_reason(
-            result, retry_with_type_fix, phase_id.value, will_try_phase4b
+            result, retry_with_type_fix, phase_id.value
         )
         checker._record_attempt_from_result(
             debug_trace,
@@ -418,58 +415,10 @@ def _run_phase_stages(
             return finalized
 
         if result.is_equivalent is False:
-            checker._debug_print(f"Phase {phase_id.value}: SAT - checking for Phase 4-B eligibility")
+            # SAT の後の再試行は P4C（戻り値型の修正）と P4A tail だけ。Phase 4-B（MIPS64 の
+            # ABI 制約の retry）は撤去した（#184）: SAT model と usage hint から入力の仮定を
+            # 作っていた（入力の仮定の owner は InputCorrespondence だけ）。
             attempted_return_type_fix = False
-
-            if retry_with_type_fix and will_try_phase4b:
-                abi_constraints = checker.phase_handler.run_phase4_mips64_retry(result, ctx)
-                if abi_constraints:
-                    deadline_checkpoint(PHASE_RETRY_STAGE)
-                    phase4b_result = checker._retry_with_iterative_abi_constraints(
-                        ctx, abi_constraints, retry_count=retry_count + 1
-                    )
-                    if phase4b_result is not None:
-                        result = phase4b_result
-                        p4b_transition = checker._get_transition_reason(result, retry_with_type_fix)
-                        checker._record_attempt_from_result(
-                            debug_trace,
-                            attempt_id,
-                            retry_count + 1,
-                            "P4B_MIPS64_SPURIOUS",
-                            result,
-                            p4b_transition,
-                            type_fix_result,
-                        )
-                        attempt_id += 1
-
-                        if result.is_equivalent is True:
-                            checker._debug_print(
-                                f"Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from {phase_id.value})"
-                            )
-                            return _attach_trace_and_return(
-                                result, debug_trace, start_time, True
-                            )
-                        result, attempt_id, did_attempt = _maybe_retry_sat_return_type_fix(
-                            checker,
-                            ctx,
-                            result,
-                            debug_trace,
-                            attempt_id,
-                            retry_count + 2,
-                            type_fixer1,
-                            type_fixer2,
-                            retry_with_type_fix,
-                        )
-                        attempted_return_type_fix = attempted_return_type_fix or did_attempt
-                        if result.is_equivalent is True:
-                            checker._debug_print(
-                                f"Phase 4-C: EQUIVALENT after return type retry (from {phase_id.value})"
-                            )
-                            return _attach_trace_and_return(
-                                result, debug_trace, start_time, True
-                            )
-            else:
-                checker._debug_print("Phase 4-B: Skipped")
 
             if result.is_equivalent is False:
                 result, attempt_id, did_attempt = _maybe_retry_sat_return_type_fix(
@@ -601,13 +550,8 @@ def _run_phase4a_tail(
     ctx.analysis1 = analysis1
     ctx.analysis2 = analysis2
 
-    will_try_phase4b = False
-    if result.is_equivalent is False:
-        abi_constraints_check = checker.phase_handler.run_phase4_mips64_retry(result, ctx)
-        will_try_phase4b = abi_constraints_check is not None
-
     transition_reason = checker._get_transition_reason(
-        result, retry_with_type_fix, PhaseID.P4A_MIPS64_ABI.value, will_try_phase4b
+        result, retry_with_type_fix, PhaseID.P4A_MIPS64_ABI.value
     )
     checker._record_attempt_from_result(
         debug_trace,
@@ -624,63 +568,6 @@ def _run_phase4a_tail(
     if result.is_equivalent is True:
         checker._debug_print(f"Phase {PhaseID.P4A_MIPS64_ABI.value}: EQUIVALENT")
         return _attach_trace_and_return(result, debug_trace, start_time, True), attempt_id
-
-    if result.is_equivalent is False and retry_with_type_fix and will_try_phase4b:
-        abi_constraints = checker.phase_handler.run_phase4_mips64_retry(result, ctx)
-        if abi_constraints:
-            phase4b_result = checker._retry_with_iterative_abi_constraints(
-                ctx, abi_constraints, retry_count=retry_count + 1
-            )
-            if phase4b_result is not None:
-                result = phase4b_result
-                p4b_transition = checker._get_transition_reason(result, retry_with_type_fix)
-                checker._record_attempt_from_result(
-                    debug_trace,
-                    attempt_id,
-                    retry_count + 1,
-                    "P4B_MIPS64_SPURIOUS",
-                    result,
-                    p4b_transition,
-                    ctx.type_fix_result,
-                )
-                attempt_id += 1
-
-                if result.is_equivalent is True:
-                    checker._debug_print(
-                        "Phase 4-B: EQUIVALENT after MIPS64 ABI retry (from Phase 4-A)"
-                    )
-                    return _attach_trace_and_return(result, debug_trace, start_time, True), attempt_id
-                result, attempt_id, did_attempt = _maybe_retry_sat_return_type_fix(
-                    checker,
-                    ctx,
-                    result,
-                    debug_trace,
-                    attempt_id,
-                    retry_count + 2,
-                    type_fixer1,
-                    type_fixer2,
-                    retry_with_type_fix,
-                )
-                if result.is_equivalent is False and did_attempt:
-                    result, attempt_id = _run_phase4a_tail(
-                        checker,
-                        ctx,
-                        result,
-                        debug_trace,
-                        start_time,
-                        retry_count + 2,
-                        attempt_id,
-                        type_fixer1,
-                        type_fixer2,
-                        retry_with_type_fix,
-                    )
-                    if result.debug_trace is not None:
-                        return result, attempt_id
-                if result.is_equivalent is True:
-                    checker._debug_print(
-                        "Phase 4-C: EQUIVALENT after return type retry (from Phase 4-A)"
-                    )
-                    return _attach_trace_and_return(result, debug_trace, start_time, True), attempt_id
 
     return result, attempt_id
 

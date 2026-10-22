@@ -43,8 +43,7 @@ class TestRetryDisabledEarlyExit:
                      patch.object(checker.phase_handler, 'run_phase1_5_param_signedness_fix') as mock_p1_5, \
                      patch.object(checker.phase_handler, 'run_phase2_return_type_fix') as mock_p2, \
                      patch.object(checker.phase_handler, 'run_phase3_param_type_fix') as mock_p3, \
-                     patch.object(checker.phase_handler, 'run_phase4_mips64_fix') as mock_p4a, \
-                     patch.object(checker.phase_handler, 'run_phase4_mips64_retry') as mock_p4b:
+                     patch.object(checker.phase_handler, 'run_phase4_mips64_fix') as mock_p4a:
                     
                     result = checker.check_from_binaries(
                         mock_program_mips64, mock_program_x86,
@@ -61,12 +60,11 @@ class TestRetryDisabledEarlyExit:
                     assert not mock_p2.called, "Phase 2 should NOT be called"
                     assert not mock_p3.called, "Phase 3 should NOT be called"
                     assert not mock_p4a.called, "Phase 4-A should NOT be called"
-                    assert not mock_p4b.called, "Phase 4-B should NOT be called"
                     
                     print("\n[RETRY DISABLED] Correctly exited at Phase 0 UNKNOWN without entering recovery")
     
     def test_retry_disabled_exits_at_phase0_sat(self, mock_program_mips64, mock_program_x86):
-        """retry_with_type_fix=False では Phase 0 SAT で即終了し、Phase 4-B も実行しない"""
+        """retry_with_type_fix=False では Phase 0 SAT で即終了し、SAT の後の再試行（P4C / P4A tail）もしない"""
         from scripts.function_tracer_pcode.checker.checker import EquivalenceChecker
         from unittest.mock import Mock, patch
         
@@ -95,20 +93,18 @@ class TestRetryDisabledEarlyExit:
                     counterexample=counterexample
                 )
                 
-                with patch.object(checker.phase_handler, 'run_phase4_mips64_retry') as mock_p4b, \
-                     patch.object(checker, '_retry_with_abi_constraints') as mock_retry:
-                    
+                with patch.object(checker.phase_handler, 'run_phase2_return_type_fix') as mock_p4c, \
+                     patch.object(checker.phase_handler, 'run_phase4_mips64_fix') as mock_p4a:
+
                     result = checker.check_from_binaries(
                         mock_program_mips64, mock_program_x86,
                         "test_func", "test_func",
                         retry_with_type_fix=False
                     )
-                    
+
                     # Phase 0 SAT で終了
                     assert result.is_equivalent is False
-                    
-                    # Phase 4-B も ABI retry も呼ばれない
-                    assert not mock_p4b.called, "Phase 4-B gate should NOT be called"
-                    assert not mock_retry.called, "_retry_with_abi_constraints should NOT be called"
-                    
-                    print("\n[RETRY DISABLED] Correctly exited at Phase 0 SAT without Phase 4-B")
+
+                    # SAT の後の再試行は始めない
+                    assert not mock_p4c.called, "Phase 4-C should NOT be called"
+                    assert not mock_p4a.called, "Phase 4-A should NOT be called"

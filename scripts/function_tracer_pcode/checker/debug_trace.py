@@ -35,7 +35,7 @@ class TransitionReason(Enum):
     """Phase/Stage遷移理由"""
     UNSAT = "UNSAT"  # 等価確定 → 終了
     SAT = "SAT"  # 非等価確定 → 終了
-    SAT_PHASE4B = "SAT->Phase4B"  # SAT だが Phase 4-B 試行
+    SAT_PHASE4B = "SAT->Phase4B"  # 撤去した Phase 4-B（#184）の値。schema を保つため残す（出さない）
     UNKNOWN = "UNKNOWN"  # 不明 → 次Phase
     TIMEOUT = "TIMEOUT"  # タイムアウト → 次Phase
     NO_CHANGES = "no_changes"  # Phase適用されず → スキップ

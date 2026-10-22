@@ -313,11 +313,12 @@ def test_baseline_is_a_frozen_snapshot_with_stable_totals():
     # plan v4 PR-A: ABI の solver の取引の巻き戻しを try/finally にした（broad except を撤去、-1）
     # plan v4 PR-A: loop の solver の取引を session の共通の取引の境界へ移した（-1 key / -1）
     # plan v4 PR-D: 書き換えの照合を値の identity にし、SMT の文字列の signature を撤去（-1 key / -1）
+    # eval-prep PR-4: Phase 4-B（`checker/abi_retry.py`）を撤去（#184、-1 key / -1）
     assert baseline_totals(entries) == {
-        "keys": 583,
+        "keys": 582,
         "logged": 0,
-        "unlogged": 907,
-        "handlers": 907,
+        "unlogged": 906,
+        "handlers": 906,
     }
 
 

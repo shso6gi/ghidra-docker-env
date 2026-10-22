@@ -297,7 +297,6 @@ def test_the_duplicate_detector_ignores_module_level_conditional_blocks(tmp_path
 # 「Re-exports kept for callers ...」ブロックの明示的 re-export。
 # module 内で未使用のものもここに含む。
 CHECKER_REEXPORTS = (
-    "AbiRetryMixin",
     "BranchCheckContext",
     "PreflightGateMixin",
     "RecoveryProofMixin",

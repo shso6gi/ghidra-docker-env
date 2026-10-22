@@ -81,8 +81,6 @@ class TestSelectiveReanalysis:
 
             phase_handler.should_retry.side_effect = [True, False]
             phase_handler.get_retry_reason.side_effect = ["UNKNOWN", "UNKNOWN"]
-            # ★ 修正: Phase 4-B が呼ばれないように None を明示
-            phase_handler.run_phase4_mips64_retry.return_value = None
             
             # checker の phase_handler を差し替え
             checker.phase_handler = phase_handler
@@ -213,8 +211,6 @@ class TestSelectiveReanalysis:
             # ★ 修正: Phase 0 後は True, Phase 1 後は False
             phase_handler.should_retry.side_effect = [True, False]
             phase_handler.get_retry_reason.side_effect = ["UNKNOWN", "UNKNOWN"]
-            # ★ 修正: Phase 4-B が呼ばれないように None を明示
-            phase_handler.run_phase4_mips64_retry.return_value = None
             
             # checker の phase_handler を差し替え
             checker.phase_handler = phase_handler
@@ -296,8 +292,6 @@ class TestSelectiveReanalysis:
             
             phase_handler.execute_phase.return_value = phase_result_p1
             phase_handler.should_retry.return_value = False
-            # ★ 修正: Phase 4-B が呼ばれないように None を明示
-            phase_handler.run_phase4_mips64_retry.return_value = None
             
             checker.phase_handler = phase_handler
             

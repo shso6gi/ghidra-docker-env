@@ -16,13 +16,12 @@ defaults:
 # - expected.final_verdict: EQUIVALENT | NOT_EQUIVALENT | UNKNOWN
 # - expected.allowed_recovery_phases: list of phase names that may run after phase0
 # - expected.required_stage_path: ordered stage checkpoints expected to run
-# - expected.phase4b_gate_allowed: true|false (P4B gate condition check)
 #
 # Stage names (outer-level):
 #   S_PAIRWISE, S_MONOLITHIC_FALLBACK
 #
 # Phase names (pipeline-level):
-#   P0_BASE, P1_SIGNEDNESS, P2_PATTERN_INT, P4B_MIPS64_SPURIOUS
+#   P0_BASE, P1_SIGNEDNESS, P2_PATTERN_INT
 
 test_cases:
   - id: "pairwise_equiv_all_unsat"
@@ -112,29 +111,6 @@ test_cases:
       stop_after_phase0: true
       allowed_recovery_phases: []
       allowed_special_phases: []
-      required_stage_path:
-        - "S_PAIRWISE"
-
-  - id: "sat_mips64_spurious_allows_phase4b_only"
-    description: "SAT with MIPS64 spurious pattern may enter only P4B retry path."
-    scope: "phase_gate"
-    architecture:
-      binary1: "MIPS:BE:64:64-32addr"
-      binary2: "x86:LE:64:default"
-    phase0:
-      status: "SAT"
-      has_counterexample: true
-      counterexample:
-        param_1_1: 18446744069414584321  # 0xFFFFFFFF00000001
-        param_1_2: 1
-    expected:
-      final_verdict: "NOT_EQUIVALENT"
-      stop_after_phase0: false
-      allowed_recovery_phases:
-        - "P4B_MIPS64_SPURIOUS"
-      allowed_special_phases:
-        - "P4B_MIPS64_SPURIOUS"
-      phase4b_gate_allowed: true
       required_stage_path:
         - "S_PAIRWISE"
 

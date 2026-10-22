@@ -28,17 +28,14 @@ def get_transition_reason(
     result: EquivalenceResult,
     retry_with_type_fix: bool,
     phase_id: Optional[str] = None,
-    will_try_phase4b: bool = False
 ) -> str:
-    """結果から phase レベルの遷移理由を返す"""
+    """結果から phase レベルの遷移理由を返す（``SAT_PHASE4B`` は撤去した Phase 4-B の値で、出さない）"""
     del retry_with_type_fix
     del phase_id
 
     if result.is_equivalent is True:
         return TransitionReason.UNSAT.value
     if result.is_equivalent is False:
-        if will_try_phase4b:
-            return TransitionReason.SAT_PHASE4B.value
         return TransitionReason.SAT.value
     if result.has_critical_error():
         return TransitionReason.CRITICAL_ERROR.value

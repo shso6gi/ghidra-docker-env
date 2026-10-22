@@ -268,12 +268,12 @@ class PhaseHandler:
             False: UNSAT/SAT/critical error → 通常recovery phases へ進まない
         
         Note:
-            SAT時の Phase 4-B (MIPS64 spurious) は should_run_phase4_retry() で別途判定
+            SAT 時の再試行は workflow の P4C / P4A tail だけ（Phase 4-B は撤去、#184）
         """
         if result.is_equivalent is True:  # UNSAT
             return False
         if result.is_equivalent is False:  # SAT
-            return False  # ★ SAT時は通常recoveryブロック（P4Bは別ゲート）
+            return False  # ★ SAT時は通常recoveryブロック
         if result.has_critical_error():
             return False
         # UNKNOWN/TIMEOUT のみ True
@@ -1062,94 +1062,4 @@ class PhaseHandler:
         
         applied = changed_binary1 or changed_binary2
         return (applied, changed_binary1, changed_binary2)
-    
-    # ===== Phase 4-B: MIPS64 ABI Retry (spurious counterexample detection) =====
-    
-    def should_run_phase4_retry(
-        self,
-        previous_result: EquivalenceResult,
-        ctx: PhaseContext
-    ) -> bool:
-        """Phase 4-B Retryを実行すべきかを判定
-        
-        SAT時の特別ゲート: MIPS64偽反例検出に限定
-        
-        Returns:
-            True: MIPS64 + SAT + counterexample + analysis揃い
-            False: 上記条件を満たさない
-        """
-        # NOT EQUIVALENT (SAT) の場合のみ
-        if previous_result.is_equivalent is not False:
-            return False
-        
-        # counterexampleが取得できている
-        if previous_result.solver_results is None:
-            return False
-        counterexample = previous_result.solver_results.get_counterexample()
-        if not counterexample:
-            return False
-        
-        # MIPS64バイナリが含まれている
-        is_mips64_1 = self.arch_detector.is_mips64(ctx.program1)
-        is_mips64_2 = self.arch_detector.is_mips64(ctx.program2)
-        if not (is_mips64_1 or is_mips64_2):
-            return False
-        
-        # 解析結果が揃っている
-        if ctx.analysis1 is None or ctx.analysis2 is None:
-            return False
-        
-        return True
-    
-    def run_phase4_mips64_retry(
-        self,
-        previous_result: EquivalenceResult,
-        ctx: PhaseContext
-    ) -> Optional[Dict[str, Tuple[str, int]]]:
-        """
-        Phase 4-B: MIPS64 ABI Retry
-        偽反例を検出し、ABI整合制約マップを返す
-        
-        Args:
-            previous_result: 前回の判定結果（NOT EQUIVALENT）
-            ctx: Phaseコンテキスト
-        
-        Returns:
-            ABI整合制約マップ
-            - key: 64bitパラメータ名（例: "param_1_1"）
-            - value: (signedness, narrow_bits) タプル
-            空の場合は偽反例なし → リトライ不要
-        """
-        if not self.should_run_phase4_retry(previous_result, ctx):
-            return None
-        
-        counterexample = previous_result.solver_results.get_counterexample()
-        if not counterexample:
-            return None
-        
-        if ctx.analysis1 is None or ctx.analysis2 is None:
-            self._debug_print("Phase 4-B: Analysis not available, skipping")
-            return None
-        
-        is_mips64_1 = self.arch_detector.is_mips64(ctx.program1)
-        is_mips64_2 = self.arch_detector.is_mips64(ctx.program2)
-        
-        self._debug_print("=" * 60)
-        self._debug_print("Phase 4-B: MIPS64 ABI Retry (spurious counterexample detection)")
-        self._debug_print("=" * 60)
-        
-        # 偽反例検出
-        abi_constraints = self.mips64_handler.detect_spurious_counterexample(
-            counterexample,
-            ctx.analysis1,
-            ctx.analysis2,
-            is_mips64_1,
-            is_mips64_2
-        )
-        
-        if abi_constraints:
-            self._debug_print(f"Spurious counterexample detected, constraints: {abi_constraints}")
-            return abi_constraints
-        else:
-            self._debug_print("No spurious counterexample detected (genuine NOT EQUIVALENT)")
-            return None
+

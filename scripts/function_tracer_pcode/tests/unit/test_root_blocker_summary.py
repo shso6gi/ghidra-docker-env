@@ -14,7 +14,6 @@ from scripts.function_tracer_pcode.reporting.root_blocker_summary import (
     summarize_root_blockers,
     compare_root_blocker_summaries,
 )
-import scripts.function_tracer_pcode.checker.abi_retry as _mx_abi_retry
 import scripts.function_tracer_pcode.checker.preflight_gate as _mx_preflight_gate
 import scripts.function_tracer_pcode.checker.recovery_proofs as _mx_recovery_proofs
 import scripts.function_tracer_pcode.checker.recurrence_stage as _mx_recurrence_stage
@@ -713,7 +712,6 @@ def test_check_from_binaries_preserves_supplied_content_identities(monkeypatch):
         solver_results=ParallelResult(results=[]),
     )
     monkeypatch.setattr(checker_module, "run_check_from_binaries", lambda *args, **kwargs: result)
-    monkeypatch.setattr(_mx_abi_retry, "run_check_from_binaries", lambda *args, **kwargs: result)
     monkeypatch.setattr(_mx_preflight_gate, "run_check_from_binaries", lambda *args, **kwargs: result)
     monkeypatch.setattr(_mx_root_causes, "run_check_from_binaries", lambda *args, **kwargs: result)
     monkeypatch.setattr(_mx_recovery_proofs, "run_check_from_binaries", lambda *args, **kwargs: result)

@@ -355,7 +355,6 @@ def test_e0f_limitation_during_phase_reanalysis_is_not_lost():
     )
     phase_handler.should_retry.return_value = True
     phase_handler.get_retry_reason.return_value = "UNKNOWN"
-    phase_handler.run_phase4_mips64_retry.return_value = None
 
     result = _run_pair(
         analyze=_analyze, stage_plan=_stage_plan, connector=_connector(),
@@ -397,7 +396,6 @@ def test_e0f_phase_loop_stops_after_a_swallowed_limitation():
     )
     phase_handler.should_retry.return_value = True
     phase_handler.get_retry_reason.return_value = "UNKNOWN"
-    phase_handler.run_phase4_mips64_retry.return_value = None
 
     result = _run_pair(
         analyze=_analyze, stage_plan=_stage_plan, connector=_connector(),
@@ -413,7 +411,7 @@ def test_e0f_phase_loop_stops_after_a_swallowed_limitation():
 def test_e0f_sat_retries_stop_inside_the_phase_that_went_terminal():
     """E0f 補: phase の途中で terminal になったら SAT 後の再試行も始めない。
 
-    phase の先頭 gate では止められない区画（4-B / 4-C / 4-A）を通るので、
+    phase の先頭 gate では止められない区画（4-C / 4-A）を通るので、
     phase 内側の gate が無いと型修正リトライが走ってしまう。
     """
     analysis1, analysis2 = _analyses()
@@ -431,7 +429,6 @@ def test_e0f_sat_retries_stop_inside_the_phase_that_went_terminal():
         )
 
     phase_handler = Mock(spec=PhaseHandler)
-    phase_handler.run_phase4_mips64_retry.return_value = None
     phase_handler.should_fix_return_type.return_value = True
     phase_handler.should_retry.return_value = False
     phase_handler.get_retry_reason.return_value = "NOT_EQUIVALENT"
@@ -441,8 +438,7 @@ def test_e0f_sat_retries_stop_inside_the_phase_that_went_terminal():
         retry_with_type_fix=True, phase_handler=phase_handler,
     )
 
-    # 4-B の適格判定は gate より前で 1 回だけ走る。そこから先は始めない。
-    assert phase_handler.run_phase4_mips64_retry.call_count == 1
+    # SAT の後の再試行（P4C / P4A tail）は始めない。
     assert phase_handler.should_fix_return_type.call_count == 0
     assert phase_handler.execute_phase.call_count == 0
     assert result.pair_stop_state == PairStopState.PAIR_TERMINAL_LIMITATION.value
