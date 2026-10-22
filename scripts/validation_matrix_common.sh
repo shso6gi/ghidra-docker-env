@@ -78,6 +78,96 @@ validation_resolve_analysis_timeout_policy() {
     fi
 }
 
+_VALIDATION_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# ---------------------------------------------------------------------------
+# Issue #160: FULL scope の評価 tree（Eq / Neq 共通）
+#
+# FULL scope の tree は「現在の source・config・入力 binary で評価した pair だけ」を持つ。
+#   - 実行する pair を絞る入力（件数上限・sample / pair filter・rerun manifest・ERROR-only）を
+#     FULL では 1 つも受け付けない（validation_refuse_narrowed_full_scope）。
+#   - 出力先は、何かを書く前に受理判定する（validation_admit_full_scope_output）。判定規則は
+#     reporting/execution_receipt.py::full_scope_output_admission だけが持ち、ここは呼ぶだけ。
+#   - resume 時の pair の再利用も同じ module が FULL では source / config をまたがせない
+#     （cross_identity_resume_is_permitted）。runner 側に identity の規則を書かない。
+# ---------------------------------------------------------------------------
+
+# FULL scope で、実行対象を絞る入力が 1 つでも有効なら理由を出して 1 を返す（pair を始める前に呼ぶ）。
+# FULL でない scope では何もしない。
+#   validation_refuse_narrowed_full_scope <scope> <max_samples> <sample_filter> <pair_filter> \
+#       <rerun_manifest> <error_only_rerun>
+validation_refuse_narrowed_full_scope() {
+    local scope="$1" max_samples="$2" sample_filter="$3" pair_filter="$4"
+    local rerun_manifest="$5" error_only_rerun="$6"
+    local -a active=()
+    [[ "$scope" == FULL_EQBENCH || "$scope" == FULL_NEQ ]] || return 0
+    [[ "$max_samples" == 0 ]] || active+=("a sample limit ($max_samples)")
+    [[ -z "$sample_filter" ]] || active+=("a sample filter")
+    [[ -z "$pair_filter" ]] || active+=("a pair filter")
+    [[ -z "$rerun_manifest" ]] || active+=("a rerun manifest")
+    [[ "$error_only_rerun" == 0 ]] || active+=("ERROR-only rerun")
+    (( ${#active[@]} == 0 )) && return 0
+    local joined
+    joined="$(printf '%s, ' "${active[@]}")"
+    echo "Error: $scope runs every pair of the frozen census; refusing ${joined%, } (use a REPRESENTATIVE scope for a narrowed or rerun tree)" >&2
+    return 1
+}
+
+# FULL scope の出力先の受理判定（書き込みの前に呼ぶ）。candidate は出力先の外に置いた、これから
+# 置く run manifest。成功すると VALIDATION_OUTPUT_ADMISSION に FRESH / SAME_IDENTITY_RESUME を入れて
+# 0 を返す。REFUSE（または判定できない）なら理由を出して 1 を返す: 呼び出し側は出力先に何も書かずに
+# exit する。
+#   validation_admit_full_scope_output <python_bin> <output_dir> <candidate_manifest>
+validation_admit_full_scope_output() {
+    local python_bin="$1" output_dir="$2" candidate="$3" line decision reason status=0
+    [[ "$python_bin" != */* || "$python_bin" == /* ]] || python_bin="$PWD/$python_bin"
+    line="$(cd "$_VALIDATION_REPO_ROOT" && "$python_bin" -B -m \
+        scripts.function_tracer_pcode.reporting.execution_receipt \
+        --repo-root "$_VALIDATION_REPO_ROOT" --full-scope-output-admission \
+        --output-dir "$output_dir" --run-manifest "$candidate" 2>&1)" || status=$?
+    decision="${line%%$'\t'*}"
+    reason="${line#*$'\t'}"
+    if (( status != 0 )) || [[ "$decision" != FRESH && "$decision" != SAME_IDENTITY_RESUME ]]; then
+        echo "Error: FULL-scope output directory refused; nothing was written to it: $output_dir" >&2
+        echo "Reason: $(printf '%s\n' "${reason:-exit $status}" | tail -n 1)" >&2
+        echo "Use a new, empty OUTPUT_BASE_DIR, or resume it with the exact run identity that wrote it." >&2
+        return 1
+    fi
+    VALIDATION_OUTPUT_ADMISSION="$decision"
+    echo "FULL-scope output admission: $decision ($reason): $output_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Issue #160: pair ごとの runtime receipt（Eq / Neq 共通の writer と execution 境界）
+#
+# schema・path・execution_nonce による束縛は reporting/pair_runtime_receipt.py が持つ。
+# receipt は診断で、pair-status / canonical result / 署名 / ledger の入力にならない。
+# 書けなくても pair と run の exit code は変えない（警告だけ出して 0 を返す）。
+# ---------------------------------------------------------------------------
+
+# 前回 execution の receipt を捨てる。run_pair の中、新しい child を起こす前（journal と同じ境界）で呼ぶ。
+#   validation_reset_pair_runtime_receipts <metrics_dir> <pair_stem>
+validation_reset_pair_runtime_receipts() {
+    local metrics_dir="$1" stem="$2"
+    rm -f -- "$metrics_dir/$stem.progress.json" "$metrics_dir/$stem.runtime.json" || true
+    return 0
+}
+
+# receipt を 1 つ書く。値はすべて引数で渡す（runner の global を読まない）。
+# 引数は pair_runtime_receipt の `write` subcommand の option をそのまま渡す。
+#   validation_write_pair_runtime_receipt <python_bin> --metrics-dir D --stem S --state RUNNING|COMPLETED \
+#       --function-name F --left-binary-id L --right-binary-id R --execution-nonce N [--<field> V ...]
+validation_write_pair_runtime_receipt() {
+    local python_bin="$1"
+    shift
+    [[ "$python_bin" != */* || "$python_bin" == /* ]] || python_bin="$PWD/$python_bin"
+    if ! (cd "$_VALIDATION_REPO_ROOT" && "$python_bin" -B -m \
+        scripts.function_tracer_pcode.reporting.pair_runtime_receipt write "$@"); then
+        echo "Warning: pair runtime receipt was not written (diagnostic only): $*" >&2
+    fi
+    return 0
+}
+
 # 実行記録の 1 行に安全に埋め込める形へ整える（改行・復帰を潰す）。
 validation_manifest_value() {
     printf '%s' "${1-}" | tr '\r\n' '  '

@@ -1410,13 +1410,21 @@ def test_eqbench_runner_clamps_parallelism_and_records_pair_progress_contract(
     assert 'EQBENCH_CPU_TOKENS=' in script
     assert 'EQBENCH_PAIR_CPU_TOKENS=' in script
     assert 'RESOURCE_ADMISSION_JOBS=$((EQBENCH_CPU_TOKENS / EQBENCH_PAIR_CPU_TOKENS))' in script
-    assert 'write_pair_progress_receipt() {' in script
-    assert 'eqbench-pair-progress-receipt-v1' in script
+    # Issue #160: the receipt writer is shared with the Neq runner; the schema
+    # lives in reporting/pair_runtime_receipt.py, the shell entry in the common file.
+    common = Path("scripts/validation_matrix_common.sh").read_text()
+    receipt_module = Path(
+        "scripts/function_tracer_pcode/reporting/pair_runtime_receipt.py"
+    ).read_text()
+    assert 'validation_write_pair_runtime_receipt() {' in common
+    assert 'write_pair_progress_receipt' not in script
+    assert 'validation_write_pair_runtime_receipt "$PYTHON_BIN" --state COMPLETED' in script
+    assert 'eqbench-pair-progress-receipt-v2' in receipt_module
     assert "/usr/bin/time -f 'elapsed_seconds=%e\\nmax_rss_kb=%M'" in script
-    assert '"writer_pid": os.getpid()' in script
-    assert '"timed_command_pid": number(timed_command_pid)' in script
-    assert '"supervisor_pid"' not in script
-    assert '"pid": os.getpid()' not in script
+    assert '"writer_pid": os.getpid()' in receipt_module
+    assert '"timed_command_pid"' in receipt_module
+    assert '"supervisor_pid"' not in receipt_module
+    assert '"pid": os.getpid()' not in receipt_module
 
     output_dir = tmp_path / "eqbench"
     env = os.environ.copy()

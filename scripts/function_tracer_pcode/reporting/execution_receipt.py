@@ -91,6 +91,15 @@ ANALYSIS_CONFIG_SCHEMAS_WITH_FAST_PATH = frozenset({
 })
 ANALYSIS_CONFIG_SCHEMA_KEY = "analysis_config_schema"
 MATRIX_RUN_SCOPES = frozenset({"REPRESENTATIVE", "FULL_EQBENCH", "FULL_NEQ"})
+# Issue #160: the scopes whose tree is an evaluation result.  Such a tree holds
+# only pairs evaluated by the current source, config and input binaries: it is
+# created empty (FRESH) or resumed by a run of the exact same identity
+# (SAME_IDENTITY_RESUME), and it never reuses a pair across identities.
+FULL_RUN_SCOPES = frozenset({"FULL_EQBENCH", "FULL_NEQ"})
+OUTPUT_ADMISSION_FRESH = "FRESH"
+OUTPUT_ADMISSION_SAME_IDENTITY_RESUME = "SAME_IDENTITY_RESUME"
+OUTPUT_ADMISSION_REFUSE = "REFUSE"
+RUN_MANIFEST_FILE = "run_manifest.txt"
 
 
 def analysis_config_from_run(run: Mapping[str, str]) -> Mapping[str, Any]:
@@ -255,6 +264,117 @@ def _read_key_values(path: Path) -> Mapping[str, str]:
     return values
 
 
+def cross_identity_resume_is_permitted(current_config: Mapping[str, Any]) -> bool:
+    """Whether a resume may accept pair statuses of another run identity.
+
+    The compatibility paths below let a resumed run reuse a pair status signed
+    under a *different* analysis source or config digest (a checkout migration,
+    or a historical v1 config).  The runner also derives its function-summary
+    shortcut from them, and the shortcut does not look at the pair's inputs at
+    all.  Neither belongs in a FULL-scope tree, which must hold only pairs
+    evaluated by the current source, config and input binaries (Issue #160).
+    For a FULL scope the only reuse left is the pair-level exact target match
+    (``pair_status_file_skip_decision`` without compatible digests), which
+    compares the source and both binary hashes as well.  Other scopes keep the
+    compatibility paths unchanged.
+    """
+
+    return current_config.get("run_scope") not in FULL_RUN_SCOPES
+
+
+def full_scope_output_admission(
+    output_dir: Path, *, candidate_manifest: Path, repo_root: Path,
+) -> tuple[str, str]:
+    """Decide, before anything is written, whether a FULL run may use ``output_dir``.
+
+    ``candidate_manifest`` is the run manifest the runner is about to install
+    (written outside ``output_dir``).  Returns ``(kind, reason)``:
+
+    ``FRESH``
+        ``output_dir`` does not exist or is an empty directory.
+    ``SAME_IDENTITY_RESUME``
+        ``output_dir`` holds a run manifest of the same run kind and FULL scope,
+        not a dry run, whose stored config digest is the current one and whose
+        source digest (start, and end when recorded) is the current checkout.
+    ``REFUSE``
+        anything else: other entries without a manifest, an unreadable or
+        malformed manifest, another run kind, scope, config or source, a dry
+        run, or a candidate whose own source digest is not the current one.
+
+    The caller must not write into ``output_dir`` unless the kind is FRESH or
+    SAME_IDENTITY_RESUME, so a refused directory is left exactly as it was.
+    """
+
+    candidate = _read_key_values(candidate_manifest)
+    current_config = analysis_config_from_run(candidate)
+    if current_config["run_scope"] not in FULL_RUN_SCOPES:
+        raise ValueError("output admission applies to FULL-scope runs only")
+    current_source = source_tree_digest(repo_root)
+    current_digest = authority_digest(current_config)
+    if candidate.get("analysis_source_digest_start") != current_source:
+        return OUTPUT_ADMISSION_REFUSE, (
+            "the candidate run manifest does not record the current source digest"
+        )
+    if candidate.get("analysis_config_digest", current_digest) != current_digest:
+        return OUTPUT_ADMISSION_REFUSE, (
+            "the candidate run manifest records an analysis config digest that "
+            "is not the digest of its own config"
+        )
+    if not output_dir.exists() and not output_dir.is_symlink():
+        return OUTPUT_ADMISSION_FRESH, "the output directory does not exist"
+    if output_dir.is_symlink() or not output_dir.is_dir():
+        return OUTPUT_ADMISSION_REFUSE, "the output path is not a directory"
+    if not any(output_dir.iterdir()):
+        return OUTPUT_ADMISSION_FRESH, "the output directory is empty"
+    manifest = output_dir / RUN_MANIFEST_FILE
+    if manifest.is_symlink() or not manifest.is_file():
+        return OUTPUT_ADMISSION_REFUSE, (
+            f"the output directory is not empty and has no {RUN_MANIFEST_FILE}"
+        )
+    try:
+        previous = _read_key_values(manifest)
+    except (OSError, UnicodeError, ValueError):
+        return OUTPUT_ADMISSION_REFUSE, f"{RUN_MANIFEST_FILE} is unreadable"
+    for field, reason in (
+        ("run_kind", "was written by another run kind"),
+        ("run_scope", "was written for another run scope"),
+    ):
+        if previous.get(field) != candidate.get(field):
+            return OUTPUT_ADMISSION_REFUSE, (
+                f"{RUN_MANIFEST_FILE} {reason} ({field}={previous.get(field)!r}, "
+                f"current {candidate.get(field)!r})"
+            )
+    if previous.get("dry_run") != "0":
+        return OUTPUT_ADMISSION_REFUSE, (
+            f"{RUN_MANIFEST_FILE} is not from a real run "
+            f"(dry_run={previous.get('dry_run')!r})"
+        )
+    stored_digest = previous.get("analysis_config_digest")
+    source_start = previous.get("analysis_source_digest_start")
+    source_end = previous.get("analysis_source_digest_end")
+    try:
+        previous_config = analysis_config_from_run(previous)
+    except ValueError:
+        return OUTPUT_ADMISSION_REFUSE, f"{RUN_MANIFEST_FILE} lacks a typed analysis config"
+    if stored_digest != authority_digest(previous_config):
+        return OUTPUT_ADMISSION_REFUSE, (
+            f"{RUN_MANIFEST_FILE} records a config digest that is not the digest of its config"
+        )
+    if stored_digest != current_digest:
+        return OUTPUT_ADMISSION_REFUSE, (
+            f"{RUN_MANIFEST_FILE} was written under another analysis config "
+            f"({stored_digest}, current {current_digest})"
+        )
+    if source_start != current_source or source_end not in (None, current_source):
+        return OUTPUT_ADMISSION_REFUSE, (
+            f"{RUN_MANIFEST_FILE} was written by another source tree "
+            f"(start {source_start}, end {source_end}, current {current_source})"
+        )
+    return OUTPUT_ADMISSION_SAME_IDENTITY_RESUME, (
+        "the output directory holds a run of the same identity"
+    )
+
+
 def compatible_previous_run_manifest_analysis_identity(
     previous_manifest: Path, *, current_config: Mapping[str, Any],
 ) -> tuple[str, str] | None:
@@ -269,8 +389,12 @@ def compatible_previous_run_manifest_analysis_identity(
     and binary hashes).  Accept both the scheduling-free v2 digest and the
     historical v1 digest, but require the stored digest to match the
     reconstructed typed config exactly.
+
+    A FULL-scope run gets ``None``: see ``cross_identity_resume_is_permitted``.
     """
 
+    if not cross_identity_resume_is_permitted(current_config):
+        return None
     try:
         run = _read_key_values(previous_manifest)
         stored_digest = run["analysis_config_digest"]
@@ -574,8 +698,12 @@ def compatible_published_analysis_identity(
     the API for callers that want to report the migration boundary; it is not
     required to equal the historical digest for this explicitly signed resume
     compatibility path.
+
+    A FULL-scope run gets ``None``: see ``cross_identity_resume_is_permitted``.
     """
 
+    if not cross_identity_resume_is_permitted(current_config):
+        return None
     publication_path = matrix_root / MATRIX_PUBLICATION_MANIFEST_FILE
     receipt_path = matrix_root / MATRIX_EXECUTION_RECEIPT_FILE
     public_key_path = matrix_root / "pair-status-verification-key.json"
@@ -612,6 +740,86 @@ def compatible_published_analysis_identity(
         return None
 
 
+def audit_matrix_pair_identity(matrix_root: Path) -> Mapping[str, Any]:
+    """Check that every pair of a finished matrix tree belongs to its publication.
+
+    Run after an evaluation (Issue #160): the tree's signed publication and
+    execution receipt must validate and bind to each other, and every expected
+    pair status must exist, carry a valid pair-status signature, and name the
+    publication's analysis source digest and config digest in its
+    ``pair_execution_target``.  A pair reused from a run of another identity
+    therefore shows up here even if it slipped past the runner.  Diagnostic:
+    the verification ledger does not read this report.
+
+    The unsigned diagnostic a runner writes when classification fails is
+    listed on its own and does not fail the audit: it carries no identity to
+    compare, it is never reused (resume reschedules every unsigned status), and
+    it is counted as an ERROR pair by every consumer.
+    """
+
+    from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
+        pair_status_operational_diagnostic,
+        validate_signed_pair_status,
+    )
+
+    publication_path = matrix_root / MATRIX_PUBLICATION_MANIFEST_FILE
+    receipt_path = matrix_root / MATRIX_EXECUTION_RECEIPT_FILE
+    public_key_path = matrix_root / "pair-status-verification-key.json"
+    publication = validate_matrix_publication_manifest(
+        json.loads(publication_path.read_text(encoding="utf-8"))
+    )
+    receipt = validate_execution_receipt(
+        json.loads(receipt_path.read_text(encoding="utf-8")),
+        public_key_path=public_key_path,
+    )
+    mismatch = matrix_execution_binding_mismatch(publication_path, publication, receipt)
+    if mismatch is not None:
+        raise ValueError(f"execution receipt does not bind to the publication: {mismatch}")
+    source = publication["analysis_source_digest_start"]
+    if publication["analysis_source_digest_end"] != source:
+        raise ValueError("the publication's source digest changed during the run")
+    config = publication["analysis_config_digest"]
+    missing: list[str] = []
+    invalid: list[str] = []
+    foreign: list[str] = []
+    diagnostics: list[str] = []
+    for relative in publication["expected_pair_status_paths"]:
+        path = matrix_root / relative
+        if not path.is_file():
+            missing.append(relative)
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if pair_status_operational_diagnostic(payload) is not None:
+                diagnostics.append(relative)
+                continue
+            body = validate_signed_pair_status(payload, public_key_path=public_key_path)
+        except (OSError, UnicodeError, ValueError, TypeError):
+            invalid.append(relative)
+            continue
+        target = body["pair_execution_target"]
+        if (
+            target.get("analysis_source_digest") != source
+            or target.get("analysis_config_digest") != config
+        ):
+            foreign.append(relative)
+    expected = len(publication["expected_pair_status_paths"])
+    return {
+        "matrix_root": str(matrix_root),
+        "analysis_source_digest": source,
+        "analysis_config_digest": config,
+        "expected_pairs": expected,
+        "matching_pairs": (
+            expected - len(missing) - len(invalid) - len(foreign) - len(diagnostics)
+        ),
+        "unsigned_diagnostic_pair_status_paths": diagnostics,
+        "missing_pair_status_paths": missing,
+        "invalid_pair_status_paths": invalid,
+        "foreign_identity_pair_status_paths": foreign,
+        "passed": not (missing or invalid or foreign),
+    }
+
+
 # Kept as a compatibility alias for callers and stored validation scripts
 # created before cross-checkout resume was generalized.
 compatible_legacy_analysis_identity = compatible_published_analysis_identity
@@ -639,6 +847,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--print-compatible-manifest-analysis-identity", action="store_true"
     )
+    parser.add_argument(
+        "--full-scope-output-admission", action="store_true",
+        help="decide FRESH / SAME_IDENTITY_RESUME / REFUSE for --output-dir "
+             "before a FULL-scope runner writes into it",
+    )
+    parser.add_argument("--output-dir")
+    parser.add_argument(
+        "--audit-matrix-identity",
+        help="after a run: check every expected pair status of this matrix "
+             "tree against its publication's source and config digests",
+    )
     parser.add_argument("--matrix-root")
     parser.add_argument("--source-digest-start")
     parser.add_argument("--analysis-config-digest", default="full-unit-default")
@@ -648,6 +867,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     repo_root = Path(args.repo_root).resolve()
+    if args.full_scope_output_admission:
+        if not args.output_dir or not args.run_manifest:
+            parser.error("output admission requires --output-dir and --run-manifest")
+        kind, reason = full_scope_output_admission(
+            Path(args.output_dir), candidate_manifest=Path(args.run_manifest),
+            repo_root=repo_root,
+        )
+        print(f"{kind}\t{reason}")
+        return 1 if kind == OUTPUT_ADMISSION_REFUSE else 0
+    if args.audit_matrix_identity:
+        report = audit_matrix_pair_identity(Path(args.audit_matrix_identity))
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0 if report["passed"] else 1
     if args.print_compatible_analysis_config_digest:
         if (
             not args.run_manifest or not args.resume_compatibility_root

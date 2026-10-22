@@ -78,11 +78,14 @@ PROCESS_WORKER_KEY_ID=t18-worker; PROCESS_WORKER_KEY_FILE="__TMP__/keys/worker.k
 PAIR_STATUS_SIGNING_PRIVATE_KEY_FILE="__TMP__/keys/pair-status.key"
 PAIR_STATUS_VERIFICATION_KEY_FILE="__TMP__/keys/pair-status-verification-key.json"
 EQBENCH_DEBUG=0; EQBENCH_PROGRESS_INTERVAL_SECONDS=1; EQBENCH_IDENTICAL_FAST_PATH=1
+# Issue #160: run_pair passes these to the runtime receipt writer.
+EQBENCH_CPU_TOKENS=16; EQBENCH_PAIR_CPU_TOKENS=8; PARALLEL_JOBS=2; PARALLEL_JOBS_REQUESTED=2
 FT_EXPANDER_DEDUP_CASE_LIMIT=0; FT_CALLEE_UNBOUND_REUSE=0; FT_CALLEE_UNBOUND_REUSE_SHADOW=0
 STACK_DUMP_ARTIFACT_STATE_FILE="__TMP__/stack-dump-state.tsv"
 export ISSUE165_HARNESS_RECORDS="__TMP__/harness"
 
-write_pair_progress_receipt() { :; }
+validation_write_pair_runtime_receipt() { :; }
+validation_reset_pair_runtime_receipts() { :; }
 validation_record_stack_dump_state() { :; }
 cleanup_pair_process_authority_with_run_health() { return 0; }
 

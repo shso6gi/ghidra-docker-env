@@ -75,6 +75,11 @@ from scripts.function_tracer_pcode.authority.decision.pair_status_authority impo
     FINALIZATION_DURABLE,
     FINALIZATION_UNVERIFIED,
 )
+from scripts.function_tracer_pcode.reporting.pair_runtime_receipt import (
+    RUNTIME_METRICS_DIR,
+    RUNTIME_SUFFIX as RUNTIME_METRICS_SUFFIX,
+    bound_elapsed_seconds,
+)
 from scripts.function_tracer_pcode.reporting.pair_outcomes import (
     LABEL_EQ,
     LABEL_NEQ,
@@ -1009,8 +1014,9 @@ COMPLETENESS_COMPLETE = "complete"
 COMPLETENESS_PARTIAL = "partial"
 COMPLETENESS_UNKNOWN = "unknown"
 PUBLICATION_MANIFEST_FILE = "matrix-publication-manifest.json"
-RUNTIME_METRICS_DIR = ".runtime-metrics"
-RUNTIME_METRICS_SUFFIX = ".runtime.json"
+# Issue #160: the receipt contract (path layout and execution binding) is owned
+# by ``pair_runtime_receipt``; ``RUNTIME_METRICS_DIR`` / ``RUNTIME_METRICS_SUFFIX``
+# are re-exported from it for existing callers.
 
 
 @dataclass(frozen=True)
@@ -1167,30 +1173,41 @@ def _runtime_identity(root: Path, path: Path) -> Optional[PairKey]:
 
 
 def load_runtime_metrics(root: Path) -> Tuple[Dict[PairKey, float], int]:
-    """``(elapsed seconds per pair, number of unusable receipts)``."""
+    """``(elapsed seconds per pair, number of unusable receipts)``.
+
+    A receipt counts only when ``bound_elapsed_seconds`` accepts it against the
+    pair status next to it: same pair, same ``execution_nonce``.  A receipt
+    from another execution of the pair, or one too old to carry a nonce, is
+    unusable rather than silently attributed to the current status (Issue #160).
+    """
     root = Path(root)
     elapsed: Dict[PairKey, float] = {}
     unusable = 0
     for path in sorted(root.rglob(f"*{RUNTIME_METRICS_SUFFIX}")):
         key = _runtime_identity(root, path)
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            payload = None
-        if key is None or not isinstance(payload, Mapping):
-            unusable += 1
-            continue
-        identity_matches = (
-            payload.get("function_name") == key[1]
-            and payload.get("left_binary_id") == key[2]
-            and payload.get("right_binary_id") == key[3]
+        payload = _read_json_object(path)
+        status = None
+        if key is not None:
+            status = _read_json_object(path.parent.parent.joinpath(
+                path.name[: -len(RUNTIME_METRICS_SUFFIX)] + PAIR_STATUS_SUFFIX
+            ))
+        seconds = None if key is None else bound_elapsed_seconds(
+            payload, function_name=key[1], left_binary_id=key[2],
+            right_binary_id=key[3], pair_status=status,
         )
-        seconds = payload.get("elapsed_seconds")
-        if not identity_matches or not isinstance(seconds, (int, float)):
+        if seconds is None:
             unusable += 1
             continue
-        elapsed[key] = float(seconds)
+        elapsed[key] = seconds
     return elapsed, unusable
+
+
+def _read_json_object(path: Path) -> Optional[Mapping[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return payload if isinstance(payload, Mapping) else None
 
 @dataclass(frozen=True)
 class RuntimeMetricsReport:

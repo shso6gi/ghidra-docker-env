@@ -74,8 +74,11 @@ EXPECTED_FULL_SOURCE_PAIRS=125
 NEQ_ROOT="$(realpath -m "$NEQ_ROOT")"
 case "$NEQ_ROOT" in "$SCRIPT_DIR"/*) ;; *) echo "NEQ_ROOT must be inside repository" >&2; exit 1 ;; esac
 [[ -d "$NEQ_ROOT" ]] || exit 1
-if [[ "$NEQ_RUN_SCOPE" == FULL_NEQ && "$NEQ_MAX_SAMPLES" != 0 ]]; then exit 1; fi
-if [[ "$NEQ_RUN_SCOPE" == FULL_NEQ && ( -n "$NEQ_SAMPLE_FILTER" || -n "$NEQ_PAIR_FILTER" ) ]]; then exit 1; fi
+# Issue #160: FULL_NEQ は凍結した census の全 pair を実行する。実行対象を絞る入力は
+# pair を 1 つも始めずに拒否する（規則は Eq / Neq 共通の 1 箇所）。
+validation_refuse_narrowed_full_scope "$NEQ_RUN_SCOPE" "$NEQ_MAX_SAMPLES" \
+    "$NEQ_SAMPLE_FILTER" "$NEQ_PAIR_FILTER" "$NEQ_RERUN_MANIFEST" \
+    "$ERROR_ONLY_RERUN" || exit 1
 PAIR_PROCESS_TIMEOUT_SECONDS="$(printf '%s' "$PAIR_PROCESS_TIMEOUT" | sed 's/s$//')"
 PAIR_PROCESS_KILL_AFTER_SECONDS="$(printf '%s' "$PAIR_PROCESS_KILL_AFTER" | sed 's/s$//')"
 PAIR_STACK_DUMP_LEAD_SECONDS="$(printf '%s' "$PAIR_STACK_DUMP_LEAD" | sed 's/s$//')"
@@ -86,6 +89,8 @@ PAIR_STACK_DUMP_LEAD_SECONDS="$(printf '%s' "$PAIR_STACK_DUMP_LEAD" | sed 's/s$/
 # PAIR_PROCESS_TIMEOUT is never raised to make room.
 validation_resolve_analysis_timeout_policy "$PYTHON_BIN" "" "$SCRIPT_DIR" || exit 1
 
+# Issue #160: admission で絞る前の要求値（runtime receipt と run manifest に残す）。
+PARALLEL_JOBS_REQUESTED="$PARALLEL_JOBS"
 RESOURCE_ADMISSION_JOBS="$EQBENCH_CPU_TOKENS"
 if (( EQBENCH_RESOURCE_ADMISSION == 1 )); then
     RESOURCE_ADMISSION_JOBS=$((EQBENCH_CPU_TOKENS / EQBENCH_PAIR_CPU_TOKENS))
@@ -192,7 +197,9 @@ cleanup() { [[ -d "$RUN_TMP" ]] && rm -rf -- "$RUN_TMP"; }
 trap cleanup EXIT
 trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
 
-mkdir -p "$OUTPUT_BASE_DIR"; OUTPUT_BASE_DIR="$(realpath -m "$OUTPUT_BASE_DIR")"
+# Issue #160: FULL_NEQ では出力先の受理判定より前に出力先へ書かない。census は run の tmp に作り、
+# 判定の後で出力先へ写す。
+OUTPUT_BASE_DIR="$(realpath -m "$OUTPUT_BASE_DIR")"
 if [[ -s "$OUTPUT_BASE_DIR/run_manifest.txt" ]] \
     && grep -q '^run_kind=neqbench_all_cross_matrix_current$' "$OUTPUT_BASE_DIR/run_manifest.txt"; then
     echo "Existing output uses the old 256-pair cross-ISA scope: $OUTPUT_BASE_DIR" >&2
@@ -205,7 +212,7 @@ fi
 KEYSET="$(printf '%s' "$OUTPUT_BASE_DIR" | sha256sum | awk '{print $1}')"
 AUTHORITY_ROOT="$(validation_resolve_authority_keyset \
     "$EQBENCH_PRIVATE_AUTHORITY_ROOT" "$KEYSET" "$OUTPUT_BASE_DIR")" || exit 1
-CENSUS="$OUTPUT_BASE_DIR/neq_source_pairs.tsv"; : > "$CENSUS"
+CENSUS="$RUN_TMP/neq_source_pairs.tsv"; : > "$CENSUS"
 SOURCE_PAIR_COUNT=0
 while IFS= read -r dir; do
     [[ -n "$dir" ]] || continue
@@ -225,9 +232,84 @@ if [[ "$NEQ_RUN_SCOPE" == FULL_NEQ && "$SOURCE_PAIR_COUNT" != "$EXPECTED_FULL_SO
     exit 1
 fi
 CENSUS_DIGEST="$(sha256sum "$CENSUS" | awk '{print $1}')"
-PREFILTER_SOURCE_CENSUS_FILE="$OUTPUT_BASE_DIR/prefilter_source_paths.txt"
+PREFILTER_SOURCE_CENSUS_FILE="$RUN_TMP/prefilter_source_paths.txt"
 cut -f1 "$CENSUS" > "$PREFILTER_SOURCE_CENSUS_FILE"
 PREFILTER_SOURCE_CENSUS_DIGEST="$(sha256sum "$PREFILTER_SOURCE_CENSUS_FILE" | awk '{print $1}')"
+ANALYSIS_SOURCE_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)"
+# Issue #123: この run を出した作業ツリー・時刻・ホストを manifest に残す。
+# analysis_config_digest は固定 key 集合からしか作られないので、これらの行を
+# 足しても判定系 digest は変わらない。
+RUN_START_TIME_UTC="$(validation_utc_timestamp)"
+RUN_HOSTNAME="$(validation_run_hostname)"
+RUN_GIT_STATE_LINES="$(validation_run_git_state_lines "$PYTHON_BIN" "$SCRIPT_DIR")"
+# Issue #160: run manifest のうち関数選択より前に決まる行（analysis config を含む）を、出力先の外で
+# 先に組み立てる。FULL_NEQ ではこれを出力先の受理判定にかけ、後で同じ file を manifest の先頭にする。
+# ERROR_ONLY_RERUN is receipt-bound scheduling policy, not part of the
+# semantic analysis-config digest used by reusable pair targets.
+RUN_MANIFEST_HEAD="$RUN_TMP/run_manifest.head.txt"
+cat > "$RUN_MANIFEST_HEAD" <<EOF
+run_kind=neqbench_all_same_isa_function_closure_current
+run_scope=$NEQ_RUN_SCOPE
+build_policy=$NEQ_BUILD_POLICY
+neq_root=$NEQ_ROOT
+output_base_dir=$OUTPUT_BASE_DIR
+parallel_jobs=$PARALLEL_JOBS
+parallel_jobs_requested=$PARALLEL_JOBS_REQUESTED
+resource_admission_jobs=$RESOURCE_ADMISSION_JOBS
+validation_summary_level=$VALIDATION_SUMMARY_LEVEL
+pair_process_timeout=$PAIR_PROCESS_TIMEOUT
+pair_process_kill_after=$PAIR_PROCESS_KILL_AFTER
+pair_stack_dump_lead=$PAIR_STACK_DUMP_LEAD
+pair_process_timeout_seconds=$PAIR_PROCESS_TIMEOUT_SECONDS
+pair_process_kill_after_seconds=$PAIR_PROCESS_KILL_AFTER_SECONDS
+$ANALYSIS_TIMEOUT_MANIFEST_LINES
+equiv_timeout=$EQUIV_TIMEOUT
+decompile_timeout=$DECOMPILE_TIMEOUT
+pairwise_timeout=$PAIRWISE_TIMEOUT
+pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD
+expander_dedup_case_limit_requested=$(validation_manifest_value "$FT_EXPANDER_DEDUP_CASE_LIMIT_REQUESTED")
+expander_dedup_case_limit_effective=$FT_EXPANDER_DEDUP_CASE_LIMIT
+callee_unbound_reuse=$FT_CALLEE_UNBOUND_REUSE
+callee_unbound_reuse_shadow=$FT_CALLEE_UNBOUND_REUSE_SHADOW
+skip_completed_results=$SKIP_COMPLETED_RESULTS
+error_only_rerun=$ERROR_ONLY_RERUN
+debug=$EQBENCH_DEBUG
+analysis_config_schema=eqbench-analysis-config-v4
+identical_fast_path=$EQBENCH_IDENTICAL_FAST_PATH
+max_samples=$NEQ_MAX_SAMPLES
+sample_filter=$NEQ_SAMPLE_FILTER
+pair_filter=$NEQ_PAIR_FILTER
+dry_run=$DRY_RUN
+prefilter_source_count=$SOURCE_PAIR_COUNT
+prefilter_source_census_digest=$PREFILTER_SOURCE_CENSUS_DIGEST
+target_sources=$SOURCE_PAIR_COUNT
+expected_full_source_pairs=$EXPECTED_FULL_SOURCE_PAIRS
+function_policy=changed_functions_plus_recursive_source_callers
+compile_axes=arm64,mips64 x clang,gcc x O0,O1,O2,O3
+new_binary_count=16
+old_binary_count=16
+same_isa_pair_policy=arm64_B1_B8_and_mips64_B9_B16
+expected_same_isa_pairs_per_function=128
+expected_arm64_pairs_per_function=64
+expected_mips64_pairs_per_function=64
+source_pair_count=$SOURCE_PAIR_COUNT
+source_pair_census_digest=$CENSUS_DIGEST
+runner_script_sha256=$(sha256sum "$SCRIPT_DIR/neqbench_run_all_32jobs.sh" | awk '{print $1}')
+start_time_utc=$RUN_START_TIME_UTC
+hostname=$RUN_HOSTNAME
+$RUN_GIT_STATE_LINES
+analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST
+EOF
+CONFIG_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt --run-manifest "$RUN_MANIFEST_HEAD" --print-analysis-config-digest)"
+if [[ "$NEQ_RUN_SCOPE" == FULL_NEQ ]]; then
+    { cat "$RUN_MANIFEST_HEAD"; printf 'analysis_config_digest=%s\n' "$CONFIG_DIGEST"; } \
+        > "$RUN_TMP/run_manifest.candidate.txt"
+    validation_admit_full_scope_output "$PYTHON_BIN" "$OUTPUT_BASE_DIR" \
+        "$RUN_TMP/run_manifest.candidate.txt" || exit 1
+fi
+mkdir -p "$OUTPUT_BASE_DIR"
+cp "$CENSUS" "$OUTPUT_BASE_DIR/neq_source_pairs.tsv"
+cp "$PREFILTER_SOURCE_CENSUS_FILE" "$OUTPUT_BASE_DIR/prefilter_source_paths.txt"
 
 FUNCTION_SELECTION_CENSUS_FILE="$OUTPUT_BASE_DIR/neq_function_selection.tsv"
 FUNCTION_SELECTION_FAILURES_FILE="$OUTPUT_BASE_DIR/function_selection_failures.txt"
@@ -529,11 +611,26 @@ run_pair() {
     local classification_failure
     classification_failure="$metrics_dir/$function"_"$left_id"_"$right_id.classification-failure.json"
     rm -f -- "$classification_failure"
+    # Issue #160: 前回 execution の runtime receipt も同じ境界で捨てる（Eq と同じ writer・schema・path）。
+    local pair_stem="$function"_"$left_id"_"$right_id" started_at finished_at elapsed_seconds max_rss_kb
+    validation_reset_pair_runtime_receipts "$metrics_dir" "$pair_stem"
+    started_at="$(date +%s.%N)"
     local nonce identity result_id source_fp stream exec_nonce checkpoint authority status_file detail ec=0
     nonce="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_hex(24))')"
     identity="$(PYTHONWARNINGS=ignore::RuntimeWarning "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.production_cutover --print-production-execution-identity --binary1-path "$left" --binary2-path "$right" --binary1-id "$left_id" --binary2-id "$right_id" --function-name1 "$function" --function-name2 "$function" --result-entry-occurrence-nonce "$nonce")"
     IFS=$'\t' read -r result_id source_fp stream <<< "$identity"
     exec_nonce="$(printf '%s' "$result_id" | sed 's/^production-pilot-//')"; checkpoint="$RUN_TMP/process-authority"; authority="$checkpoint/$exec_nonce/supervisor-projection.json"; mkdir -p "$checkpoint"
+    # Issue #160: receipt は pair-status と同じ execution_nonce で束縛する。値は引数で渡す。
+    local -a receipt_args=(
+        --metrics-dir "$metrics_dir" --stem "$pair_stem"
+        --function-name "$function" --left-binary-id "$left_id"
+        --right-binary-id "$right_id" --execution-nonce "$exec_nonce"
+        --started-at-epoch "$started_at" --cpu-tokens "$EQBENCH_CPU_TOKENS"
+        --pair-cpu-tokens "$EQBENCH_PAIR_CPU_TOKENS"
+        --parallel-jobs-requested "$PARALLEL_JOBS_REQUESTED"
+        --parallel-jobs-effective "$PARALLEL_JOBS"
+    )
+    validation_write_pair_runtime_receipt "$PYTHON_BIN" --state RUNNING "${receipt_args[@]}"
     # Issue #124 PR-124-B: journal は log の隣、stack dump の一時先は checkpoint
     # 配下（cleanup で消える）、journal に正本として渡す退避先は run dir 配下。
     # 退避そのものは supervisor 側の責務（PR-124-C）。
@@ -544,11 +641,17 @@ run_pair() {
     supervisor_cmd+=( ${ANALYSIS_TIMEOUT_CLI_ARGS[@]+"${ANALYSIS_TIMEOUT_CLI_ARGS[@]}"} )
     if [[ "$EQBENCH_IDENTICAL_FAST_PATH" == "0" ]]; then supervisor_cmd+=( --no-identical-fast-path ); fi
     if [[ "$EQBENCH_DEBUG" == "1" ]]; then supervisor_cmd+=( -d ); fi
-    "${supervisor_cmd[@]}" > "$log" 2>&1 || ec=$?
+    # Issue #160: pair の wall clock / max RSS は Eq と同じく GNU time で supervisor ごと測る。
+    local resource_metrics_file="$pair_tmp/resource-usage.txt"
+    /usr/bin/time -f 'elapsed_seconds=%e\nmax_rss_kb=%M' -o "$resource_metrics_file" \
+        "${supervisor_cmd[@]}" > "$log" 2>&1 || ec=$?
     if ! supervisor_projection_is_terminal "$authority"; then
         echo "Supervisor recovery: resuming non-terminal projection before classification" >> "$log"
         if "${supervisor_cmd[@]}" >> "$log" 2>&1; then ec=0; else ec=$?; fi
     fi
+    finished_at="$(date +%s.%N)"
+    elapsed_seconds="$(awk -F= '$1 == "elapsed_seconds" {print $2}' "$resource_metrics_file" 2>/dev/null || true)"
+    max_rss_kb="$(awk -F= '$1 == "max_rss_kb" {print $2}' "$resource_metrics_file" 2>/dev/null || true)"
     status_file="$out/$function"_"$left_id"_"$right_id.pair-status.json"
     "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.canonical_result --classify-pair-log "$log" --supervisor-projection "$authority" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --pair-status-signing-private-key-file "$PAIR_PRIVATE_KEY" --pair-status-verification-key-file "$PAIR_PUBLIC_KEY" --pair-execution-target-file "$target" --classification-diagnostic-log "$log" --classification-failure-output "$classification_failure" > "$status_file" || ec=1
     if detail="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.pair_status_authority --validate-pair-status "$status_file" --public-key "$PAIR_PUBLIC_KEY" --expected-pair-target "$target" --allow-operational-diagnostic 2>&1)"; then
@@ -563,6 +666,13 @@ run_pair() {
     validation_record_stack_dump_state "$STACK_DUMP_ARTIFACT_STATE_FILE" "$sample" "$function"_"$left_id"_"$right_id" "$dump_status" "$dump_artifact" "$log"
     "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.process_authority_cleanup --tmp-root "$EQBENCH_TMPDIR" --run-tmpdir "$RUN_TMP" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" || { printf '%s\t%s\t%s\n' "$sample" "$function" "$exec_nonce" >> "$PROCESS_CLEANUP_FAILURES"; ec=1; }
     rm -rf "$pair_tmp"
+    local error_kind child_returncode
+    error_kind="$("$PYTHON_BIN" -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("error_kind") or "-")' "$status_file" 2>/dev/null || echo -)"
+    child_returncode="$("$PYTHON_BIN" -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("child_returncode", "-"))' "$status_file" 2>/dev/null || echo -)"
+    validation_write_pair_runtime_receipt "$PYTHON_BIN" --state COMPLETED \
+        "${receipt_args[@]}" --finished-at-epoch "$finished_at" \
+        --elapsed-seconds "${elapsed_seconds:--}" --max-rss-kb "${max_rss_kb:--}" \
+        --status "$status" --error-kind "$error_kind" --child-returncode "$child_returncode"
     progress_update "$sample" "$function" "$left_id" "$right_id" "$status"
     printf '[%s/%s] [%s %s/%s pair=%s/%s] %s <-> %s : %s\n' \
         "$sample_position" "$SOURCE_PAIR_COUNT" "$sample" \
@@ -579,76 +689,19 @@ write_function_results_summary() {
 }
 pair_scheduler_init "$PARALLEL_JOBS" write_function_results_summary RUN_PAIR_FAILURES
 
-ANALYSIS_SOURCE_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)"
-# Issue #123: この run を出した作業ツリー・時刻・ホストを manifest に残す。
-# analysis_config_digest は固定 key 集合からしか作られないので、これらの行を
-# 足しても判定系 digest は変わらない。
-RUN_START_TIME_UTC="$(validation_utc_timestamp)"
-RUN_HOSTNAME="$(validation_run_hostname)"
-RUN_GIT_STATE_LINES="$(validation_run_git_state_lines "$PYTHON_BIN" "$SCRIPT_DIR")"
 RUN_MANIFEST="$OUTPUT_BASE_DIR/run_manifest.txt"
 PREVIOUS_RUN_MANIFEST="$RUN_TMP/previous-run-manifest.txt"
 if [[ -s "$RUN_MANIFEST" ]]; then cp "$RUN_MANIFEST" "$PREVIOUS_RUN_MANIFEST"; fi
-# ERROR_ONLY_RERUN is receipt-bound scheduling policy, not part of the
-# semantic analysis-config digest used by reusable pair targets.
-cat > "$RUN_MANIFEST" <<EOF
-run_kind=neqbench_all_same_isa_function_closure_current
-run_scope=$NEQ_RUN_SCOPE
-build_policy=$NEQ_BUILD_POLICY
-neq_root=$NEQ_ROOT
-output_base_dir=$OUTPUT_BASE_DIR
-parallel_jobs=$PARALLEL_JOBS
-resource_admission_jobs=$RESOURCE_ADMISSION_JOBS
-validation_summary_level=$VALIDATION_SUMMARY_LEVEL
-pair_process_timeout=$PAIR_PROCESS_TIMEOUT
-pair_process_kill_after=$PAIR_PROCESS_KILL_AFTER
-pair_stack_dump_lead=$PAIR_STACK_DUMP_LEAD
-pair_process_timeout_seconds=$PAIR_PROCESS_TIMEOUT_SECONDS
-pair_process_kill_after_seconds=$PAIR_PROCESS_KILL_AFTER_SECONDS
-$ANALYSIS_TIMEOUT_MANIFEST_LINES
-equiv_timeout=$EQUIV_TIMEOUT
-decompile_timeout=$DECOMPILE_TIMEOUT
-pairwise_timeout=$PAIRWISE_TIMEOUT
-pairwise_timeout_hard=$PAIRWISE_TIMEOUT_HARD
-expander_dedup_case_limit_requested=$(validation_manifest_value "$FT_EXPANDER_DEDUP_CASE_LIMIT_REQUESTED")
-expander_dedup_case_limit_effective=$FT_EXPANDER_DEDUP_CASE_LIMIT
-callee_unbound_reuse=$FT_CALLEE_UNBOUND_REUSE
-callee_unbound_reuse_shadow=$FT_CALLEE_UNBOUND_REUSE_SHADOW
-skip_completed_results=$SKIP_COMPLETED_RESULTS
-error_only_rerun=$ERROR_ONLY_RERUN
-debug=$EQBENCH_DEBUG
-analysis_config_schema=eqbench-analysis-config-v4
-identical_fast_path=$EQBENCH_IDENTICAL_FAST_PATH
-max_samples=$NEQ_MAX_SAMPLES
-sample_filter=$NEQ_SAMPLE_FILTER
-pair_filter=$NEQ_PAIR_FILTER
-dry_run=$DRY_RUN
-prefilter_source_count=$SOURCE_PAIR_COUNT
-prefilter_source_census_digest=$PREFILTER_SOURCE_CENSUS_DIGEST
-target_sources=$SOURCE_PAIR_COUNT
-expected_full_source_pairs=$EXPECTED_FULL_SOURCE_PAIRS
-function_policy=changed_functions_plus_recursive_source_callers
+{
+    cat "$RUN_MANIFEST_HEAD"
+    cat <<EOF
 function_selection_census_file=$(basename "$FUNCTION_SELECTION_CENSUS_FILE")
 function_selection_census_digest=$FUNCTION_SELECTION_CENSUS_DIGEST
-compile_axes=arm64,mips64 x clang,gcc x O0,O1,O2,O3
-new_binary_count=16
-old_binary_count=16
-same_isa_pair_policy=arm64_B1_B8_and_mips64_B9_B16
-expected_same_isa_pairs_per_function=128
-expected_arm64_pairs_per_function=64
-expected_mips64_pairs_per_function=64
 planned_functions=$TOTAL_PLANNED_FUNCTIONS
 planned_pair_jobs=$TOTAL_PLANNED_PAIR_JOBS
-source_pair_count=$SOURCE_PAIR_COUNT
-source_pair_census_digest=$CENSUS_DIGEST
-runner_script_sha256=$(sha256sum "$SCRIPT_DIR/neqbench_run_all_32jobs.sh" | awk '{print $1}')
-start_time_utc=$RUN_START_TIME_UTC
-hostname=$RUN_HOSTNAME
-$RUN_GIT_STATE_LINES
-analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST
+analysis_config_digest=$CONFIG_DIGEST
 EOF
-CONFIG_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt --run-manifest "$RUN_MANIFEST" --print-analysis-config-digest)"
-printf 'analysis_config_digest=%s\n' "$CONFIG_DIGEST" >> "$RUN_MANIFEST"
+} > "$RUN_MANIFEST"
 PAIR_STATUS_RESUME_COMPAT_ARGS=()
 SUMMARY_SHORTCUT_AUTHORIZED=0
 if compatible_identity="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt \
