@@ -237,6 +237,21 @@ class UnpublishedSemanticInputError(AnalysisFailureError):
     """
 
 
+class SemanticAnalysisAfterCommitError(AnalysisFailureError):
+    """安全な counterexample を commit した後に、新しい比較を始めようとした（内部バグ、#130 S3 / A-5）。
+
+    commit の後は新しい意味解析を始めない。開始点は始める前に止まるので、ここへ届くのは
+    止め忘れた開始点がある印（呼び手の契約違反）。黙って解析を続けず、内部バグとして ERROR へ
+    落とす。`FrozenExpressionError` と同じ理由で標準の型階層へは混ぜない。
+    """
+
+    def __init__(self, site: str) -> None:
+        if type(site) is not str or not site:
+            raise ValueError("the refused start point needs an exact site")
+        super().__init__(f"new semantic analysis after a counterexample commit: {site}")
+        self.site = site
+
+
 class DeadlineExceeded(AnalysisLimitation):
     """解析の予算（時間・段数）を使い切って打ち切った限界。
 

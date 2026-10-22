@@ -72,9 +72,12 @@ from scripts.function_tracer_pcode.checker.result_assembly import (
     unsupported_smt_result,
 )
 from scripts.function_tracer_pcode.checker.pair_execution import (
-    pair_counterexample_committed,
     pair_failure_result_from_check,
     raise_pending_pair_failure,
+    refuse_comparison_after_commit,
+)
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+    counterexample_commit_stop_reason,
 )
 from scripts.function_tracer_pcode.checker.strategy_execution import (
     build_prepared_dispatch_frame,
@@ -643,6 +646,9 @@ class EquivalenceChecker(PreflightGateMixin, RootCauseMixin, RecoveryProofMixin,
                 original_signature2 = FunctionSignature.from_analysis(analysis2)
 
             try:
+                # #130 S3 / A-5: check() は新しい比較の唯一の入口。安全な counterexample を
+                # commit した後に呼ばれたら、止め忘れた開始点がある（内部バグとして ERROR へ）。
+                refuse_comparison_after_commit("EquivalenceChecker.check")
                 # strategy を選択
                 strategy = force_strategy if force_strategy is not None else self.check_strategy
 
@@ -781,7 +787,7 @@ class EquivalenceChecker(PreflightGateMixin, RootCauseMixin, RecoveryProofMixin,
                 # 比較（新しい意味解析）を始めない。
                 if (
                     getattr(self, "_active_recurrence_promotion_authority", None) is None
-                    and not pair_counterexample_committed()
+                    and counterexample_commit_stop_reason() is None
                 ):
                     # 6b-4: (1)(2) は段関数、(3) の facade write はその直後・(4) より前に check() が書く。
                     with stage_region("recurrence_promotion"):

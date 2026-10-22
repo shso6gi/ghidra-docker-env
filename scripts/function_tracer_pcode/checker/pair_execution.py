@@ -46,8 +46,13 @@ from scripts.function_tracer_pcode.core.json_encoding import value_token
 # Issue #106 PR-106-A: failure を結果へ変えるのは確定処理（期限で止めない）。変換の唯一の
 # owner がこの module なので、区間を張るのもここ（呼び出し側の数だけ張らない）。
 from scripts.function_tracer_pcode.core.deadline import finalization as deadline_finalization
+from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+    COUNTEREXAMPLE_COMMITTED_STOP,
+    counterexample_commit_stop_reason,
+)
 from scripts.function_tracer_pcode.core.errors import (
     PairFailureKind,
+    SemanticAnalysisAfterCommitError,
     PairPendingFailure,
     PairStopState,
     adopt_pair_failure,
@@ -72,35 +77,31 @@ def pair_stop_state() -> PairStopState:
 #: 新しい意味解析を始めない理由（``semantic_analysis_stop_reason`` の値）。
 #: pair が terminal（限界 / deadline / 内部バグ。Issue #106）。
 SEMANTIC_ANALYSIS_STOP_PAIR_TERMINAL = "pair_terminal"
-#: この pair で安全な counterexample を commit 済み（#130 S3 / A-5）。
-SEMANTIC_ANALYSIS_STOP_COUNTEREXAMPLE_COMMITTED = "counterexample_committed"
-
-
-def pair_counterexample_committed(session: Any = None) -> bool:
-    """この pair で安全な counterexample を decisive として commit 済みか（authority の記録）。
-
-    commit の後は新しい意味解析（次の phase・SAT の後の再試行・stage の fallback・再帰の
-    昇格・conditional lane）を始めない（#130 S3 / A-5）。commit した判定は消えないので、
-    後の解析は判定を変えられず、ERROR / UNKNOWN への劣化と無駄な解析だけを生む。legacy の
-    結果の値（bool）では判定しない。
-
-    ``session`` を省くと active な production session の記録を読む。signal scope の外
-    （確定処理の後の conditional lane）では、その pair の session を渡す。
-    """
-    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
-        committed_safe_counterexample,
-    )
-
-    return committed_safe_counterexample(session) is not None
+#: この pair で安全な counterexample を commit 済み（#130 S3 / A-5。値と規則の owner は authority）。
+SEMANTIC_ANALYSIS_STOP_COUNTEREXAMPLE_COMMITTED = COUNTEREXAMPLE_COMMITTED_STOP
 
 
 def semantic_analysis_stop_reason(session: Any = None):
-    """新しい意味解析を始めない理由（始めてよければ ``None``）。terminal を先に見る。"""
+    """checker の開始点（phase・SAT の後の再試行・conditional lane）が新しい意味解析を始めない理由。
+
+    始めてよければ ``None``。terminal を先に見る（診断の既存の値を保つ）。commit の規則は
+    authority の ``counterexample_commit_stop_reason`` が owner で、ここは合成するだけ。
+    ``session`` を省くと active な production session を読む。signal scope の外（確定処理の後の
+    conditional lane）では、その pair の session を渡す。
+    """
     if not pair_stop_state().allows_semantic_analysis():
         return SEMANTIC_ANALYSIS_STOP_PAIR_TERMINAL
-    if pair_counterexample_committed(session):
-        return SEMANTIC_ANALYSIS_STOP_COUNTEREXAMPLE_COMMITTED
-    return None
+    return counterexample_commit_stop_reason(session)
+
+
+def refuse_comparison_after_commit(site: str) -> None:
+    """新しい比較の入口の backstop: commit の後に呼ばれたら内部バグとして raise する（A-5）。
+
+    開始点は自分で止まる（``semantic_analysis_stop_reason`` / ``counterexample_commit_stop_reason``）。
+    止め忘れた開始点が新しい比較を始めても、黙って解析を続けない。
+    """
+    if counterexample_commit_stop_reason() is not None:
+        raise SemanticAnalysisAfterCommitError(site)
 
 
 def pair_allows_semantic_analysis() -> bool:
@@ -380,7 +381,7 @@ __all__ = [
     "apply_pair_failure_gate",
     "binary_display_name",
     "pair_allows_semantic_analysis",
-    "pair_counterexample_committed",
+    "refuse_comparison_after_commit",
     "pair_failure_result",
     "pair_failure_result_for_exception",
     "pair_failure_result_from_check",

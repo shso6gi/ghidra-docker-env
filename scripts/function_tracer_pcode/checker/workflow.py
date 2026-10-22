@@ -516,6 +516,9 @@ def _run_phase4a_tail(
     type_fixer2,
     retry_with_type_fix: bool,
 ):
+    if semantic_analysis_stop_reason() is not None:
+        # 開始点は自分で止まる（#106 の terminal・#130 S3 / A-5 の commit）。
+        return result, attempt_id
     deadline_checkpoint(PHASE_RETRY_STAGE)
     phase4a_spec = PhaseSpec(PhaseID.P4A_MIPS64_ABI, "MIPS64 ABI param fix (conservative)")
     phase_timeline = phase_timeline_of(checker)
@@ -591,6 +594,10 @@ def _maybe_retry_sat_return_type_fix(
         return result, attempt_id, False
 
     if ctx.analysis1 is None or ctx.analysis2 is None:
+        return result, attempt_id, False
+
+    if semantic_analysis_stop_reason() is not None:
+        # 開始点は自分で止まる（#106 の terminal・#130 S3 / A-5 の commit）。
         return result, attempt_id, False
 
     should_fix1 = checker.phase_handler.should_fix_return_type(
