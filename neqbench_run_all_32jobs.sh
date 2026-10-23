@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/scripts/validation_matrix_common.sh"
 source "$SCRIPT_DIR/scripts/eqbench/pair_scheduler.sh"
-validation_claim_process_ownership || { echo "Error: cannot claim the process ownership of this run" >&2; exit 1; }
+validation_claim_process_ownership "$SCRIPT_DIR/$(basename "$0")" "$@" || { echo "Error: cannot claim the process ownership of this run" >&2; exit 1; }
 
 default_value() {
     local name="$1" value="$2"
@@ -195,7 +195,7 @@ probe="$(mktemp "$EQBENCH_TMPDIR/neqbench-tmp.XXXXXX")"; rm -f "$probe"
 export TMPDIR="$EQBENCH_TMPDIR" TEMP="$EQBENCH_TMPDIR" TMP="$EQBENCH_TMPDIR"
 RUN_TMP="$(mktemp -d "$EQBENCH_TMPDIR/neqbench-run.XXXXXX")"
 cleanup() { [[ -d "$RUN_TMP" ]] && rm -rf -- "$RUN_TMP"; }
-trap cleanup EXIT
+trap 'validation_handle_exit cleanup' EXIT
 # 実行中の pair を（scheduler への登録の有無によらず）すべて止めて待ってから RUN_TMP を消す
 # （validation_handle_stop_signal）。順序を逆にすると、store と child の TMPDIR を消された
 # pair が分類まで進み、確定した結果に見える status を残しうる。
@@ -663,8 +663,9 @@ run_pair() {
     "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.canonical_result --classify-pair-log "$log" --supervisor-projection "$authority" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --pair-status-signing-private-key-file "$PAIR_PRIVATE_KEY" --pair-status-verification-key-file "$PAIR_PUBLIC_KEY" --pair-execution-target-file "$target" --classification-diagnostic-log "$log" --classification-failure-output "$classification_failure" --pair-status-output "$status_file" || true
     # 結果を確定とするかは分類器の exit code ではなく、公開された status を
     # validation_resolve_pair_execution（署名・target・正規の終端・この execution の nonce）が
-    # 決める。確定した ERROR / TIMEOUT も確定で、pair job の失敗ではない（verification
-    # ledger の run_pair_failures の契約）。未完了（INCOMPLETE）と cleanup の失敗だけが失敗。
+    # 決める。確定した結果（ERROR / TIMEOUT を含む）は再利用される確定結果で、Neq runner の
+    # 既存の policy のまま pair job の失敗に数えない。未完了（INCOMPLETE）と cleanup の失敗だけが
+    # 失敗（Eq runner は確定した ERROR も失敗に数える。この契約の差は #276 が PR-B に引き継ぐ）。
     local resolution status error_kind child_returncode pair_ec=0
     resolution="$(validation_resolve_pair_execution "$PYTHON_BIN" "$status_file" "$target" \
         "$PAIR_PUBLIC_KEY" "$exec_nonce" "$classification_failure" 2>> "$log")" || pair_ec=1

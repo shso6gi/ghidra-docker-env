@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/scripts/validation_matrix_common.sh" || exit 1
 source "$SCRIPT_DIR/scripts/eqbench/pair_scheduler.sh" || exit 1
-validation_claim_process_ownership || { echo "Error: cannot claim the process ownership of this run" >&2; exit 1; }
+validation_claim_process_ownership "$SCRIPT_DIR/$(basename "$0")" "$@" || { echo "Error: cannot claim the process ownership of this run" >&2; exit 1; }
 
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
     echo "Error: bash 4.3 or newer is required for wait -n" >&2
@@ -203,7 +203,7 @@ handle_eqbench_signal() {
     # TMPDIR を消された pair が分類まで進み、確定した結果に見える status を残しうる。
     validation_handle_stop_signal "$1" cleanup_eqbench_run_tmpdir
 }
-trap cleanup_eqbench_run_tmpdir EXIT
+trap 'validation_handle_exit cleanup_eqbench_run_tmpdir' EXIT
 trap 'handle_eqbench_signal 129' HUP
 trap 'handle_eqbench_signal 130' INT
 trap 'handle_eqbench_signal 143' TERM
@@ -635,8 +635,10 @@ run_pair() {
     # 分類器は pair-status を atomic に公開する（公開に失敗すれば status を残さない）。
     # 結果を確定とするかは分類器の exit code ではなく、公開された status を
     # validation_resolve_pair_execution（署名・target・正規の終端・この execution の nonce）が
-    # 決める。確定した ERROR / TIMEOUT も確定で、pair job の失敗ではない（verification
-    # ledger の run_pair_failures の契約）。未完了（INCOMPLETE）だけが pair job の失敗。
+    # 決める。確定した結果（ERROR / TIMEOUT を含む）は再利用される確定結果で、未完了
+    # （INCOMPLETE）とは区別する。pair job の exit code は下で、Eq runner の既存の policy の
+    # まま決める（確定した ERROR も pair job の失敗に数える。Neq runner とも verification
+    # ledger の記述とも異なる。この契約の差は #276 が PR-B に引き継ぐ）。
     if PYTHONWARNINGS="ignore::RuntimeWarning" "$PYTHON_BIN" -m \
         scripts.function_tracer_pcode.authority.decision.canonical_result \
         --classify-pair-log "$log_file" \

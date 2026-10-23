@@ -14,9 +14,11 @@ pair は確定した結果に見えないまま再実行される、という契
   読み、原因（OOM など）は推定しない。
 * **環境依存の ERROR**: 署名済みの ERROR で error kind が環境依存のものは、ERROR の
   まま分母に残り、別に数えるだけ。
-* **停止**: runner は停止要求を受けたら、この execution が所有する process（owner token を
-  受け継いだもの、と runner の子孫。scheduler への登録の有無によらない）をすべて凍結し、
-  SIGKILL し、消えたのを確かめてから tmp を消す。停止は時間の設定に依存しない。
+* **停止**: runner は停止要求を受けたとき、また途中で失敗して抜けるときも、この execution
+  が所有する process をすべて凍結し、SIGKILL し、消えたのを確かめてから tmp を消す。所有は
+  scheduler への登録や親子関係によらない（runner は owner token を持たせて自分を exec し
+  直すので、exec を経ない fork の子も token を持つ）。所有かどうかを読めない process が
+  あれば tmp を残して exit 75 で失敗を示す。停止は時間の設定に依存しない。
   supervisor 単体も TERM / INT / HUP で child の process group を止め、終端の projection を
   書かずに終わる。
 * **実行境界**: 新しい execution は前回の pair-status・journal・診断・receipt を消し、消えた
@@ -447,21 +449,24 @@ def test_an_interrupted_supervisor_stops_its_child_and_publishes_no_terminal(
 
 
 # ---------------------------------------------------------------------------
-# 5. runner の停止: 所有しているすべての process を止めてから tmp を消す
-#    （runner の実際の handler と trap、共有の scheduler と common を使い、pair だけを
-#    「子が終わったら分類する」stand-in に置き換える）
+# 5. runner の停止。契約: 中断した pair の process が 1 つも処理を続けていないことを確かめて
+#    から run の一時 dir を消す。確かめられなければ一時 dir を残し、失敗（exit 75）を示す。
+#    runner の実際の ownership の取得・handler・trap、共有の scheduler と common を使い、
+#    pair だけを「子が終わったら分類する」stand-in に置き換える。harness は file として
+#    実行する（runner と同じく、所有権の取得で自分を exec し直す）。
 # ---------------------------------------------------------------------------
 
-_STOP_HARNESS = """
-set -u
+_STOP_HARNESS = """set -u
 source "__COMMON__"
+validation_claim_process_ownership "$0" "$@"
 source "__SCHEDULER__"
-validation_claim_process_ownership
 PYTHON_BIN="__PYTHON__"
 # runner が受理する小数の猶予（停止はこの値に依存しない）
 PAIR_PROCESS_KILL_AFTER=0.5s; PAIR_PROCESS_KILL_AFTER_SECONDS=0.5
 EQBENCH_TMPDIR="__TMP__"; EQBENCH_RUN_TMPDIR="__TMP__/runtmp"; RUN_TMP="__TMP__/runtmp"
 mkdir -p "$RUN_TMP"
+[[ -p "__TMP__/fifo" ]] || mkfifo "__TMP__/fifo"
+echo "$$" > "__TMP__/runner.pid"
 check_then_remove_tmp() {
     local pid state
     for pid in $(cat "__TMP__/pids" 2>/dev/null); do
@@ -485,33 +490,51 @@ run_pair() {
     echo "classified $1" >> "__TMP__/events"
 }
 __INJECT__
-wait
 """
 
 _CHILDREN = {
     "plain": """sh -c 'echo $$ >> "__TMP__/pids"; exec sleep 30' &
     wait $!""",
+    "short": """sh -c 'echo $$ >> "__TMP__/pids"; exit 0' &
+    wait $!""",
     # TERM を無視する子孫
     "ignores-term": """sh -c 'trap "" TERM; echo $$ >> "__TMP__/pids"; while :; do sleep 1; done' &
     wait $!""",
-    # 親を失って runner の process tree から外れる孫（token で所有を辿る）
-    "orphan": """sh -c 'setsid sh -c "echo \\$\\$ >> __TMP__/pids; exec sleep 30" & echo $$ >> "__TMP__/pids"' &
-    wait $!; sleep 30""",
+    # exec を経て親を失い、runner の process tree から外れる孫
+    "exec-orphan": """( setsid sh -c 'echo $$ >> "__TMP__/pids"; exec sleep 30' & )
+    sh -c 'echo $$ >> "__TMP__/pids"; exec sleep 30' &
+    wait $!""",
+    # exec を一度も経ない bash の孫が親を失い、runner の process tree から外れて処理を続ける
+    "fork-orphan": """( ( echo "$BASHPID" >> "__TMP__/pids"
+        while :; do read -r -t 0.05 _ <> "__TMP__/fifo"; echo tick >> "__TMP__/ticks"; done ) & )
+    sh -c 'echo $$ >> "__TMP__/pids"; exec sleep 30' &
+    wait $!""",
+    # 所有かどうかを読めない（non-dumpable で environ が読めない）孤児
+    "unverifiable": """( setsid "__PYTHON__" -c 'import ctypes, os, time
+ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)
+open("__TMP__/unverifiable", "w").write(str(os.getpid()))
+time.sleep(60)' </dev/null >/dev/null 2>&1 & )
+    until [ -s "__TMP__/unverifiable" ]; do sleep 0.05; done
+    sh -c 'echo $$ >> "__TMP__/pids"; exec sleep 30' &
+    wait $!""",
 }
 
 _INJECTIONS = {
     # 起動の直前に停止要求: pair は 1 つも起動しない
     "before-launch": """kill -__SIG__ $$
-pair_scheduler_launch_job g run_pair 1""",
+pair_scheduler_launch_job g run_pair 1
+wait""",
     # fork の直後、scheduler への登録の前に停止要求
     "after-fork-before-registration": """eval "$(declare -f pair_scheduler_start_job | sed '1s/pair_scheduler_start_job/_registered_start_job/')"
 pair_scheduler_start_job() { kill -__SIG__ $$; _registered_start_job "$@"; }
-pair_scheduler_launch_job g run_pair 1""",
+pair_scheduler_launch_job g run_pair 1
+wait""",
     # 登録の後（pair が子を持ってから）に停止要求
     "after-registration": """pair_scheduler_launch_job g run_pair 1
 pair_scheduler_launch_job g run_pair 2
-until [[ "$(wc -l < "__TMP__/pids" 2>/dev/null || echo 0)" -ge 4 ]]; do sleep 0.05; done
-kill -__SIG__ $$""",
+until [[ "$(wc -l < "__TMP__/pids" 2>/dev/null || echo 0)" -ge __READY__ ]]; do sleep 0.05; done
+kill -__SIG__ $$
+wait""",
     # 停止の最中に、この run が所有しない別の process から INT / HUP が届き続ける。
     # 送り手は runner の tree からも token からも外れている（停止で止められない）。
     # pair の子が凍結された（= 停止が始まった）のを見てから送り始める。
@@ -528,7 +551,19 @@ child="$(sed -n 2p "__TMP__/pids")"
     while [ $i -lt 400 ] && kill -INT "$runner" 2>/dev/null; do
         kill -HUP "$runner" 2>/dev/null; echo sent >> "__TMP__/sender"; i=$((i + 1)); sleep 0.002
     done' sender "$$" "$child" & )
-kill -__SIG__ $$""",
+kill -__SIG__ $$
+wait""",
+    # 停止要求ではなく、runner が途中で失敗して抜ける（EXIT の経路）
+    "error-exit": """pair_scheduler_launch_job g run_pair 1
+until [[ "$(wc -l < "__TMP__/pids" 2>/dev/null || echo 0)" -ge 2 ]]; do sleep 0.05; done
+exit 3""",
+    # 正常に完了する（停止要求なし）
+    "normal": """pair_scheduler_launch_job g run_pair 1
+pair_scheduler_close_group g
+pair_scheduler_finalize""",
+    # 外から停止要求が来るまで待つ（別 run との対照用）
+    "wait-external": """pair_scheduler_launch_job g run_pair 1
+wait""",
 }
 
 
@@ -541,7 +576,7 @@ def _runner_handlers(runner: Path) -> str:
     return "\n".join(parts)
 
 
-def _run_stop_harness(tmp_path, runner, injection, signal_name, child="plain"):
+def _harness_script(tmp_path, runner, injection, signal_name, child, ready=4):
     script = (
         _STOP_HARNESS
         .replace("__HANDLERS__", _runner_handlers(runner))
@@ -549,22 +584,42 @@ def _run_stop_harness(tmp_path, runner, injection, signal_name, child="plain"):
         .replace("__INJECT__", _INJECTIONS[injection])
         .replace("__COMMON__", str(COMMON)).replace("__SCHEDULER__", str(SCHEDULER))
         .replace("__PYTHON__", sys.executable).replace("__SIG__", signal_name)
-        .replace("__TMP__", str(tmp_path))
+        .replace("__READY__", str(ready)).replace("__TMP__", str(tmp_path))
     )
+    path = tmp_path / "runner-harness.sh"
+    path.write_text(script, encoding="utf-8")
+    return path
+
+
+def _lines(path: Path):
+    return path.read_text().split() if path.exists() else []
+
+
+def _run_stop_harness(tmp_path, runner, injection, signal_name="TERM", child="plain", ready=4):
+    script = _harness_script(tmp_path, runner, injection, signal_name, child, ready)
     result = subprocess.run(
-        ["bash", "-c", script], capture_output=True, text=True, timeout=120, cwd=REPO_ROOT,
+        ["bash", str(script)], capture_output=True, text=True, timeout=180, cwd=REPO_ROOT,
     )
     time.sleep(1.0)  # 取りこぼした pair が残っていれば、その間に「分類」まで進む
     events = (tmp_path / "events").read_text() if (tmp_path / "events").exists() else ""
-    pids = [int(p) for p in (tmp_path / "pids").read_text().split()] if (
-        tmp_path / "pids").exists() else []
+    pids = [int(p) for p in _lines(tmp_path / "pids")]
     return result, events, pids
 
 
+def _assert_stopped_before_removal(tmp_path, result, events, pids, exit_code):
+    assert result.returncode == exit_code, (result.returncode, result.stderr)
+    assert "classified" not in events, events
+    assert "alive-at-tmp-removal" not in events, events
+    assert events.strip().splitlines()[-1] == "tmp-removed"
+    assert not (tmp_path / "runtmp").exists()
+    assert not [pid for pid in pids if _alive(pid)]
+
+
 _EXIT = {"TERM": 143, "INT": 130, "HUP": 129}
+_RUNNERS = pytest.mark.parametrize("runner", (EQ_RUNNER, NEQ_RUNNER), ids=("eq", "neq"))
 
 
-@pytest.mark.parametrize("runner", (EQ_RUNNER, NEQ_RUNNER), ids=("eq", "neq"))
+@_RUNNERS
 @pytest.mark.parametrize("injection", (
     "before-launch", "after-fork-before-registration", "after-registration",
 ))
@@ -573,36 +628,125 @@ def test_a_stop_request_stops_every_pair_before_the_tmpdir_is_removed(
     tmp_path, runner, injection, signal_name,
 ):
     result, events, pids = _run_stop_harness(tmp_path, runner, injection, signal_name)
-    assert result.returncode == _EXIT[signal_name], result.stderr
-    assert "classified" not in events, events
-    assert "alive-at-tmp-removal" not in events, events
-    assert events.strip().splitlines()[-1] == "tmp-removed"
-    assert not (tmp_path / "runtmp").exists()
-    assert not [pid for pid in pids if _alive(pid)]
+    _assert_stopped_before_removal(tmp_path, result, events, pids, _EXIT[signal_name])
     if injection == "before-launch":
         assert pids == []
 
 
-@pytest.mark.parametrize("runner", (EQ_RUNNER, NEQ_RUNNER), ids=("eq", "neq"))
-@pytest.mark.parametrize("child", ("ignores-term", "orphan"))
+@_RUNNERS
+@pytest.mark.parametrize("child", ("ignores-term", "exec-orphan", "fork-orphan"))
 def test_descendants_that_ignore_term_or_left_the_tree_are_stopped(tmp_path, runner, child):
     result, events, pids = _run_stop_harness(
-        tmp_path, runner, "after-registration", "TERM", child=child,
+        tmp_path, runner, "after-registration", child=child, ready=6 if "orphan" in child else 4,
     )
-    assert result.returncode == 143, result.stderr
-    assert "classified" not in events and "alive-at-tmp-removal" not in events, events
-    assert len(pids) >= 4
-    assert not [pid for pid in pids if _alive(pid)]
+    _assert_stopped_before_removal(tmp_path, result, events, pids, 143)
+    if child == "fork-orphan":
+        # exec を経ない孫が、tmp を消した後に処理を続けていない（tick が増えない）。
+        before = len(_lines(tmp_path / "ticks"))
+        time.sleep(0.5)
+        assert len(_lines(tmp_path / "ticks")) == before
 
 
-@pytest.mark.parametrize("runner", (EQ_RUNNER, NEQ_RUNNER), ids=("eq", "neq"))
+@_RUNNERS
+def test_an_unverifiable_process_keeps_the_tmpdir_and_fails_the_stop(tmp_path, runner):
+    try:
+        result, events, pids = _run_stop_harness(
+            tmp_path, runner, "after-registration", child="unverifiable", ready=4,
+        )
+        # 所有かどうかを読めない process があれば、止めたとは言えない: tmp を残して失敗を示す。
+        assert result.returncode == 75, (result.returncode, result.stderr)
+        assert "tmp-removed" not in events, events
+        assert (tmp_path / "runtmp").is_dir()
+        assert "ownership could not be read" in result.stderr
+        assert "classified" not in events
+        # 所有を確かめられない process には signal を送らない（他人のものかもしれない）。
+        unverifiable = int((tmp_path / "unverifiable").read_text())
+        assert _alive(unverifiable)
+    finally:
+        if (tmp_path / "unverifiable").exists():
+            os.kill(int((tmp_path / "unverifiable").read_text()), signal.SIGKILL)
+
+
+@_RUNNERS
 def test_repeated_stop_requests_end_with_the_first_signal(tmp_path, runner):
     result, events, pids = _run_stop_harness(tmp_path, runner, "repeated-signals", "TERM")
     # 停止の最中に届いた INT / HUP は停止を中断せず、最初の TERM で終わる。
     assert (tmp_path / "sender").exists(), "no signal reached the runner during the stop"
-    assert result.returncode == 143, (result.returncode, result.stderr)
-    assert events.count("tmp-removed") == 1 and "classified" not in events, events
-    assert not [pid for pid in pids if _alive(pid)]
+    _assert_stopped_before_removal(tmp_path, result, events, pids, 143)
+    assert events.count("tmp-removed") == 1
+
+
+@_RUNNERS
+def test_an_error_exit_also_stops_the_pairs_before_the_tmpdir_is_removed(tmp_path, runner):
+    result, events, pids = _run_stop_harness(tmp_path, runner, "error-exit")
+    _assert_stopped_before_removal(tmp_path, result, events, pids, 3)
+
+
+@_RUNNERS
+def test_a_normal_completion_classifies_and_removes_the_tmpdir(tmp_path, runner):
+    result, events, pids = _run_stop_harness(tmp_path, runner, "normal", child="short")
+    assert result.returncode == 0, result.stderr
+    assert "classified 1" in events and events.strip().splitlines()[-1] == "tmp-removed"
+    assert not (tmp_path / "runtmp").exists()
+
+
+@_RUNNERS
+def test_a_stop_leaves_other_runs_and_unrelated_processes_alive(tmp_path, runner):
+    """対照: 同じ user の別の run と無関係な process、runner の呼び出し元は止めない。"""
+
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    unrelated = subprocess.Popen(["sleep", "60"])  # 同じ user、run の開始後に起動、token なし
+    runners = []
+    try:
+        for directory in (first, second):
+            script = _harness_script(directory, runner, "wait-external", "TERM", "plain")
+            runners.append(subprocess.Popen(
+                ["bash", str(script)], cwd=REPO_ROOT,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            ))
+        assert _wait_for(lambda: len(_lines(first / "pids")) >= 2 and len(_lines(second / "pids")) >= 2)
+        runners[0].send_signal(signal.SIGTERM)
+        assert runners[0].wait(timeout=60) == 143
+        assert not [pid for pid in map(int, _lines(first / "pids")) if _alive(pid)]
+        assert [pid for pid in map(int, _lines(second / "pids")) if _alive(pid)] == list(
+            map(int, _lines(second / "pids")))
+        assert (second / "runtmp").is_dir()
+        assert unrelated.poll() is None
+        assert _alive(os.getpid())  # 呼び出し元（この test の process）
+        runners[1].send_signal(signal.SIGTERM)
+        assert runners[1].wait(timeout=60) == 143
+        assert not [pid for pid in map(int, _lines(second / "pids")) if _alive(pid)]
+    finally:
+        for process in runners:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        unrelated.kill()
+        unrelated.wait()
+
+
+def test_the_runner_reexecutes_itself_so_fork_only_children_carry_the_owner(tmp_path):
+    """所有権の取得の前提: exec を経ない fork の子も、自分の environ に token を持つ。"""
+
+    script = tmp_path / "claim.sh"
+    script.write_text(
+        f'set -u\nsource "{COMMON}"\nvalidation_claim_process_ownership "$0" "$@"\n'
+        'echo "args=$*"\n'
+        '( p=$BASHPID; tr "\\0" "\\n" < /proc/$p/environ | grep -c "^EQBENCH_PROCESS_OWNER_TOKEN=$EQBENCH_PROCESS_OWNER_TOKEN$" )\n'
+        'echo "root=$EQBENCH_PROCESS_OWNER_ROOT self=$$"\n',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["bash", str(script), "one", "two words"], capture_output=True, text=True,
+        timeout=60, cwd=REPO_ROOT,
+    )
+    lines = result.stdout.splitlines()
+    assert lines[0] == "args=one two words", result.stderr
+    assert lines[1] == "1"
+    root, self_pid = lines[2].split()
+    assert root.split("=")[1] == self_pid.split("=")[1]
 
 
 def test_ownership_excludes_the_caller_and_its_ancestors(tmp_path):
@@ -615,8 +759,7 @@ def test_ownership_excludes_the_caller_and_its_ancestors(tmp_path):
         owned = rp.owned_processes(token, os.getpid())
         assert sleeper.pid in owned
         assert os.getpid() not in owned
-        survivors = rp.stop(token, os.getpid(), wait_seconds=10)
-        assert survivors == {}
+        assert rp.stop(token, os.getpid(), wait_seconds=10) == {}
         sleeper.wait(timeout=10)
         assert sleeper.returncode == -signal.SIGKILL
     finally:
@@ -627,7 +770,7 @@ def test_ownership_excludes_the_caller_and_its_ancestors(tmp_path):
 
 def test_the_stop_handlers_use_no_shell_arithmetic_on_time_settings():
     # 小数を受理する時間の設定（例: PAIR_PROCESS_KILL_AFTER=0.5s）を shell の整数演算に
-    # 渡さない。停止の実挙動は小数の設定で上の harness が確かめる。
+    # 渡さない。停止の実挙動は、小数の設定のまま上の harness で確かめている。
     for path in (EQ_RUNNER, NEQ_RUNNER, COMMON, SCHEDULER):
         for line in path.read_text(encoding="utf-8").splitlines():
             if "$((" in line or "(( " in line:
@@ -1001,3 +1144,41 @@ def test_the_runners_go_through_the_shared_lifecycle_helpers():
             for target in ('"$RUN_MANIFEST_FILE"', '"$RUN_MANIFEST"',
                            '"$OUTPUT_BASE_DIR/run_manifest.txt"'):
                 assert f"> {target}" not in stripped, (runner.name, line)
+
+
+# ---------------------------------------------------------------------------
+# 10. 所有権の前提: supervisor の子（解析の child）も owner token を受け継ぐ。読めない /proc は
+#     「対象なし」ではなく停止の失敗になる。
+# ---------------------------------------------------------------------------
+
+
+def test_the_supervisor_passes_the_owner_token_to_its_child(tmp_path):
+    marker = tmp_path / "child-environ"
+    child = (
+        sys.executable, "-c",
+        "import sys\n"
+        "env = open('/proc/self/environ', 'rb').read().split(b'\\0')\n"
+        "open(sys.argv[1], 'w').write(str(sum(e.startswith(b'EQBENCH_PROCESS_OWNER_TOKEN=abcd') for e in env)))",
+        str(marker),
+    )
+    with supervisor_case(tmp_path / "case", child, allow_child_exit_resolution=True) as case:
+        subprocess.run(
+            _supervisor_argv(case.config), cwd=REPO_ROOT, capture_output=True, timeout=60,
+            env={**os.environ, "EQBENCH_PROCESS_OWNER_TOKEN": "abcd" * 8},
+        )
+    assert marker.read_text() == "1"
+
+
+def test_a_stop_that_cannot_read_the_process_table_fails(tmp_path):
+    from scripts.eqbench import runner_processes as rp
+
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    with pytest.raises(ValueError):
+        rp.stop("f" * 32, dead.pid)
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.eqbench.runner_processes", "stop",
+         "--token", "f" * 32, "--root", str(dead.pid)],
+        capture_output=True, text=True, cwd=REPO_ROOT, timeout=60,
+    )
+    assert result.returncode == 1 and "could not be carried out" in result.stderr

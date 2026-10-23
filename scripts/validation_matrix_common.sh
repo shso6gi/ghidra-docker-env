@@ -187,21 +187,39 @@ validation_write_pair_runtime_receipt() {
 # 中断と確定の境界（評価計画 v2 PR-A）。2 本の runner はここだけを呼ぶ。
 # ---------------------------------------------------------------------------
 
-# この runner の execution が起こす process の所有権を取る。何かを起動する前に呼ぶ。
-# token は子孫すべてが環境変数で受け継ぐので、scheduler に登録される前の pair job も、
-# 親を失って runner の process tree から外れた process も、この execution のものとして
-# 止められる（scripts/eqbench/runner_processes.py）。入れ子の runner は自分の token で
-# 上書きするので、外側の process は止めない。
+# 停止を確かめられなかった（所有している process が残る、または所有かどうかを確かめられない
+# process がある）ときの runner の exit code。run の一時 dir は残す。
+VALIDATION_STOP_UNCONFIRMED_EXIT=75
+
+# この runner の execution が起こす process の所有権を取る。runner の先頭で、何かを起動する
+# 前に `validation_claim_process_ownership "<runner script の絶対 path>" "$@"` と呼ぶ。
+# owner token を**環境変数として持たせたうえで runner 自身を exec し直す**。bash の export は
+# 自分の /proc/<pid>/environ を変えないので、exec し直さないと、exec を経ない fork（subshell、
+# pair job、progress の loop）の environ に token が現れず、親を失ったときに見つけられない。
+# exec し直した後は、fork だけの子も exec した子も token を持つ（scripts/eqbench/runner_processes.py）。
+# 入れ子の runner は自分の token で exec し直すので、外側の process は止めない。
 validation_claim_process_ownership() {
-    EQBENCH_PROCESS_OWNER_TOKEN="$("${PYTHON_BIN:-python3}" -c \
-        'import secrets; print(secrets.token_hex(16))')" || return 1
-    EQBENCH_PROCESS_OWNER_ROOT="$BASHPID"
-    [[ "$EQBENCH_PROCESS_OWNER_TOKEN" =~ ^[0-9a-f]{32}$ ]] || return 1
-    export EQBENCH_PROCESS_OWNER_TOKEN
+    local script="$1"
+    shift
+    if [[ "${EQBENCH_PROCESS_OWNER_ROOT:-}" == "$$" ]] && _validation_owner_token_in_own_environ; then
+        export EQBENCH_PROCESS_OWNER_TOKEN EQBENCH_PROCESS_OWNER_ROOT
+        return 0
+    fi
+    local token
+    token="$("${PYTHON_BIN:-python3}" -c 'import secrets; print(secrets.token_hex(16))')" || return 1
+    [[ "$token" =~ ^[0-9a-f]{32}$ ]] || return 1
+    exec env EQBENCH_PROCESS_OWNER_TOKEN="$token" EQBENCH_PROCESS_OWNER_ROOT="$$" \
+        "$BASH" "$script" "$@"
 }
 
-# 所有している process を凍結し、SIGKILL し、消えるまで待つ。消えない process が残れば
-# 非 0 を返す（その場合、呼び出し側は tmp を消してはならない）。
+_validation_owner_token_in_own_environ() {
+    [[ "${EQBENCH_PROCESS_OWNER_TOKEN:-}" =~ ^[0-9a-f]{32}$ ]] || return 1
+    tr '\0' '\n' < "/proc/$$/environ" \
+        | grep -qxF "EQBENCH_PROCESS_OWNER_TOKEN=$EQBENCH_PROCESS_OWNER_TOKEN"
+}
+
+# 所有している process を凍結し、SIGKILL し、消えたことを確かめる。残った process、または
+# 所有かどうかを確かめられない process があれば非 0 を返す（呼び出し側は tmp を消さない）。
 validation_stop_owned_processes() {
     local python_bin="${1:-${PYTHON_BIN:-python3}}"
     [[ -n "${EQBENCH_PROCESS_OWNER_TOKEN:-}" && -n "${EQBENCH_PROCESS_OWNER_ROOT:-}" ]] || return 1
@@ -211,19 +229,37 @@ validation_stop_owned_processes() {
 }
 
 # runner の TERM / INT / HUP の handler。以後の停止要求は無視し（停止は 1 回だけ）、
-# 所有している process をすべて止めてから、run の一時 dir を消す関数 <cleanup> を呼んで
-# <exit_status> で終わる。止めきれなければ一時 dir を残し、そのことを書いて終わる。
+# 所有している process がすべて止まったことを確かめてから、run の一時 dir を消す関数
+# <cleanup> を呼んで <exit_status> で終わる。確かめられなければ一時 dir を残し、
+# VALIDATION_STOP_UNCONFIRMED_EXIT で終わる。
 #   trap 'validation_handle_stop_signal 143 <cleanup>' TERM
 validation_handle_stop_signal() {
     local exit_status="$1" cleanup="$2"
     trap '' HUP INT TERM
     trap - EXIT
+    _validation_stop_then_cleanup "$cleanup" || exit_status="$VALIDATION_STOP_UNCONFIRMED_EXIT"
+    exit "$exit_status"
+}
+
+# runner の EXIT の handler。正常終了でも、途中の失敗（set -e など）で抜けるときも、
+# 所有している process が残っていれば止めて確かめてから一時 dir を消す。
+#   trap 'validation_handle_exit <cleanup>' EXIT
+validation_handle_exit() {
+    local exit_status=$? cleanup="$1"
+    trap '' HUP INT TERM
+    trap - EXIT
+    _validation_stop_then_cleanup "$cleanup" || exit_status="$VALIDATION_STOP_UNCONFIRMED_EXIT"
+    exit "$exit_status"
+}
+
+_validation_stop_then_cleanup() {
+    local cleanup="$1"
     if validation_stop_owned_processes; then
         "$cleanup" || true
-    else
-        echo "Error: stop request: owned processes did not all end; the run tmpdir is kept" >&2
+        return 0
     fi
-    exit "$exit_status"
+    echo "Error: the processes of this run could not all be confirmed stopped; the run tmpdir is kept" >&2
+    return 1
 }
 
 # pair の execution 境界を開く。前回 execution の pair-status（atomic な公開の書きかけの
