@@ -2,7 +2,8 @@
 """Issue #165 T18: runner の pair 実行（``run_pair``）で ERROR / TIMEOUT / INVALID が混ざる。
 
 runner（``eqbench_run_all_32jobs.sh``）の ``run_pair`` と、そこから呼ぶ
-``supervisor_projection_is_terminal`` / ``validate_current_pair_status`` を
+``supervisor_projection_is_terminal`` を（結果の確定は共通 helper の
+``validation_resolve_pair_execution``）
 そのまま取り出し、共有の pair scheduler（``scripts/eqbench/pair_scheduler.sh``）
 で 4 pair を並べて走らせる。supervisor・分類器・pair-status の封と検証は
 production の module。Ghidra の CLI だけを ``runner_child``（harness の worker）へ
@@ -88,7 +89,6 @@ STACK_DUMP_ARTIFACT_STATE_FILE="__TMP__/stack-dump-state.tsv"
 export ISSUE165_HARNESS_RECORDS="__TMP__/harness"
 
 validation_write_pair_runtime_receipt() { :; }
-validation_reset_pair_runtime_receipts() { :; }
 validation_record_stack_dump_state() { :; }
 cleanup_pair_process_authority_with_run_health() { return 0; }
 
@@ -163,7 +163,7 @@ def runner_result(tmp_path_factory):
     wrapper.chmod(0o755)
     source = RUNNER.read_text(encoding="utf-8")
     functions = "\n\n".join(_extract(source, name) for name in (
-        "run_pair", "supervisor_projection_is_terminal", "validate_current_pair_status",
+        "run_pair", "supervisor_projection_is_terminal",
     ))
     script = (
         _SCRIPT.replace("__FUNCTIONS__", functions)

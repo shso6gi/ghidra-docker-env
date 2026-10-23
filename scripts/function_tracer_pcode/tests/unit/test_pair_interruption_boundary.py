@@ -14,10 +14,20 @@ pair は確定した結果に見えないまま再実行される、という契
   読み、原因（OOM など）は推定しない。
 * **環境依存の ERROR**: 署名済みの ERROR で error kind が環境依存のものは、ERROR の
   まま分母に残り、別に数えるだけ。
-* **停止**: supervisor は TERM / INT / HUP で child の process group を止め、終端の
-  projection を書かずに終わる。runner は実行中の pair を止めて待ってから tmp を消す。
-* **境界と原子性**: 新しい execution は前回の pair-status を消してから始め、分類器は
-  pair-status を atomic に書く。実行記録も atomic に置き換える / 追記する。
+* **停止**: runner は停止要求を受けたら、この execution が所有する process（owner token を
+  受け継いだもの、と runner の子孫。scheduler への登録の有無によらない）をすべて凍結し、
+  SIGKILL し、消えたのを確かめてから tmp を消す。停止は時間の設定に依存しない。
+  supervisor 単体も TERM / INT / HUP で child の process group を止め、終端の projection を
+  書かずに終わる。
+* **実行境界**: 新しい execution は前回の pair-status・journal・診断・receipt を消し、消えた
+  ことを確かめてから解析を始める。確かめられなければ解析を始めない。
+* **結果の確定**: 分類器は pair-status を atomic に公開し、公開できなければ status を残さない。
+  runner は、署名・target・正規の終端・**この execution の nonce** が揃った status だけを
+  確定とし、それ以外は INCOMPLETE にする（前回の status を今回の結果と取り違えない）。
+  実行記録も atomic に置き換える / 追記する。
+
+再現と回帰はどれも実際の signal・子 process・ファイル操作で確かめる（runner は実際の
+handler と trap、共有の scheduler と common を使い、解析だけを stand-in に置き換える）。
 """
 
 from __future__ import annotations
@@ -27,7 +37,6 @@ import os
 import signal
 import subprocess
 import sys
-import textwrap
 import time
 from pathlib import Path
 
@@ -42,7 +51,9 @@ from scripts.function_tracer_pcode.authority.decision.pair_status_authority impo
     error_kind_is_environment_dependent,
     generate_pair_status_keypair,
     pair_status_file_skip_decision,
+    resolve_pair_execution,
     seal_pair_status,
+    write_pair_status_file,
 )
 from scripts.function_tracer_pcode.reporting.result_summary import (
     STATUS_ERROR,
@@ -64,6 +75,14 @@ from scripts.function_tracer_pcode.tests.unit.test_outcome_transition_axes_and_r
     write_sealed_pair,
 )
 from scripts.function_tracer_pcode.tests.unit._supervisor_support import (
+    Checkpoint,
+    ChildScript,
+    Deadline,
+    Envelope,
+    Exit,
+    Stop,
+    classify,
+    run_supervisor,
     supervisor_case,
 )
 
@@ -309,6 +328,35 @@ def test_the_classifier_publishes_the_pair_status_atomically(tmp_path):
     assert sorted(p.name for p in tmp_path.iterdir()) == [output.name]
 
 
+def test_a_status_that_cannot_be_published_leaves_no_status(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("directory permissions do not bind root")
+    directory = tmp_path / "out"
+    directory.mkdir()
+    directory.chmod(0o555)
+    missing = tmp_path / "missing"
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m",
+             "scripts.function_tracer_pcode.authority.decision.canonical_result",
+             "--classify-pair-log", str(missing / "f.log"),
+             "--supervisor-projection", str(missing / "projection.json"),
+             "--checkpoint-root", str(missing), "--execution-nonce", "nonce",
+             "--supervisor-signing-key-id", "k", "--supervisor-signing-key-file", str(missing / "k"),
+             "--worker-signing-key-id", "k", "--worker-signing-key-file", str(missing / "k"),
+             "--pair-status-signing-private-key-file", str(missing / "k"),
+             "--pair-status-verification-key-file", str(missing / "k"),
+             "--pair-execution-target-file", str(missing / "target.json"),
+             "--pair-status-output", str(directory / "f_B1_B2.pair-status.json")],
+            capture_output=True, text=True, check=False, cwd=REPO_ROOT,
+        )
+    finally:
+        directory.chmod(0o755)
+    assert result.returncode == 2
+    assert "Pair-status publication failed" in result.stderr
+    assert list(directory.iterdir()) == []
+
+
 # ---------------------------------------------------------------------------
 # 4. supervisor は止められたら child を止め、終端を書かない
 # ---------------------------------------------------------------------------
@@ -330,7 +378,7 @@ def _supervisor_argv(config):
         "--supervisor-signing-key-file", str(config.supervisor_signing_key_file),
         "--worker-signing-key-id", config.worker_signing_key_id,
         "--worker-signing-key-file", str(config.worker_signing_key_file),
-        "--timeout-seconds", "600", "--kill-grace-seconds", "5",
+        "--timeout-seconds", "600", "--kill-grace-seconds", "0.5",
         "--allow-child-exit-resolution", "--",
     ]
     return argv + list(config.child_command)
@@ -347,22 +395,29 @@ def _wait_for(predicate, timeout=30.0):
 
 def _alive(pid: int) -> bool:
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    stat = Path(f"/proc/{pid}/stat")
-    try:
-        return stat.read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
     except (OSError, IndexError):
         return False
+    return state != "Z"
 
 
-@pytest.mark.parametrize("signum", (signal.SIGTERM, signal.SIGINT, signal.SIGHUP))
-def test_an_interrupted_supervisor_stops_its_child_and_publishes_no_terminal(tmp_path, signum):
+@pytest.mark.parametrize(("signals", "expected"), (
+    ((signal.SIGTERM,), signal.SIGTERM),
+    ((signal.SIGINT,), signal.SIGINT),
+    ((signal.SIGHUP,), signal.SIGHUP),
+    # 同時に届いた複数の停止要求: どれか 1 つで終わり、残りは停止を中断しない
+    # （Python は保留中の handler を signal 番号順に実行するので、どれで終わるかは決めない）。
+    ((signal.SIGTERM, signal.SIGINT, signal.SIGHUP), None),
+))
+def test_an_interrupted_supervisor_stops_its_child_and_publishes_no_terminal(
+    tmp_path, signals, expected,
+):
     marker = tmp_path / "child.pid"
     child = (
         sys.executable, "-c",
-        "import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(120)",
+        "import os, signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"  # TERM を無視する child も止まる
+        "open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(120)",
         str(marker),
     )
     with supervisor_case(tmp_path / "case", child, allow_child_exit_resolution=True) as case:
@@ -373,13 +428,17 @@ def test_an_interrupted_supervisor_stops_its_child_and_publishes_no_terminal(tmp
         try:
             assert _wait_for(lambda: marker.is_file() and marker.read_text().strip())
             child_pid = int(marker.read_text())
-            process.send_signal(signum)
+            for signum in signals:
+                process.send_signal(signum)
             returncode = process.wait(timeout=30)
         finally:
             if process.poll() is None:
                 process.kill()
                 process.wait()
-        assert returncode == 128 + signum
+        if expected is None:
+            assert returncode in {128 + signum for signum in signals}
+        else:
+            assert returncode == 128 + expected
         assert _wait_for(lambda: not _alive(child_pid), timeout=10)
         # 中断は終端ではない: projection も child の終了の evidence も書かない。
         assert not case.config.authority_output.exists()
@@ -388,103 +447,263 @@ def test_an_interrupted_supervisor_stops_its_child_and_publishes_no_terminal(tmp
 
 
 # ---------------------------------------------------------------------------
-# 5. runner: 実行中の pair を止めて待ってから片付ける
+# 5. runner の停止: 所有しているすべての process を止めてから tmp を消す
+#    （runner の実際の handler と trap、共有の scheduler と common を使い、pair だけを
+#    「子が終わったら分類する」stand-in に置き換える）
 # ---------------------------------------------------------------------------
 
-_TERMINATE_HARNESS = textwrap.dedent("""\
-    set -u
-    source "__SCHEDULER__"
-    done_group() { :; }
-    FAILURES=0
-    pair_scheduler_init 4 done_group FAILURES
-    pair_scheduler_open_group g
-    job() {
-        # 子 process（supervisor の代役）が終わったら「分類」する。止めた pair は
-        # ここへ来てはならない。
-        sh -c 'echo $$ >> "__TMP__/children"; exec sleep 60' &
-        wait $!
-        echo classified >> "__TMP__/classified-$1"
-    }
-    for index in 1 2 3; do
-        job "$index" &
-        pair_scheduler_start_job g "$!"
+_STOP_HARNESS = """
+set -u
+source "__COMMON__"
+source "__SCHEDULER__"
+validation_claim_process_ownership
+PYTHON_BIN="__PYTHON__"
+# runner が受理する小数の猶予（停止はこの値に依存しない）
+PAIR_PROCESS_KILL_AFTER=0.5s; PAIR_PROCESS_KILL_AFTER_SECONDS=0.5
+EQBENCH_TMPDIR="__TMP__"; EQBENCH_RUN_TMPDIR="__TMP__/runtmp"; RUN_TMP="__TMP__/runtmp"
+mkdir -p "$RUN_TMP"
+check_then_remove_tmp() {
+    local pid state
+    for pid in $(cat "__TMP__/pids" 2>/dev/null); do
+        state="$(cut -d')' -f2 "/proc/$pid/stat" 2>/dev/null | awk '{print $1}')"
+        if [[ -n "$state" && "$state" != Z ]]; then echo "alive-at-tmp-removal $pid" >> "__TMP__/events"; fi
     done
-    while [[ "$(wc -l < "__TMP__/children" 2>/dev/null || echo 0)" -lt 3 ]]; do sleep 0.05; done
-    pair_scheduler_terminate_all 5
-    echo "active=$PAIR_SCHEDULER_ACTIVE_JOBS failures=$FAILURES"
-""")
+    echo "tmp-removed" >> "__TMP__/events"
+    rm -rf -- "$RUN_TMP"
+}
+cleanup_eqbench_run_tmpdir() { check_then_remove_tmp; }
+cleanup() { check_then_remove_tmp; }
+__HANDLERS__
+done_group() { :; }
+FAILURES=0
+pair_scheduler_init 4 done_group FAILURES
+pair_scheduler_open_group g
+run_pair() {
+    # stand-in: 子（supervisor の代役）が終わったら「分類」する。止めた pair はここへ来ない。
+    echo "$BASHPID" >> "__TMP__/pids"
+    __CHILD__
+    echo "classified $1" >> "__TMP__/events"
+}
+__INJECT__
+wait
+"""
+
+_CHILDREN = {
+    "plain": """sh -c 'echo $$ >> "__TMP__/pids"; exec sleep 30' &
+    wait $!""",
+    # TERM を無視する子孫
+    "ignores-term": """sh -c 'trap "" TERM; echo $$ >> "__TMP__/pids"; while :; do sleep 1; done' &
+    wait $!""",
+    # 親を失って runner の process tree から外れる孫（token で所有を辿る）
+    "orphan": """sh -c 'setsid sh -c "echo \\$\\$ >> __TMP__/pids; exec sleep 30" & echo $$ >> "__TMP__/pids"' &
+    wait $!; sleep 30""",
+}
+
+_INJECTIONS = {
+    # 起動の直前に停止要求: pair は 1 つも起動しない
+    "before-launch": """kill -__SIG__ $$
+pair_scheduler_launch_job g run_pair 1""",
+    # fork の直後、scheduler への登録の前に停止要求
+    "after-fork-before-registration": """eval "$(declare -f pair_scheduler_start_job | sed '1s/pair_scheduler_start_job/_registered_start_job/')"
+pair_scheduler_start_job() { kill -__SIG__ $$; _registered_start_job "$@"; }
+pair_scheduler_launch_job g run_pair 1""",
+    # 登録の後（pair が子を持ってから）に停止要求
+    "after-registration": """pair_scheduler_launch_job g run_pair 1
+pair_scheduler_launch_job g run_pair 2
+until [[ "$(wc -l < "__TMP__/pids" 2>/dev/null || echo 0)" -ge 4 ]]; do sleep 0.05; done
+kill -__SIG__ $$""",
+    # 停止の最中に、この run が所有しない別の process から INT / HUP が届き続ける。
+    # 送り手は runner の tree からも token からも外れている（停止で止められない）。
+    # pair の子が凍結された（= 停止が始まった）のを見てから送り始める。
+    "repeated-signals": """pair_scheduler_launch_job g run_pair 1
+until [[ "$(wc -l < "__TMP__/pids" 2>/dev/null || echo 0)" -ge 2 ]]; do sleep 0.05; done
+child="$(sed -n 2p "__TMP__/pids")"
+( setsid env EQBENCH_PROCESS_OWNER_TOKEN=not-this-run sh -c '
+    runner=$1; child=$2
+    while :; do
+        state=$(cut -d")" -f2 "/proc/$child/stat" 2>/dev/null | cut -d" " -f2)
+        case "$state" in T|t|Z|"") break ;; esac
+    done
+    i=0
+    while [ $i -lt 400 ] && kill -INT "$runner" 2>/dev/null; do
+        kill -HUP "$runner" 2>/dev/null; echo sent >> "__TMP__/sender"; i=$((i + 1)); sleep 0.002
+    done' sender "$$" "$child" & )
+kill -__SIG__ $$""",
+}
 
 
-def test_the_scheduler_stops_running_pairs_before_anything_classifies_them(tmp_path):
-    script = (_TERMINATE_HARNESS.replace("__SCHEDULER__", str(SCHEDULER))
-              .replace("__TMP__", str(tmp_path)))
-    started = time.monotonic()
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
-    assert result.returncode == 0, result.stderr
-    assert time.monotonic() - started < 30
-    assert "active=0 failures=0" in result.stdout
-    children = [int(line) for line in (tmp_path / "children").read_text().split()]
-    assert len(children) == 3
-    assert _wait_for(lambda: not any(_alive(pid) for pid in children), timeout=5)
-    assert not list(tmp_path.glob("classified-*"))
-
-
-def test_terminate_all_is_a_no_op_before_the_scheduler_exists(tmp_path):
-    result = subprocess.run(
-        ["bash", "-c", f'set -u; source "{SCHEDULER}"; pair_scheduler_terminate_all 1; echo ok'],
-        capture_output=True, text=True, timeout=30,
-    )
-    assert result.returncode == 0 and result.stdout.strip() == "ok", result.stderr
-
-
-@pytest.mark.parametrize("runner", (EQ_RUNNER, NEQ_RUNNER))
-def test_the_runner_stops_pairs_before_it_removes_the_run_tmpdir(runner):
+def _runner_handlers(runner: Path) -> str:
     source = runner.read_text(encoding="utf-8")
+    parts = []
     if runner == EQ_RUNNER:
-        handler = _extract_shell_function(source, "handle_eqbench_signal")
-        cleanup = "cleanup_eqbench_run_tmpdir"
-    else:
-        handler = _extract_shell_function(source, "handle_neq_signal")
-        cleanup = "exit"
-    assert "pair_scheduler_terminate_all" in handler
-    assert handler.index("pair_scheduler_terminate_all") < handler.index(cleanup)
-    for signal_name in ("HUP", "INT", "TERM"):
-        assert any(
-            line.strip().startswith("trap ") and signal_name in line
-            and ("handle_eqbench_signal" in line or "handle_neq_signal" in line)
-            for line in source.splitlines()
-        ), signal_name
+        parts.append(_extract_shell_function(source, "handle_eqbench_signal"))
+    parts.extend(line for line in source.splitlines() if line.startswith("trap "))
+    return "\n".join(parts)
+
+
+def _run_stop_harness(tmp_path, runner, injection, signal_name, child="plain"):
+    script = (
+        _STOP_HARNESS
+        .replace("__HANDLERS__", _runner_handlers(runner))
+        .replace("__CHILD__", _CHILDREN[child])
+        .replace("__INJECT__", _INJECTIONS[injection])
+        .replace("__COMMON__", str(COMMON)).replace("__SCHEDULER__", str(SCHEDULER))
+        .replace("__PYTHON__", sys.executable).replace("__SIG__", signal_name)
+        .replace("__TMP__", str(tmp_path))
+    )
+    result = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=120, cwd=REPO_ROOT,
+    )
+    time.sleep(1.0)  # 取りこぼした pair が残っていれば、その間に「分類」まで進む
+    events = (tmp_path / "events").read_text() if (tmp_path / "events").exists() else ""
+    pids = [int(p) for p in (tmp_path / "pids").read_text().split()] if (
+        tmp_path / "pids").exists() else []
+    return result, events, pids
+
+
+_EXIT = {"TERM": 143, "INT": 130, "HUP": 129}
+
+
+@pytest.mark.parametrize("runner", (EQ_RUNNER, NEQ_RUNNER), ids=("eq", "neq"))
+@pytest.mark.parametrize("injection", (
+    "before-launch", "after-fork-before-registration", "after-registration",
+))
+@pytest.mark.parametrize("signal_name", ("TERM", "INT", "HUP"))
+def test_a_stop_request_stops_every_pair_before_the_tmpdir_is_removed(
+    tmp_path, runner, injection, signal_name,
+):
+    result, events, pids = _run_stop_harness(tmp_path, runner, injection, signal_name)
+    assert result.returncode == _EXIT[signal_name], result.stderr
+    assert "classified" not in events, events
+    assert "alive-at-tmp-removal" not in events, events
+    assert events.strip().splitlines()[-1] == "tmp-removed"
+    assert not (tmp_path / "runtmp").exists()
+    assert not [pid for pid in pids if _alive(pid)]
+    if injection == "before-launch":
+        assert pids == []
+
+
+@pytest.mark.parametrize("runner", (EQ_RUNNER, NEQ_RUNNER), ids=("eq", "neq"))
+@pytest.mark.parametrize("child", ("ignores-term", "orphan"))
+def test_descendants_that_ignore_term_or_left_the_tree_are_stopped(tmp_path, runner, child):
+    result, events, pids = _run_stop_harness(
+        tmp_path, runner, "after-registration", "TERM", child=child,
+    )
+    assert result.returncode == 143, result.stderr
+    assert "classified" not in events and "alive-at-tmp-removal" not in events, events
+    assert len(pids) >= 4
+    assert not [pid for pid in pids if _alive(pid)]
+
+
+@pytest.mark.parametrize("runner", (EQ_RUNNER, NEQ_RUNNER), ids=("eq", "neq"))
+def test_repeated_stop_requests_end_with_the_first_signal(tmp_path, runner):
+    result, events, pids = _run_stop_harness(tmp_path, runner, "repeated-signals", "TERM")
+    # 停止の最中に届いた INT / HUP は停止を中断せず、最初の TERM で終わる。
+    assert (tmp_path / "sender").exists(), "no signal reached the runner during the stop"
+    assert result.returncode == 143, (result.returncode, result.stderr)
+    assert events.count("tmp-removed") == 1 and "classified" not in events, events
+    assert not [pid for pid in pids if _alive(pid)]
+
+
+def test_ownership_excludes_the_caller_and_its_ancestors(tmp_path):
+    from scripts.eqbench import runner_processes as rp
+
+    token = "f" * 32
+    env = {**os.environ, rp.OWNER_TOKEN_ENV: token}
+    sleeper = subprocess.Popen(["sleep", "30"], env=env)
+    try:
+        owned = rp.owned_processes(token, os.getpid())
+        assert sleeper.pid in owned
+        assert os.getpid() not in owned
+        survivors = rp.stop(token, os.getpid(), wait_seconds=10)
+        assert survivors == {}
+        sleeper.wait(timeout=10)
+        assert sleeper.returncode == -signal.SIGKILL
+    finally:
+        if sleeper.poll() is None:
+            sleeper.kill()
+            sleeper.wait()
+
+
+def test_the_stop_handlers_use_no_shell_arithmetic_on_time_settings():
+    # 小数を受理する時間の設定（例: PAIR_PROCESS_KILL_AFTER=0.5s）を shell の整数演算に
+    # 渡さない。停止の実挙動は小数の設定で上の harness が確かめる。
+    for path in (EQ_RUNNER, NEQ_RUNNER, COMMON, SCHEDULER):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if "$((" in line or "(( " in line:
+                assert "_SECONDS" not in line and "KILL_AFTER" not in line, (path.name, line)
 
 
 # ---------------------------------------------------------------------------
-# 6. 境界: 前回の pair-status を捨ててから実行し、実行記録は atomic に書く
+# 6. 実行境界: 前回の成果物を消し、消えたことを確かめてから解析を始める
 # ---------------------------------------------------------------------------
 
-_STALE_PROBE = """#!/bin/sh
-# 新しい execution の最初の interpreter 呼び出しの時点で、前回の pair-status が残っているか。
-if [ ! -f "$PROBE_MARKER" ]; then
-  if [ -e "$PROBE_STATUS" ] || ls "$PROBE_DIR"/.*.pair-status.json.* >/dev/null 2>&1; then
-    echo stale > "$PROBE_MARKER"
-  else
-    echo clean > "$PROBE_MARKER"
-  fi
-fi
+_ARTIFACTS = (
+    "{stem}.pair-status.json", "{stem}.stage.jsonl",
+    ".runtime-metrics/{stem}.stack-dump.txt", ".runtime-metrics/{stem}.stack-dump.status.json",
+    ".runtime-metrics/{stem}.classification-failure.json",
+    ".runtime-metrics/{stem}.progress.json", ".runtime-metrics/{stem}.runtime.json",
+    ".{stem}.pair-status.json.partial",
+)
+
+
+def _seed_artifacts(directory: Path, stem: str):
+    for template in _ARTIFACTS:
+        path = directory / template.format(stem=stem)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("previous execution\n")
+
+
+def _open(directory: Path, stem: str):
+    return subprocess.run(
+        ["bash", "-c", f'source "{COMMON}"; validation_open_pair_execution "$1" "$2"',
+         "bash", str(directory), stem],
+        capture_output=True, text=True, timeout=60,
+    )
+
+
+def test_the_boundary_removes_every_artifact_of_the_previous_execution(tmp_path):
+    _seed_artifacts(tmp_path, "f_B1_B2")
+    (tmp_path / "f_B1_B2.log").write_text("previous log\n")
+    result = _open(tmp_path, "f_B1_B2")
+    assert result.returncode == 0, result.stderr
+    assert sorted(
+        str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*") if p.is_file()
+    ) == ["f_B1_B2.log"]
+
+
+def test_the_boundary_fails_when_an_artifact_cannot_be_removed(tmp_path):
+    if os.geteuid() == 0:
+        pytest.skip("directory permissions do not bind root")
+    _seed_artifacts(tmp_path, "f_B1_B2")
+    tmp_path.chmod(0o555)
+    try:
+        result = _open(tmp_path, "f_B1_B2")
+    finally:
+        tmp_path.chmod(0o755)
+    assert result.returncode != 0
+    assert "could not remove" in result.stderr
+    assert (tmp_path / "f_B1_B2.pair-status.json").read_text() == "previous execution\n"
+
+
+_PROBE_LOG = """#!/bin/sh
+echo "$*" >> "$PROBE_CALLS"
 echo stub
 exit 0
 """
 
 
-@pytest.mark.parametrize("runner", (EQ_RUNNER, NEQ_RUNNER))
-def test_run_pair_drops_the_previous_pair_status_at_the_execution_boundary(tmp_path, runner):
+@pytest.mark.parametrize("runner", (EQ_RUNNER, NEQ_RUNNER), ids=("eq", "neq"))
+def test_run_pair_starts_no_analysis_when_the_boundary_cannot_be_opened(tmp_path, runner):
+    if os.geteuid() == 0:
+        pytest.skip("directory permissions do not bind root")
     out = tmp_path / "out" / "sample" / "f"
     out.mkdir(parents=True)
     (tmp_path / "runtmp").mkdir()
     stem = "f_B1_B2" if runner == EQ_RUNNER else "f_N_B1_O_B2"
-    status = out / f"{stem}.pair-status.json"
-    status.write_text('{"note": "previous-execution"}\n')
-    (out / f".{stem}.pair-status.json.partial").write_text("torn")
+    (out / f"{stem}.pair-status.json").write_text('{"note": "previous-execution"}\n')
     probe = tmp_path / "python-probe"
-    probe.write_text(_STALE_PROBE)
+    probe.write_text(_PROBE_LOG)
     probe.chmod(0o755)
     function = _extract_shell_function(runner.read_text(encoding="utf-8"), "run_pair")
     if runner == EQ_RUNNER:
@@ -494,22 +713,250 @@ def test_run_pair_drops_the_previous_pair_status_at_the_execution_boundary(tmp_p
     script = (
         _BOUNDARY_HARNESS.replace("__COMMON__", str(COMMON))
         .replace("__TMP__", str(tmp_path)).replace("__FUNCTION__", function)
-        .replace("__ARGS__", args)
+        .replace("run_pair __ARGS__ || true", f"run_pair {args}; echo rc=$?")
     )
-    marker = tmp_path / "marker"
-    subprocess.run(
-        ["bash", "-c", script], capture_output=True, timeout=120,
-        env={**os.environ, "PROBE_MARKER": str(marker), "PROBE_STATUS": str(status),
-             "PROBE_DIR": str(out)},
-    )
-    assert marker.read_text().strip() == "clean"
+    out.chmod(0o555)
+    try:
+        result = subprocess.run(
+            ["bash", "-c", script], capture_output=True, text=True, timeout=120,
+            env={**os.environ, "PROBE_CALLS": str(tmp_path / "calls")},
+        )
+    finally:
+        out.chmod(0o755)
+    assert "BOUNDARY_FAILED" in result.stdout
+    assert "rc=1" in result.stdout
+    assert not (tmp_path / "calls").exists()  # 解析（python の呼び出し）は 1 つも始まらない
+    assert (out / f"{stem}.pair-status.json").read_text() == '{"note": "previous-execution"}\n'
 
 
-@pytest.mark.parametrize("runner", (EQ_RUNNER, NEQ_RUNNER))
-def test_the_runner_hands_the_status_path_to_the_classifier_instead_of_redirecting(runner):
+# ---------------------------------------------------------------------------
+# 7. 結果の確定: この execution が公開した、署名・target・終端・nonce の揃った status だけ
+# ---------------------------------------------------------------------------
+
+_NONCE = "a1b2c3d4e5f60718293a4b5c"
+_DISPATCH = """#!/bin/bash
+# python の stand-in: 結果の確定（pair_status_authority）だけ本物を使う。
+args="$*"
+case "$args" in
+  *"import secrets"*) echo 0123456789abcdef0123456789abcdef0123456789abcdef; exit 0 ;;
+  *production_cutover*) printf 'production-pilot-%s\\tfingerprint\\tstream\\n' "$NONCE"; exit 0 ;;
+  *canonical_result*)
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --pair-status-output) out="$2"; shift ;;
+        --classification-failure-output) record="$2"; shift ;;
+      esac
+      shift
+    done
+    case "$SCENARIO" in
+      stale-status) cp "$STALE_STATUS" "$out"; exit 0 ;;
+      decided-error) cp "$DECIDED_STATUS" "$out"; exit 1 ;;
+      diagnostic) cp "$DIAGNOSTIC" "$out"; cp "$RECORD" "$record"; exit 2 ;;
+      publication-failed) exit 3 ;;
+    esac ;;
+  *pair_status_authority*) exec "$REAL_PYTHON" "$@" ;;
+esac
+exit 0
+"""
+
+
+def _signed(tree: Path, outcome: str, *, nonce: str, supervisor_status="RESOLVED"):
+    from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
+        PAIR_STATUS_PUBLIC_KEY_FILE,
+    )
+    private_key, public_key = tree / "pair-status.key", tree / PAIR_STATUS_PUBLIC_KEY_FILE
+    if not public_key.is_file():
+        generate_pair_status_keypair(private_key, public_key)
+    body = _status_body("sample", "f", "B1", "B2", outcome, supervisor_status)
+    body["execution_nonce"] = nonce
+    return seal_pair_status(body, private_key_path=private_key, public_key_path=public_key)
+
+
+def _run_pair_with_classifier(tmp_path, runner, scenario):
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    stale = tmp_path / "stale.json"
+    stale.write_text(json.dumps(_signed(keys, "NOT_EQ", nonce="previous-execution-nonce")))
+    decided = tmp_path / "decided.json"
+    decided.write_text(json.dumps(_signed(keys, "ERROR", nonce=_NONCE)))
+    diagnostic = tmp_path / "diagnostic.json"
+    diagnostic.write_text(json.dumps(OPERATIONAL_DIAGNOSTIC))
+    record = tmp_path / "record.json"
+    _write_failure_record(record, -9)
+    target = tmp_path / "target.json"
+    target.write_text(json.dumps(
+        _status_body("sample", "f", "B1", "B2", "UNKNOWN", "RESOLVED")["pair_execution_target"]
+    ))
+    out = tmp_path / "out" / "sample" / "f"
+    out.mkdir(parents=True)
+    (tmp_path / "runtmp").mkdir()
+    dispatch = tmp_path / "python-probe"
+    dispatch.write_text(_DISPATCH)
+    dispatch.chmod(0o755)
+    public_key = keys / "pair-status-verification-key.json"
     function = _extract_shell_function(runner.read_text(encoding="utf-8"), "run_pair")
-    assert "--pair-status-output" in function
-    assert '> "$pair_status_file"' not in function and '> "$status_file"' not in function
+    if runner == EQ_RUNNER:
+        args = f'"sample" "f" "B1" "B2" "/left" "/right" "{out}" 1 1 "{target}"'
+        stem = "f_B1_B2"
+    else:
+        args = f'"sample" "f" "N_B1" "O_B2" "/left" "/right" "{out}" 1 1 "{target}" 1 1 1'
+        stem = "f_N_B1_O_B2"
+    script = (
+        _BOUNDARY_HARNESS.replace("__COMMON__", str(COMMON))
+        .replace("__TMP__", str(tmp_path)).replace("__FUNCTION__", function)
+        .replace("PAIR_STATUS_VERIFICATION_KEY_FILE=/dev/null", f"PAIR_STATUS_VERIFICATION_KEY_FILE={public_key}")
+        .replace("PAIR_PUBLIC_KEY=/dev/null", f"PAIR_PUBLIC_KEY={public_key}")
+        .replace("run_pair __ARGS__ || true", f"run_pair {args}; echo rc=$?")
+    )
+    result = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=120, cwd=REPO_ROOT,
+        env={**os.environ, "SCENARIO": scenario, "NONCE": _NONCE, "REAL_PYTHON": sys.executable,
+             "STALE_STATUS": str(stale), "DECIDED_STATUS": str(decided),
+             "DIAGNOSTIC": str(diagnostic), "RECORD": str(record),
+             "PYTHONPATH": str(REPO_ROOT)},
+    )
+    line = next(
+        (line for line in result.stdout.splitlines() if "<->" in line), "",
+    )
+    rc = int(result.stdout.rsplit("rc=", 1)[1].split()[0])
+    return line, rc, out / f"{stem}.pair-status.json", result
+
+
+@pytest.mark.parametrize("runner", (EQ_RUNNER, NEQ_RUNNER), ids=("eq", "neq"))
+@pytest.mark.parametrize(("scenario", "state", "eq_rc", "neq_rc"), (
+    # 有効に署名された同じ target の status でも、この execution のものでなければ未完了。
+    ("stale-status", "INCOMPLETE", 3, 1),
+    # 公開に失敗した（status が無い）。
+    ("publication-failed", "INCOMPLETE", 3, 1),
+    # 分類に失敗した（署名の無い診断）。rc は分類器の record から。
+    ("diagnostic", "INCOMPLETE", 2, 1),
+    # この execution の確定した ERROR は確定（Eq は既存の policy で pair job の失敗）。
+    ("decided-error", "ERROR", 1, 0),
+))
+def test_run_pair_accepts_only_this_executions_decided_status(
+    tmp_path, runner, scenario, state, eq_rc, neq_rc,
+):
+    line, rc, status, result = _run_pair_with_classifier(tmp_path, runner, scenario)
+    assert f": {state}" in line, (line, result.stderr)
+    assert rc == (eq_rc if runner == EQ_RUNNER else neq_rc), (line, result.stderr)
+    if scenario == "diagnostic" and runner == EQ_RUNNER:
+        assert "child_exit=-9" in line
+
+
+# ---------------------------------------------------------------------------
+# 8. 本物の supervisor から公開・確定・再開まで: 確定した ERROR / 期限の TIMEOUT / UNKNOWN は
+#    再利用され、止められた pair は未完了で再試行される
+# ---------------------------------------------------------------------------
+
+
+def _publish_and_resume(tmp_path, case, classified):
+    keys = tmp_path / "pair-keys"
+    keys.mkdir()
+    private_key = keys / "pair-status.key"
+    public_key = keys / "pair-status-verification-key.json"
+    generate_pair_status_keypair(private_key, public_key)
+    target = _status_body("sample", "f", "B1", "B2", "UNKNOWN", "RESOLVED")[
+        "pair_execution_target"]
+    target_path = tmp_path / "target.json"
+    target_path.write_text(json.dumps(target))
+    status = tmp_path / "f_B1_B2.pair-status.json"
+    write_pair_status_file(status, seal_pair_status(
+        {**classified, "pair_execution_target": target},
+        private_key_path=private_key, public_key_path=public_key,
+    ))
+    (tmp_path / "f_B1_B2.log").write_text("pair log\n")
+    resolved = resolve_pair_execution(
+        status, expected_pair_target_path=target_path, public_key_path=public_key,
+        execution_nonce=case.config.execution_nonce,
+    )
+    skip = pair_status_file_skip_decision(
+        status, log_path=tmp_path / "f_B1_B2.log", public_key_path=public_key,
+        expected_pair_target_path=target_path, mode="NORMAL_RESUME",
+    )
+    return resolved, skip
+
+
+def test_a_durable_error_is_decided_and_reused(tmp_path):
+    with supervisor_case(tmp_path / "case", ChildScript((Exit(3),))) as case:
+        run = run_supervisor(case)
+        resolved, skip = _publish_and_resume(tmp_path, case, classify(run))
+    assert resolved[0] == "ERROR" and resolved[3] is None
+    assert skip == "SKIP"
+
+
+def test_a_deadline_timeout_is_decided_and_reused(tmp_path):
+    with supervisor_case(
+        tmp_path / "case", ChildScript((Stop(),)), kill_grace=30.0,
+    ) as case:
+        run = run_supervisor(case, deadline=Deadline.AT_CHILD_STOP)
+        assert run.projection["status"] == "TIMEOUT"
+        resolved, skip = _publish_and_resume(tmp_path, case, classify(run))
+    assert resolved[0] == "TIMEOUT" and resolved[3] is None
+    assert skip == "SKIP"
+
+
+def test_a_canonical_unknown_is_decided_and_reused(tmp_path):
+    script = ChildScript((Checkpoint(), Envelope("UNKNOWN"), Exit()))
+    with supervisor_case(tmp_path / "case", script, allow_child_exit_resolution=True) as case:
+        run = run_supervisor(case)
+        resolved, skip = _publish_and_resume(tmp_path, case, classify(run))
+    assert resolved[0] == "UNKNOWN" and resolved[3] is None
+    assert skip == "SKIP"
+
+
+def test_an_interrupted_pair_is_incomplete_and_retried(tmp_path):
+    marker = tmp_path / "child.pid"
+    child = (
+        sys.executable, "-c",
+        "import os, sys, time; open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(120)",
+        str(marker),
+    )
+    keys = tmp_path / "pair-keys"
+    keys.mkdir()
+    generate_pair_status_keypair(keys / "pair-status.key", keys / "pair-status-verification-key.json")
+    target_path = tmp_path / "target.json"
+    target_path.write_text(json.dumps(
+        _status_body("sample", "f", "B1", "B2", "UNKNOWN", "RESOLVED")["pair_execution_target"]))
+    with supervisor_case(tmp_path / "case", child, allow_child_exit_resolution=True) as case:
+        process = subprocess.Popen(_supervisor_argv(case.config), cwd=REPO_ROOT,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert _wait_for(lambda: marker.is_file() and marker.read_text().strip())
+        process.send_signal(signal.SIGTERM)
+        assert process.wait(timeout=30) == 143
+        config = case.config
+        status = tmp_path / "f_B1_B2.pair-status.json"
+        log = tmp_path / "f_B1_B2.log"
+        log.write_text("pair log\n")
+        code = canonical_result_main([
+            "--classify-pair-log", str(log),
+            "--supervisor-projection", str(config.authority_output),
+            "--checkpoint-root", str(config.checkpoint_root),
+            "--execution-nonce", config.execution_nonce,
+            "--supervisor-signing-key-id", config.supervisor_signing_key_id,
+            "--supervisor-signing-key-file", str(config.supervisor_signing_key_file),
+            "--worker-signing-key-id", config.worker_signing_key_id,
+            "--worker-signing-key-file", str(config.worker_signing_key_file),
+            "--pair-status-signing-private-key-file", str(keys / "pair-status.key"),
+            "--pair-status-verification-key-file", str(keys / "pair-status-verification-key.json"),
+            "--pair-execution-target-file", str(target_path),
+            "--pair-status-output", str(status),
+        ])
+    assert code == 2
+    resolved = resolve_pair_execution(
+        status, expected_pair_target_path=target_path,
+        public_key_path=keys / "pair-status-verification-key.json",
+        execution_nonce=config.execution_nonce,
+    )
+    assert resolved[0] == "INCOMPLETE" and resolved[3] is not None
+    assert pair_status_file_skip_decision(
+        status, log_path=log, public_key_path=keys / "pair-status-verification-key.json",
+        expected_pair_target_path=target_path, mode="NORMAL_RESUME",
+    ) == "SCHEDULE"
+
+
+# ---------------------------------------------------------------------------
+# 9. 実行記録は atomic に置き換える / 追記する
+# ---------------------------------------------------------------------------
 
 
 def _common(script: str, tmp_path: Path) -> subprocess.CompletedProcess:
@@ -530,7 +977,6 @@ def test_the_run_manifest_is_replaced_and_extended_atomically(tmp_path):
     assert result.returncode == 0, result.stderr
     assert manifest.read_text() == "run_kind=x\nend=1\n"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["candidate.txt", "run_manifest.txt"]
-    # 置き換え先の dir に書けなければ失敗を返し、元の file を壊さない。
     result = _common(
         f'validation_install_file_atomically "{candidate}" "{tmp_path}/missing/run_manifest.txt"',
         tmp_path,
@@ -539,13 +985,19 @@ def test_the_run_manifest_is_replaced_and_extended_atomically(tmp_path):
     assert manifest.read_text() == "run_kind=x\nend=1\n"
 
 
-def test_the_runners_write_the_run_manifest_only_through_the_atomic_helpers():
+def test_the_runners_go_through_the_shared_lifecycle_helpers():
+    # 2 本の runner が同じ owner を呼ぶことの静的な裏付け（実挙動は上の各 test）。
     for runner in (EQ_RUNNER, NEQ_RUNNER):
-        for line in runner.read_text(encoding="utf-8").splitlines():
+        source = runner.read_text(encoding="utf-8")
+        run_pair = _extract_shell_function(source, "run_pair")
+        assert source.count("validation_claim_process_ownership") == 1
+        assert "pair_scheduler_launch_job" in source and "pair_scheduler_start_job" not in source
+        calls = [line for line in run_pair.splitlines() if not line.strip().startswith("#")]
+        assert sum("validation_open_pair_execution " in line for line in calls) == 1
+        assert sum("validation_resolve_pair_execution " in line for line in calls) == 1
+        assert "--pair-status-output" in run_pair
+        for line in source.splitlines():
             stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
             for target in ('"$RUN_MANIFEST_FILE"', '"$RUN_MANIFEST"',
                            '"$OUTPUT_BASE_DIR/run_manifest.txt"'):
                 assert f"> {target}" not in stripped, (runner.name, line)
-                assert f"cp \"$CANDIDATE_RUN_MANIFEST_FILE\" {target}" not in stripped

@@ -1384,7 +1384,7 @@ def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
     assert "results_summary.txt" in script
     assert "function_summary_all_pairs_reusable" in script
     assert "Summary shortcut: skipped" in script
-    assert "validate_current_pair_status" in script
+    assert "validation_resolve_pair_execution" in script
     assert "remove_pair_process_authority" in script
     assert "reporting.process_authority_cleanup" in script
     assert "EQBENCH_PRIVATE_AUTHORITY_ROOT" in script
@@ -1684,34 +1684,28 @@ def test_timed_command_pid_contract_survives_ps_no_match_exits(
 
 
 def test_eqbench_runner_cleans_authority_after_validation_diagnostics():
+    # 結果の確定（共通の resolver。理由は pair log へ追記される）は、process authority の
+    # cleanup より前に済ませる。
     script = Path("eqbench_run_all_32jobs.sh").read_text()
-    validation_call = script.index(
-        'if pair_status_validation_detail="$(validate_current_pair_status'
-    )
-    cleanup_call = script.index(
-        "if cleanup_pair_process_authority_with_run_health",
-        validation_call,
-    )
-    validation_failure = script.index(
-        "generated pair status failed authority validation",
-        validation_call,
-    )
-    log_copy = script.index(
-        "Pair-status authority validation failed:",
-        validation_failure,
-    )
-    assert validation_call < validation_failure < log_copy < cleanup_call
+    resolution = script.index('if resolution="$(validation_resolve_pair_execution')
+    log_copy = script.index('"$classification_failure" 2>> "$log_file")"', resolution)
+    failure = script.index("no terminal pair status of this execution", log_copy)
+    cleanup_call = script.index("if cleanup_pair_process_authority_with_run_health", failure)
+    assert resolution < log_copy < failure < cleanup_call
 
 
 def test_eqbench_runner_reports_primary_diagnostic_before_signature_validation():
     script = Path("eqbench_run_all_32jobs.sh").read_text()
-    validation_start = script.index("validate_current_pair_status() {")
-    validation_end = script.index(
-        "remove_pair_process_authority() {", validation_start
+    # 分類失敗の診断（署名の無い operational diagnostic）は、共通の resolver が署名の検証より
+    # 前に見分けて INCOMPLETE にする。
+    resolver = Path(
+        "scripts/function_tracer_pcode/authority/decision/pair_status_authority.py"
+    ).read_text()
+    body = resolver[resolver.index("def resolve_pair_execution("):]
+    assert body.index("pair_status_operational_diagnostic(payload)") < body.index(
+        "validate_signed_pair_status(payload"
     )
-    validation_block = script[validation_start:validation_end]
-
-    assert "--allow-operational-diagnostic" in validation_block
+    assert "validation_resolve_pair_execution" in script
     assert '--classification-diagnostic-log "$log_file"' in script
     assert "Primary pair classification error:" in Path(
         "scripts/function_tracer_pcode/authority/decision/canonical_result.py"

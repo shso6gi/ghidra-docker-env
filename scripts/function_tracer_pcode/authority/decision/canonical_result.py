@@ -1484,13 +1484,23 @@ def main(arguments: list[str] | None = None) -> int:
                     f"{type(record_exc).__name__}: {record_exc}",
                     file=sys.stderr,
                 )
-        publish({
-            "classification_valid": False,
-            "error_kind": "PAIR_STATUS_AUTHORITY_INVALID",
-            "detail": detail,
-        })
+        try:
+            publish({
+                "classification_valid": False,
+                "error_kind": "PAIR_STATUS_AUTHORITY_INVALID",
+                "detail": detail,
+            })
+        except OSError as publish_exc:
+            print(f"Pair-status publication failed: {type(publish_exc).__name__}: {publish_exc}",
+                  file=sys.stderr)
         return 2
-    publish(sealed_status)
+    try:
+        publish(sealed_status)
+    except OSError as exc:
+        # 公開できなければ status は無い（atomic な公開は書きかけを残さない）。runner は
+        # この execution の status が無い pair を未完了として扱う。
+        print(f"Pair-status publication failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 3
     return 1 if status["canonical_outcome"] == Outcome.ERROR.value else 0
 
 

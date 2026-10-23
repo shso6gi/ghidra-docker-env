@@ -167,14 +167,6 @@ validation_new_runtime_run_id() {
     printf '%s\n' "$run_id"
 }
 
-# 前回 execution の receipt を捨てる。run_pair の中、新しい child を起こす前（journal と同じ境界）で呼ぶ。
-#   validation_reset_pair_runtime_receipts <metrics_dir> <pair_stem>
-validation_reset_pair_runtime_receipts() {
-    local metrics_dir="$1" stem="$2"
-    rm -f -- "$metrics_dir/$stem.progress.json" "$metrics_dir/$stem.runtime.json" || true
-    return 0
-}
-
 # receipt を 1 つ書く。値はすべて引数で渡す（runner の global を読まない）。
 # 引数は pair_runtime_receipt の `write` subcommand の option をそのまま渡す。
 #   validation_write_pair_runtime_receipt <python_bin> --metrics-dir D --stem S --state RUNNING|COMPLETED \
@@ -191,22 +183,104 @@ validation_write_pair_runtime_receipt() {
     return 0
 }
 
-# 中断と確定の境界: pair を新しく実行すると決めた時点で、前回 execution の pair-status
-# （と、kill された分類器が残した書きかけの一時 file）を捨てる。残すと、この execution が
-# 終端の status を書く前に止まったとき、前回の status が current の結果に見える。
-# 分類器は status を atomic に書く（pair_status_authority.write_pair_status_file）。
-validation_reset_pair_status() {
-    local status_file="$1"
-    rm -f -- "$status_file" "${status_file%/*}/.${status_file##*/}."* || true
+# ---------------------------------------------------------------------------
+# 中断と確定の境界（評価計画 v2 PR-A）。2 本の runner はここだけを呼ぶ。
+# ---------------------------------------------------------------------------
+
+# この runner の execution が起こす process の所有権を取る。何かを起動する前に呼ぶ。
+# token は子孫すべてが環境変数で受け継ぐので、scheduler に登録される前の pair job も、
+# 親を失って runner の process tree から外れた process も、この execution のものとして
+# 止められる（scripts/eqbench/runner_processes.py）。入れ子の runner は自分の token で
+# 上書きするので、外側の process は止めない。
+validation_claim_process_ownership() {
+    EQBENCH_PROCESS_OWNER_TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    EQBENCH_PROCESS_OWNER_ROOT="$BASHPID"
+    [[ "$EQBENCH_PROCESS_OWNER_TOKEN" =~ ^[0-9a-f]{32}$ ]] || return 1
+    export EQBENCH_PROCESS_OWNER_TOKEN
+}
+
+# 所有している process を凍結し、SIGKILL し、消えるまで待つ。消えない process が残れば
+# 非 0 を返す（その場合、呼び出し側は tmp を消してはならない）。
+validation_stop_owned_processes() {
+    local python_bin="${1:-${PYTHON_BIN:-python3}}"
+    [[ -n "${EQBENCH_PROCESS_OWNER_TOKEN:-}" && -n "${EQBENCH_PROCESS_OWNER_ROOT:-}" ]] || return 1
+    [[ "$python_bin" != */* || "$python_bin" == /* ]] || python_bin="$PWD/$python_bin"
+    (cd "$_VALIDATION_REPO_ROOT" && "$python_bin" -B -m scripts.eqbench.runner_processes stop \
+        --token "$EQBENCH_PROCESS_OWNER_TOKEN" --root "$EQBENCH_PROCESS_OWNER_ROOT")
+}
+
+# runner の TERM / INT / HUP の handler。以後の停止要求は無視し（停止は 1 回だけ）、
+# 所有している process をすべて止めてから、run の一時 dir を消す関数 <cleanup> を呼んで
+# <exit_status> で終わる。止めきれなければ一時 dir を残し、そのことを書いて終わる。
+#   trap 'validation_handle_stop_signal 143 <cleanup>' TERM
+validation_handle_stop_signal() {
+    local exit_status="$1" cleanup="$2"
+    trap '' HUP INT TERM
+    trap - EXIT
+    if validation_stop_owned_processes; then
+        "$cleanup" || true
+    else
+        echo "Error: stop request: owned processes did not all end; the run tmpdir is kept" >&2
+    fi
+    exit "$exit_status"
+}
+
+# pair の execution 境界を開く。前回 execution の pair-status（atomic な公開の書きかけの
+# 一時 file を含む）、stage journal、stack dump とその状態、分類失敗の record、runtime
+# receipt を消し、**消えたことを確かめる**。1 つでも残れば非 0 を返し、残った path を
+# stderr に書く。呼び出し側は解析を始めてはならない（残った前回の結果を、今回の結果と
+# 取り違えないため）。
+#   validation_open_pair_execution <pair の output dir> <pair stem>
+validation_open_pair_execution() {
+    local directory="$1" stem="$2" metrics path
+    metrics="$directory/.runtime-metrics"
+    mkdir -p -- "$metrics" 2>/dev/null
+    local -a paths=(
+        "$directory/$stem.pair-status.json"
+        "$directory/$stem.stage.jsonl"
+        "$metrics/$stem.stack-dump.txt"
+        "$metrics/$stem.stack-dump.status.json"
+        "$metrics/$stem.classification-failure.json"
+        "$metrics/$stem.progress.json"
+        "$metrics/$stem.runtime.json"
+    )
+    local -a partials=()
+    shopt -s nullglob
+    partials=("$directory/.$stem.pair-status.json."*)
+    shopt -u nullglob
+    rm -f -- "${paths[@]}" "${partials[@]}" 2>/dev/null
+    local -a remaining=()
+    for path in "${paths[@]}"; do
+        if [[ -e "$path" || -L "$path" ]]; then remaining+=("$path"); fi
+    done
+    shopt -s nullglob
+    for path in "$directory/.$stem.pair-status.json."*; do remaining+=("$path"); done
+    shopt -u nullglob
+    if (( ${#remaining[@]} > 0 )); then
+        printf 'Error: pair execution boundary could not remove: %s\n' "${remaining[@]}" >&2
+        return 1
+    fi
+    if [[ ! -d "$metrics" || ! -w "$metrics" || ! -w "$directory" ]]; then
+        echo "Error: pair execution boundary: output directory is not writable: $directory" >&2
+        return 1
+    fi
     return 0
 }
 
-# 分類に失敗した（署名済みの終端 status が無い）pair の child の rc を、分類器の record から
-# 読む（読めなければ "-"）。rc を出すだけで、原因（OOM など）は推定しない。
-validation_unterminated_child_returncode() {
-    local python_bin="$1" record="$2"
+# 分類器が公開した pair-status を、この execution の結果として読む。署名・期待する
+# target・正規の終端・**この execution の nonce** がすべて確かめられたときだけ確定とし、
+# それ以外（status が無い・分類失敗の診断・壊れている・別の target / 別の execution）は
+# INCOMPLETE にする。stdout に "<状態>\t<error_kind>\t<child rc>" を 1 行書き、確定なら
+# 0、未完了なら 3 を返す。理由は stderr に書く。
+#   validation_resolve_pair_execution <python> <status> <target> <public key> <nonce> <classification-failure record>
+validation_resolve_pair_execution() {
+    local python_bin="$1"
+    shift
     [[ "$python_bin" != */* || "$python_bin" == /* ]] || python_bin="$PWD/$python_bin"
-    (cd "$_VALIDATION_REPO_ROOT" && "$python_bin" -B -m         scripts.function_tracer_pcode.authority.decision.classification_failure         --print-child-returncode "$record" 2>/dev/null) || printf '%s\n' "-"
+    (cd "$_VALIDATION_REPO_ROOT" && "$python_bin" -B -m \
+        scripts.function_tracer_pcode.authority.decision.pair_status_authority \
+        --resolve-pair-execution "$1" --expected-pair-target "$2" --public-key "$3" \
+        --expected-execution-nonce "$4" --classification-failure-record "$5")
 }
 
 # 実行記録（run_manifest.txt など）を丸ごと置き換える / 追記する。どちらも同じ dir の一時

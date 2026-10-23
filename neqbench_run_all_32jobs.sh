@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/scripts/validation_matrix_common.sh"
 source "$SCRIPT_DIR/scripts/eqbench/pair_scheduler.sh"
+validation_claim_process_ownership || { echo "Error: cannot claim the process ownership of this run" >&2; exit 1; }
 
 default_value() {
     local name="$1" value="$2"
@@ -195,15 +196,12 @@ export TMPDIR="$EQBENCH_TMPDIR" TEMP="$EQBENCH_TMPDIR" TMP="$EQBENCH_TMPDIR"
 RUN_TMP="$(mktemp -d "$EQBENCH_TMPDIR/neqbench-run.XXXXXX")"
 cleanup() { [[ -d "$RUN_TMP" ]] && rm -rf -- "$RUN_TMP"; }
 trap cleanup EXIT
-# 実行中の pair を止めて待ってから RUN_TMP を消す（EXIT trap の cleanup）。順序を逆にすると、
-# store と child の TMPDIR を消された pair が分類まで進み、確定した結果に見える status を
-# 残しうる（止めた pair は署名済みの status を持たず、次の execution で再実行される）。
-handle_neq_signal() {
-    trap '' HUP INT TERM
-    pair_scheduler_terminate_all "$((PAIR_PROCESS_KILL_AFTER_SECONDS + 5))"
-    exit "$1"
-}
-trap 'handle_neq_signal 129' HUP; trap 'handle_neq_signal 130' INT; trap 'handle_neq_signal 143' TERM
+# 実行中の pair を（scheduler への登録の有無によらず）すべて止めて待ってから RUN_TMP を消す
+# （validation_handle_stop_signal）。順序を逆にすると、store と child の TMPDIR を消された
+# pair が分類まで進み、確定した結果に見える status を残しうる。
+trap 'validation_handle_stop_signal 129 cleanup' HUP
+trap 'validation_handle_stop_signal 130 cleanup' INT
+trap 'validation_handle_stop_signal 143 cleanup' TERM
 
 # Issue #160: FULL_NEQ では出力先の受理判定より前に出力先へ書かない。census は run の tmp に作り、
 # 判定の後で出力先へ写す。
@@ -603,32 +601,24 @@ progress_skip_function() {
 run_pair() {
     local sample_position="${11}" function_position="${12}" function_total="${13}"
     local sample="$1" function="$2" left_id="$3" right_id="$4" left="$5" right="$6" out="$7" count="$8" total="$9" target="${10}"
-    local log="$out/$function"_"$left_id"_"$right_id.log" pair_tmp="$(mktemp -d "$RUN_TMP/pair.XXXXXX")"
-    # Issue #124 PR-124-B: skip 判定は呼び出し側で済んでいる。新しい child を起こす
-    # 前に前回 execution の journal を捨て、`.log` の `>` と同じ境界にする
-    # （残すと seq が巻き戻り、古い readiness 行が current のものに見える）。
-    local journal_file="${log%.log}.stage.jsonl"
-    rm -f -- "$journal_file"
-    # 同じ境界で、journal が正本として宣言する dump 退避先の残骸も捨てる
-    # （退避そのものは PR-124-C。残すと前回の dump が current の dump に見える）。
-    local metrics_dir dump_artifact
-    metrics_dir="$out/.runtime-metrics"; mkdir -p "$metrics_dir"
-    dump_artifact="$metrics_dir/$function"_"$left_id"_"$right_id.stack-dump.txt"
-    rm -f -- "$dump_artifact"
-    # Issue #124 PR-124-C: supervisor が書く診断 sidecar の残骸も同じ境界で捨てる。
-    local dump_status
-    dump_status="$metrics_dir/$function"_"$left_id"_"$right_id.stack-dump.status.json"
-    rm -f -- "$dump_status"
-    # Issue #204: 分類が失敗したときに分類器が残す record。前回 execution の record も同じ境界で捨てる。
-    local classification_failure
-    classification_failure="$metrics_dir/$function"_"$left_id"_"$right_id.classification-failure.json"
-    rm -f -- "$classification_failure"
-    # Issue #160: 前回 execution の runtime receipt も同じ境界で捨てる（Eq と同じ writer・schema・path）。
+    local log="$out/$function"_"$left_id"_"$right_id.log"
     local pair_stem="$function"_"$left_id"_"$right_id" started_at finished_at
-    validation_reset_pair_runtime_receipts "$metrics_dir" "$pair_stem"
-    # 同じ境界で前回 execution の pair-status も捨てる（この execution が終端の status を
-    # 書く前に止まったとき、前回の status を current の結果として残さない）。
-    validation_reset_pair_status "$out/$pair_stem.pair-status.json"
+    local metrics_dir="$out/.runtime-metrics"
+    # 実行境界（Issue #124 PR-124-B/C、#204、#160、評価計画 v2 PR-A）。前回 execution の
+    # pair-status・journal・stack dump とその状態・分類失敗の record・runtime receipt を消し、
+    # 消えたことを確かめてから解析を始める。確かめられなければ解析を始めない。
+    if ! validation_open_pair_execution "$out" "$pair_stem"; then
+        printf '[%s/%s] [%s %s/%s pair=%s/%s] %s <-> %s : BOUNDARY_FAILED (no analysis started)\n' \
+            "$sample_position" "$SOURCE_PAIR_COUNT" "$sample" \
+            "$function_position" "$function_total" "$count" "$total" "$left_id" "$right_id"
+        return 1
+    fi
+    local journal_file="${log%.log}.stage.jsonl"
+    local dump_artifact="$metrics_dir/$pair_stem.stack-dump.txt"
+    local dump_status="$metrics_dir/$pair_stem.stack-dump.status.json"
+    local classification_failure="$metrics_dir/$pair_stem.classification-failure.json"
+    local pair_tmp
+    pair_tmp="$(mktemp -d "$RUN_TMP/pair.XXXXXX")"
     started_at="$(date +%s.%N)"
     local nonce identity result_id source_fp stream exec_nonce checkpoint authority status_file detail ec=0
     nonce="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_hex(24))')"
@@ -670,29 +660,24 @@ run_pair() {
     fi
     finished_at="$(date +%s.%N)"
     status_file="$out/$function"_"$left_id"_"$right_id.pair-status.json"
-    "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.canonical_result --classify-pair-log "$log" --supervisor-projection "$authority" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --pair-status-signing-private-key-file "$PAIR_PRIVATE_KEY" --pair-status-verification-key-file "$PAIR_PUBLIC_KEY" --pair-execution-target-file "$target" --classification-diagnostic-log "$log" --classification-failure-output "$classification_failure" --pair-status-output "$status_file" || ec=1
-    if detail="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.pair_status_authority --validate-pair-status "$status_file" --public-key "$PAIR_PUBLIC_KEY" --expected-pair-target "$target" --allow-operational-diagnostic 2>&1)"; then
-        status="$detail"
-        ec=0
-    else
-        # 検証できる終端の status が無い（書かれなかった・壊れている・target が違う）。
-        # 確定した ERROR ではなく未完了で、次の execution で再実行される。
-        status=INCOMPLETE
-        ec=1
+    "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.canonical_result --classify-pair-log "$log" --supervisor-projection "$authority" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --pair-status-signing-private-key-file "$PAIR_PRIVATE_KEY" --pair-status-verification-key-file "$PAIR_PUBLIC_KEY" --pair-execution-target-file "$target" --classification-diagnostic-log "$log" --classification-failure-output "$classification_failure" --pair-status-output "$status_file" || true
+    # 結果を確定とするかは分類器の exit code ではなく、公開された status を
+    # validation_resolve_pair_execution（署名・target・正規の終端・この execution の nonce）が
+    # 決める。確定した ERROR / TIMEOUT も確定で、pair job の失敗ではない（verification
+    # ledger の run_pair_failures の契約）。未完了（INCOMPLETE）と cleanup の失敗だけが失敗。
+    local resolution status error_kind child_returncode pair_ec=0
+    resolution="$(validation_resolve_pair_execution "$PYTHON_BIN" "$status_file" "$target" \
+        "$PAIR_PUBLIC_KEY" "$exec_nonce" "$classification_failure" 2>> "$log")" || pair_ec=1
+    IFS=$'\t' read -r status error_kind child_returncode <<< "$resolution"
+    if (( pair_ec != 0 )) || [[ -z "$status" ]]; then
+        status=INCOMPLETE; pair_ec=1
+        [[ -n "${error_kind:-}" ]] || error_kind="PAIR_STATUS_AUTHORITY_INVALID"
+        [[ -n "${child_returncode:-}" ]] || child_returncode="-"
     fi
     # Issue #124 PR-124-C: cleanup より前に dump 退避状態を確認して記録する。
     # cleanup 自体は従来どおり必ず実行し、失敗の扱いも変えない。
     validation_record_stack_dump_state "$STACK_DUMP_ARTIFACT_STATE_FILE" "$sample" "$function"_"$left_id"_"$right_id" "$dump_status" "$dump_artifact" "$log"
-    "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.process_authority_cleanup --tmp-root "$EQBENCH_TMPDIR" --run-tmpdir "$RUN_TMP" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" || { printf '%s\t%s\t%s\n' "$sample" "$function" "$exec_nonce" >> "$PROCESS_CLEANUP_FAILURES"; ec=1; }
-    local error_kind child_returncode
-    error_kind="$("$PYTHON_BIN" -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("error_kind") or "-")' "$status_file" 2>/dev/null || echo -)"
-    child_returncode="$("$PYTHON_BIN" -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("child_returncode", "-"))' "$status_file" 2>/dev/null || echo -)"
-    if [[ "$status" == INCOMPLETE ]]; then
-        # 分類に失敗した（終端していない）pair。rc は分類器の record からだけ読める。
-        # 未完了の pair は run の失敗として数える（Eq runner と同じ。run は完了していない）。
-        child_returncode="$(validation_unterminated_child_returncode "$PYTHON_BIN" "$classification_failure")"
-        ec=1
-    fi
+    "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.process_authority_cleanup --tmp-root "$EQBENCH_TMPDIR" --run-tmpdir "$RUN_TMP" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" || { printf '%s\t%s\t%s\n' "$sample" "$function" "$exec_nonce" >> "$PROCESS_CLEANUP_FAILURES"; pair_ec=1; }
     validation_write_pair_runtime_receipt "$PYTHON_BIN" --state COMPLETED \
         "${receipt_args[@]}" "${usage_args[@]}" --finished-at-epoch "$finished_at" \
         --status "$status" --error-kind "$error_kind" --child-returncode "$child_returncode"
@@ -703,7 +688,7 @@ run_pair() {
         "$sample_position" "$SOURCE_PAIR_COUNT" "$sample" \
         "$function_position" "$function_total" "$count" "$total" \
         "$left_id" "$right_id" "$status"
-    return "$ec"
+    return "$pair_ec"
 }
 # Per-function summary, produced by the cross-function pair scheduler once
 # every pair job of the function directory (the group key) has been reaped.
@@ -916,9 +901,9 @@ while IFS="$(printf '\t')" read -r sample new_source old_source; do
             fi
             pair_scheduler_wait_for_slot
             TOTAL_SCHEDULED_PAIR_JOBS=$((TOTAL_SCHEDULED_PAIR_JOBS + 1))
-            run_pair "$sample" "$function" "$left_id" "$right_id" "$left" "$right" "$function_dir" "$count" "$total" "$target" \
-                "$CURRENT_SAMPLE_INDEX" "$function_position" "$function_total" &
-            pair_scheduler_start_job "$function_dir" "$!"
+            pair_scheduler_launch_job "$function_dir" \
+                run_pair "$sample" "$function" "$left_id" "$right_id" "$left" "$right" "$function_dir" "$count" "$total" "$target" \
+                "$CURRENT_SAMPLE_INDEX" "$function_position" "$function_total"
         done
         # results_summary.txt is written by the scheduler's completion hook
         # once the last pair of this function has been reaped.
