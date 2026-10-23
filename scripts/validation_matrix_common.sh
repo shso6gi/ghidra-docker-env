@@ -193,7 +193,8 @@ validation_write_pair_runtime_receipt() {
 # 止められる（scripts/eqbench/runner_processes.py）。入れ子の runner は自分の token で
 # 上書きするので、外側の process は止めない。
 validation_claim_process_ownership() {
-    EQBENCH_PROCESS_OWNER_TOKEN="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    EQBENCH_PROCESS_OWNER_TOKEN="$("${PYTHON_BIN:-python3}" -c \
+        'import secrets; print(secrets.token_hex(16))')" || return 1
     EQBENCH_PROCESS_OWNER_ROOT="$BASHPID"
     [[ "$EQBENCH_PROCESS_OWNER_TOKEN" =~ ^[0-9a-f]{32}$ ]] || return 1
     export EQBENCH_PROCESS_OWNER_TOKEN
