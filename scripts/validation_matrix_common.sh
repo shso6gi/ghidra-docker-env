@@ -191,6 +191,51 @@ validation_write_pair_runtime_receipt() {
     return 0
 }
 
+# 中断と確定の境界: pair を新しく実行すると決めた時点で、前回 execution の pair-status
+# （と、kill された分類器が残した書きかけの一時 file）を捨てる。残すと、この execution が
+# 終端の status を書く前に止まったとき、前回の status が current の結果に見える。
+# 分類器は status を atomic に書く（pair_status_authority.write_pair_status_file）。
+validation_reset_pair_status() {
+    local status_file="$1"
+    rm -f -- "$status_file" "${status_file%/*}/.${status_file##*/}."* || true
+    return 0
+}
+
+# 分類に失敗した（署名済みの終端 status が無い）pair の child の rc を、分類器の record から
+# 読む（読めなければ "-"）。rc を出すだけで、原因（OOM など）は推定しない。
+validation_unterminated_child_returncode() {
+    local python_bin="$1" record="$2"
+    [[ "$python_bin" != */* || "$python_bin" == /* ]] || python_bin="$PWD/$python_bin"
+    (cd "$_VALIDATION_REPO_ROOT" && "$python_bin" -B -m         scripts.function_tracer_pcode.authority.decision.classification_failure         --print-child-returncode "$record" 2>/dev/null) || printf '%s\n' "-"
+}
+
+# 実行記録（run_manifest.txt など）を丸ごと置き換える / 追記する。どちらも同じ dir の一時
+# file に書いてから rename するので、途中で kill されても書きかけの file は残らない。
+validation_install_file_atomically() {
+    local source="$1" destination="$2" temporary
+    temporary="$(mktemp "${destination%/*}/.${destination##*/}.XXXXXX")" || return 1
+    if cp -- "$source" "$temporary" \
+        && chmod "$(printf '%o' $((0666 & ~$(umask))))" "$temporary" \
+        && mv -f -- "$temporary" "$destination"; then
+        return 0
+    fi
+    rm -f -- "$temporary"
+    return 1
+}
+
+# stdin を destination の末尾に足した内容で destination を置き換える。
+validation_append_file_atomically() {
+    local destination="$1" temporary
+    temporary="$(mktemp "${destination%/*}/.${destination##*/}.XXXXXX")" || return 1
+    if { if [[ -e "$destination" ]]; then cat -- "$destination"; fi; cat; } > "$temporary" \
+        && chmod "$(printf '%o' $((0666 & ~$(umask))))" "$temporary" \
+        && mv -f -- "$temporary" "$destination"; then
+        return 0
+    fi
+    rm -f -- "$temporary"
+    return 1
+}
+
 # 実行記録の 1 行に安全に埋め込める形へ整える（改行・復帰を潰す）。
 validation_manifest_value() {
     printf '%s' "${1-}" | tr '\r\n' '  '

@@ -179,6 +179,76 @@ pair_scheduler_finalize() {
     return 0
 }
 
+# Stop every pair job in flight and everything it started, and reap them, for
+# a runner that was told to stop (TERM / INT / HUP).  The runner calls this in
+# its signal handler *before* it removes the run tmpdir: a pair that is
+# stopped must end with no classified status, never with one that a
+# classifier built after its tmpdir and checkpoint store were deleted under
+# it (that status would look decided and resume would reuse it).
+#
+# Order: freeze the job subshells (SIGSTOP) so they start nothing new, collect
+# their whole process tree, SIGKILL the subshells (so no classification can
+# begin), TERM the rest (the supervisor stops its own child process group),
+# give them GRACE seconds, SIGKILL whatever is left, then reap the jobs.
+# A job's exit status here is not a pair failure and is not counted.
+pair_scheduler_terminate_all() {
+    local grace="${1:-30}" pid deadline
+    [[ "$grace" =~ ^[0-9]+$ ]] || grace=30
+    declare -p PAIR_SCHEDULER_JOB_GROUP > /dev/null 2>&1 || return 0
+    local -a jobs=("${!PAIR_SCHEDULER_JOB_GROUP[@]}")
+    (( ${#jobs[@]} > 0 )) || return 0
+    kill -STOP "${jobs[@]}" 2>/dev/null || true
+    local -a tree=()
+    mapfile -t tree < <(_pair_scheduler_descendants "${jobs[@]}")
+    kill -KILL "${jobs[@]}" 2>/dev/null || true
+    if (( ${#tree[@]} > 0 )); then
+        kill -TERM "${tree[@]}" 2>/dev/null || true
+        deadline=$((SECONDS + grace))
+        while (( SECONDS < deadline )); do
+            _pair_scheduler_any_alive "${tree[@]}" || break
+            sleep 0.2
+        done
+        kill -KILL "${tree[@]}" 2>/dev/null || true
+    fi
+    for pid in "${jobs[@]}"; do
+        wait "$pid" 2>/dev/null || true
+        unset 'PAIR_SCHEDULER_JOB_GROUP[$pid]'
+    done
+    PAIR_SCHEDULER_ACTIVE_JOBS=0
+    return 0
+}
+
+# Every live descendant of the given PIDs (not the PIDs themselves), from one
+# snapshot of the process table.
+_pair_scheduler_descendants() {
+    local -A children=()
+    local pid ppid
+    while read -r pid ppid; do
+        children["$ppid"]+="$pid "
+    done < <(ps -e -o pid= -o ppid= 2>/dev/null)
+    local -a queue=("$@")
+    local -A seen=()
+    while (( ${#queue[@]} > 0 )); do
+        pid="${queue[0]}"
+        queue=("${queue[@]:1}")
+        for ppid in ${children[$pid]:-}; do
+            [[ -n "${seen[$ppid]+x}" ]] && continue
+            seen["$ppid"]=1
+            printf '%s\n' "$ppid"
+            queue+=("$ppid")
+        done
+    done
+}
+
+_pair_scheduler_any_alive() {
+    local pid
+    for pid in "$@"; do
+        # A zombie is already dead; only a running process keeps the wait going.
+        _pair_scheduler_pid_finished "$pid" || return 0
+    done
+    return 1
+}
+
 _pair_scheduler_count_failure() {
     local -n _pair_scheduler_counter_ref="$PAIR_SCHEDULER_FAILURE_COUNTER"
     _pair_scheduler_counter_ref=$((_pair_scheduler_counter_ref + 1))

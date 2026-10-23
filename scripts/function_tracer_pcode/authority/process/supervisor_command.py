@@ -65,6 +65,32 @@ _DIAGNOSTIC_GUARD_ERRORS = (
 )
 
 
+#: 外から止められたことを伝える signal（runner の停止・`docker stop`・端末の切断）。
+INTERRUPT_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+
+class SupervisorInterrupted(BaseException):
+    """supervisor が外から止められた（pair の実行の中断）。
+
+    ``BaseException`` にするのは、``run`` の ``except Exception``（観測・永続化の失敗を
+    durable な evidence だけから終端へ決め直す経路）に入れないため。中断は終端ではない:
+    child の process group を止め（``finally``）、projection も終端の evidence も
+    **新しく書かずに**終わる。その pair は署名済みの status を持たないまま残り、次の
+    execution で再び実行される。
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+def _raise_interrupted(signum: int, _frame: Any) -> None:
+    # 停止処理（child の cleanup）を二度目の signal で中断させない。
+    for interrupt in INTERRUPT_SIGNALS:
+        signal.signal(interrupt, signal.SIG_IGN)
+    raise SupervisorInterrupted(signum)
+
+
 def _exact_string(name: str, value: Any) -> str:
     if type(value) is not str or not value:
         raise TypeError(f"{name} must be a non-empty exact string")
@@ -826,7 +852,12 @@ def main(arguments: Optional[Sequence[str]] = None) -> int:
         ),
         stack_dump_lead_seconds=args.stack_dump_lead_seconds,
     )
-    return ProcessSupervisorCommand(config).run()
+    for interrupt in INTERRUPT_SIGNALS:
+        signal.signal(interrupt, _raise_interrupted)
+    try:
+        return ProcessSupervisorCommand(config).run()
+    except SupervisorInterrupted as interrupted:
+        return 128 + interrupted.signum
 
 
 if __name__ == "__main__":

@@ -103,6 +103,31 @@ PAIR_STATUS_OPERATIONAL_DIAGNOSTIC_FIELDS = frozenset({
 })
 
 
+# An unsigned operational diagnostic is the classifier saying that it could not
+# finish this pair: no signed terminal status exists, so the pair is *not*
+# completed.  Its state is therefore ``INCOMPLETE`` (the same state as a pair
+# that left no status at all) and never ``ERROR``: an ERROR is a decided result
+# that resume reuses, while a pair without a signed terminal status is always
+# scheduled again (``pair_status_file_skip_decision``).  Counting it as ERROR
+# would report an interrupted pair -- one killed from outside, for example --
+# as a decided outcome that the next run then quietly replaces.
+PAIR_STATUS_OPERATIONAL_DIAGNOSTIC_STATE = "INCOMPLETE"
+
+# Error kinds whose ERROR can depend on the host rather than on the pair (the
+# JVM / PyGhidra could not start, for example under memory pressure).  Such an
+# ERROR is still a decided result that the run keeps and counts in its
+# denominator; the classification only lets reports show it apart from the
+# other ERRORs.  Add a kind here only when the error kind itself says that the
+# analysis never started for an environmental reason.
+ENVIRONMENT_DEPENDENT_ERROR_KINDS = frozenset({"CLI_STARTUP_ERROR"})
+
+
+def error_kind_is_environment_dependent(error_kind: Any) -> bool:
+    """True when an ERROR of this kind may depend on the host, not the pair."""
+
+    return isinstance(error_kind, str) and error_kind in ENVIRONMENT_DEPENDENT_ERROR_KINDS
+
+
 def pair_status_operational_diagnostic(
     payload: Any,
 ) -> Mapping[str, Any] | None:
@@ -142,6 +167,21 @@ def _atomic_write(path: Path, data: bytes, mode: int) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def write_pair_status_file(path: Path, payload: Mapping[str, Any]) -> None:
+    """Publish a pair-status (signed or the operational diagnostic) atomically.
+
+    The file appears only as a whole: a classifier killed while writing leaves
+    no pair-status (or the previous one, which the runner has already removed
+    at the execution boundary), never a torn one.
+    """
+
+    _atomic_write(
+        Path(path),
+        (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"),
+        0o644,
+    )
 
 
 def _public_key_payload(public_key_bytes: bytes) -> Mapping[str, Any]:
@@ -506,7 +546,18 @@ def pair_status_file_skip_decision(
     compatible_analysis_config_digest: str | None = None,
     compatible_analysis_source_digest: str | None = None,
 ) -> str:
-    """Return SCHEDULE for every missing or unverifiable pair artifact."""
+    """Return SKIP only for a pair whose result may be reused as it is.
+
+    Reuse needs all three of: a valid seal (signature, key, schema and body),
+    the expected identity (the whole ``pair_execution_target``: source,
+    binaries, analysis source and config digests), and a regular terminal
+    state (``RESOLVED``, or a durable ``TIMEOUT``/``ERROR`` whose deadline and
+    child-exit evidence validated).  A file that merely *has* a signature
+    field, a different target, the unsigned operational diagnostic, an empty or
+    torn file, or a missing log is SCHEDULE.  Among reusable statuses every
+    outcome is kept, ERROR and TIMEOUT included: they are decided results and
+    resume must not overwrite them (only ``ERROR_ONLY`` mode re-runs ERRORs).
+    """
 
     try:
         if (
@@ -544,6 +595,10 @@ def pair_status_file_skip_decision(
                 "target_digest": authority_digest(compatible_target),
             })
         if body["pair_execution_target"] not in accepted_targets:
+            return "SCHEDULE"
+        if pair_status_finalization(
+            payload, public_key_path=public_key_path,
+        ) not in (FINALIZATION_RESOLVED, FINALIZATION_DURABLE):
             return "SCHEDULE"
         disposition = pair_status_resume_disposition(body)
         return (
@@ -685,7 +740,7 @@ def main(argv: list[str] | None = None) -> int:
         payload = json.loads(pair_status_path.read_text(encoding="utf-8"))
         diagnostic = pair_status_operational_diagnostic(payload)
         if args.allow_operational_diagnostic and diagnostic is not None:
-            print("ERROR")
+            print(PAIR_STATUS_OPERATIONAL_DIAGNOSTIC_STATE)
             return 0
         public_key_path = (
             Path(args.public_key) if args.public_key

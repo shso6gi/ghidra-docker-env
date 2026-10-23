@@ -195,7 +195,15 @@ export TMPDIR="$EQBENCH_TMPDIR" TEMP="$EQBENCH_TMPDIR" TMP="$EQBENCH_TMPDIR"
 RUN_TMP="$(mktemp -d "$EQBENCH_TMPDIR/neqbench-run.XXXXXX")"
 cleanup() { [[ -d "$RUN_TMP" ]] && rm -rf -- "$RUN_TMP"; }
 trap cleanup EXIT
-trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+# 実行中の pair を止めて待ってから RUN_TMP を消す（EXIT trap の cleanup）。順序を逆にすると、
+# store と child の TMPDIR を消された pair が分類まで進み、確定した結果に見える status を
+# 残しうる（止めた pair は署名済みの status を持たず、次の execution で再実行される）。
+handle_neq_signal() {
+    trap '' HUP INT TERM
+    pair_scheduler_terminate_all "$((PAIR_PROCESS_KILL_AFTER_SECONDS + 5))"
+    exit "$1"
+}
+trap 'handle_neq_signal 129' HUP; trap 'handle_neq_signal 130' INT; trap 'handle_neq_signal 143' TERM
 
 # Issue #160: FULL_NEQ では出力先の受理判定より前に出力先へ書かない。census は run の tmp に作り、
 # 判定の後で出力先へ写す。
@@ -618,6 +626,9 @@ run_pair() {
     # Issue #160: 前回 execution の runtime receipt も同じ境界で捨てる（Eq と同じ writer・schema・path）。
     local pair_stem="$function"_"$left_id"_"$right_id" started_at finished_at
     validation_reset_pair_runtime_receipts "$metrics_dir" "$pair_stem"
+    # 同じ境界で前回 execution の pair-status も捨てる（この execution が終端の status を
+    # 書く前に止まったとき、前回の status を current の結果として残さない）。
+    validation_reset_pair_status "$out/$pair_stem.pair-status.json"
     started_at="$(date +%s.%N)"
     local nonce identity result_id source_fp stream exec_nonce checkpoint authority status_file detail ec=0
     nonce="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_hex(24))')"
@@ -659,12 +670,14 @@ run_pair() {
     fi
     finished_at="$(date +%s.%N)"
     status_file="$out/$function"_"$left_id"_"$right_id.pair-status.json"
-    "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.canonical_result --classify-pair-log "$log" --supervisor-projection "$authority" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --pair-status-signing-private-key-file "$PAIR_PRIVATE_KEY" --pair-status-verification-key-file "$PAIR_PUBLIC_KEY" --pair-execution-target-file "$target" --classification-diagnostic-log "$log" --classification-failure-output "$classification_failure" > "$status_file" || ec=1
+    "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.canonical_result --classify-pair-log "$log" --supervisor-projection "$authority" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --pair-status-signing-private-key-file "$PAIR_PRIVATE_KEY" --pair-status-verification-key-file "$PAIR_PUBLIC_KEY" --pair-execution-target-file "$target" --classification-diagnostic-log "$log" --classification-failure-output "$classification_failure" --pair-status-output "$status_file" || ec=1
     if detail="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.pair_status_authority --validate-pair-status "$status_file" --public-key "$PAIR_PUBLIC_KEY" --expected-pair-target "$target" --allow-operational-diagnostic 2>&1)"; then
         status="$detail"
         ec=0
     else
-        status=ERROR
+        # 検証できる終端の status が無い（書かれなかった・壊れている・target が違う）。
+        # 確定した ERROR ではなく未完了で、次の execution で再実行される。
+        status=INCOMPLETE
         ec=1
     fi
     # Issue #124 PR-124-C: cleanup より前に dump 退避状態を確認して記録する。
@@ -674,6 +687,12 @@ run_pair() {
     local error_kind child_returncode
     error_kind="$("$PYTHON_BIN" -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("error_kind") or "-")' "$status_file" 2>/dev/null || echo -)"
     child_returncode="$("$PYTHON_BIN" -c 'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("child_returncode", "-"))' "$status_file" 2>/dev/null || echo -)"
+    if [[ "$status" == INCOMPLETE ]]; then
+        # 分類に失敗した（終端していない）pair。rc は分類器の record からだけ読める。
+        # 未完了の pair は run の失敗として数える（Eq runner と同じ。run は完了していない）。
+        child_returncode="$(validation_unterminated_child_returncode "$PYTHON_BIN" "$classification_failure")"
+        ec=1
+    fi
     validation_write_pair_runtime_receipt "$PYTHON_BIN" --state COMPLETED \
         "${receipt_args[@]}" "${usage_args[@]}" --finished-at-epoch "$finished_at" \
         --status "$status" --error-kind "$error_kind" --child-returncode "$child_returncode"
@@ -698,6 +717,7 @@ pair_scheduler_init "$PARALLEL_JOBS" write_function_results_summary RUN_PAIR_FAI
 RUN_MANIFEST="$OUTPUT_BASE_DIR/run_manifest.txt"
 PREVIOUS_RUN_MANIFEST="$RUN_TMP/previous-run-manifest.txt"
 if [[ -s "$RUN_MANIFEST" ]]; then cp "$RUN_MANIFEST" "$PREVIOUS_RUN_MANIFEST"; fi
+RUN_MANIFEST_CANDIDATE="$RUN_TMP/run_manifest.candidate.txt"
 {
     cat "$RUN_MANIFEST_HEAD"
     cat <<EOF
@@ -707,7 +727,11 @@ planned_functions=$TOTAL_PLANNED_FUNCTIONS
 planned_pair_jobs=$TOTAL_PLANNED_PAIR_JOBS
 analysis_config_digest=$CONFIG_DIGEST
 EOF
-} > "$RUN_MANIFEST"
+} > "$RUN_MANIFEST_CANDIDATE"
+validation_install_file_atomically "$RUN_MANIFEST_CANDIDATE" "$RUN_MANIFEST" || {
+    echo "Error: could not install run manifest: $RUN_MANIFEST" >&2
+    exit 1
+}
 PAIR_STATUS_RESUME_COMPAT_ARGS=()
 SUMMARY_SHORTCUT_AUTHORIZED=0
 if compatible_identity="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt \
@@ -913,7 +937,7 @@ find "$OUTPUT_BASE_DIR" -type f -name '*.log' ! -name 'compile_*.log' ! -name 'r
 validation_run_benchmark_gate "$OUTPUT_BASE_DIR" "$NEQ_ROOT" "$SCRIPT_DIR"
 # Issue #124 PR-124-C: TIMEOUT 診断を run_health_summary へ merge（gate の直後）。
 validation_run_timeout_hotspot_summary "$OUTPUT_BASE_DIR" "$SCRIPT_DIR"
-cat >> "$RUN_MANIFEST" <<EOF
+if ! validation_append_file_atomically "$RUN_MANIFEST" <<EOF
 completed_samples=$COMPLETED_SAMPLES
 skipped_samples=$SKIPPED_SAMPLES
 total_functions=$TOTAL_FUNCTIONS
@@ -934,6 +958,10 @@ benchmark_gate_failures=$VALIDATION_BENCHMARK_GATE_FAILURES
 analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
 end_time_utc=$(validation_utc_timestamp)
 EOF
+then
+    echo "Error: could not complete run manifest: $RUN_MANIFEST" >&2
+    exit 1
+fi
 exit_status=0
 if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT > 0 || FUNCTION_CENSUS_FAILURES > 0 || VALIDATION_BENCHMARK_GATE_FAILURES > 0 )); then
     exit_status=1

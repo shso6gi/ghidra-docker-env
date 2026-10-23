@@ -198,7 +198,12 @@ cleanup_eqbench_run_tmpdir() {
 }
 handle_eqbench_signal() {
     local exit_status="$1"
-    trap - EXIT HUP INT TERM
+    trap - EXIT
+    trap '' HUP INT TERM
+    # 実行中の pair を止めて待ってから run tmpdir を消す。順序を逆にすると、store と
+    # child の TMPDIR を消された pair が分類まで進み、確定した結果に見える status を
+    # 残しうる（止めた pair は署名済みの status を持たず、次の execution で再実行される）。
+    pair_scheduler_terminate_all "$((PAIR_PROCESS_KILL_AFTER_SECONDS + 5))"
     cleanup_eqbench_run_tmpdir
     exit "$exit_status"
 }
@@ -508,6 +513,10 @@ run_pair() {
     # receipt を書けなかったときに前回の計測値が current の pair に見える）。
     local pair_stem="${function_name}_${left_id}_${right_id}"
     validation_reset_pair_runtime_receipts "$runtime_metrics_dir" "$pair_stem"
+    # 同じ境界で前回 execution の pair-status も捨てる（この execution が終端の status を
+    # 書く前に止まったとき、前回の status を current の結果として残さない）。
+    local pair_status_file="${output_dir}/${pair_stem}.pair-status.json"
+    validation_reset_pair_status "$pair_status_file"
     local started_at finished_at
     started_at="$(date +%s.%N)"
     local result_entry_occurrence_nonce
@@ -643,18 +652,18 @@ run_pair() {
     finished_at="$(date +%s.%N)"
 
     if (( ec == 124 || ec == 137 )); then
+        # supervisor 自身が kill された（期限の kill は supervisor が child に送るので、
+        # ここには来ない）。結果は署名済みの pair-status だけが決める。ここで TIMEOUT と
+        # 書くと、外からの kill を確定した結果として log に残してしまう。
         {
             echo ""
-            echo "Pair process timeout: exceeded PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT"
-            echo "Timeout kill-after: PAIR_PROCESS_KILL_AFTER=$PAIR_PROCESS_KILL_AFTER"
-            echo "Result: TIMEOUT (pair process exceeded wall-clock time limit)"
+            echo "Pair supervisor exited with status $ec (killed from outside); the outcome is the signed pair status only"
         } >> "$log_file"
     fi
 
-    local pair_status_file classification_ec status error_kind child_returncode
+    local classification_ec status error_kind child_returncode
     local pair_status_validation_ec pair_status_validation_detail
     local cleanup_ec run_pair_ec
-    pair_status_file="${output_dir}/${function_name}_${left_id}_${right_id}.pair-status.json"
     if PYTHONWARNINGS="ignore::RuntimeWarning" "$PYTHON_BIN" -m \
         scripts.function_tracer_pcode.authority.decision.canonical_result \
         --classify-pair-log "$log_file" \
@@ -669,7 +678,7 @@ run_pair() {
         --pair-status-verification-key-file "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
         --pair-execution-target-file "$pair_target_file" --classification-diagnostic-log "$log_file" \
         --classification-failure-output "$classification_failure" \
-        > "$pair_status_file"; then
+        --pair-status-output "$pair_status_file"; then
         classification_ec=0
     else
         classification_ec=$?
@@ -684,11 +693,19 @@ run_pair() {
         child_returncode="$("$PYTHON_BIN" -c \
             'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("child_returncode", "-"))' \
             "$pair_status_file")"
+        if [[ "$status" == INCOMPLETE ]]; then
+            # 分類に失敗した（終端していない）pair。rc は分類器の record からだけ読める。
+            child_returncode="$(validation_unterminated_child_returncode \
+                "$PYTHON_BIN" "$classification_failure")"
+        fi
     else
         pair_status_validation_ec=$?
-        status="ERROR"
+        # 検証できる終端の status が無い（書かれなかった・壊れている・target が違う）。
+        # 確定した ERROR ではなく未完了で、次の execution で再実行される。
+        status="INCOMPLETE"
         error_kind="PAIR_STATUS_AUTHORITY_INVALID"
-        child_returncode="-"
+        child_returncode="$(validation_unterminated_child_returncode \
+            "$PYTHON_BIN" "$classification_failure")"
         echo "Error: generated pair status failed authority validation: $pair_status_file" >&2
         echo "$pair_status_validation_detail" >&2
         {
@@ -991,7 +1008,10 @@ PREVIOUS_RUN_MANIFEST_FILE="$EQBENCH_RUN_TMPDIR/previous-run-manifest.txt"
 if [[ -s "$RUN_MANIFEST_FILE" ]]; then
     cp "$RUN_MANIFEST_FILE" "$PREVIOUS_RUN_MANIFEST_FILE"
 fi
-cp "$CANDIDATE_RUN_MANIFEST_FILE" "$RUN_MANIFEST_FILE"
+validation_install_file_atomically "$CANDIDATE_RUN_MANIFEST_FILE" "$RUN_MANIFEST_FILE" || {
+    echo "Error: could not install run manifest: $RUN_MANIFEST_FILE" >&2
+    exit 1
+}
 PAIR_STATUS_RESUME_COMPAT_ARGS=()
 SUMMARY_SHORTCUT_AUTHORIZED=0
 if compatible_identity="$("$PYTHON_BIN" -m \
@@ -1423,7 +1443,7 @@ validation_run_benchmark_gate "$OUTPUT_BASE_DIR" "$EQBENCH_ROOT" "$SCRIPT_DIR"
 # run_health_summary へ merge する（gate の直後、receipt が hash する前）。
 validation_run_timeout_hotspot_summary "$OUTPUT_BASE_DIR" "$SCRIPT_DIR"
 
-cat >> "$OUTPUT_BASE_DIR/run_manifest.txt" <<EOF
+if ! validation_append_file_atomically "$OUTPUT_BASE_DIR/run_manifest.txt" <<EOF
 completed_samples=$COMPLETED_SAMPLES
 skipped_samples=$SKIPPED_SAMPLES
 total_functions=$TOTAL_FUNCTIONS
@@ -1443,6 +1463,10 @@ benchmark_gate_failures=$VALIDATION_BENCHMARK_GATE_FAILURES
 analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
 end_time_utc=$(validation_utc_timestamp)
 EOF
+then
+    echo "Error: could not complete run manifest: $OUTPUT_BASE_DIR/run_manifest.txt" >&2
+    exit 1
+fi
 
 FINAL_RUN_EXIT_STATUS=0
 if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT > 0 || FUNCTION_CENSUS_FAILURES > 0 || VALIDATION_BENCHMARK_GATE_FAILURES > 0 )); then

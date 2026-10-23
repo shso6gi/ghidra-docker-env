@@ -308,7 +308,9 @@ def test_canonical_summary_aggregates_operational_invalid_pair_status(tmp_path):
     summary = aggregate_validation_logs_by_function((path,), canonical_only=True)
     health = build_run_health_summary(summary)
 
-    assert record.status == STATUS_ERROR
+    # The unsigned diagnostic means classification never finished: the pair is
+    # incomplete (resume runs it again), not a decided ERROR.
+    assert record.status == STATUS_INCOMPLETE
     assert record.payloads == ()
     assert record.pair_status_metadata == {
         "error_kind": "PAIR_STATUS_AUTHORITY_INVALID",
@@ -317,7 +319,8 @@ def test_canonical_summary_aggregates_operational_invalid_pair_status(tmp_path):
         "classification_valid": False,
         "detail": "ValueError: durable restart authority is invalid",
     }
-    assert summary.overall.count(STATUS_ERROR) == 1
+    assert summary.overall.count(STATUS_ERROR) == 0
+    assert summary.overall.count(STATUS_INCOMPLETE) == 1
     assert health["error_kind_counts"] == {"PAIR_STATUS_AUTHORITY_INVALID": 1}
     assert health["supervisor_status_counts"] == {"INVALID": 1}
 
@@ -337,7 +340,7 @@ def test_pair_status_operational_diagnostic_requires_exact_schema():
     }) is None
 
 
-def test_pair_status_validation_classifies_operational_diagnostic_as_error(tmp_path):
+def test_pair_status_validation_classifies_operational_diagnostic_as_incomplete(tmp_path):
     status_path = tmp_path / "pair-status.json"
     status_path.write_text(json.dumps({
         "classification_valid": False,
@@ -360,7 +363,7 @@ def test_pair_status_validation_classifies_operational_diagnostic_as_error(tmp_p
     )
 
     assert result.returncode == 0
-    assert result.stdout.strip() == "ERROR"
+    assert result.stdout.strip() == "INCOMPLETE"
     assert "signed pair-status schema differs" not in result.stderr
 
 

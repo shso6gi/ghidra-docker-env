@@ -16,7 +16,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from scripts.function_tracer_pcode.authority.decision.classification_failure import (
+    recorded_child_returncode,
+)
 from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
+    error_kind_is_environment_dependent,
     find_pair_status_public_key,
     pair_status_operational_diagnostic,
     validate_signed_pair_status,
@@ -397,8 +401,9 @@ def read_validation_log_record(
                 else pair_status["canonical_outcome"]
             )
             if pair_status is not None
-            else STATUS_ERROR
-            if operational_invalid is not None
+            # The unsigned operational diagnostic means classification never
+            # finished: no signed terminal status, so the pair is incomplete
+            # (resume runs it again), not a decided ERROR.
             else STATUS_INCOMPLETE
             if canonical_only
             else classify_log_text(text, matrix_context=True)
@@ -414,7 +419,12 @@ def read_validation_log_record(
             if pair_status is not None
             else {
                 "error_kind": operational_invalid["error_kind"],
-                "child_returncode": None,
+                # Recorded rc only (e.g. -9 for a kill from outside); never a
+                # guessed cause.
+                "child_returncode": recorded_child_returncode(
+                    log_path.parent / ".runtime-metrics"
+                    / f"{log_path.stem}.classification-failure.json"
+                ),
                 "supervisor_status": "INVALID",
                 "classification_valid": False,
                 "detail": operational_invalid["detail"],
@@ -1487,6 +1497,18 @@ def build_run_health_summary(
         # 契約とは独立で、decision authority へは接続しない。
         **summarize_failure_diagnostics(summary.overall.records).to_dict(),
         **metadata_counts,
+        # Decided ERRORs (signed) whose error kind may depend on the host rather
+        # than the pair.  They stay in final_result_counts["ERROR"] and in every
+        # denominator; this is only the subset to report apart.
+        "environment_dependent_error_results": sum(
+            1 for record in summary.overall.records
+            if record.status == STATUS_ERROR
+            and record.pair_status_metadata is not None
+            and record.pair_status_metadata.get("classification_valid") is not False
+            and error_kind_is_environment_dependent(
+                record.pair_status_metadata.get("error_kind")
+            )
+        ),
         "functions": {
             function_name: {
                 "total": aggregate.total_pairs,

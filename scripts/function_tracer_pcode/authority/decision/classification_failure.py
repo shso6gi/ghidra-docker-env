@@ -145,3 +145,41 @@ def write_failure_record(path: Path, record: Mapping[str, Any]) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def recorded_child_returncode(path: Path) -> Optional[int]:
+    """record に写した projection が記録した child の rc（無ければ ``None``）。
+
+    分類に失敗した pair は署名済みの status を持たないので、runtime receipt に残す child の
+    終了は record からしか読めない。**rc だけを返し、原因を推定しない**（SIGKILL の -9 は
+    外部からの kill を示すだけで、OOM かどうかは cgroup の記録と突き合わせないと分からない）。
+    """
+
+    try:
+        record = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    projection = record.get("projection") if isinstance(record, Mapping) else None
+    if not isinstance(projection, Mapping) or projection.get("readable") is not True:
+        return None
+    value = projection.get("value")
+    if not isinstance(value, Mapping):
+        return None
+    returncode = value.get("child_returncode")
+    return returncode if type(returncode) is int else None
+
+
+def main(arguments: Optional[list] = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--print-child-returncode", required=True,
+                        help="record の path。rc が読めなければ '-' を出す")
+    args = parser.parse_args(arguments)
+    returncode = recorded_child_returncode(Path(args.print_child_returncode))
+    print("-" if returncode is None else returncode)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
