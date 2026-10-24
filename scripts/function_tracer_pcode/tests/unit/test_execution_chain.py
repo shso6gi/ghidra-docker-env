@@ -15,6 +15,13 @@ nonce の発行の記録・封印の複製）だけから、tree が 1 つの id
   ときだけ complete になる。REPRESENTATIVE の再利用は partial のまま。
 * Issue #276: 確定した ERROR を含む FULL tree は、他の条件を満たせば scope_health を通り full
   verdict を得る。未完了を含む tree は得ない（Eq / Neq の両 scope）。
+* 中断と確定点（review 1）: 本番 writer を各永続化境界で強制終了させ、その残存状態から同じ
+  identity で再開すれば、手作業で何も消さずに CLOSED になる。書きかけの残骸
+  （``.<name>.uncommitted-*``、開始の記録の前に止まった execution）は証拠ではない。対で、
+  確定した記録の欠損・破損と、記録でも残骸でもないものは拒否する。
+* 時間の帰属（review 1）: receipt は、nonce・path・target から求めた生成元の execution の
+  ものだけを計測とする。census の外・未帰属・別の execution・欠測は、正常な coverage にも
+  0 秒にもしない。
 """
 
 from __future__ import annotations
@@ -363,11 +370,10 @@ def test_the_records_survive_every_execution_and_the_publication_still_rebuilds(
     tree, e1, e2 = two_executions(tmp_path)
     executions = tree.root / chain.EXECUTIONS_DIR
     assert (executions / e1 / chain.START_RECORD).is_file()
-    assert not (executions / e1 / chain.RECEIPT_FILE).exists()
-    for name, top in ((chain.PUBLICATION_FILE, chain.PUBLICATION_FILE),
-                      (chain.RECEIPT_FILE, chain.RECEIPT_FILE),
-                      (chain.END_RECORD, chain.RUN_MANIFEST_FILE)):
-        assert (executions / e2 / name).read_bytes() == (tree.root / top).read_bytes()
+    assert not (executions / e1 / chain.SEAL_DIR).exists()
+    for top, name in chain.SEAL_FILES:
+        assert (executions / e2 / chain.SEAL_DIR / name).read_bytes() == (
+            tree.root / top).read_bytes()
     stored = json.loads((tree.root / chain.PUBLICATION_FILE).read_text())
     assert er.build_matrix_publication_manifest(tree.root) == stored
     assert stored["prior_executions"] == [
@@ -539,7 +545,7 @@ def t_executed_by_an_earlier_execution(tree, e1, e2):
 
 
 def t_latest_unsealed(tree, e1, e2):
-    (tree.root / chain.EXECUTIONS_DIR / e2 / chain.RECEIPT_FILE).unlink()
+    (tree.root / chain.EXECUTIONS_DIR / e2 / chain.SEAL_DIR / chain.RECEIPT_FILE).unlink()
 
 
 def t_stale_publication(tree, e1, e2):
@@ -586,7 +592,8 @@ TAMPERING = {
     "latest-unsealed": (t_latest_unsealed, {chain.R_LATEST_UNSEALED, chain.R_SEALED_INVALID}),
     "stale-publication": (t_stale_publication, {
         chain.R_LATEST_START, chain.R_LATEST_UNSEALED, chain.R_PRIOR, chain.R_BINDING}),
-    "unrecognised-entry": (t_unrecognised_entry, {chain.R_UNRECOGNISED, chain.R_BINDING}),
+    # publication の生成は残骸や未知の entry で例外にしない（判定は検証器）ので、binding は保たれる。
+    "unrecognised-entry": (t_unrecognised_entry, {chain.R_UNRECOGNISED}),
     "v3-publication": (t_v3_publication, {chain.R_NO_CHAIN_FIELDS}),
 }
 
@@ -696,10 +703,14 @@ def _receipt(tree, pair, run_id, seconds, *, nonce):
     prr.write_receipt(metrics, f"{function}_{left}_{right}", payload)
 
 
+def _nonces(tree):
+    return {pair: json.loads((tree.root / tree.relative(pair)).read_text())["execution_nonce"]
+            for pair in tree.pairs}
+
+
 def test_the_chain_view_counts_each_execution_and_never_zero_fills(tmp_path):
     tree, e1, e2 = two_executions(tmp_path)
-    nonces = {pair: json.loads((tree.root / tree.relative(pair)).read_text())["execution_nonce"]
-              for pair in tree.pairs}
+    nonces = _nonces(tree)
     _receipt(tree, tree.pairs[0], e1, 10.0, nonce=nonces[tree.pairs[0]])
     _receipt(tree, tree.pairs[2], e2, 5.0, nonce=nonces[tree.pairs[2]])
     _receipt(tree, tree.pairs[3], e2, 7.0, nonce=nonces[tree.pairs[3]])
@@ -708,9 +719,299 @@ def test_the_chain_view_counts_each_execution_and_never_zero_fills(tmp_path):
     view = prr.load_chain_measurements(tree.root).as_dict()
     assert view["measured_by_execution"] == {e1: 1, e2: 2}
     assert view["pairs_measured"] == 3 and view["pairs_without_measurement"] == 1
-    assert view["receipts_from_unrecorded_execution"] == 1
+    assert view["receipts_from_other_execution"] == 1
     assert view["measured_seconds_total"] == 22.0
     # 最新の run だけの delta の意味は変わらない（最新以外の run の receipt は、記録の有無に
     # かかわらず retained）。
     latest = prr.load_tree_measurements(tree.root)
     assert len(latest.measured) == 2 and len(latest.retained) == 2
+
+
+def test_a_receipt_of_another_recorded_execution_is_not_the_producers_measurement(tmp_path):
+    """反例: E1 が 2 pair、E2 が 2 pair を生成した tree で、全 receipt が E2 名義。"""
+    tree, e1, e2 = two_executions(tmp_path)
+    nonces = _nonces(tree)
+    for pair in tree.pairs:
+        _receipt(tree, pair, e2, 1.0, nonce=nonces[pair])
+    view = prr.load_chain_measurements(tree.root).as_dict()
+    assert view["measured_by_execution"] == {e1: 0, e2: 2}
+    assert view["receipts_from_other_execution"] == 2
+    assert view["pairs_without_measurement"] == 2
+
+
+def test_unattributed_outside_census_and_censusless_receipts_are_never_coverage(tmp_path):
+    tree, e1, e2 = two_executions(tmp_path)
+    nonces = _nonces(tree)
+    for pair, run_id in zip(tree.pairs, (e1, e1, e2, e2)):
+        _receipt(tree, pair, run_id, 1.0, nonce=nonces[pair])
+    # census の外の pair の receipt（status と束縛されていても数えない）
+    stray = ("S0", "f", "B1", "B9")
+    tree.decide(e2, stray)
+    _receipt(tree, stray, e2, 1.0, nonce=_nonces_of(tree, stray))
+    # 生成元を決められない pair（issue 記録が無い）
+    (tree.root / chain.EXECUTIONS_DIR / e1 / chain.ISSUED_DIR / f"{nonces[tree.pairs[0]]}.json").unlink()
+    view = prr.load_chain_measurements(tree.root).as_dict()
+    assert view["receipts_outside_census"] == 1
+    assert view["receipts_unattributed"] == 1
+    assert view["measured_by_execution"] == {e1: 1, e2: 2}
+    assert view["pairs_without_measurement"] == 1
+    # census を読めなければ coverage は不明（完全とも 0 秒とも言わない）。
+    (tree.root / chain.PUBLICATION_FILE).unlink()
+    view = prr.load_chain_measurements(tree.root).as_dict()
+    assert view["pairs_without_measurement"] is None and view["pairs_measured"] == 0
+
+
+def _nonces_of(tree, pair):
+    return json.loads((tree.root / tree.relative(pair)).read_text())["execution_nonce"]
+
+
+# ---------------------------------------------------------------------------
+# 7. 本番 writer の各永続化境界での強制終了と、その残存状態からの再開
+#    writer（CLI の start / issue / seal と、publication / receipt の書き込み）を子 process で
+#    動かし、durable にする system call（open / link / rename / replace / unlink / fsync /
+#    mkdir / close）の前後の境界のうち k 番目で SIGKILL する。k を 1 から、writer が最後まで終わるまで
+#    増やすので、どの境界で止まった状態も作られる。その状態から同じ identity で再開して完走
+#    すれば、手作業で何も消さずに CLOSED になる。対で、確定した記録の欠損・破損は拒否する。
+# ---------------------------------------------------------------------------
+
+import os
+import signal
+import subprocess
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
+_CRASHING = r"""
+import builtins, os, signal, sys
+limit = int(sys.argv[1]); count = [0]
+class Guard:
+    # a callable object, not a function: pathlib stores os.mkdir & co. as class
+    # attributes, and a function there would be bound as a method
+    def __init__(self, real):
+        self.real = real
+    def __call__(self, *args, **kwargs):
+        # stop just before the call and just after it (an open() that truncates
+        # is itself a boundary)
+        self.boundary()
+        result = self.real(*args, **kwargs)
+        self.boundary()
+        return result
+    @staticmethod
+    def boundary():
+        count[0] += 1
+        if count[0] == limit:
+            os.kill(os.getpid(), signal.SIGKILL)
+for name in ("open", "link", "rename", "replace", "unlink", "fsync", "mkdir", "close"):
+    setattr(os, name, Guard(getattr(os, name)))
+builtins.open = Guard(builtins.open)
+import io
+io.open = builtins.open  # pathlib's read/write_text goes through io.open
+mode = sys.argv[2]
+if mode == "cli":
+    from scripts.function_tracer_pcode.reporting import execution_chain
+    sys.exit(execution_chain.main(sys.argv[3:]))
+from scripts.function_tracer_pcode.reporting import execution_receipt
+import json
+path, payload = sys.argv[3], json.loads(open(sys.argv[4], encoding="utf-8").read())
+execution_receipt._write(__import__("pathlib").Path(path), payload)
+"""
+
+
+def _crashing(argv, limit):
+    """Run a writer, killed before its ``limit``-th durable system call. Returns rc."""
+    return subprocess.run(
+        [sys.executable, "-B", "-c", _CRASHING, str(limit), *argv], cwd=REPO_ROOT,
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT)}, capture_output=True, text=True,
+        timeout=60,
+    ).returncode
+
+
+def _every_crash(build, run_writer, finish):
+    """For k = 1.. until the writer completes: fresh state, crash at k, finish the evaluation."""
+    stops = 0
+    for limit in range(1, 200):
+        state = build(limit)
+        rc = run_writer(state, limit)
+        verdict = finish(state, rc)
+        assert verdict["verdict"] == chain.VERDICT_CLOSED, (limit, rc, verdict["reasons"])
+        if rc == 0:
+            assert stops > 0, "the writer was never stopped"
+            return stops
+        assert rc == -signal.SIGKILL, (limit, rc)
+        stops += 1
+    raise AssertionError("the writer never completed")
+
+
+def _start_cli(tree, run_id, limit):
+    text = "".join(f"{k}={v}\n" for k, v in tree.start_fields(run_id).items())
+    manifest = tree.root / chain.RUN_MANIFEST_FILE
+    manifest.write_text(text, encoding="utf-8")
+    return _crashing(["cli", "start", "--root", str(tree.root), "--run-id", run_id,
+                      "--manifest", str(manifest)], limit)
+
+
+def _complete_with(tree, run_id, *, reuse):
+    """A later execution of the same identity finishes the evaluation normally."""
+    tree.start(run_id)
+    for pair in tree.pairs:
+        if pair not in reuse:
+            tree.decide(run_id, pair)
+    tree.finish(run_id, reused=reuse)
+    return _verify(tree)
+
+
+def test_a_start_record_stopped_at_any_boundary_never_blocks_the_resume(tmp_path):
+    def build(limit):
+        return ChainTree(tmp_path / f"t{limit}")
+
+    def run(tree, limit):
+        return _start_cli(tree, _run_id(1), limit)
+
+    def finish(tree, rc):
+        # E1 は開始の記録の途中で止まった（rc 0 なら記録は確定している）。E2 が全 pair を実行する。
+        return _complete_with(tree, _run_id(2), reuse=[])
+
+    assert _every_crash(build, run, finish) >= 4
+
+
+def test_an_issue_record_stopped_at_any_boundary_never_blocks_the_resume(tmp_path):
+    def build(limit):
+        tree = ChainTree(tmp_path / f"t{limit}")
+        tree.start(_run_id(1))
+        tree.decide(_run_id(1), tree.pairs[0])
+        return tree
+
+    def run(tree, limit):
+        nonce = tree.next_nonce()
+        target = tmp_path / f"target-{limit}.json"
+        target.write_text(json.dumps(tree.target(tree.pairs[1])))
+        return _crashing(["cli", "issue", "--root", str(tree.root), "--run-id", _run_id(1),
+                          "--execution-nonce", nonce,
+                          "--pair-status", str(tree.root / tree.relative(tree.pairs[1])),
+                          "--target-file", str(target)], limit)
+
+    def finish(tree, rc):
+        # runner は issue の途中で止まった: pair 1 の解析は始まっていない。
+        return _complete_with(tree, _run_id(2), reuse=[tree.pairs[0]])
+
+    assert _every_crash(build, run, finish) >= 4
+
+
+def test_a_seal_stopped_at_any_boundary_never_blocks_the_resume(tmp_path):
+    def build(limit):
+        tree = ChainTree(tmp_path / f"t{limit}")
+        tree.start(_run_id(1))
+        for pair in tree.pairs:
+            tree.decide(_run_id(1), pair)
+        tree.finish(_run_id(1), reused=[], seal=False)
+        return tree
+
+    def run(tree, limit):
+        return _crashing(["cli", "seal", "--root", str(tree.root), "--run-id", _run_id(1)], limit)
+
+    def finish(tree, rc):
+        # E1 は封印の途中で止まった。E2 は全 pair を再利用して封印する。
+        return _complete_with(tree, _run_id(2), reuse=list(tree.pairs))
+
+    assert _every_crash(build, run, finish) >= 6
+
+
+def test_a_publication_write_stopped_at_any_boundary_leaves_no_torn_file(tmp_path):
+    def build(limit):
+        tree = ChainTree(tmp_path / f"t{limit}")
+        tree.start(_run_id(1))
+        for pair in tree.pairs:
+            tree.decide(_run_id(1), pair)
+        tree.finish(_run_id(1), reused=[], seal=False)
+        return tree
+
+    def run(tree, limit):
+        publication = tree.root / chain.PUBLICATION_FILE
+        before = publication.read_bytes()
+        payload = tmp_path / f"payload-{limit}.json"
+        payload.write_text(json.dumps({**json.loads(before), "note": "rewritten"}))
+        rc = _crashing(["write", str(publication), str(payload)], limit)
+        # 前の版か新しい版のどちらか。途中まで書いた file は残らない。
+        assert json.loads(publication.read_text()) in (
+            json.loads(before), json.loads(payload.read_text()))
+        return rc
+
+    def finish(tree, rc):
+        return _complete_with(tree, _run_id(2), reuse=list(tree.pairs))
+
+    assert _every_crash(build, run, finish) >= 3
+
+
+# 対: 確定した記録の欠損・破損と、debris に見えないものは受理しない。
+def r_start_truncated(tree, e1, e2):
+    (tree.root / chain.EXECUTIONS_DIR / e1 / chain.START_RECORD).write_text("runtime_run_id=")
+
+
+def r_issue_corrupted(tree, e1, e2):
+    nonce = _nonces_of(tree, tree.pairs[0])
+    (tree.root / chain.EXECUTIONS_DIR / e1 / chain.ISSUED_DIR / f"{nonce}.json").write_text("{")
+
+
+def r_seal_file_missing(tree, e1, e2):
+    (tree.root / chain.EXECUTIONS_DIR / e2 / chain.SEAL_DIR / chain.END_RECORD).unlink()
+
+
+def r_seal_file_extra(tree, e1, e2):
+    (tree.root / chain.EXECUTIONS_DIR / e2 / chain.SEAL_DIR / "extra.json").write_text("{}")
+
+
+def r_unknown_entry(tree, e1, e2):
+    (tree.root / chain.EXECUTIONS_DIR / e1 / "notes.txt").write_text("x")
+
+
+def r_debris_of_an_unknown_record(tree, e1, e2):
+    (tree.root / chain.EXECUTIONS_DIR / e1 / f".notes.txt{chain.UNCOMMITTED_MARK}abc").write_text("x")
+
+
+def r_records_without_start(tree, e1, e2):
+    # 開始の記録の無い execution が、pair 0 の nonce を発行したと主張する。
+    orphan = tree.root / chain.EXECUTIONS_DIR / _run_id(5) / chain.ISSUED_DIR
+    orphan.mkdir(parents=True)
+    nonce = _nonces_of(tree, tree.pairs[0])
+    (orphan / f"{nonce}.json").write_text(json.dumps({
+        "schema": chain.ISSUE_SCHEMA, "runtime_run_id": _run_id(5), "execution_nonce": nonce,
+        "pair_status_path": tree.relative(tree.pairs[0]), "target_digest": "0" * 64}))
+
+
+def d_debris_everywhere(tree, e1, e2):
+    """受理する側の対照: 書きかけの残骸だけなら判定は変わらない。"""
+    executions = tree.root / chain.EXECUTIONS_DIR
+    (executions / e1 / f".{chain.START_RECORD}{chain.UNCOMMITTED_MARK}x1").write_text("partial")
+    (executions / e1 / chain.ISSUED_DIR / f".{'a' * 48}.json{chain.UNCOMMITTED_MARK}x2").write_text("")
+    staging = executions / e1 / f".{chain.SEAL_DIR}{chain.UNCOMMITTED_MARK}x3"
+    staging.mkdir()
+    (staging / chain.END_RECORD).write_text("partial")
+    (executions / _run_id(6)).mkdir()
+    (executions / _run_id(6) / f".{chain.START_RECORD}{chain.UNCOMMITTED_MARK}x4").write_text("")
+
+
+DAMAGE = {
+    "start-truncated": (r_start_truncated, {
+        chain.R_DAMAGED, chain.R_START_MISSING, chain.R_PRODUCER_NO_START, chain.R_PRIOR,
+        chain.R_BINDING}),
+    "issue-corrupted": (r_issue_corrupted, {chain.R_DAMAGED, chain.R_UNATTRIBUTED, chain.R_BINDING}),
+    "seal-file-missing": (r_seal_file_missing, {chain.R_SEALED_INVALID, chain.R_LATEST_UNSEALED}),
+    "seal-file-extra": (r_seal_file_extra, {chain.R_SEALED_INVALID, chain.R_LATEST_UNSEALED}),
+    "unknown-entry": (r_unknown_entry, {chain.R_DAMAGED}),
+    "debris-of-an-unknown-record": (r_debris_of_an_unknown_record, {chain.R_DAMAGED}),
+    "records-without-start": (r_records_without_start, {
+        chain.R_START_MISSING, chain.R_DUPLICATE_ISSUE}),
+    "debris-only": (d_debris_everywhere, set()),
+}
+
+
+@pytest.mark.parametrize("case", sorted(DAMAGE))
+def test_committed_evidence_damage_is_rejected_while_debris_is_not_evidence(tmp_path, case):
+    tree, e1, e2 = two_executions(tmp_path)
+    mutate, expected = DAMAGE[case]
+    mutate(tree, e1, e2)
+    report = _verify(tree)
+    assert set(report["reasons"]) == expected, report["reasons"]
+    assert report["verdict"] == (chain.VERDICT_CLOSED if not expected else chain.VERDICT_OPEN)
+    # publication の生成は、残骸や破損で例外にならない（判定は検証器が行う）。
+    er.build_matrix_publication_manifest(tree.root)

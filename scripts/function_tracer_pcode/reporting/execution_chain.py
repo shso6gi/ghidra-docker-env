@@ -23,9 +23,26 @@ Records, under ``<tree>/.executions/<runtime_run_id>/``:
     that issued its nonce -- also when that execution was killed before it
     could publish anything.  A pair whose issue record cannot be written is not
     analysed.
-``run_manifest.end.txt``, the publication and the execution receipt
-    Copies made when the execution sealed (finished normally).  An execution
-    without them was killed or failed before its end.
+``seal/`` (``run_manifest.end.txt``, the publication, the execution receipt)
+    Copies made when the execution sealed (finished normally), committed
+    together by one directory rename.  An execution without ``seal/`` was
+    killed or failed before its end.
+
+**Commit points.**  Every record is written under a temporary name of the form
+``.<final name>.uncommitted-<random>`` in its final directory, made durable,
+and only then given its final name (a hard link for a file, a rename for the
+``seal/`` directory) -- the single commit point.  So a writer stopped at any
+moment leaves either the committed record or *uncommitted debris*, never a
+half-written record under a final name.  Debris is never evidence and the
+verifier ignores it: no committed record ever exists under a debris name, so
+ignoring debris cannot hide one.  An execution directory that holds nothing
+but debris is an execution stopped before its start record was committed --
+it started no pair (an issue record needs the start record) -- and is ignored
+too.  Everything else is judged: a committed record that is missing where the
+other records require it, unreadable, malformed or inconsistent opens the
+chain, and so does any entry that is neither a record nor debris.  Resuming
+the same identity therefore reaches ``CLOSED_SAME_IDENTITY`` after any stop
+without deleting anything by hand, while a damaged record is never accepted.
 
 ``verify_execution_chain`` returns ``CLOSED_SAME_IDENTITY`` only when every
 check in ``CHAIN_CHECKS`` passes; anything absent, unreadable, inconsistent or
@@ -36,6 +53,7 @@ an outcome, a pair status or a runner exit code.
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass, field
 import hashlib
 import json
 import os
@@ -51,6 +69,8 @@ EXECUTIONS_DIR = ".executions"
 START_RECORD = "run_manifest.start.txt"
 END_RECORD = "run_manifest.end.txt"
 ISSUED_DIR = "issued"
+SEAL_DIR = "seal"
+UNCOMMITTED_MARK = ".uncommitted-"
 ISSUE_SCHEMA = "eqbench-pair-execution-issue-v1"
 RUN_MANIFEST_FILE = "run_manifest.txt"
 PUBLICATION_FILE = "matrix-publication-manifest.json"
@@ -93,6 +113,7 @@ R_EXECUTED_PRODUCER = "executed_pair_not_produced_by_latest_execution"
 R_REUSED_PRODUCER = "reused_pair_produced_by_latest_execution"
 R_REUSED_EVIDENCE = "reused_pair_evidence_differs"
 R_OBSERVATION = "execution_records_unreadable"
+R_DAMAGED = "execution_record_damaged"
 
 
 # ---------------------------------------------------------------------------
@@ -106,24 +127,45 @@ def _execution_dir(root: Path, run_id: str) -> Path:
     return Path(root) / EXECUTIONS_DIR / run_id
 
 
+def _fsync_directory(path: Path) -> None:
+    directory = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _write_durable(path: Path, data: bytes) -> None:
+    with open(path, "xb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 def _write_exclusive(path: Path, data: bytes) -> None:
-    """Create ``path`` with ``data`` atomically; an existing file is an error."""
+    """Commit ``path`` with ``data``; an existing record is an error.
+
+    The data is made durable under an uncommitted temporary name first; the
+    hard link to the final name is the commit point (``link`` fails if the name
+    exists, so a record is never replaced).  The temporary name is removed
+    afterwards; a stop in between leaves only debris (see the module docstring).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    handle, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}{UNCOMMITTED_MARK}", dir=path.parent,
+    )
     try:
         with os.fdopen(handle, "wb") as stream:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        # link() fails if the name exists: a record is never replaced.
         os.link(temporary, path)
     finally:
-        os.unlink(temporary)
-    directory = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+    _fsync_directory(path.parent)
 
 
 def record_start(root: Path, run_id: str, manifest: Path) -> Path:
@@ -162,17 +204,30 @@ def record_issue(
     return path
 
 
+SEAL_FILES = ((RUN_MANIFEST_FILE, END_RECORD), (PUBLICATION_FILE, PUBLICATION_FILE),
+              (RECEIPT_FILE, RECEIPT_FILE))
+
+
 def record_seal(root: Path, run_id: str) -> None:
-    """Copy the latest execution's end artifacts into its record dir (I3)."""
+    """Commit the latest execution's end artifacts as its ``seal/`` (I3).
+
+    The three copies are written into an uncommitted staging directory and
+    committed together by renaming it to ``seal`` -- there is no partially
+    sealed state.
+    """
     root = Path(root)
     execution = _execution_dir(root, run_id)
     if not (execution / START_RECORD).is_file():
         raise ValueError("the execution has no start record")
-    for source, name in (
-        (RUN_MANIFEST_FILE, END_RECORD), (PUBLICATION_FILE, PUBLICATION_FILE),
-        (RECEIPT_FILE, RECEIPT_FILE),
-    ):
-        _write_exclusive(execution / name, (root / source).read_bytes())
+    final = execution / SEAL_DIR
+    if final.exists():
+        raise FileExistsError(f"the execution is already sealed: {final}")
+    staging = Path(tempfile.mkdtemp(prefix=f".{SEAL_DIR}{UNCOMMITTED_MARK}", dir=execution))
+    for source, name in SEAL_FILES:
+        _write_durable(staging / name, (root / source).read_bytes())
+    _fsync_directory(staging)
+    os.rename(staging, final)
+    _fsync_directory(execution)
 
 
 def _relative_status_path(root: Path, path: Path) -> str:
@@ -265,18 +320,132 @@ def _parse_key_values(text: str) -> Dict[str, str]:
     return values
 
 
-def execution_ids(root: Path) -> Tuple[List[str], List[str]]:
-    """``(execution ids, unrecognised entries)`` under ``.executions``."""
+_DEBRIS = re.compile(r"\.(?P<name>.+)" + re.escape(UNCOMMITTED_MARK) + r"[A-Za-z0-9_]+")
+
+
+def _debris_of(name: str) -> Optional[str]:
+    """The final name an uncommitted temporary name was for, or ``None``."""
+    match = _DEBRIS.fullmatch(name)
+    return match.group("name") if match else None
+
+
+@dataclass
+class ExecutionRecords:
+    """What one ``.executions/<run_id>/`` directory holds, classified."""
+
+    run_id: str
+    start_text: Optional[str] = None
+    issued: List[Mapping[str, Any]] = field(default_factory=list)
+    sealed: bool = False
+    #: Committed records that are damaged or entries that are neither a record
+    #: nor debris -- each opens the chain.
+    problems: List[str] = field(default_factory=list)
+    debris: List[str] = field(default_factory=list)
+
+    @property
+    def started(self) -> bool:
+        return self.start_text is not None
+
+    @property
+    def holds_records(self) -> bool:
+        return bool(self.issued or self.sealed or self.problems)
+
+
+@dataclass
+class ChainRecords:
+    executions: Dict[str, ExecutionRecords] = field(default_factory=dict)
+    #: Directories stopped before their start record was committed (debris only).
+    never_started: List[str] = field(default_factory=list)
+    unrecognised: List[str] = field(default_factory=list)
+
+    def started(self) -> Dict[str, ExecutionRecords]:
+        return {run_id: e for run_id, e in self.executions.items() if e.started}
+
+
+def _read_execution(directory: Path, run_id: str) -> ExecutionRecords:
+    records = ExecutionRecords(run_id)
+    for entry in sorted(directory.iterdir()):
+        name = entry.name
+        debris = _debris_of(name)
+        if debris in (START_RECORD, SEAL_DIR):
+            records.debris.append(name)
+        elif name == START_RECORD and entry.is_file() and not entry.is_symlink():
+            try:
+                text = entry.read_text(encoding="utf-8")
+                if _parse_key_values(text).get(RUN_ID_KEY) != run_id:
+                    raise ValueError("it names another runtime_run_id")
+                records.start_text = text
+            except (OSError, UnicodeError, ValueError) as exc:
+                records.problems.append(f"{START_RECORD}: {exc}")
+        elif name == ISSUED_DIR and entry.is_dir() and not entry.is_symlink():
+            _read_issued(entry, run_id, records)
+        elif name == SEAL_DIR and entry.is_dir() and not entry.is_symlink():
+            present = sorted(path.name for path in entry.iterdir())
+            if present != sorted(final for _source, final in SEAL_FILES):
+                records.problems.append(f"{SEAL_DIR}/ holds {present}")
+            else:
+                records.sealed = True
+        else:
+            records.problems.append(f"unrecognised entry {name}")
+    return records
+
+
+def _read_issued(directory: Path, run_id: str, records: ExecutionRecords) -> None:
+    for path in sorted(directory.iterdir()):
+        debris = _debris_of(path.name)
+        if debris is not None and re.fullmatch(r"[0-9a-f]{16,128}\.json", debris):
+            records.debris.append(f"{ISSUED_DIR}/{path.name}")
+            continue
+        try:
+            if not path.is_file() or path.is_symlink():
+                raise ValueError("not a regular file")
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(record, Mapping)
+                or set(record) != {
+                    "schema", RUN_ID_KEY, "execution_nonce", "pair_status_path",
+                    "target_digest",
+                }
+                or record.get("schema") != ISSUE_SCHEMA
+                or record.get(RUN_ID_KEY) != run_id
+                or f"{record.get('execution_nonce')}.json" != path.name
+            ):
+                raise ValueError("issue record does not describe itself")
+        except (OSError, UnicodeError, ValueError) as exc:
+            records.problems.append(f"{ISSUED_DIR}/{path.name}: {exc}")
+            continue
+        records.issued.append(record)
+
+
+def read_chain_records(root: Path) -> ChainRecords:
+    """Every execution directory of ``root``, classified (see the module docstring).
+
+    Raises ``OSError`` only when ``.executions`` itself cannot be listed.
+    """
+    chain = ChainRecords()
     directory = Path(root) / EXECUTIONS_DIR
     if not directory.exists():
-        return [], []
-    ids, unrecognised = [], []
+        return chain
     for entry in sorted(directory.iterdir()):
-        if entry.is_dir() and not entry.is_symlink() and re.fullmatch(r"[0-9a-f]{32}", entry.name):
-            ids.append(entry.name)
-        else:
-            unrecognised.append(entry.name)
-    return ids, unrecognised
+        if not (entry.is_dir() and not entry.is_symlink()
+                and re.fullmatch(r"[0-9a-f]{32}", entry.name)):
+            chain.unrecognised.append(entry.name)
+            continue
+        try:
+            records = _read_execution(entry, entry.name)
+        except OSError as exc:
+            records = ExecutionRecords(entry.name, problems=[f"unreadable: {exc}"])
+        if not records.started and not records.holds_records:
+            chain.never_started.append(entry.name)
+            continue
+        chain.executions[entry.name] = records
+    return chain
+
+
+def execution_ids(root: Path) -> Tuple[List[str], List[str]]:
+    """``(started execution ids, unrecognised entries)`` under ``.executions``."""
+    chain = read_chain_records(root)
+    return sorted(chain.started()), list(chain.unrecognised)
 
 
 def start_record_sha256(root: Path, run_id: str) -> str:
@@ -284,42 +453,32 @@ def start_record_sha256(root: Path, run_id: str) -> str:
 
 
 def prior_executions(root: Path, latest_run_id: str) -> List[Mapping[str, str]]:
-    """The publication v4 ``prior_executions`` field: every other recorded start."""
-    ids, unrecognised = execution_ids(root)
-    if unrecognised:
-        raise ValueError(f"unrecognised entries under {EXECUTIONS_DIR}: {unrecognised}")
+    """The publication v4 ``prior_executions`` field: every other committed start.
+
+    Never raises on debris or damaged records: the publication records what is
+    committed, and the verifier judges the rest (a run must be able to finish
+    and publish whatever state an earlier execution left).
+    """
     rows = []
-    for run_id in ids:
+    for run_id, records in sorted(read_chain_records(root).started().items()):
         if run_id == latest_run_id:
             continue
-        rows.append({RUN_ID_KEY: run_id, "start_record_sha256": start_record_sha256(root, run_id)})
+        rows.append({
+            RUN_ID_KEY: run_id,
+            "start_record_sha256": hashlib.sha256(
+                records.start_text.encode("utf-8")).hexdigest(),
+        })
     return rows
 
 
 def issued_records(root: Path) -> Tuple[Dict[str, List[Mapping[str, Any]]], List[str]]:
-    """``(nonce -> issue records, problems)`` over every execution."""
+    """``(nonce -> committed issue records of started executions, problems)``."""
     by_nonce: Dict[str, List[Mapping[str, Any]]] = {}
     problems: List[str] = []
-    ids, _unrecognised = execution_ids(root)
-    for run_id in ids:
-        directory = _execution_dir(root, run_id) / ISSUED_DIR
-        if not directory.exists():
-            continue
-        for path in sorted(directory.iterdir()):
-            try:
-                if path.name.startswith("."):
-                    raise ValueError("temporary file left behind")
-                record = json.loads(path.read_text(encoding="utf-8"))
-                if (
-                    not isinstance(record, Mapping)
-                    or record.get("schema") != ISSUE_SCHEMA
-                    or record.get(RUN_ID_KEY) != run_id
-                    or f"{record.get('execution_nonce')}.json" != path.name
-                ):
-                    raise ValueError("issue record does not describe itself")
-            except (OSError, UnicodeError, ValueError) as exc:
-                problems.append(f"{run_id}/{ISSUED_DIR}/{path.name}: {exc}")
-                continue
+    chain = read_chain_records(root)
+    for run_id, records in chain.executions.items():
+        problems.extend(f"{run_id}/{problem}" for problem in records.problems)
+        for record in records.issued:
             by_nonce.setdefault(str(record["execution_nonce"]), []).append(record)
     return by_nonce, problems
 
@@ -514,49 +673,50 @@ def verify_execution_chain(root: Path) -> Dict[str, Any]:
     except (OSError, UnicodeError, ValueError, KeyError) as exc:
         fail(R_BINDING, f"publication cannot be rebuilt: {type(exc).__name__}: {exc}")
 
-    # Executions on disk.
+    # Executions on disk: committed records are judged, uncommitted debris and
+    # executions stopped before their start record are not evidence.
     try:
-        ids, unrecognised = execution_ids(root)
+        chain = read_chain_records(root)
     except OSError as exc:
         fail(R_OBSERVATION, str(exc))
         return done()
-    for name in unrecognised:
+    for name in chain.unrecognised:
         fail(R_UNRECOGNISED, name)
+    report["never_started_executions"] = list(chain.never_started)
+    report["uncommitted_debris"] = sum(len(e.debris) for e in chain.executions.values())
     starts: Dict[str, Dict[str, str]] = {}
+    start_texts: Dict[str, str] = {}
     sealed: Dict[str, bool] = {}
-    for run_id in ids:
-        directory = _execution_dir(root, run_id)
-        try:
-            text = (directory / START_RECORD).read_text(encoding="utf-8")
-            values = _parse_key_values(text)
-            if values.get(RUN_ID_KEY) != run_id:
-                raise ValueError("start record names another runtime_run_id")
-        except (OSError, UnicodeError, ValueError) as exc:
-            fail(R_START_MISSING, f"{run_id}: {exc}")
+    for run_id, records in chain.executions.items():
+        for problem in records.problems:
+            fail(R_SEALED_INVALID if problem.startswith(SEAL_DIR) else R_DAMAGED,
+                 f"{run_id}/{problem}")
+        if not records.started:
+            # Issue records or a seal without the start record that must precede them.
+            fail(R_START_MISSING, f"{run_id}: records without a committed start record")
             continue
-        starts[run_id] = values
-        seal_files = [directory / name for name in (END_RECORD, PUBLICATION_FILE, RECEIPT_FILE)]
-        present = [path.is_file() for path in seal_files]
-        sealed[run_id] = all(present)
-        if any(present) and not all(present):
-            fail(R_SEALED_INVALID, f"{run_id}: partial seal")
-        elif all(present):
-            try:
-                copy_payload = json.loads(seal_files[1].read_text(encoding="utf-8"))
-                copy = validate_matrix_publication_manifest(copy_payload)
-                copy_receipt = validate_execution_receipt(
-                    json.loads(seal_files[2].read_text(encoding="utf-8")),
-                    public_key_path=key_path,
-                )
-                why = matrix_execution_binding_mismatch(seal_files[1], copy, copy_receipt)
-                if why is not None:
-                    raise ValueError(why)
-                if copy.get(RUN_ID_KEY) != run_id:
-                    raise ValueError("sealed publication names another execution")
-                if not seal_files[0].read_text(encoding="utf-8").startswith(text):
-                    raise ValueError("end manifest does not continue the start record")
-            except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
-                fail(R_SEALED_INVALID, f"{run_id}: {exc}")
+        start_texts[run_id] = records.start_text
+        starts[run_id] = _parse_key_values(records.start_text)
+        sealed[run_id] = records.sealed
+        if not records.sealed:
+            continue
+        seal = _execution_dir(root, run_id) / SEAL_DIR
+        try:
+            copy_payload = json.loads((seal / PUBLICATION_FILE).read_text(encoding="utf-8"))
+            copy = validate_matrix_publication_manifest(copy_payload)
+            copy_receipt = validate_execution_receipt(
+                json.loads((seal / RECEIPT_FILE).read_text(encoding="utf-8")),
+                public_key_path=key_path,
+            )
+            why = matrix_execution_binding_mismatch(seal / PUBLICATION_FILE, copy, copy_receipt)
+            if why is not None:
+                raise ValueError(why)
+            if copy.get(RUN_ID_KEY) != run_id:
+                raise ValueError("sealed publication names another execution")
+            if not (seal / END_RECORD).read_text(encoding="utf-8").startswith(records.start_text):
+                raise ValueError("end manifest does not continue the start record")
+        except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
+            fail(R_SEALED_INVALID, f"{run_id}: {exc}")
 
     # The latest execution.
     if latest not in starts:
@@ -564,21 +724,22 @@ def verify_execution_chain(root: Path) -> Dict[str, Any]:
     else:
         try:
             top = (root / RUN_MANIFEST_FILE).read_text(encoding="utf-8")
-            start_text = (_execution_dir(root, latest) / START_RECORD).read_text(encoding="utf-8")
-            if not top.startswith(start_text):
+            if not top.startswith(start_texts[latest]):
                 fail(R_LATEST_START, "run_manifest.txt does not continue the start record")
         except (OSError, UnicodeError) as exc:
             fail(R_LATEST_START, str(exc))
         if not sealed.get(latest):
             fail(R_LATEST_UNSEALED, latest)
         else:
-            directory = _execution_dir(root, latest)
-            for source, name in (
-                (PUBLICATION_FILE, PUBLICATION_FILE), (RECEIPT_FILE, RECEIPT_FILE),
-                (RUN_MANIFEST_FILE, END_RECORD),
-            ):
-                if (root / source).read_bytes() != (directory / name).read_bytes():
-                    fail(R_LATEST_UNSEALED, f"{name} differs from the top-level {source}")
+            seal = _execution_dir(root, latest) / SEAL_DIR
+            for source, name in SEAL_FILES:
+                try:
+                    same = (root / source).read_bytes() == (seal / name).read_bytes()
+                except OSError as exc:
+                    fail(R_LATEST_UNSEALED, f"{name}: {exc}")
+                    continue
+                if not same:
+                    fail(R_LATEST_UNSEALED, f"{SEAL_DIR}/{name} differs from the top-level {source}")
         reference = _start_conditions(starts[latest])
         for run_id, values in starts.items():
             conditions = _start_conditions(values)
@@ -596,18 +757,14 @@ def verify_execution_chain(root: Path) -> Dict[str, Any]:
     recorded_prior = sorted(
         (row[RUN_ID_KEY], row["start_record_sha256"]) for row in publication["prior_executions"]
     )
-    try:
-        on_disk = sorted(
-            (run_id, start_record_sha256(root, run_id)) for run_id in starts if run_id != latest
-        )
-    except OSError as exc:
-        fail(R_OBSERVATION, str(exc))
-        on_disk = []
-    if recorded_prior != on_disk or len(starts) != len(ids):
+    on_disk = sorted(
+        (run_id, hashlib.sha256(text.encode("utf-8")).hexdigest())
+        for run_id, text in start_texts.items() if run_id != latest
+    )
+    if recorded_prior != on_disk:
         fail(R_PRIOR, (
             f"publication lists {len(recorded_prior)} prior start record(s), the tree holds "
-            f"{len(on_disk)} readable of {len(ids) - (1 if latest in ids else 0)}; "
-            f"{len(set(recorded_prior) ^ set(on_disk))} differ by id or digest"
+            f"{len(on_disk)}; {len(set(recorded_prior) ^ set(on_disk))} differ by id or digest"
         ))
 
     # The pair census.
@@ -620,9 +777,8 @@ def verify_execution_chain(root: Path) -> Dict[str, Any]:
     evidence = {row["pair_status_path"]: row for row in publication["reused_pair_evidence"]}
     if set(evidence) != set(reused):
         fail(R_REUSED_EVIDENCE, "reused_pair_evidence does not cover exactly the reused pairs")
-    by_nonce, issue_problems = issued_records(root)
-    for problem in issue_problems:
-        fail(R_OBSERVATION, problem)
+    # Damaged issue records were reported with their execution above.
+    by_nonce, _problems = issued_records(root)
     binary_shas = build_receipt_binary_shas(publication["build_receipts"])
     executed_by: Dict[str, int] = {run_id: 0 for run_id in starts}
     reused_set = set(reused)

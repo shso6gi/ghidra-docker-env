@@ -954,8 +954,43 @@ compatible_legacy_analysis_identity = compatible_published_analysis_identity
 
 
 def _write(path: Path, payload: Mapping[str, Any]) -> None:
+    """Replace ``path`` atomically (eval plan v2 PR-B).
+
+    The publication and the receipt are rewritten by every execution of a
+    tree; a writer stopped half-way must leave the previous file or the new
+    one, never a torn file, so the next execution and the verifiers see a
+    whole artifact.  The temporary name is the execution chain's uncommitted
+    form, so a stop before the rename leaves recognisable debris.
+    """
+    import os
+    import tempfile
+
+    from scripts.function_tracer_pcode.reporting.execution_chain import UNCOMMITTED_MARK
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    handle, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}{UNCOMMITTED_MARK}", dir=path.parent,
+    )
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, 0o666 & ~_current_umask())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _current_umask() -> int:
+    import os
+
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
 
 
 def main(argv: list[str] | None = None) -> int:

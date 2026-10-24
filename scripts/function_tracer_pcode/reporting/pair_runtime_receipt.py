@@ -44,10 +44,12 @@ zero-delta measurement.
 
 **Chain view** (``load_chain_measurements``, eval plan v2 PR-B).  A tree
 finished over several executions holds, for each decided pair, the receipt of
-the execution that produced it.  The chain view takes every receipt bound to
-its pair status and made by an execution the tree records (its
-``.executions`` start record), and reports per execution how many pairs it
-measured and how many expected pairs have no such receipt.  A missing
+the execution that produced it.  The chain view accepts a receipt only for a
+pair in the tree's census, bound to its pair status, and made by the status's
+producing execution as the execution chain attributes it (nonce, path and
+target digest).  It reports per execution how many pairs it measured, and
+counts apart receipts outside the census, unattributed ones, ones from another
+execution, and expected pairs with no accepted measurement.  A missing
 measurement is counted, never read as 0 seconds.  The executions may have run
 under different load (another parallel job count is impossible -- it is in the
 identity -- but the host was not otherwise controlled), so the chain's times
@@ -353,10 +355,17 @@ class ChainMeasurements:
     executions: Tuple[str, ...]
     measured: Dict[PairKey, float] = field(default_factory=dict)
     measured_by_execution: Dict[str, int] = field(default_factory=dict)
-    #: Receipts bound to their status but made by an execution the tree does not record.
-    unrecorded_execution: int = 0
+    #: Bound to its status, but the status's producing execution is unknown
+    #: (no unique committed issue record of a started execution).
+    unattributed: int = 0
+    #: Bound to its status, but made by an execution other than the one that
+    #: produced the status -- recorded or not.
+    other_execution: int = 0
+    #: Receipts of pairs the tree's publication does not expect.
+    outside_census: int = 0
     unusable: int = 0
-    #: Expected pairs (by the tree's publication) with no accepted receipt.
+    #: Expected pairs with no accepted measurement; ``None`` when the tree has
+    #: no readable census, so coverage is unknown rather than complete.
     pairs_without_measurement: Optional[int] = None
 
     def as_dict(self) -> Dict[str, Any]:
@@ -365,28 +374,44 @@ class ChainMeasurements:
             "pairs_measured": len(self.measured),
             "measured_by_execution": dict(sorted(self.measured_by_execution.items())),
             "measured_seconds_total": round(sum(self.measured.values()), 3),
-            "receipts_from_unrecorded_execution": self.unrecorded_execution,
+            "receipts_unattributed": self.unattributed,
+            "receipts_from_other_execution": self.other_execution,
+            "receipts_outside_census": self.outside_census,
             "receipts_unusable": self.unusable,
             "pairs_without_measurement": self.pairs_without_measurement,
         }
 
 
 def load_chain_measurements(root: Path) -> ChainMeasurements:
-    """Every pair's measurement by the execution that produced it, with coverage."""
+    """Every expected pair's measurement by the execution that produced it.
+
+    A receipt is a measurement only when it is bound to its pair status (same
+    pair, the status's ``execution_nonce``, a complete measurement) *and* its
+    ``run_id`` is the status's producing execution -- the one the execution
+    chain derives from the nonce, the path and the target digest
+    (``execution_chain.producing_run_id``, the verifier's own attribution).
+    A receipt of a pair outside the publication's census, one whose status
+    cannot be attributed, and one made by any other execution are each counted
+    and never measured; a missing measurement is counted, never read as 0.
+    """
     from scripts.function_tracer_pcode.reporting import execution_chain
     from scripts.function_tracer_pcode.reporting.pair_outcomes import (
         identity_from_status_path,
     )
 
     root = Path(root)
-    executions, _unrecognised = execution_chain.execution_ids(root)
-    recorded = {
-        run_id for run_id in executions
-        if (root / execution_chain.EXECUTIONS_DIR / run_id / execution_chain.START_RECORD).is_file()
-    }
+    chain = execution_chain.read_chain_records(root)
+    started = chain.started()
+    by_nonce, _problems = execution_chain.issued_records(root)
+    publication = _read_json_object(root / execution_chain.PUBLICATION_FILE)
+    rows = (publication or {}).get("expected_pair_status_paths")
+    census = (
+        frozenset(rows) if isinstance(rows, list) and all(isinstance(r, str) for r in rows)
+        else None
+    )
     measured: Dict[PairKey, float] = {}
-    by_execution: Dict[str, int] = {run_id: 0 for run_id in sorted(recorded)}
-    unrecorded = unusable = 0
+    by_execution: Dict[str, int] = {run_id: 0 for run_id in sorted(started)}
+    unattributed = other = outside = unusable = 0
     for path in sorted(root.rglob(f"*{RUNTIME_SUFFIX}")):
         relative = path.relative_to(root)
         if len(relative.parts) < 4 or relative.parts[-2] != RUNTIME_METRICS_DIR:
@@ -395,34 +420,38 @@ def load_chain_measurements(root: Path) -> ChainMeasurements:
         status_path = path.parent.parent / (
             path.name[: -len(RUNTIME_SUFFIX)] + PAIR_STATUS_SUFFIX
         )
+        status_relative = status_path.relative_to(root).as_posix()
+        if census is None or status_relative not in census:
+            outside += 1
+            continue
         try:
             key = identity_from_status_path(root, status_path)
         except ValueError:
             unusable += 1
             continue
         receipt = _read_json_object(path)
+        status = _read_json_object(status_path)
         kind, seconds = classify_receipt(
             receipt, function_name=key[1], left_binary_id=key[2], right_binary_id=key[3],
-            pair_status=_read_json_object(status_path), run_id=None,
+            pair_status=status, run_id=None,
         )
         if kind == RECEIPT_UNUSABLE or seconds is None:
             unusable += 1
             continue
-        producer = str((receipt or {}).get("run_id"))
-        if producer not in recorded:
-            unrecorded += 1
+        producer = execution_chain.producing_run_id(by_nonce, status, status_relative)
+        if producer is None or producer not in started:
+            unattributed += 1
+            continue
+        if (receipt or {}).get("run_id") != producer:
+            other += 1
             continue
         measured[key] = seconds
         by_execution[producer] += 1
-    expected_count: Optional[int] = None
-    publication = _read_json_object(root / execution_chain.PUBLICATION_FILE)
-    rows = (publication or {}).get("expected_pair_status_paths")
-    if isinstance(rows, list):
-        expected_count = len(rows) - len(measured)
     return ChainMeasurements(
-        executions=tuple(sorted(recorded)), measured=measured,
-        measured_by_execution=by_execution, unrecorded_execution=unrecorded,
-        unusable=unusable, pairs_without_measurement=expected_count,
+        executions=tuple(sorted(started)), measured=measured,
+        measured_by_execution=by_execution, unattributed=unattributed,
+        other_execution=other, outside_census=outside, unusable=unusable,
+        pairs_without_measurement=None if census is None else len(census) - len(measured),
     )
 
 
