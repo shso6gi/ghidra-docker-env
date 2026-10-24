@@ -1368,7 +1368,7 @@ def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
     assert 'checkpoint_root="${EQBENCH_RUN_TMPDIR}/process-authority"' in script
     assert 'checkpoint_root="${output_dir}/.process-authority"' not in script
     assert 'env "TMPDIR=$pair_tmpdir" "TEMP=$pair_tmpdir" "TMP=$pair_tmpdir"' in script
-    assert 'trap cleanup_eqbench_run_tmpdir EXIT' in script
+    assert "trap 'validation_handle_exit cleanup_eqbench_run_tmpdir' EXIT" in script
     assert 'rm -rf -- "$pair_tmpdir"' in script
     assert "write_log_list0()" in script
     assert '--log-list0 "$function_log_list"' in script

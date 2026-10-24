@@ -49,6 +49,8 @@ OWNER_TOKEN_ENV = "EQBENCH_PROCESS_OWNER_TOKEN"
 #: that survives SIGKILL this long is stuck in the kernel; the caller then must
 #: not remove the state that process may still use.
 KILL_WAIT_SECONDS = 60.0
+#: How long an unverifiable process has to stay unverifiable to count.
+UNVERIFIABLE_SETTLE_SECONDS = 1.0
 _POLL_SECONDS = 0.02
 _FREEZE_ROUNDS = 200
 
@@ -226,6 +228,17 @@ def stop(token: str, root: int, *, wait_seconds: float = KILL_WAIT_SECONDS) -> M
             return {pid: "owned process survived SIGKILL" for pid in survivors}
         time.sleep(_POLL_SECONDS)
     owned, unverifiable = scan(token, root)
+    # A process in the middle of exiting can briefly show an empty environment;
+    # only what stays owned or unverifiable while it is watched is a problem.
+    settle = time.monotonic() + UNVERIFIABLE_SETTLE_SECONDS
+    while (owned or unverifiable) and time.monotonic() < settle:
+        time.sleep(_POLL_SECONDS)
+        owned_again, unverifiable_again = scan(token, root)
+        owned = {pid: start for pid, start in owned_again.items()}
+        unverifiable = {
+            pid: start for pid, start in unverifiable.items()
+            if unverifiable_again.get(pid) == start
+        }
     problems = {pid: "owned process still alive after the stop" for pid in owned}
     problems.update(
         (pid, "process of this user whose ownership could not be read")

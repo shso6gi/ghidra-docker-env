@@ -512,9 +512,9 @@ _CHILDREN = {
     # 所有かどうかを読めない（non-dumpable で environ が読めない）孤児
     "unverifiable": """( setsid "__PYTHON__" -c 'import ctypes, os, time
 ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)
-open("__TMP__/unverifiable", "w").write(str(os.getpid()))
-time.sleep(60)' </dev/null >/dev/null 2>&1 & )
-    until [ -s "__TMP__/unverifiable" ]; do sleep 0.05; done
+open("__TMP__/unverifiable", "a").write(str(os.getpid()) + chr(10))
+time.sleep(30)' </dev/null >/dev/null 2>&1 & )
+    until [ "$(wc -l < "__TMP__/unverifiable" 2>/dev/null || echo 0)" -ge "$1" ]; do sleep 0.05; done
     sh -c 'echo $$ >> "__TMP__/pids"; exec sleep 30' &
     wait $!""",
 }
@@ -660,11 +660,14 @@ def test_an_unverifiable_process_keeps_the_tmpdir_and_fails_the_stop(tmp_path, r
         assert "ownership could not be read" in result.stderr
         assert "classified" not in events
         # 所有を確かめられない process には signal を送らない（他人のものかもしれない）。
-        unverifiable = int((tmp_path / "unverifiable").read_text())
-        assert _alive(unverifiable)
+        unverifiable = [int(p) for p in _lines(tmp_path / "unverifiable")]
+        assert len(unverifiable) == 2 and all(_alive(pid) for pid in unverifiable)
     finally:
-        if (tmp_path / "unverifiable").exists():
-            os.kill(int((tmp_path / "unverifiable").read_text()), signal.SIGKILL)
+        for pid in _lines(tmp_path / "unverifiable"):
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 @_RUNNERS

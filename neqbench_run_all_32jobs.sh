@@ -4,10 +4,11 @@
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/scripts/validation_matrix_common.sh"
+# 所有権の取得は cd の前に、実行された path（"$0"）のまま渡す（exec し直しても cwd は変わらない）。
+validation_claim_process_ownership "$0" "$@" || { echo "Error: cannot claim the process ownership of this run" >&2; exit 1; }
+cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/scripts/eqbench/pair_scheduler.sh"
-validation_claim_process_ownership "$SCRIPT_DIR/$(basename "$0")" "$@" || { echo "Error: cannot claim the process ownership of this run" >&2; exit 1; }
 
 default_value() {
     local name="$1" value="$2"

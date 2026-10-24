@@ -243,12 +243,16 @@ validation_handle_stop_signal() {
 
 # runner の EXIT の handler。正常終了でも、途中の失敗（set -e など）で抜けるときも、
 # 所有している process が残っていれば止めて確かめてから一時 dir を消す。
+# 確かめられなければ一時 dir を残し、正常終了だったときは VALIDATION_STOP_UNCONFIRMED_EXIT で
+# 終わる（すでに失敗の exit code なら、それを残す。どちらも失敗を示す）。
 #   trap 'validation_handle_exit <cleanup>' EXIT
 validation_handle_exit() {
     local exit_status=$? cleanup="$1"
     trap '' HUP INT TERM
     trap - EXIT
-    _validation_stop_then_cleanup "$cleanup" || exit_status="$VALIDATION_STOP_UNCONFIRMED_EXIT"
+    if ! _validation_stop_then_cleanup "$cleanup" && (( exit_status == 0 )); then
+        exit_status="$VALIDATION_STOP_UNCONFIRMED_EXIT"
+    fi
     exit "$exit_status"
 }
 

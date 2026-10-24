@@ -5,10 +5,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/scripts/validation_matrix_common.sh" || exit 1
+# 所有権の取得は cd の前に、実行された path（"$0"）のまま渡す（exec し直しても cwd は変わらない）。
+validation_claim_process_ownership "$0" "$@" || { echo "Error: cannot claim the process ownership of this run" >&2; exit 1; }
+cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/scripts/eqbench/pair_scheduler.sh" || exit 1
-validation_claim_process_ownership "$SCRIPT_DIR/$(basename "$0")" "$@" || { echo "Error: cannot claim the process ownership of this run" >&2; exit 1; }
 
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
     echo "Error: bash 4.3 or newer is required for wait -n" >&2
