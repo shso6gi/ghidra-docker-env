@@ -192,30 +192,34 @@ validation_write_pair_runtime_receipt() {
 VALIDATION_STOP_UNCONFIRMED_EXIT=75
 
 # この runner の execution が起こす process の所有権を取る。runner の先頭で、何かを起動する
-# 前に `validation_claim_process_ownership "<runner script の絶対 path>" "$@"` と呼ぶ。
+# 前に（cd の前に）`validation_claim_process_ownership "$0" "$@"` と呼ぶ。
 # owner token を**環境変数として持たせたうえで runner 自身を exec し直す**。bash の export は
 # 自分の /proc/<pid>/environ を変えないので、exec し直さないと、exec を経ない fork（subshell、
 # pair job、progress の loop）の environ に token が現れず、親を失ったときに見つけられない。
 # exec し直した後は、fork だけの子も exec した子も token を持つ（scripts/eqbench/runner_processes.py）。
-# 入れ子の runner は自分の token で exec し直すので、外側の process は止めない。
+# 判定は runner_processes の claim が行う（pipe は使わない。読めた・無い・読めないを区別する）。
+# exec し直しは runner の (pid, 起動時刻) に結び付けるので 1 回だけ: exec し直した後に自分の
+# environ で token を確かめられなければ、もう一度 exec せずに失敗する。別の runner から受け
+# 継いだ owner の値は一致しないので、入れ子の runner は自分の token で exec し直す。
 validation_claim_process_ownership() {
-    local script="$1"
+    local script="$1" python_bin="${PYTHON_BIN:-python3}" claim status token start
     shift
-    if [[ "${EQBENCH_PROCESS_OWNER_ROOT:-}" == "$$" ]] && _validation_owner_token_in_own_environ; then
-        export EQBENCH_PROCESS_OWNER_TOKEN EQBENCH_PROCESS_OWNER_ROOT
-        return 0
-    fi
-    local token
-    token="$("${PYTHON_BIN:-python3}" -c 'import secrets; print(secrets.token_hex(16))')" || return 1
-    [[ "$token" =~ ^[0-9a-f]{32}$ ]] || return 1
-    exec env EQBENCH_PROCESS_OWNER_TOKEN="$token" EQBENCH_PROCESS_OWNER_ROOT="$$" \
-        "$BASH" "$script" "$@"
-}
-
-_validation_owner_token_in_own_environ() {
-    [[ "${EQBENCH_PROCESS_OWNER_TOKEN:-}" =~ ^[0-9a-f]{32}$ ]] || return 1
-    tr '\0' '\n' < "/proc/$$/environ" \
-        | grep -qxF "EQBENCH_PROCESS_OWNER_TOKEN=$EQBENCH_PROCESS_OWNER_TOKEN"
+    [[ "$python_bin" != */* || "$python_bin" == /* ]] || python_bin="$PWD/$python_bin"
+    claim="$(cd "$_VALIDATION_REPO_ROOT" && "$python_bin" -B -m scripts.eqbench.runner_processes \
+        claim --pid "$$")" && status=0 || status=$?
+    case "$status" in
+        0)
+            export EQBENCH_PROCESS_OWNER_TOKEN EQBENCH_PROCESS_OWNER_ROOT EQBENCH_PROCESS_OWNER_ROOT_START
+            return 0
+            ;;
+        3)
+            read -r token start <<< "$claim"
+            [[ "$token" =~ ^[0-9a-f]{32}$ && "$start" =~ ^[0-9]+$ ]] || return 1
+            exec env EQBENCH_PROCESS_OWNER_TOKEN="$token" EQBENCH_PROCESS_OWNER_ROOT="$$" \
+                EQBENCH_PROCESS_OWNER_ROOT_START="$start" "$BASH" "$script" "$@"
+            ;;
+    esac
+    return 1
 }
 
 # 所有している process を凍結し、SIGKILL し、消えたことを確かめる。残った process、または

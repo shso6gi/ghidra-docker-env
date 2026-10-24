@@ -17,8 +17,11 @@ pair は確定した結果に見えないまま再実行される、という契
 * **停止**: runner は停止要求を受けたとき、また途中で失敗して抜けるときも、この execution
   が所有する process をすべて凍結し、SIGKILL し、消えたのを確かめてから tmp を消す。所有は
   scheduler への登録や親子関係によらない（runner は owner token を持たせて自分を exec し
-  直すので、exec を経ない fork の子も token を持つ）。所有かどうかを読めない process が
-  あれば tmp を残して exit 75 で失敗を示す。停止は時間の設定に依存しない。
+  直すので、exec を経ない fork の子も token を持つ）。exec し直しは runner の (pid, 起動時刻)
+  に結び付けて 1 回だけで、環境の大きさや受け継いだ owner の値、pipefail に左右されない。
+  停止の確認は最新の走査だけで判定し、所有している process も所有かどうかを読めない
+  process も 2 回続けて見えないときだけ成功する（確認の途中の出現・交代・可読性の変化を
+  含む）。確かめられなければ tmp を残して exit 75 で失敗を示す。停止は時間の設定に依存しない。
   supervisor 単体も TERM / INT / HUP で child の process group を止め、終端の projection を
   書かずに終わる。
 * **実行境界**: 新しい execution は前回の pair-status・journal・診断・receipt を消し、消えた
@@ -36,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -517,6 +521,31 @@ time.sleep(30)' </dev/null >/dev/null 2>&1 & )
     until [ "$(wc -l < "__TMP__/unverifiable" 2>/dev/null || echo 0)" -ge "$1" ]; do sleep 0.05; done
     sh -c 'echo $$ >> "__TMP__/pids"; exec sleep 30' &
     wait $!""",
+    # 確かめられない孤児が、停止が pair を凍結した（または消した）のを見てから子を残して終わる（交代）
+    "unverifiable-replaced": """( setsid "__PYTHON__" -c 'import ctypes, os, time
+ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)
+out = "__TMP__/unverifiable"
+open(out, "a").write(str(os.getpid()) + chr(10))
+def stopping():
+    # 停止が始まった: pair の process が凍結された、または消えた
+    for pid in open("__TMP__/pids").read().split():
+        try:
+            state = open("/proc/%s/stat" % pid).read().rsplit(")", 1)[1].split()[0]
+        except (OSError, IndexError):
+            return True
+        if state in ("T", "t", "Z"):
+            return True
+    return False
+limit = time.monotonic() + 60
+while not stopping() and time.monotonic() < limit:
+    time.sleep(0.002)
+if os.fork() == 0:
+    open(out, "a").write(str(os.getpid()) + chr(10))
+    time.sleep(30)
+os._exit(0)' </dev/null >/dev/null 2>&1 & )
+    until [ "$(wc -l < "__TMP__/unverifiable" 2>/dev/null || echo 0)" -ge "$1" ]; do sleep 0.05; done
+    sh -c 'echo $$ >> "__TMP__/pids"; exec sleep 30' &
+    wait $!""",
 }
 
 _INJECTIONS = {
@@ -648,10 +677,11 @@ def test_descendants_that_ignore_term_or_left_the_tree_are_stopped(tmp_path, run
 
 
 @_RUNNERS
-def test_an_unverifiable_process_keeps_the_tmpdir_and_fails_the_stop(tmp_path, runner):
+@pytest.mark.parametrize("child", ("unverifiable", "unverifiable-replaced"))
+def test_an_unverifiable_process_keeps_the_tmpdir_and_fails_the_stop(tmp_path, runner, child):
     try:
         result, events, pids = _run_stop_harness(
-            tmp_path, runner, "after-registration", child="unverifiable", ready=4,
+            tmp_path, runner, "after-registration", child=child, ready=4,
         )
         # 所有かどうかを読めない process があれば、止めたとは言えない: tmp を残して失敗を示す。
         assert result.returncode == 75, (result.returncode, result.stderr)
@@ -661,7 +691,12 @@ def test_an_unverifiable_process_keeps_the_tmpdir_and_fails_the_stop(tmp_path, r
         assert "classified" not in events
         # 所有を確かめられない process には signal を送らない（他人のものかもしれない）。
         unverifiable = [int(p) for p in _lines(tmp_path / "unverifiable")]
-        assert len(unverifiable) == 2 and all(_alive(pid) for pid in unverifiable)
+        if child == "unverifiable":
+            assert len(unverifiable) == 2 and all(_alive(pid) for pid in unverifiable)
+        else:
+            # 親は終わり、残った子（確かめられない）は止められずに残っている。
+            assert len(unverifiable) == 4
+            assert len([pid for pid in unverifiable if _alive(pid)]) == 2
     finally:
         for pid in _lines(tmp_path / "unverifiable"):
             try:
@@ -730,26 +765,139 @@ def test_a_stop_leaves_other_runs_and_unrelated_processes_alive(tmp_path, runner
         unrelated.wait()
 
 
-def test_the_runner_reexecutes_itself_so_fork_only_children_carry_the_owner(tmp_path):
-    """所有権の取得の前提: exec を経ない fork の子も、自分の environ に token を持つ。"""
+# 所有権の取得: 判定は pipe を使わず、exec し直しは runner の (pid, 起動時刻) に結び付けて
+# 1 回だけ。大きな環境（pipe の容量を超える）、別の runner から受け継いだ owner の値、
+# pipefail のどれでも、起動は「元の 1 回 + exec し直し 1 回」で、fork だけの子も token を持つ。
+_LARGE_ENVIRONMENT = {f"EQBENCH_TEST_FILLER_{i}": "x" * 8000 for i in range(96)}  # 約 768KiB
+_PIPE_CAPACITY = 64 * 1024
 
+
+def _inherited_owner():
+    """別の（生きている）runner の owner の値: この test の process の pid と起動時刻。"""
+
+    start = Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()[19]
+    return {
+        "EQBENCH_PROCESS_OWNER_TOKEN": "0123456789abcdef" * 2,
+        "EQBENCH_PROCESS_OWNER_ROOT": str(os.getpid()),
+        "EQBENCH_PROCESS_OWNER_ROOT_START": start,
+    }
+
+
+def _claim_script(tmp_path: Path, prologue: str = "") -> Path:
     script = tmp_path / "claim.sh"
     script.write_text(
-        f'set -u\nsource "{COMMON}"\nvalidation_claim_process_ownership "$0" "$@"\n'
+        f'set -euo pipefail\necho run >> "{tmp_path}/runs"\n{prologue}'
+        f'source "{COMMON}"\n'
+        'validation_claim_process_ownership "$0" "$@" || { echo claim-failed; exit 1; }\n'
         'echo "args=$*"\n'
         '( p=$BASHPID; tr "\\0" "\\n" < /proc/$p/environ | grep -c "^EQBENCH_PROCESS_OWNER_TOKEN=$EQBENCH_PROCESS_OWNER_TOKEN$" )\n'
-        'echo "root=$EQBENCH_PROCESS_OWNER_ROOT self=$$"\n',
+        'echo "root=$EQBENCH_PROCESS_OWNER_ROOT self=$$ token=$EQBENCH_PROCESS_OWNER_TOKEN"\n'
+        # 前提の測定: 自分の初期環境で、token の行の後に続く bytes 数
+        f'"{sys.executable}" -c \'import sys; e = open("/proc/%s/environ" % sys.argv[1], "rb").read(); '
+        'print("after_token=%d" % (len(e) - e.find(b"EQBENCH_PROCESS_OWNER_TOKEN=")))\' $$\n',
         encoding="utf-8",
     )
+    return script
+
+
+@pytest.mark.parametrize("large", (False, True), ids=("normal-env", "large-env"))
+@pytest.mark.parametrize("inherited", (False, True), ids=("no-owner", "inherited-owner"))
+def test_the_runner_reexecutes_itself_once_so_fork_only_children_carry_the_owner(
+    tmp_path, large, inherited,
+):
+    """所有権の取得の前提: exec を経ない fork の子も、自分の environ に token を持つ。"""
+
+    # 受け継いだ owner の値は環境の先頭に置く（exec し直しても同じ位置で置き換わるので、
+    # 一致する行の後に大きな環境が続く: pipe で読むと読み手が先に終わる配置）。
+    env = dict(_inherited_owner()) if inherited else {}
+    if large:
+        env.update(_LARGE_ENVIRONMENT)
+    env.update((k, v) for k, v in os.environ.items() if not k.startswith("EQBENCH_PROCESS_OWNER"))
     result = subprocess.run(
-        ["bash", str(script), "one", "two words"], capture_output=True, text=True,
-        timeout=60, cwd=REPO_ROOT,
+        ["bash", str(_claim_script(tmp_path)), "one", "two words"], capture_output=True,
+        text=True, timeout=60, cwd=REPO_ROOT, env=env,
     )
+    assert result.returncode == 0, result.stderr
     lines = result.stdout.splitlines()
     assert lines[0] == "args=one two words", result.stderr
     assert lines[1] == "1"
-    root, self_pid = lines[2].split()
+    root, self_pid, token = lines[2].split()
     assert root.split("=")[1] == self_pid.split("=")[1]
+    assert token.split("=")[1] != _inherited_owner()["EQBENCH_PROCESS_OWNER_TOKEN"]
+    if large and inherited:
+        # 前提: token の行の後に pipe の容量を超える環境が続く（pipe で読むと、読み手が一致で
+        # 終わった後も書き手が書き続ける配置）。受け継いだ値はその位置で置き換わる。bash は
+        # 環境を自分の順に並べ直すので、配置は測って確かめる。
+        assert int(lines[3].split("=")[1]) > 2 * _PIPE_CAPACITY, lines[3]
+    # 元の起動 1 回 + exec し直し 1 回。
+    assert _lines(tmp_path / "runs") == ["run", "run"]
+
+
+@pytest.mark.parametrize("case", (
+    "no-owner", "inherited", "reused-pid", "confirmed", "token-not-initial", "unreadable",
+    "malformed-token",
+))
+def test_the_claim_tells_confirmed_absent_and_unreadable_apart(case):
+    """claim の判定（実 process の /proc/<pid>/environ）: exec し直すのは、この pid と起動時刻の
+    owner の値が無いときだけ。値があるのに token を確かめられない（無い・読めない・形が違う）
+    ときは、exec し直さずに失敗する。"""
+
+    from scripts.eqbench import runner_processes as rp
+
+    token = "e" * 32
+    env = _owner_free_env()
+    if case in ("confirmed", "unreadable"):
+        env[rp.OWNER_TOKEN_ENV] = token
+    actor = _Actor(env) if case == "unreadable" else None
+    process = actor.process if actor else subprocess.Popen(["sleep", "60"], env=env)
+    try:
+        pid = actor.pid if actor else process.pid
+        start = rp._stat(pid)[2]
+        own = {rp.OWNER_TOKEN_ENV: token, rp.OWNER_ROOT_ENV: str(pid),
+               rp.OWNER_ROOT_START_ENV: str(start)}
+        environment = {
+            "no-owner": {},
+            "inherited": {**own, rp.OWNER_ROOT_ENV: str(os.getpid())},
+            "reused-pid": {**own, rp.OWNER_ROOT_START_ENV: str(start - 1)},
+            "malformed-token": {**own, rp.OWNER_TOKEN_ENV: "not-a-token"},
+        }.get(case, own)
+        if case in ("no-owner", "inherited", "reused-pid"):
+            new_token, new_start = rp.claim(pid, environment)
+            assert re.fullmatch(r"[0-9a-f]{32}", new_token) and new_token != token
+            assert new_start == start
+        elif case == "confirmed":
+            assert rp.claim(pid, environment) is None
+        else:
+            with pytest.raises(rp.OwnershipError):
+                rp.claim(pid, environment)
+    finally:
+        if actor:
+            actor.kill_all()
+        else:
+            process.kill()
+            process.wait()
+
+
+def test_a_reexecuted_runner_that_cannot_confirm_its_token_fails_without_reexecuting(tmp_path):
+    # 自分の (pid, 起動時刻) の owner の値を持って exec された image で、token が初期環境に
+    # 無い（export しただけ）。もう一度 exec し直しても直らないので、claim は失敗する。
+    prologue = (
+        'if [[ -z "${EQBENCH_TEST_SELF_EXEC:-}" ]]; then\n'
+        '    start=$(cut -d")" -f2 /proc/$$/stat | cut -d" " -f21)\n'
+        '    exec env EQBENCH_TEST_SELF_EXEC=1 EQBENCH_PROCESS_OWNER_ROOT=$$ '
+        'EQBENCH_PROCESS_OWNER_ROOT_START="$start" bash "$0" "$@"\n'
+        'fi\n'
+        'export EQBENCH_PROCESS_OWNER_TOKEN=' + "ab" * 16 + '\n'
+    )
+    env = {k: v for k, v in os.environ.items() if not k.startswith("EQBENCH_PROCESS_OWNER")}
+    env.update(_LARGE_ENVIRONMENT)
+    result = subprocess.run(
+        ["bash", str(_claim_script(tmp_path, prologue))], capture_output=True, text=True,
+        timeout=60, cwd=REPO_ROOT, env=env,
+    )
+    assert result.returncode == 1 and result.stdout.strip() == "claim-failed", result
+    assert "ownership claim failed" in result.stderr
+    assert _lines(tmp_path / "runs") == ["run", "run"]
 
 
 def test_ownership_excludes_the_caller_and_its_ancestors(tmp_path):
@@ -769,6 +917,244 @@ def test_ownership_excludes_the_caller_and_its_ancestors(tmp_path):
         if sleeper.poll() is None:
             sleeper.kill()
             sleeper.wait()
+
+
+# 停止の確認の規則（順序を制御）: 最新の走査だけで判定し、所有している process も確かめ
+# られない process も 2 回続けて見えないときだけ成功。確認の途中の出現・消滅・親から子への
+# 交代・可読性の変化・期限を、走査の間の決まった同期点で起こす（sleep の調整に頼らない）。
+# root は別の process（test の process の子孫を所有に含めないため）。
+
+_ACTOR = """import ctypes, os, sys, time
+libc = ctypes.CDLL(None)
+libc.prctl(4, 0, 0, 0, 0)  # non-dumpable: /proc/<pid>/environ を他から読めない
+print("ready", os.getpid(), flush=True)
+for line in sys.stdin:
+    command = line.strip()
+    if command == "fork":
+        if os.fork() == 0:
+            print("child", os.getpid(), flush=True)
+            sys.stdout.close()
+            time.sleep(60)
+            os._exit(0)
+        os._exit(0)
+    if command == "readable":
+        libc.prctl(4, 1, 0, 0, 0)
+        print("readable", flush=True)
+    if command == "exit":
+        os._exit(0)
+time.sleep(60)
+"""
+
+
+class _Actor:
+    """non-dumpable な process。stdin の命令で fork して終わる / 読めるようになる / 終わる。"""
+
+    def __init__(self, env=None):
+        self.process = subprocess.Popen(
+            [sys.executable, "-c", _ACTOR], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, env=env,
+        )
+        word, pid = self.process.stdout.readline().split()
+        assert word == "ready"
+        self.pid = int(pid)
+        self.others = []
+
+    def command(self, command):
+        self.process.stdin.write(command + "\n")
+        self.process.stdin.flush()
+
+    def fork_and_exit(self):
+        self.command("fork")
+        word, pid = self.process.stdout.readline().split()
+        assert word == "child"
+        self.others.append(int(pid))
+        self.process.wait(timeout=30)
+        return int(pid)
+
+    def kill_all(self):
+        for pid in [self.pid, *self.others]:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.process.wait(timeout=30)
+
+
+def _stop_with_step(monkeypatch, token, root, *, when, act, **kwargs):
+    """``stop`` の走査のうち、``when(n, 結果)`` が真になった走査の直後（次の走査の前）に
+    ``act`` を 1 回だけ起こす。``act`` が起きたかどうかも返す。"""
+
+    from scripts.eqbench import runner_processes as rp
+
+    real = rp.scan
+    state = {"calls": 0, "armed": False, "acted": False}
+
+    def scan(*args, **kw):
+        if state["armed"] and not state["acted"]:
+            state["acted"] = True
+            act()
+        result = real(*args, **kw)
+        state["calls"] += 1
+        if not state["acted"] and when(state["calls"], result):
+            state["armed"] = True
+        return result
+
+    monkeypatch.setattr(rp, "scan", scan)
+    return rp.stop(token, root, **kwargs), state["acted"]
+
+
+@pytest.fixture
+def stop_world():
+    """root（別の process）と、root の後に起動した無関係な process（対照）。"""
+
+    root = subprocess.Popen(["sleep", "120"])
+    time.sleep(0.02)  # 起動時刻（clock tick）を root より後にする
+    unrelated = subprocess.Popen(["sleep", "120"])
+    actors = []
+    yield root, unrelated, actors
+    for actor in actors:
+        actor.kill_all()
+    for process in (root, unrelated):
+        process.kill()
+        process.wait()
+
+
+_TOKEN_UNDER_TEST = "c" * 32
+_UNREADABLE = "process of this user whose ownership could not be read"
+
+
+def _owner_free_env():
+    return {k: v for k, v in os.environ.items() if not k.startswith("EQBENCH_PROCESS_OWNER")}
+
+
+def test_a_child_left_by_an_exiting_unverifiable_parent_keeps_the_stop_unconfirmed(
+    monkeypatch, stop_world,
+):
+    root, unrelated, actors = stop_world
+    parent = _Actor(_owner_free_env())
+    actors.append(parent)
+    children = []
+    seen = []
+
+    def parent_seen_three_times(n, result):
+        # 確認の走査の途中で交代させる（最初の観測の直後ではなく、何度か見た後）
+        if parent.pid in result[1]:
+            seen.append(n)
+        return len(seen) >= 3
+
+    problems, acted = _stop_with_step(
+        monkeypatch, _TOKEN_UNDER_TEST, root.pid,
+        when=parent_seen_three_times, act=lambda: children.append(parent.fork_and_exit()),
+    )
+    assert acted
+    # 親は消えたが、残った子は確かめられない: 成功にしない。子には signal を送らない。
+    assert problems == {children[0]: _UNREADABLE}
+    assert _alive(children[0]) and unrelated.poll() is None and root.poll() is None
+
+
+def test_an_unverifiable_process_that_appears_after_a_clean_scan_keeps_the_stop_unconfirmed(
+    monkeypatch, stop_world,
+):
+    root, unrelated, actors = stop_world
+    problems, acted = _stop_with_step(
+        monkeypatch, _TOKEN_UNDER_TEST, root.pid,
+        when=lambda n, result: n >= 2 and not result[0] and not result[1],
+        act=lambda: actors.append(_Actor(_owner_free_env())),
+    )
+    assert acted
+    assert problems == {actors[0].pid: _UNREADABLE}
+    assert _alive(actors[0].pid) and unrelated.poll() is None
+
+
+def test_an_unverifiable_process_that_becomes_readable_as_owned_is_killed(
+    monkeypatch, stop_world,
+):
+    root, unrelated, actors = stop_world
+    owned = _Actor({**_owner_free_env(), "EQBENCH_PROCESS_OWNER_TOKEN": _TOKEN_UNDER_TEST})
+    actors.append(owned)
+
+    def become_readable():
+        owned.command("readable")
+        assert owned.process.stdout.readline().strip() == "readable"
+
+    problems, acted = _stop_with_step(
+        monkeypatch, _TOKEN_UNDER_TEST, root.pid,
+        when=lambda n, result: owned.pid in result[1], act=become_readable,
+    )
+    assert acted
+    # 読めるようになって所有と分かった process は止め、消えたのを確かめてから成功する。
+    assert problems == {}
+    assert owned.process.wait(timeout=30) == -signal.SIGKILL
+    assert unrelated.poll() is None and root.poll() is None
+
+
+def test_an_unverifiable_process_that_exits_lets_the_stop_succeed(monkeypatch, stop_world):
+    root, unrelated, actors = stop_world
+    actor = _Actor(_owner_free_env())
+    actors.append(actor)
+
+    def leave():
+        actor.command("exit")
+        actor.process.wait(timeout=30)
+
+    problems, acted = _stop_with_step(
+        monkeypatch, _TOKEN_UNDER_TEST, root.pid,
+        when=lambda n, result: actor.pid in result[1], act=leave,
+    )
+    assert acted and problems == {}
+    assert unrelated.poll() is None and root.poll() is None
+
+
+@pytest.mark.parametrize(("wait_seconds", "settle_seconds"), ((0.3, 60.0), (60.0, 0.3)),
+                         ids=("deadline", "settle"))
+def test_an_unverifiable_process_that_stays_fails_the_stop_at_its_deadline(
+    stop_world, wait_seconds, settle_seconds,
+):
+    from scripts.eqbench import runner_processes as rp
+
+    root, unrelated, actors = stop_world
+    actors.append(_Actor(_owner_free_env()))
+    started = time.monotonic()
+    problems = rp.stop(
+        _TOKEN_UNDER_TEST, root.pid, wait_seconds=wait_seconds, settle_seconds=settle_seconds,
+    )
+    assert problems == {actors[0].pid: _UNREADABLE}
+    assert time.monotonic() - started < 30
+    assert _alive(actors[0].pid) and unrelated.poll() is None
+
+
+def test_an_exiting_process_or_kernel_thread_is_never_unverifiable(monkeypatch):
+    """終了の途中の process は environ が空に読める。kernel thread には environ が無い。
+    どちらも「確かめられない」にしない。走査の後で終了を始めたもの（environ を読んだ後の
+    stat に PF_EXITING）と、PID が別の process に再利用されたものも同じ。"""
+
+    from scripts.eqbench import runner_processes as rp
+
+    root, start = 10, 1000
+    uid = os.getuid()
+    table = {  # pid -> stat の列（呼ばれるたびに次へ。最後のものを繰り返す）
+        root: [(1, "S", start, 0)],
+        11: [(1, "S", start + 1, 0)],                                   # 読めない: 確かめられない
+        12: [(1, "R", start + 1, rp._PF_EXITING)],                      # 終了の途中
+        13: [(1, "S", start + 1, 0), (1, "R", start + 1, rp._PF_EXITING)],  # 読んだ後に終了
+        14: [(2, "S", 5, rp._PF_KTHREAD)],                               # kernel thread
+        15: [(1, "S", start + 1, 0), (1, "S", start + 9, 0)],           # PID の再利用
+    }
+    calls = {}
+
+    def fake_stat(pid):
+        if pid not in table:
+            return None
+        n = calls.get(pid, 0)
+        calls[pid] = n + 1
+        return table[pid][min(n, len(table[pid]) - 1)]
+
+    monkeypatch.setattr(rp, "_all_pids", lambda: iter(table))
+    monkeypatch.setattr(rp, "_stat", fake_stat)
+    monkeypatch.setattr(rp, "_environ", lambda pid: b"" if pid in (12, 13) else None)
+    monkeypatch.setattr(rp, "_uid", lambda pid: uid)
+    owned, unverifiable = rp.scan("d" * 32, root)
+    assert owned == {} and set(unverifiable) == {11}
 
 
 def test_the_stop_handlers_use_no_shell_arithmetic_on_time_settings():
