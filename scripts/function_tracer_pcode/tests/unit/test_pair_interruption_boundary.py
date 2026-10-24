@@ -21,7 +21,10 @@ pair は確定した結果に見えないまま再実行される、という契
   に結び付けて 1 回だけで、環境の大きさや受け継いだ owner の値、pipefail に左右されない。
   停止の確認は最新の走査だけで判定し、所有している process も所有かどうかを読めない
   process も 2 回続けて見えないときだけ成功する（確認の途中の出現・交代・可読性の変化を
-  含む）。確かめられなければ tmp を残して exit 75 で失敗を示す。停止は時間の設定に依存しない。
+  含む）。その 2 回は期限より前に終わっていなければならず、期限は成功より先に調べる。成否は
+  stop の verdict（CONFIRMED / DEADLINE / UNVERIFIABLE。観測の失敗は例外）だけが決め、最新の
+  走査が空でも期限切れは失敗。確かめられなければ tmp を残して exit 75 で失敗を示す（既に失敗の
+  exit code ならそれを残す）。停止は時間の設定に依存しない。
   supervisor 単体も TERM / INT / HUP で child の process group を止め、終端の projection を
   書かずに終わる。
 * **実行境界**: 新しい execution は前回の pair-status・journal・診断・receipt を消し、消えた
@@ -48,6 +51,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts.eqbench.runner_processes import StopVerdict
 from scripts.function_tracer_pcode.authority.decision import classification_failure as cf
 from scripts.function_tracer_pcode.authority.decision.canonical_result import (
     main as canonical_result_main,
@@ -464,7 +468,7 @@ _STOP_HARNESS = """set -u
 source "__COMMON__"
 validation_claim_process_ownership "$0" "$@"
 source "__SCHEDULER__"
-PYTHON_BIN="__PYTHON__"
+PYTHON_BIN="__PYTHON_BIN__"
 # runner が受理する小数の猶予（停止はこの値に依存しない）
 PAIR_PROCESS_KILL_AFTER=0.5s; PAIR_PROCESS_KILL_AFTER_SECONDS=0.5
 EQBENCH_TMPDIR="__TMP__"; EQBENCH_RUN_TMPDIR="__TMP__/runtmp"; RUN_TMP="__TMP__/runtmp"
@@ -605,13 +609,14 @@ def _runner_handlers(runner: Path) -> str:
     return "\n".join(parts)
 
 
-def _harness_script(tmp_path, runner, injection, signal_name, child, ready=4):
+def _harness_script(tmp_path, runner, injection, signal_name, child, ready=4, python_bin=None):
     script = (
         _STOP_HARNESS
         .replace("__HANDLERS__", _runner_handlers(runner))
         .replace("__CHILD__", _CHILDREN[child])
         .replace("__INJECT__", _INJECTIONS[injection])
         .replace("__COMMON__", str(COMMON)).replace("__SCHEDULER__", str(SCHEDULER))
+        .replace("__PYTHON_BIN__", str(python_bin or sys.executable))
         .replace("__PYTHON__", sys.executable).replace("__SIG__", signal_name)
         .replace("__READY__", str(ready)).replace("__TMP__", str(tmp_path))
     )
@@ -624,8 +629,10 @@ def _lines(path: Path):
     return path.read_text().split() if path.exists() else []
 
 
-def _run_stop_harness(tmp_path, runner, injection, signal_name="TERM", child="plain", ready=4):
-    script = _harness_script(tmp_path, runner, injection, signal_name, child, ready)
+def _run_stop_harness(
+    tmp_path, runner, injection, signal_name="TERM", child="plain", ready=4, python_bin=None,
+):
+    script = _harness_script(tmp_path, runner, injection, signal_name, child, ready, python_bin)
     result = subprocess.run(
         ["bash", str(script)], capture_output=True, text=True, timeout=180, cwd=REPO_ROOT,
     )
@@ -849,7 +856,13 @@ def test_the_claim_tells_confirmed_absent_and_unreadable_apart(case):
     if case in ("confirmed", "unreadable"):
         env[rp.OWNER_TOKEN_ENV] = token
     actor = _Actor(env) if case == "unreadable" else None
-    process = actor.process if actor else subprocess.Popen(["sleep", "60"], env=env)
+    # exec の途中（Popen が戻った直後）は environ が空に読めるので、走り出したのを待ってから読む
+    process = actor.process if actor else subprocess.Popen(
+        [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(60)"],
+        env=env, stdout=subprocess.PIPE, text=True,
+    )
+    if not actor:
+        assert process.stdout.readline().strip() == "ready"
     try:
         pid = actor.pid if actor else process.pid
         start = rp._stat(pid)[2]
@@ -910,7 +923,8 @@ def test_ownership_excludes_the_caller_and_its_ancestors(tmp_path):
         owned = rp.owned_processes(token, os.getpid())
         assert sleeper.pid in owned
         assert os.getpid() not in owned
-        assert rp.stop(token, os.getpid(), wait_seconds=10) == {}
+        result = rp.stop(token, os.getpid(), wait_seconds=10)
+        assert result.verdict is rp.StopVerdict.CONFIRMED and result.problems == {}
         sleeper.wait(timeout=10)
         assert sleeper.returncode == -signal.SIGKILL
     finally:
@@ -1009,7 +1023,12 @@ def stop_world():
 
     root = subprocess.Popen(["sleep", "120"])
     time.sleep(0.02)  # 起動時刻（clock tick）を root より後にする
-    unrelated = subprocess.Popen(["sleep", "120"])
+    # 走り出したのを待つ（exec の途中は environ が空に読め、確かめられない process に見える）
+    unrelated = subprocess.Popen(
+        [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(120)"],
+        stdout=subprocess.PIPE, text=True,
+    )
+    assert unrelated.stdout.readline().strip() == "ready"
     actors = []
     yield root, unrelated, actors
     for actor in actors:
@@ -1020,6 +1039,7 @@ def stop_world():
 
 
 _TOKEN_UNDER_TEST = "c" * 32
+_CONFIRMED = StopVerdict.CONFIRMED
 _UNREADABLE = "process of this user whose ownership could not be read"
 
 
@@ -1042,13 +1062,13 @@ def test_a_child_left_by_an_exiting_unverifiable_parent_keeps_the_stop_unconfirm
             seen.append(n)
         return len(seen) >= 3
 
-    problems, acted = _stop_with_step(
+    result, acted = _stop_with_step(
         monkeypatch, _TOKEN_UNDER_TEST, root.pid,
         when=parent_seen_three_times, act=lambda: children.append(parent.fork_and_exit()),
     )
     assert acted
     # 親は消えたが、残った子は確かめられない: 成功にしない。子には signal を送らない。
-    assert problems == {children[0]: _UNREADABLE}
+    assert result.verdict is not _CONFIRMED and result.problems == {children[0]: _UNREADABLE}
     assert _alive(children[0]) and unrelated.poll() is None and root.poll() is None
 
 
@@ -1056,13 +1076,13 @@ def test_an_unverifiable_process_that_appears_after_a_clean_scan_keeps_the_stop_
     monkeypatch, stop_world,
 ):
     root, unrelated, actors = stop_world
-    problems, acted = _stop_with_step(
+    result, acted = _stop_with_step(
         monkeypatch, _TOKEN_UNDER_TEST, root.pid,
         when=lambda n, result: n >= 2 and not result[0] and not result[1],
         act=lambda: actors.append(_Actor(_owner_free_env())),
     )
     assert acted
-    assert problems == {actors[0].pid: _UNREADABLE}
+    assert result.verdict is not _CONFIRMED and result.problems == {actors[0].pid: _UNREADABLE}
     assert _alive(actors[0].pid) and unrelated.poll() is None
 
 
@@ -1077,13 +1097,13 @@ def test_an_unverifiable_process_that_becomes_readable_as_owned_is_killed(
         owned.command("readable")
         assert owned.process.stdout.readline().strip() == "readable"
 
-    problems, acted = _stop_with_step(
+    result, acted = _stop_with_step(
         monkeypatch, _TOKEN_UNDER_TEST, root.pid,
         when=lambda n, result: owned.pid in result[1], act=become_readable,
     )
     assert acted
     # 読めるようになって所有と分かった process は止め、消えたのを確かめてから成功する。
-    assert problems == {}
+    assert result.verdict is _CONFIRMED and result.problems == {}
     assert owned.process.wait(timeout=30) == -signal.SIGKILL
     assert unrelated.poll() is None and root.poll() is None
 
@@ -1097,30 +1117,221 @@ def test_an_unverifiable_process_that_exits_lets_the_stop_succeed(monkeypatch, s
         actor.command("exit")
         actor.process.wait(timeout=30)
 
-    problems, acted = _stop_with_step(
+    result, acted = _stop_with_step(
         monkeypatch, _TOKEN_UNDER_TEST, root.pid,
         when=lambda n, result: actor.pid in result[1], act=leave,
     )
-    assert acted and problems == {}
+    assert acted and result.verdict is _CONFIRMED and result.problems == {}
     assert unrelated.poll() is None and root.poll() is None
 
 
-@pytest.mark.parametrize(("wait_seconds", "settle_seconds"), ((0.3, 60.0), (60.0, 0.3)),
-                         ids=("deadline", "settle"))
+@pytest.mark.parametrize(("wait_seconds", "settle_seconds", "verdict"), (
+    (0.3, 60.0, "DEADLINE"), (60.0, 0.3, "UNVERIFIABLE"),
+), ids=("deadline", "settle"))
 def test_an_unverifiable_process_that_stays_fails_the_stop_at_its_deadline(
-    stop_world, wait_seconds, settle_seconds,
+    stop_world, wait_seconds, settle_seconds, verdict,
 ):
     from scripts.eqbench import runner_processes as rp
 
     root, unrelated, actors = stop_world
     actors.append(_Actor(_owner_free_env()))
     started = time.monotonic()
-    problems = rp.stop(
+    result = rp.stop(
         _TOKEN_UNDER_TEST, root.pid, wait_seconds=wait_seconds, settle_seconds=settle_seconds,
     )
-    assert problems == {actors[0].pid: _UNREADABLE}
+    assert result.verdict.value == verdict and result.problems == {actors[0].pid: _UNREADABLE}
     assert time.monotonic() - started < 30
     assert _alive(actors[0].pid) and unrelated.poll() is None
+
+
+# 停止の成功・期限・戻り値の境界（時計と走査の順序を制御）。成功は「期限より前に終わった
+# 走査が CLEAN_SCANS 回続けて何も示さない」ときだけ。期限は毎回の走査の後に先に調べ、期限の
+# 時刻ちょうど以後に終わった走査は数えない。成否は verdict だけが決め、problems（最新の走査が
+# 示したもの）は診断で、空でも成功を意味しない。CLI は CONFIRMED のときだけ 0 を返す。
+
+_GHOST, _GHOST2 = 2 ** 22 + 11, 2 ** 22 + 13  # 存在しない pid（signal は送られない）
+
+
+class _ScriptedStop:
+    """``stop`` の時計と走査を台本どおりに進める。台本の各段は (所要秒, owned, unverifiable)。
+    最初の段は凍結の走査。``sleep`` は時計を進めるだけ。"""
+
+    def __init__(self, monkeypatch, steps, *, poll=0.02):
+        from scripts.eqbench import runner_processes as rp
+
+        self.now = 1000.0
+        self.steps = list(steps)
+        self.scans = 0
+        test = self
+
+        class Clock:
+            @staticmethod
+            def monotonic():
+                return test.now
+
+            @staticmethod
+            def sleep(seconds):
+                test.now += seconds
+
+        def scan(token, root, exclude=()):
+            if not test.steps:
+                raise AssertionError("stop scanned more often than the script allows")
+            duration, owned, unverifiable = test.steps.pop(0)
+            test.now += duration
+            test.scans += 1
+            return dict(owned), dict(unverifiable)
+
+        monkeypatch.setattr(rp, "time", Clock)
+        monkeypatch.setattr(rp, "scan", scan)
+        monkeypatch.setattr(rp, "_POLL_SECONDS", poll)
+
+
+_FREEZE = (0.0, {}, {})
+_CLEAN = (0.0, {}, {})
+
+
+def _scan_at(seconds, owned=None, unverifiable=None):
+    return (seconds, owned or {}, unverifiable or {})
+
+
+# 期限は呼び出しから 60 秒（stop の既定）。各ケース: 台本、期待する verdict、problems、clean_scans
+_BOUNDARY_CASES = {
+    # 1. 最初の空の走査が期限ちょうど / 期限の後に終わる
+    "first-clean-scan-ends-at-deadline": ([_FREEZE, _scan_at(60.0)], "DEADLINE", {}, 0),
+    "first-clean-scan-ends-after-deadline": ([_FREEZE, _scan_at(75.0)], "DEADLINE", {}, 0),
+    # 2. 1 回目は期限内、2 回目の前（待ちの間）または 2 回目の走査中に期限
+    "deadline-before-second-scan": (
+        [_FREEZE, _scan_at(59.99), _scan_at(0.0)], "DEADLINE", {}, 1),
+    "second-clean-scan-ends-at-deadline": (
+        [_FREEZE, _scan_at(30.0), _scan_at(29.98)], "DEADLINE", {}, 1),
+    "freeze-outlasts-deadline": ([_scan_at(61.0), _CLEAN], "DEADLINE", {}, 0),
+    # 3. 必要な回数の空の走査が期限内に終わる（境界の直前を含む）
+    "two-clean-scans-in-time": ([_FREEZE, _CLEAN, _CLEAN], "CONFIRMED", {}, 2),
+    "second-clean-scan-just-before-deadline": (
+        [_FREEZE, _scan_at(30.0), _scan_at(29.97)], "CONFIRMED", {}, 2),
+    # 4. 所有 process / 確かめられない process が残ったまま期限
+    "owned-survives-to-deadline": (
+        [_FREEZE] + [_scan_at(20.0, owned={_GHOST: 1})] * 3, "DEADLINE",
+        {_GHOST: "owned process still alive after the stop"}, 0),
+    "unverifiable-stays-to-deadline": (
+        [_FREEZE] + [_scan_at(20.0, unverifiable={_GHOST: 1})] * 3, "DEADLINE",
+        {_GHOST: "process of this user whose ownership could not be read"}, 0),
+    # 5. 確認の途中の出現・交代・可読性の変化は、数えた空の走査をやり直させ、期限を迂回しない
+    "appears-after-a-clean-scan-then-deadline": (
+        [_FREEZE, _CLEAN, _scan_at(1.0, unverifiable={_GHOST: 1}), _scan_at(1.0),
+         _scan_at(58.0)], "DEADLINE", {}, 1),
+    "replaced-by-a-child-then-deadline": (
+        [_FREEZE, _scan_at(1.0, unverifiable={_GHOST: 1}), _scan_at(1.0, unverifiable={_GHOST2: 2}),
+         _scan_at(58.0)], "DEADLINE", {}, 0),
+    "becomes-owned-then-confirmed-in-time": (
+        [_FREEZE, _scan_at(1.0, unverifiable={_GHOST: 1}), _scan_at(1.0, owned={_GHOST: 1}),
+         _CLEAN, _CLEAN], "CONFIRMED", {}, 2),
+    "becomes-owned-then-deadline": (
+        [_FREEZE, _scan_at(1.0, unverifiable={_GHOST: 1}), _scan_at(1.0, owned={_GHOST: 1}),
+         _CLEAN, _scan_at(58.0)], "DEADLINE", {}, 1),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_BOUNDARY_CASES))
+def test_the_stop_succeeds_only_after_enough_clean_scans_before_its_deadline(monkeypatch, case):
+    from scripts.eqbench import runner_processes as rp
+
+    steps, verdict, problems, clean = _BOUNDARY_CASES[case]
+    script = _ScriptedStop(monkeypatch, steps)
+    result = rp.stop("a" * 32, os.getpid(), settle_seconds=10 ** 6)
+    assert (result.verdict.value, dict(result.problems), result.clean_scans) == (
+        verdict, problems, clean)
+    assert result.confirmed is (verdict == "CONFIRMED")
+    assert not script.steps  # 台本を使い切った（決着の後に走査しない・決着より前に止まらない）
+
+
+@pytest.mark.parametrize("case", sorted(_BOUNDARY_CASES))
+def test_the_stop_command_exits_zero_only_for_a_confirmed_stop(monkeypatch, capsys, case):
+    from scripts.eqbench import runner_processes as rp
+
+    steps, verdict, _problems, _clean = _BOUNDARY_CASES[case]
+    # CLI と同じ既定（確かめられない process の連続観測 1 秒を含む）での stop の結果
+    _ScriptedStop(monkeypatch, steps)
+    expected = rp.stop("a" * 32, os.getpid())
+    assert (expected.verdict.value == "CONFIRMED") is (verdict == "CONFIRMED")
+    _ScriptedStop(monkeypatch, steps)
+    code = rp.main(["stop", "--token", "a" * 32, "--root", str(os.getpid())])
+    err = capsys.readouterr().err
+    if expected.confirmed:
+        assert code == 0 and err == ""
+    else:
+        assert code == 1 and f"not confirmed ({expected.verdict.value};" in err
+        # 診断は最新の走査が示したものだけ（存在しない残存 process を作らない）
+        assert err.count("runner_processes: pid ") == len(expected.problems)
+
+
+def test_unverifiable_processes_seen_without_a_break_end_the_stop(monkeypatch):
+    from scripts.eqbench import runner_processes as rp
+
+    seen = _scan_at(0.4, unverifiable={_GHOST: 1})
+    _ScriptedStop(monkeypatch, [_FREEZE, seen, seen, seen, seen])
+    result = rp.stop("a" * 32, os.getpid(), settle_seconds=1.0)
+    assert result.verdict is rp.StopVerdict.UNVERIFIABLE
+    assert dict(result.problems) == {_GHOST: "process of this user whose ownership could not be read"}
+
+
+# 実 runner の handler を通す: stop の CLI だけを、時計が読むたびに飛ぶ python で動かす。
+# jump=30 秒なら、凍結・SIGKILL は実際に行われるが、2 回目の空の走査の時点で期限（60 秒）に
+# 達して未確認になる。jump=0 は対照（同じ stand-in で確認できる）。
+_JUMPING_STOP_PYTHON = """#!/bin/bash
+if [[ "$1 $2 $3" == "-B -m scripts.eqbench.runner_processes" && "$4" == stop ]]; then
+    shift 3
+    exec "__PYTHON__" -B -c 'import itertools, sys
+from scripts.eqbench import runner_processes as rp
+ticks = itertools.count(0.0, __JUMP__)
+class Clock:
+    monotonic = staticmethod(lambda: next(ticks))
+    sleep = staticmethod(lambda seconds: None)
+rp.time = Clock
+sys.exit(rp.main(sys.argv[1:]))' "$@"
+fi
+exec "__PYTHON__" "$@"
+"""
+
+
+def _jumping_python(tmp_path: Path, jump: float) -> Path:
+    path = tmp_path / "jumping-python"
+    path.write_text(
+        _JUMPING_STOP_PYTHON.replace("__PYTHON__", sys.executable).replace("__JUMP__", repr(jump)),
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+    return path
+
+
+@_RUNNERS
+@pytest.mark.parametrize(("injection", "exit_code"), (
+    ("after-registration", 75), ("error-exit", 3), ("normal", 75),
+))
+def test_a_stop_unconfirmed_by_its_deadline_keeps_the_tmpdir(tmp_path, runner, injection, exit_code):
+    """期限までに確認できなかった停止は、最新の走査が空でも失敗: tmp を残し、exit 75（既に
+    失敗の exit code なら、それを残す）。止めた pair は分類まで進まない。"""
+
+    result, events, pids = _run_stop_harness(
+        tmp_path, runner, injection, child="short" if injection == "normal" else "plain",
+        python_bin=_jumping_python(tmp_path, 30.0),
+    )
+    assert result.returncode == exit_code, (result.returncode, result.stderr)
+    assert "not confirmed (DEADLINE;" in result.stderr
+    assert "runner_processes: pid " not in result.stderr  # 残存 process を作らない
+    assert "tmp-removed" not in events
+    assert (tmp_path / "runtmp").is_dir()
+    if injection != "normal":
+        assert "classified" not in events
+        assert not [pid for pid in pids if _alive(pid)]  # 凍結と SIGKILL は実際に行われた
+
+
+@_RUNNERS
+def test_a_stop_confirmed_in_time_removes_the_tmpdir(tmp_path, runner):
+    result, events, pids = _run_stop_harness(
+        tmp_path, runner, "after-registration", python_bin=_jumping_python(tmp_path, 0.001),
+    )
+    _assert_stopped_before_removal(tmp_path, result, events, pids, 143)
 
 
 def test_an_exiting_process_or_kernel_thread_is_never_unverifiable(monkeypatch):

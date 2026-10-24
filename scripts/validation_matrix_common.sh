@@ -187,8 +187,9 @@ validation_write_pair_runtime_receipt() {
 # 中断と確定の境界（評価計画 v2 PR-A）。2 本の runner はここだけを呼ぶ。
 # ---------------------------------------------------------------------------
 
-# 停止を確かめられなかった（所有している process が残る、または所有かどうかを確かめられない
-# process がある）ときの runner の exit code。run の一時 dir は残す。
+# 停止を確かめられなかった（所有している process が残る、所有かどうかを確かめられない process
+# がある、期限までに確認を終えられなかった、process 表を観測できなかった）ときの runner の
+# exit code。run の一時 dir は残す。
 VALIDATION_STOP_UNCONFIRMED_EXIT=75
 
 # この runner の execution が起こす process の所有権を取る。runner の先頭で、何かを起動する
@@ -222,8 +223,10 @@ validation_claim_process_ownership() {
     return 1
 }
 
-# 所有している process を凍結し、SIGKILL し、消えたことを確かめる。残った process、または
-# 所有かどうかを確かめられない process があれば非 0 を返す（呼び出し側は tmp を消さない）。
+# 所有している process を凍結し、SIGKILL し、消えたことを確かめる。0 を返すのは、期限内に
+# 確認を終えたとき（runner_processes の verdict が CONFIRMED）だけ。残った process、所有かどうかを
+# 確かめられない process、期限切れ（最新の走査が空でも）、観測の失敗はすべて非 0（呼び出し側は
+# tmp を消さない）。
 validation_stop_owned_processes() {
     local python_bin="${1:-${PYTHON_BIN:-python3}}"
     [[ -n "${EQBENCH_PROCESS_OWNER_TOKEN:-}" && -n "${EQBENCH_PROCESS_OWNER_ROOT:-}" ]] || return 1

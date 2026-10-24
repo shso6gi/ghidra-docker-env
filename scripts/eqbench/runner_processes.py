@@ -30,13 +30,16 @@ frozen with SIGSTOP until a rescan finds nothing new (a frozen process cannot
 start another one), then killed with SIGKILL.  The stop is then confirmed by
 one rule applied to every rescan: only the **latest** scan counts, every owned
 process it shows is killed (again), and the stop succeeds only when two
-consecutive scans show neither an owned nor an unverifiable process.  A
+consecutive scans, each finished before the deadline, show neither an owned nor
+an unverifiable process.  :func:`stop` returns a :class:`StopResult` whose
+verdict -- not whether the latest scan was empty -- says whether it succeeded.  A
 process that appears, disappears, is replaced by its child or becomes readable
-while the stop is being confirmed is judged by that same rule; when the
-deadline comes first -- or unverifiable processes have been seen continuously
-for :data:`UNVERIFIABLE_SETTLE_SECONDS` -- the stop fails with what the latest
-scan showed.  Nothing is given
-time to finish: a stopped pair must not get as far as classifying or
+while the stop is being confirmed is judged by that same rule.  The deadline
+is checked before success after every scan, so a scan finished at or after it
+never counts: when the deadline comes first -- or unverifiable processes have
+been seen continuously for :data:`UNVERIFIABLE_SETTLE_SECONDS` -- the stop
+fails, even if the latest scan showed nothing (its findings are reported as a
+diagnostic only).  Nothing is given time to finish: a stopped pair must not get as far as classifying or
 publishing a result, so there is no grace period and no setting it depends on.
 
 A process this module cannot read is never taken for "not ours": a process
@@ -64,7 +67,8 @@ import secrets
 import signal
 import sys
 import time
-from typing import Dict, Iterable, Mapping, Optional, Tuple
+from enum import Enum
+from typing import Dict, Iterable, Mapping, NamedTuple, Optional, Tuple
 
 OWNER_TOKEN_ENV = "EQBENCH_PROCESS_OWNER_TOKEN"
 OWNER_ROOT_ENV = "EQBENCH_PROCESS_OWNER_ROOT"
@@ -236,17 +240,48 @@ def _signal(identity: Identity, signum: int) -> None:
             pass
 
 
+class StopVerdict(str, Enum):
+    """How :func:`stop` ended.  Only ``CONFIRMED`` lets the caller remove state."""
+
+    #: :data:`CLEAN_SCANS` consecutive scans, each finished before the deadline,
+    #: showed neither an owned nor an unverifiable process.
+    CONFIRMED = "CONFIRMED"
+    #: The deadline came before the stop was confirmed (whatever the last scan showed).
+    DEADLINE = "DEADLINE"
+    #: Unverifiable processes were seen without a break for ``settle_seconds``.
+    UNVERIFIABLE = "UNVERIFIABLE"
+
+
+class StopResult(NamedTuple):
+    verdict: StopVerdict
+    #: What the latest scan showed, ``{pid: reason}``.  It is a diagnostic only:
+    #: it can be empty when the verdict is not ``CONFIRMED`` (the deadline came
+    #: before enough clean scans), and the verdict alone decides success.
+    problems: Mapping[int, str]
+    #: Consecutive clean scans finished before the deadline (diagnostic).
+    clean_scans: int
+
+    @property
+    def confirmed(self) -> bool:
+        return self.verdict is StopVerdict.CONFIRMED
+
+
 def stop(
     token: str, root: int, *,
     wait_seconds: float = KILL_WAIT_SECONDS,
     settle_seconds: float = UNVERIFIABLE_SETTLE_SECONDS,
-) -> Mapping[int, str]:
+) -> StopResult:
     """Freeze and kill every owned process, then confirm none is left.
 
-    Returns what keeps the stop from being confirmed, ``{pid: reason}``, as the
-    latest scan showed it: an owned process still alive (after SIGKILL and up
-    to ``wait_seconds``), or an unverifiable process (never signalled).  An
-    empty result means :data:`CLEAN_SCANS` consecutive scans found neither.
+    The stop is confirmed only when :data:`CLEAN_SCANS` consecutive scans,
+    **each finished before the deadline** (``wait_seconds`` from the call),
+    showed neither an owned nor an unverifiable process.  The deadline is
+    checked first after every scan: a scan finished at or after it never counts,
+    so a stop that could not be confirmed in time is ``DEADLINE`` even if that
+    scan was clean.  Unverifiable processes seen without a break for
+    ``settle_seconds`` end the stop as ``UNVERIFIABLE``.  Failing to observe
+    the process table raises (``OSError`` / ``ValueError``); the caller treats
+    that as a failed stop too.
     """
 
     deadline = time.monotonic() + wait_seconds
@@ -276,26 +311,27 @@ def stop(
         killed.update(owned)
         survivors = {pid: start for pid, start in killed.items() if _alive((pid, start))}
         survivors.update(owned)
+        problems = {pid: "owned process still alive after the stop" for pid in survivors}
+        problems.update(
+            (pid, "process of this user whose ownership could not be read")
+            for pid in unverifiable
+        )
         now = time.monotonic()
-        if survivors or unverifiable:
+        # The deadline comes first: a scan finished at or after it does not count.
+        if now >= deadline:
+            return StopResult(StopVerdict.DEADLINE, problems, clean)
+        if problems:
             clean = 0
         else:
             clean += 1
             if clean >= CLEAN_SCANS:
-                return {}
+                return StopResult(StopVerdict.CONFIRMED, {}, clean)
         if not unverifiable:
             unverifiable_since = None
         elif unverifiable_since is None:
             unverifiable_since = now
-        if now >= deadline or (
-            unverifiable_since is not None and now - unverifiable_since >= settle_seconds
-        ):
-            problems = {pid: "owned process still alive after the stop" for pid in survivors}
-            problems.update(
-                (pid, "process of this user whose ownership could not be read")
-                for pid in unverifiable
-            )
-            return problems
+        elif now - unverifiable_since >= settle_seconds:
+            return StopResult(StopVerdict.UNVERIFIABLE, problems, clean)
         time.sleep(_POLL_SECONDS)
 
 
@@ -366,15 +402,20 @@ def main(arguments: Optional[list] = None) -> int:
             print(pid, start)
         return 0
     try:
-        problems = stop(args.token, args.root)
+        result = stop(args.token, args.root)
     except (OSError, ValueError) as exc:
         print(f"runner_processes: the stop could not be carried out: {exc}", file=sys.stderr)
         return 1
-    if problems:
-        for pid, reason in sorted(problems.items()):
-            print(f"runner_processes: pid {pid}: {reason}", file=sys.stderr)
-        return 1
-    return 0
+    if result.confirmed:
+        return 0
+    print(
+        f"runner_processes: the stop was not confirmed ({result.verdict.value}; "
+        f"{result.clean_scans} of {CLEAN_SCANS} consecutive clean scans before the deadline)",
+        file=sys.stderr,
+    )
+    for pid, reason in sorted(result.problems.items()):
+        print(f"runner_processes: pid {pid}: {reason}", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
