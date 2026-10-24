@@ -179,6 +179,19 @@ pair_scheduler_finalize() {
     return 0
 }
 
+# Start one pair job in the background and register it with the group in the
+# same step: `pair_scheduler_launch_job <group> <command> [args...]`.  Stopping
+# a run does not depend on this registration (the runner stops every process
+# of its execution by ownership, see validation_stop_owned_processes), so a stop
+# request that arrives between the fork and the registration still reaches the
+# job; the registration only drives the scheduler's own accounting.
+pair_scheduler_launch_job() {
+    local key="$1"
+    shift
+    "$@" &
+    pair_scheduler_start_job "$key" "$!"
+}
+
 _pair_scheduler_count_failure() {
     local -n _pair_scheduler_counter_ref="$PAIR_SCHEDULER_FAILURE_COUNTER"
     _pair_scheduler_counter_ref=$((_pair_scheduler_counter_ref + 1))

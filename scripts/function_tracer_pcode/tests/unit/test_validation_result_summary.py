@@ -308,7 +308,9 @@ def test_canonical_summary_aggregates_operational_invalid_pair_status(tmp_path):
     summary = aggregate_validation_logs_by_function((path,), canonical_only=True)
     health = build_run_health_summary(summary)
 
-    assert record.status == STATUS_ERROR
+    # The unsigned diagnostic means classification never finished: the pair is
+    # incomplete (resume runs it again), not a decided ERROR.
+    assert record.status == STATUS_INCOMPLETE
     assert record.payloads == ()
     assert record.pair_status_metadata == {
         "error_kind": "PAIR_STATUS_AUTHORITY_INVALID",
@@ -317,7 +319,8 @@ def test_canonical_summary_aggregates_operational_invalid_pair_status(tmp_path):
         "classification_valid": False,
         "detail": "ValueError: durable restart authority is invalid",
     }
-    assert summary.overall.count(STATUS_ERROR) == 1
+    assert summary.overall.count(STATUS_ERROR) == 0
+    assert summary.overall.count(STATUS_INCOMPLETE) == 1
     assert health["error_kind_counts"] == {"PAIR_STATUS_AUTHORITY_INVALID": 1}
     assert health["supervisor_status_counts"] == {"INVALID": 1}
 
@@ -337,7 +340,7 @@ def test_pair_status_operational_diagnostic_requires_exact_schema():
     }) is None
 
 
-def test_pair_status_validation_classifies_operational_diagnostic_as_error(tmp_path):
+def test_pair_status_validation_classifies_operational_diagnostic_as_incomplete(tmp_path):
     status_path = tmp_path / "pair-status.json"
     status_path.write_text(json.dumps({
         "classification_valid": False,
@@ -360,7 +363,7 @@ def test_pair_status_validation_classifies_operational_diagnostic_as_error(tmp_p
     )
 
     assert result.returncode == 0
-    assert result.stdout.strip() == "ERROR"
+    assert result.stdout.strip() == "INCOMPLETE"
     assert "signed pair-status schema differs" not in result.stderr
 
 
@@ -1365,7 +1368,7 @@ def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
     assert 'checkpoint_root="${EQBENCH_RUN_TMPDIR}/process-authority"' in script
     assert 'checkpoint_root="${output_dir}/.process-authority"' not in script
     assert 'env "TMPDIR=$pair_tmpdir" "TEMP=$pair_tmpdir" "TMP=$pair_tmpdir"' in script
-    assert 'trap cleanup_eqbench_run_tmpdir EXIT' in script
+    assert "trap 'validation_handle_exit cleanup_eqbench_run_tmpdir' EXIT" in script
     assert 'rm -rf -- "$pair_tmpdir"' in script
     assert "write_log_list0()" in script
     assert '--log-list0 "$function_log_list"' in script
@@ -1381,7 +1384,7 @@ def test_eqbench_runner_uses_bounded_summary_argv_and_excludes_stdout_log():
     assert "results_summary.txt" in script
     assert "function_summary_all_pairs_reusable" in script
     assert "Summary shortcut: skipped" in script
-    assert "validate_current_pair_status" in script
+    assert "validation_resolve_pair_execution" in script
     assert "remove_pair_process_authority" in script
     assert "reporting.process_authority_cleanup" in script
     assert "EQBENCH_PRIVATE_AUTHORITY_ROOT" in script
@@ -1681,34 +1684,28 @@ def test_timed_command_pid_contract_survives_ps_no_match_exits(
 
 
 def test_eqbench_runner_cleans_authority_after_validation_diagnostics():
+    # 結果の確定（共通の resolver。理由は pair log へ追記される）は、process authority の
+    # cleanup より前に済ませる。
     script = Path("eqbench_run_all_32jobs.sh").read_text()
-    validation_call = script.index(
-        'if pair_status_validation_detail="$(validate_current_pair_status'
-    )
-    cleanup_call = script.index(
-        "if cleanup_pair_process_authority_with_run_health",
-        validation_call,
-    )
-    validation_failure = script.index(
-        "generated pair status failed authority validation",
-        validation_call,
-    )
-    log_copy = script.index(
-        "Pair-status authority validation failed:",
-        validation_failure,
-    )
-    assert validation_call < validation_failure < log_copy < cleanup_call
+    resolution = script.index('if resolution="$(validation_resolve_pair_execution')
+    log_copy = script.index('"$classification_failure" 2>> "$log_file")"', resolution)
+    failure = script.index("no terminal pair status of this execution", log_copy)
+    cleanup_call = script.index("if cleanup_pair_process_authority_with_run_health", failure)
+    assert resolution < log_copy < failure < cleanup_call
 
 
 def test_eqbench_runner_reports_primary_diagnostic_before_signature_validation():
     script = Path("eqbench_run_all_32jobs.sh").read_text()
-    validation_start = script.index("validate_current_pair_status() {")
-    validation_end = script.index(
-        "remove_pair_process_authority() {", validation_start
+    # 分類失敗の診断（署名の無い operational diagnostic）は、共通の resolver が署名の検証より
+    # 前に見分けて INCOMPLETE にする。
+    resolver = Path(
+        "scripts/function_tracer_pcode/authority/decision/pair_status_authority.py"
+    ).read_text()
+    body = resolver[resolver.index("def resolve_pair_execution("):]
+    assert body.index("pair_status_operational_diagnostic(payload)") < body.index(
+        "validate_signed_pair_status(payload"
     )
-    validation_block = script[validation_start:validation_end]
-
-    assert "--allow-operational-diagnostic" in validation_block
+    assert "validation_resolve_pair_execution" in script
     assert '--classification-diagnostic-log "$log_file"' in script
     assert "Primary pair classification error:" in Path(
         "scripts/function_tracer_pcode/authority/decision/canonical_result.py"

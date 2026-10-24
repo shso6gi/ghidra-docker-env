@@ -33,7 +33,10 @@ from scripts.function_tracer_pcode.authority.decision.classification_failure imp
     write_failure_record,
 )
 from scripts.function_tracer_pcode.authority.decision.decision import DecisiveProofKind
-from scripts.function_tracer_pcode.authority.decision.pair_status_authority import seal_pair_status
+from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
+    seal_pair_status,
+    write_pair_status_file,
+)
 from scripts.function_tracer_pcode.authority.process.canonical_envelope import (
     CanonicalEnvelope,
     seal_envelope,
@@ -1412,7 +1415,17 @@ def main(arguments: list[str] | None = None) -> int:
     # Issue #204: 分類が失敗したときだけ書く診断（projection の写しと durable な evidence の読み）。
     # runner は store を消す前の成果物として run dir に置く。判定には使わない。
     parser.add_argument("--classification-failure-output")
+    # The pair-status file itself, written atomically (signed status or the
+    # operational diagnostic).  Without it the status goes to stdout as before.
+    parser.add_argument("--pair-status-output")
     args = parser.parse_args(arguments)
+
+    def publish(payload: Mapping[str, Any]) -> None:
+        if args.pair_status_output:
+            write_pair_status_file(Path(args.pair_status_output), payload)
+        else:
+            print(json.dumps(payload, sort_keys=True))
+
     if not all((
         args.classify_pair_log, args.supervisor_projection,
         args.checkpoint_root, args.execution_nonce,
@@ -1471,13 +1484,23 @@ def main(arguments: list[str] | None = None) -> int:
                     f"{type(record_exc).__name__}: {record_exc}",
                     file=sys.stderr,
                 )
-        print(json.dumps({
-            "classification_valid": False,
-            "error_kind": "PAIR_STATUS_AUTHORITY_INVALID",
-            "detail": detail,
-        }, sort_keys=True))
+        try:
+            publish({
+                "classification_valid": False,
+                "error_kind": "PAIR_STATUS_AUTHORITY_INVALID",
+                "detail": detail,
+            })
+        except OSError as publish_exc:
+            print(f"Pair-status publication failed: {type(publish_exc).__name__}: {publish_exc}",
+                  file=sys.stderr)
         return 2
-    print(json.dumps(sealed_status, sort_keys=True))
+    try:
+        publish(sealed_status)
+    except OSError as exc:
+        # 公開できなければ status は無い（atomic な公開は書きかけを残さない）。runner は
+        # この execution の status が無い pair を未完了として扱う。
+        print(f"Pair-status publication failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 3
     return 1 if status["canonical_outcome"] == Outcome.ERROR.value else 0
 
 

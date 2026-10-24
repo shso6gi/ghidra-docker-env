@@ -5,8 +5,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/scripts/validation_matrix_common.sh" || exit 1
+# 所有権の取得は cd の前に、実行された path（"$0"）のまま渡す（exec し直しても cwd は変わらない）。
+validation_claim_process_ownership "$0" "$@" || { echo "Error: cannot claim the process ownership of this run" >&2; exit 1; }
+cd "$SCRIPT_DIR"
 source "$SCRIPT_DIR/scripts/eqbench/pair_scheduler.sh" || exit 1
 
 if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
@@ -197,12 +199,12 @@ cleanup_eqbench_run_tmpdir() {
     EQBENCH_RUN_TMPDIR=""
 }
 handle_eqbench_signal() {
-    local exit_status="$1"
-    trap - EXIT HUP INT TERM
-    cleanup_eqbench_run_tmpdir
-    exit "$exit_status"
+    # 実行中の pair を（scheduler への登録の有無によらず）すべて止めて待ってから run
+    # tmpdir を消す（validation_handle_stop_signal）。順序を逆にすると、store と child の
+    # TMPDIR を消された pair が分類まで進み、確定した結果に見える status を残しうる。
+    validation_handle_stop_signal "$1" cleanup_eqbench_run_tmpdir
 }
-trap cleanup_eqbench_run_tmpdir EXIT
+trap 'validation_handle_exit cleanup_eqbench_run_tmpdir' EXIT
 trap 'handle_eqbench_signal 129' HUP
 trap 'handle_eqbench_signal 130' INT
 trap 'handle_eqbench_signal 143' TERM
@@ -342,16 +344,6 @@ load_error_only_summary_pairs() {
     SUMMARY_ERROR_PAIRS_READY=1
 }
 
-validate_current_pair_status() {
-    local pair_status_file="$1"
-    local pair_target_file="$2"
-    "$PYTHON_BIN" -m \
-        scripts.function_tracer_pcode.authority.decision.pair_status_authority \
-        --validate-pair-status "$pair_status_file" \
-        --public-key "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
-        --expected-pair-target "$pair_target_file" --allow-operational-diagnostic
-}
-
 remove_pair_process_authority() {
     local checkpoint_root="$1"
     local execution_nonce="$2"
@@ -477,37 +469,25 @@ run_pair() {
     local total="$9"
     local pair_target_file="${10}"
     local log_file="${output_dir}/${function_name}_${left_id}_${right_id}.log"
-    # Issue #124 PR-124-B: ここに来るのは「この pair を新しく実行する」と確定した
-    # あと（skip 判定は呼び出し側で済んでいる）。前回 execution の journal を捨てて
-    # おき、`.log` を `>` で開き直すのと同じ execution 境界にする。捨てないと 1 file
-    # の中で seq が 1..N -> 1..M と巻き戻り、古い handler_registered / pid /
-    # start_token が current execution の evidence に見えてしまう。
-    # supervisor recovery の再呼び出しは `.log` と同じく追記側なので触らない。
+    local pair_stem="${function_name}_${left_id}_${right_id}"
+    local runtime_metrics_dir="${output_dir}/.runtime-metrics"
+    # 実行境界（Issue #124 PR-124-B/C、#204、#160、評価計画 v2 PR-A）。ここに来るのは
+    # 「この pair を新しく実行する」と確定したあと。前回 execution の pair-status・journal・
+    # stack dump とその状態・分類失敗の record・runtime receipt を消し、消えたことを確かめて
+    # から解析を始める。確かめられなければ解析を始めない（前回の結果を今回の結果と取り違え
+    # ないため）。supervisor recovery の再呼び出しは `.log` と同じく追記側なので触らない。
+    if ! validation_open_pair_execution "$output_dir" "$pair_stem"; then
+        printf '[%s] [%s %s/%s] %s <-> %s : BOUNDARY_FAILED (no analysis started)\n' \
+            "$sample_label" "$function_name" "$count" "$total" "$left_id" "$right_id"
+        return 1
+    fi
     local stage_journal_file="${log_file%.log}.stage.jsonl"
-    rm -f -- "$stage_journal_file"
+    local stack_dump_artifact="${runtime_metrics_dir}/${pair_stem}.stack-dump.txt"
+    local stack_dump_status="${runtime_metrics_dir}/${pair_stem}.stack-dump.status.json"
+    local classification_failure="${runtime_metrics_dir}/${pair_stem}.classification-failure.json"
+    local pair_status_file="${output_dir}/${pair_stem}.pair-status.json"
     local pair_tmpdir
     pair_tmpdir="$(mktemp -d "$EQBENCH_RUN_TMPDIR/pair.XXXXXX")"
-    local runtime_metrics_dir
-    runtime_metrics_dir="${output_dir}/.runtime-metrics"
-    mkdir -p "$runtime_metrics_dir"
-    # journal と同じ execution 境界。まだ dump を退避しない（PR-124-C の責務）が、
-    # journal が「正本の dump 先」として宣言する path に前回 execution の dump が
-    # 残っていると、それが current execution の dump として読まれてしまう。
-    local stack_dump_artifact="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.stack-dump.txt"
-    rm -f -- "$stack_dump_artifact"
-    # Issue #124 PR-124-C: 同じ execution 境界で、supervisor が書く診断 sidecar の
-    # 残骸も捨てる。残すと前回 execution の registration / 送信結果が current の
-    # ものとして読まれてしまう。
-    local stack_dump_status="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.stack-dump.status.json"
-    rm -f -- "$stack_dump_status"
-    # Issue #204: 分類が失敗したときに分類器が残す record（projection の写しと durable な
-    # evidence の読み。store は cleanup で消える）。前回 execution の record も同じ境界で捨てる。
-    local classification_failure="${runtime_metrics_dir}/${function_name}_${left_id}_${right_id}.classification-failure.json"
-    rm -f -- "$classification_failure"
-    # Issue #160: 前回 execution の runtime receipt も同じ境界で捨てる（残すと、この execution が
-    # receipt を書けなかったときに前回の計測値が current の pair に見える）。
-    local pair_stem="${function_name}_${left_id}_${right_id}"
-    validation_reset_pair_runtime_receipts "$runtime_metrics_dir" "$pair_stem"
     local started_at finished_at
     started_at="$(date +%s.%N)"
     local result_entry_occurrence_nonce
@@ -642,19 +622,24 @@ run_pair() {
     fi
     finished_at="$(date +%s.%N)"
 
-    if (( ec == 124 || ec == 137 )); then
-        {
-            echo ""
-            echo "Pair process timeout: exceeded PAIR_PROCESS_TIMEOUT=$PAIR_PROCESS_TIMEOUT"
-            echo "Timeout kill-after: PAIR_PROCESS_KILL_AFTER=$PAIR_PROCESS_KILL_AFTER"
-            echo "Result: TIMEOUT (pair process exceeded wall-clock time limit)"
-        } >> "$log_file"
+    # supervisor の exit code は記録するだけで、結果は署名済みの pair-status だけが決める
+    # （124 は supervisor が期限を記録した終了、137 は supervisor 自身が外から kill された終了）。
+    # ここで "Result: TIMEOUT" と書くと、外からの kill まで確定した結果として log に残す。
+    if (( ec == 124 )); then
+        printf '\nPair supervisor exited with status 124 (deadline recorded by the supervisor); the outcome is the signed pair status only\n' >> "$log_file"
+    elif (( ec == 137 )); then
+        printf '\nPair supervisor exited with status 137 (killed from outside); the outcome is the signed pair status only\n' >> "$log_file"
     fi
 
-    local pair_status_file classification_ec status error_kind child_returncode
-    local pair_status_validation_ec pair_status_validation_detail
+    local classification_ec resolution resolution_ec status error_kind child_returncode
     local cleanup_ec run_pair_ec
-    pair_status_file="${output_dir}/${function_name}_${left_id}_${right_id}.pair-status.json"
+    # 分類器は pair-status を atomic に公開する（公開に失敗すれば status を残さない）。
+    # 結果を確定とするかは分類器の exit code ではなく、公開された status を
+    # validation_resolve_pair_execution（署名・target・正規の終端・この execution の nonce）が
+    # 決める。確定した結果（ERROR / TIMEOUT を含む）は再利用される確定結果で、未完了
+    # （INCOMPLETE）とは区別する。pair job の exit code は下で、Eq runner の既存の policy の
+    # まま決める（確定した ERROR も pair job の失敗に数える。Neq runner とも verification
+    # ledger の記述とも異なる。この契約の差は #276 が PR-B に引き継ぐ）。
     if PYTHONWARNINGS="ignore::RuntimeWarning" "$PYTHON_BIN" -m \
         scripts.function_tracer_pcode.authority.decision.canonical_result \
         --classify-pair-log "$log_file" \
@@ -669,36 +654,24 @@ run_pair() {
         --pair-status-verification-key-file "$PAIR_STATUS_VERIFICATION_KEY_FILE" \
         --pair-execution-target-file "$pair_target_file" --classification-diagnostic-log "$log_file" \
         --classification-failure-output "$classification_failure" \
-        > "$pair_status_file"; then
+        --pair-status-output "$pair_status_file"; then
         classification_ec=0
     else
         classification_ec=$?
     fi
-    if pair_status_validation_detail="$(validate_current_pair_status \
-        "$pair_status_file" "$pair_target_file" 2>&1)"; then
-        pair_status_validation_ec=0
-        status="$pair_status_validation_detail"
-        error_kind="$("$PYTHON_BIN" -c \
-            'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("error_kind") or "-")' \
-            "$pair_status_file")"
-        child_returncode="$("$PYTHON_BIN" -c \
-            'import json,sys; p=json.load(open(sys.argv[1])); print(p.get("child_returncode", "-"))' \
-            "$pair_status_file")"
+    if resolution="$(validation_resolve_pair_execution "$PYTHON_BIN" "$pair_status_file" \
+        "$pair_target_file" "$PAIR_STATUS_VERIFICATION_KEY_FILE" "$execution_nonce" \
+        "$classification_failure" 2>> "$log_file")"; then
+        resolution_ec=0
     else
-        pair_status_validation_ec=$?
-        status="ERROR"
-        error_kind="PAIR_STATUS_AUTHORITY_INVALID"
-        child_returncode="-"
-        echo "Error: generated pair status failed authority validation: $pair_status_file" >&2
-        echo "$pair_status_validation_detail" >&2
-        {
-            echo ""
-            echo "Pair-status authority validation failed:"
-            echo "$pair_status_validation_detail"
-        } >> "$log_file"
+        resolution_ec=$?
     fi
-    if (( pair_status_validation_ec != 0 && classification_ec == 0 )); then
-        classification_ec="$pair_status_validation_ec"
+    IFS=$'\t' read -r status error_kind child_returncode <<< "$resolution"
+    if (( resolution_ec != 0 )) || [[ -z "$status" ]]; then
+        status="INCOMPLETE"
+        [[ -n "${error_kind:-}" ]] || error_kind="PAIR_STATUS_AUTHORITY_INVALID"
+        [[ -n "${child_returncode:-}" ]] || child_returncode="-"
+        echo "Error: no terminal pair status of this execution (classifier exit $classification_ec): $pair_status_file" >&2
     fi
     # Issue #124 PR-124-C: cleanup より前に dump 退避状態を確認して記録する
     # （checkpoint が消えると tmp dump も消える）。cleanup 自体は必ず実行する。
@@ -724,7 +697,11 @@ run_pair() {
     printf ' (error_kind=%s child_exit=%s supervisor_exit=%s)' \
         "$error_kind" "$child_returncode" "$ec"
     printf '\n'
+    # Eq runner の既存の policy（Issue #165 T18）: 確定した ERROR は分類器の exit 1 のまま
+    # pair job の失敗、分類器自身の失敗はその exit code。それ以外で未完了になった pair
+    # （公開されなかった・この execution の status ではない）は 3。
     run_pair_ec="$classification_ec"
+    if [[ "$status" == INCOMPLETE ]] && (( run_pair_ec < 2 )); then run_pair_ec=3; fi
     if (( cleanup_ec != 0 && run_pair_ec == 0 )); then
         run_pair_ec="$cleanup_ec"
     fi
@@ -991,7 +968,10 @@ PREVIOUS_RUN_MANIFEST_FILE="$EQBENCH_RUN_TMPDIR/previous-run-manifest.txt"
 if [[ -s "$RUN_MANIFEST_FILE" ]]; then
     cp "$RUN_MANIFEST_FILE" "$PREVIOUS_RUN_MANIFEST_FILE"
 fi
-cp "$CANDIDATE_RUN_MANIFEST_FILE" "$RUN_MANIFEST_FILE"
+validation_install_file_atomically "$CANDIDATE_RUN_MANIFEST_FILE" "$RUN_MANIFEST_FILE" || {
+    echo "Error: could not install run manifest: $RUN_MANIFEST_FILE" >&2
+    exit 1
+}
 PAIR_STATUS_RESUME_COMPAT_ARGS=()
 SUMMARY_SHORTCUT_AUTHORIZED=0
 if compatible_identity="$("$PYTHON_BIN" -m \
@@ -1371,10 +1351,10 @@ for source_path in "${SAMPLE_SOURCES[@]}"; do
                     break 2
                 fi
                 TOTAL_SCHEDULED_PAIR_JOBS=$((TOTAL_SCHEDULED_PAIR_JOBS + 1))
-                run_pair "$sample_label" "$function_name" "$left_id" "$right_id" \
+                pair_scheduler_launch_job "$output_function_dir" \
+                    run_pair "$sample_label" "$function_name" "$left_id" "$right_id" \
                     "$left_bin" "$right_bin" "$output_function_dir" "$pair_count" "$total_pairs" \
-                    "$pair_target_file" &
-                pair_scheduler_start_job "$output_function_dir" "$!"
+                    "$pair_target_file"
             done
         done
 
@@ -1423,7 +1403,7 @@ validation_run_benchmark_gate "$OUTPUT_BASE_DIR" "$EQBENCH_ROOT" "$SCRIPT_DIR"
 # run_health_summary へ merge する（gate の直後、receipt が hash する前）。
 validation_run_timeout_hotspot_summary "$OUTPUT_BASE_DIR" "$SCRIPT_DIR"
 
-cat >> "$OUTPUT_BASE_DIR/run_manifest.txt" <<EOF
+if ! validation_append_file_atomically "$OUTPUT_BASE_DIR/run_manifest.txt" <<EOF
 completed_samples=$COMPLETED_SAMPLES
 skipped_samples=$SKIPPED_SAMPLES
 total_functions=$TOTAL_FUNCTIONS
@@ -1443,6 +1423,10 @@ benchmark_gate_failures=$VALIDATION_BENCHMARK_GATE_FAILURES
 analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
 end_time_utc=$(validation_utc_timestamp)
 EOF
+then
+    echo "Error: could not complete run manifest: $OUTPUT_BASE_DIR/run_manifest.txt" >&2
+    exit 1
+fi
 
 FINAL_RUN_EXIT_STATUS=0
 if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT > 0 || FUNCTION_CENSUS_FAILURES > 0 || VALIDATION_BENCHMARK_GATE_FAILURES > 0 )); then

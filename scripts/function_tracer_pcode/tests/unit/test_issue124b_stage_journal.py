@@ -1481,25 +1481,24 @@ def test_only_run_pair_removes_a_stage_journal(runner):
     skip した pair の journal を消す経路を作らないことの静的な裏付け。
     skip 側の実挙動そのものは固定 subset の再実行（PR 本文の E1）で確認する。
     """
+    # 評価計画 v2 PR-A: 実行境界（journal・dump・その他の pair 成果物の削除と、その確認）は
+    # 共通 helper `validation_open_pair_execution` が唯一の owner。runner はそれを `run_pair` の中、
+    # supervisor / equiv コマンドの組み立てより前で 1 回だけ呼ぶ。削除の実挙動（削除の失敗で
+    # 解析を始めないことを含む）は test_pair_interruption_boundary が実ファイルで確かめる。
     source = (REPO_ROOT / runner).read_text(encoding="utf-8")
-    # journal path を持つ変数名を assignment から拾う（名前を test に埋めない）。
-    holders = set(re.findall(r'(\w+)="\$\{log[^"]*%\.log\}\.stage\.jsonl"', source))
-    assert holders, "no shell variable holds the pair journal path"
-    removals = [
-        line.strip() for line in source.splitlines()
-        if line.strip().startswith("rm ")
-        and any(f'"${holder}"' in line for holder in holders)
+    assert not [
+        line for line in source.splitlines()
+        if line.strip().startswith("rm ") and (".stage.jsonl" in line or "journal" in line)
     ]
-    assert len(removals) == 1, removals
+    calls = [line for line in source.splitlines() if "validation_open_pair_execution " in line]
+    assert len(calls) == 1, calls
     run_pair = _extract_shell_function(source, "run_pair")
-    assert removals[0] in run_pair
-    # dump 退避先の残骸も同じ関数の中で 1 回だけ捨てる。
-    artifact_holders = set(
-        re.findall(r'^\s*(?:local\s+)?(\w+)=.*\.stack-dump\.txt', source, re.M)
-    ) & set(re.findall(r'rm -f -- "\$(\w+)"', source))
-    assert len(artifact_holders) == 1, artifact_holders
-    # 削除は supervisor / equiv コマンドの組み立てより前にある。
-    assert run_pair.index(removals[0]) < run_pair.index("supervisor_cmd")
+    assert calls[0] in run_pair
+    assert run_pair.index("validation_open_pair_execution") < run_pair.index("supervisor_cmd")
+    common = (REPO_ROOT / "scripts" / "validation_matrix_common.sh").read_text(encoding="utf-8")
+    boundary = _extract_shell_function(common, "validation_open_pair_execution")
+    assert '"$directory/$stem.stage.jsonl"' in boundary
+    assert '"$metrics/$stem.stack-dump.txt"' in boundary
 
 
 @pytest.mark.parametrize("runner", RUNNERS)

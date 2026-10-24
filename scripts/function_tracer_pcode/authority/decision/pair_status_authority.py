@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 import tempfile
 from typing import Any, Mapping
 
@@ -103,6 +104,31 @@ PAIR_STATUS_OPERATIONAL_DIAGNOSTIC_FIELDS = frozenset({
 })
 
 
+# An unsigned operational diagnostic is the classifier saying that it could not
+# finish this pair: no signed terminal status exists, so the pair is *not*
+# completed.  Its state is therefore ``INCOMPLETE`` (the same state as a pair
+# that left no status at all) and never ``ERROR``: an ERROR is a decided result
+# that resume reuses, while a pair without a signed terminal status is always
+# scheduled again (``pair_status_file_skip_decision``).  Counting it as ERROR
+# would report an interrupted pair -- one killed from outside, for example --
+# as a decided outcome that the next run then quietly replaces.
+PAIR_STATUS_OPERATIONAL_DIAGNOSTIC_STATE = "INCOMPLETE"
+
+# Error kinds whose ERROR can depend on the host rather than on the pair (the
+# JVM / PyGhidra could not start, for example under memory pressure).  Such an
+# ERROR is still a decided result that the run keeps and counts in its
+# denominator; the classification only lets reports show it apart from the
+# other ERRORs.  Add a kind here only when the error kind itself says that the
+# analysis never started for an environmental reason.
+ENVIRONMENT_DEPENDENT_ERROR_KINDS = frozenset({"CLI_STARTUP_ERROR"})
+
+
+def error_kind_is_environment_dependent(error_kind: Any) -> bool:
+    """True when an ERROR of this kind may depend on the host, not the pair."""
+
+    return isinstance(error_kind, str) and error_kind in ENVIRONMENT_DEPENDENT_ERROR_KINDS
+
+
 def pair_status_operational_diagnostic(
     payload: Any,
 ) -> Mapping[str, Any] | None:
@@ -142,6 +168,21 @@ def _atomic_write(path: Path, data: bytes, mode: int) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def write_pair_status_file(path: Path, payload: Mapping[str, Any]) -> None:
+    """Publish a pair-status (signed or the operational diagnostic) atomically.
+
+    The file appears only as a whole: a classifier killed while writing leaves
+    no pair-status (or the previous one, which the runner has already removed
+    at the execution boundary), never a torn one.
+    """
+
+    _atomic_write(
+        Path(path),
+        (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"),
+        0o644,
+    )
 
 
 def _public_key_payload(public_key_bytes: bytes) -> Mapping[str, Any]:
@@ -506,7 +547,18 @@ def pair_status_file_skip_decision(
     compatible_analysis_config_digest: str | None = None,
     compatible_analysis_source_digest: str | None = None,
 ) -> str:
-    """Return SCHEDULE for every missing or unverifiable pair artifact."""
+    """Return SKIP only for a pair whose result may be reused as it is.
+
+    Reuse needs all three of: a valid seal (signature, key, schema and body),
+    the expected identity (the whole ``pair_execution_target``: source,
+    binaries, analysis source and config digests), and a regular terminal
+    state (``RESOLVED``, or a durable ``TIMEOUT``/``ERROR`` whose deadline and
+    child-exit evidence validated).  A file that merely *has* a signature
+    field, a different target, the unsigned operational diagnostic, an empty or
+    torn file, or a missing log is SCHEDULE.  Among reusable statuses every
+    outcome is kept, ERROR and TIMEOUT included: they are decided results and
+    resume must not overwrite them (only ``ERROR_ONLY`` mode re-runs ERRORs).
+    """
 
     try:
         if (
@@ -545,6 +597,10 @@ def pair_status_file_skip_decision(
             })
         if body["pair_execution_target"] not in accepted_targets:
             return "SCHEDULE"
+        if pair_status_finalization(
+            payload, public_key_path=public_key_path,
+        ) not in (FINALIZATION_RESOLVED, FINALIZATION_DURABLE):
+            return "SCHEDULE"
         disposition = pair_status_resume_disposition(body)
         return (
             "SKIP" if resume_disposition_should_skip(disposition, mode=mode)
@@ -552,6 +608,64 @@ def pair_status_file_skip_decision(
         )
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
         return "SCHEDULE"
+
+
+#: exit code of ``--resolve-pair-execution`` for a pair without a decided status
+PAIR_EXECUTION_INCOMPLETE_EXIT = 3
+
+
+def resolve_pair_execution(
+    pair_status_path: Path, *, expected_pair_target_path: Path, public_key_path: Path,
+    execution_nonce: str, classification_failure_record: Path | None = None,
+) -> tuple[str, str, str, str | None]:
+    """What *this* execution of a pair produced: ``(state, error_kind, child rc, reason)``.
+
+    The pair is decided only when the published status has a valid seal, the
+    expected target, a regular terminal state, and the ``execution_nonce`` of
+    this execution -- so a status left over from an earlier execution (one the
+    execution boundary failed to remove, say) is never taken for this
+    execution's result, even when it is validly signed for the same target.
+    ``state`` is then the canonical outcome and ``reason`` is ``None``.
+
+    Everything else -- no status, the unsigned classification diagnostic, a
+    torn or invalid file, another target or another execution -- is
+    ``INCOMPLETE`` with the reason, and its child return code comes only from
+    the classifier's failure record (recorded, never inferred).
+    """
+
+    try:
+        payload = json.loads(Path(pair_status_path).read_text(encoding="utf-8"))
+        if pair_status_operational_diagnostic(payload) is not None:
+            raise ValueError("classification did not finish (operational diagnostic)")
+        body = validate_signed_pair_status(payload, public_key_path=public_key_path)
+        expected_target = json.loads(
+            Path(expected_pair_target_path).read_text(encoding="utf-8")
+        )
+        if body["pair_execution_target"] != expected_target:
+            raise ValueError("signed pair-status target differs from this execution's target")
+        if pair_status_finalization(payload, public_key_path=public_key_path) not in (
+            FINALIZATION_RESOLVED, FINALIZATION_DURABLE,
+        ):
+            raise ValueError("signed pair-status has no regular terminal state")
+        if body["execution_nonce"] != execution_nonce:
+            raise ValueError("signed pair-status belongs to another execution")
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, KeyError, TypeError) as exc:
+        returncode = None
+        if classification_failure_record is not None:
+            from scripts.function_tracer_pcode.authority.decision.classification_failure import (
+                recorded_child_returncode,
+            )
+            returncode = recorded_child_returncode(Path(classification_failure_record))
+        return (
+            PAIR_STATUS_OPERATIONAL_DIAGNOSTIC_STATE, "PAIR_STATUS_AUTHORITY_INVALID",
+            "-" if returncode is None else str(returncode),
+            f"{type(exc).__name__}: {exc}",
+        )
+    child_returncode = body.get("child_returncode")
+    return (
+        body["canonical_outcome"], body.get("error_kind") or "-",
+        "-" if child_returncode is None else str(child_returncode), None,
+    )
 
 
 def legacy_pair_status_target_matches(
@@ -634,7 +748,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--expected-pair-target")
     parser.add_argument("--compatible-analysis-config-digest")
     parser.add_argument("--compatible-analysis-source-digest")
+    parser.add_argument("--resolve-pair-execution")
+    parser.add_argument("--expected-execution-nonce")
+    parser.add_argument("--classification-failure-record")
     args = parser.parse_args(argv)
+    if args.resolve_pair_execution:
+        if not (args.expected_pair_target and args.public_key and args.expected_execution_nonce):
+            parser.error(
+                "--resolve-pair-execution requires --expected-pair-target, "
+                "--public-key and --expected-execution-nonce"
+            )
+        state, error_kind, child_returncode, reason = resolve_pair_execution(
+            Path(args.resolve_pair_execution),
+            expected_pair_target_path=Path(args.expected_pair_target),
+            public_key_path=Path(args.public_key),
+            execution_nonce=args.expected_execution_nonce,
+            classification_failure_record=(
+                None if args.classification_failure_record is None
+                else Path(args.classification_failure_record)
+            ),
+        )
+        print(f"{state}\t{error_kind}\t{child_returncode}")
+        if reason is not None:
+            print(f"Pair has no decided status of this execution: {reason}", file=sys.stderr)
+            return PAIR_EXECUTION_INCOMPLETE_EXIT
+        return 0
     if args.generate_private_key:
         if not args.generate_private_key or not args.write_public_key:
             parser.error("key generation requires private and public output paths")
@@ -685,7 +823,7 @@ def main(argv: list[str] | None = None) -> int:
         payload = json.loads(pair_status_path.read_text(encoding="utf-8"))
         diagnostic = pair_status_operational_diagnostic(payload)
         if args.allow_operational_diagnostic and diagnostic is not None:
-            print("ERROR")
+            print(PAIR_STATUS_OPERATIONAL_DIAGNOSTIC_STATE)
             return 0
         public_key_path = (
             Path(args.public_key) if args.public_key

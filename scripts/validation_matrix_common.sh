@@ -167,14 +167,6 @@ validation_new_runtime_run_id() {
     printf '%s\n' "$run_id"
 }
 
-# 前回 execution の receipt を捨てる。run_pair の中、新しい child を起こす前（journal と同じ境界）で呼ぶ。
-#   validation_reset_pair_runtime_receipts <metrics_dir> <pair_stem>
-validation_reset_pair_runtime_receipts() {
-    local metrics_dir="$1" stem="$2"
-    rm -f -- "$metrics_dir/$stem.progress.json" "$metrics_dir/$stem.runtime.json" || true
-    return 0
-}
-
 # receipt を 1 つ書く。値はすべて引数で渡す（runner の global を読まない）。
 # 引数は pair_runtime_receipt の `write` subcommand の option をそのまま渡す。
 #   validation_write_pair_runtime_receipt <python_bin> --metrics-dir D --stem S --state RUNNING|COMPLETED \
@@ -189,6 +181,181 @@ validation_write_pair_runtime_receipt() {
         echo "Warning: pair runtime receipt was not written (diagnostic only): $*" >&2
     fi
     return 0
+}
+
+# ---------------------------------------------------------------------------
+# 中断と確定の境界（評価計画 v2 PR-A）。2 本の runner はここだけを呼ぶ。
+# ---------------------------------------------------------------------------
+
+# 停止を確かめられなかった（所有している process が残る、所有かどうかを確かめられない process
+# がある、期限までに確認を終えられなかった、process 表を観測できなかった）ときの runner の
+# exit code。run の一時 dir は残す。
+VALIDATION_STOP_UNCONFIRMED_EXIT=75
+
+# この runner の execution が起こす process の所有権を取る。runner の先頭で、何かを起動する
+# 前に（cd の前に）`validation_claim_process_ownership "$0" "$@"` と呼ぶ。
+# owner token を**環境変数として持たせたうえで runner 自身を exec し直す**。bash の export は
+# 自分の /proc/<pid>/environ を変えないので、exec し直さないと、exec を経ない fork（subshell、
+# pair job、progress の loop）の environ に token が現れず、親を失ったときに見つけられない。
+# exec し直した後は、fork だけの子も exec した子も token を持つ（scripts/eqbench/runner_processes.py）。
+# 判定は runner_processes の claim が行う（pipe は使わない。読めた・無い・読めないを区別する）。
+# exec し直しは runner の (pid, 起動時刻) に結び付けるので 1 回だけ: exec し直した後に自分の
+# environ で token を確かめられなければ、もう一度 exec せずに失敗する。別の runner から受け
+# 継いだ owner の値は一致しないので、入れ子の runner は自分の token で exec し直す。
+validation_claim_process_ownership() {
+    local script="$1" python_bin="${PYTHON_BIN:-python3}" claim status token start
+    shift
+    [[ "$python_bin" != */* || "$python_bin" == /* ]] || python_bin="$PWD/$python_bin"
+    claim="$(cd "$_VALIDATION_REPO_ROOT" && "$python_bin" -B -m scripts.eqbench.runner_processes \
+        claim --pid "$$")" && status=0 || status=$?
+    case "$status" in
+        0)
+            export EQBENCH_PROCESS_OWNER_TOKEN EQBENCH_PROCESS_OWNER_ROOT EQBENCH_PROCESS_OWNER_ROOT_START
+            return 0
+            ;;
+        3)
+            read -r token start <<< "$claim"
+            [[ "$token" =~ ^[0-9a-f]{32}$ && "$start" =~ ^[0-9]+$ ]] || return 1
+            exec env EQBENCH_PROCESS_OWNER_TOKEN="$token" EQBENCH_PROCESS_OWNER_ROOT="$$" \
+                EQBENCH_PROCESS_OWNER_ROOT_START="$start" "$BASH" "$script" "$@"
+            ;;
+    esac
+    return 1
+}
+
+# 所有している process を凍結し、SIGKILL し、消えたことを確かめる。0 を返すのは、期限内に
+# 確認を終えたとき（runner_processes の verdict が CONFIRMED）だけ。残った process、所有かどうかを
+# 確かめられない process、期限切れ（最新の走査が空でも）、観測の失敗はすべて非 0（呼び出し側は
+# tmp を消さない）。
+validation_stop_owned_processes() {
+    local python_bin="${1:-${PYTHON_BIN:-python3}}"
+    [[ -n "${EQBENCH_PROCESS_OWNER_TOKEN:-}" && -n "${EQBENCH_PROCESS_OWNER_ROOT:-}" ]] || return 1
+    [[ "$python_bin" != */* || "$python_bin" == /* ]] || python_bin="$PWD/$python_bin"
+    (cd "$_VALIDATION_REPO_ROOT" && "$python_bin" -B -m scripts.eqbench.runner_processes stop \
+        --token "$EQBENCH_PROCESS_OWNER_TOKEN" --root "$EQBENCH_PROCESS_OWNER_ROOT")
+}
+
+# runner の TERM / INT / HUP の handler。以後の停止要求は無視し（停止は 1 回だけ）、
+# 所有している process がすべて止まったことを確かめてから、run の一時 dir を消す関数
+# <cleanup> を呼んで <exit_status> で終わる。確かめられなければ一時 dir を残し、
+# VALIDATION_STOP_UNCONFIRMED_EXIT で終わる。
+#   trap 'validation_handle_stop_signal 143 <cleanup>' TERM
+validation_handle_stop_signal() {
+    local exit_status="$1" cleanup="$2"
+    trap '' HUP INT TERM
+    trap - EXIT
+    _validation_stop_then_cleanup "$cleanup" || exit_status="$VALIDATION_STOP_UNCONFIRMED_EXIT"
+    exit "$exit_status"
+}
+
+# runner の EXIT の handler。正常終了でも、途中の失敗（set -e など）で抜けるときも、
+# 所有している process が残っていれば止めて確かめてから一時 dir を消す。
+# 確かめられなければ一時 dir を残し、正常終了だったときは VALIDATION_STOP_UNCONFIRMED_EXIT で
+# 終わる（すでに失敗の exit code なら、それを残す。どちらも失敗を示す）。
+#   trap 'validation_handle_exit <cleanup>' EXIT
+validation_handle_exit() {
+    local exit_status=$? cleanup="$1"
+    trap '' HUP INT TERM
+    trap - EXIT
+    if ! _validation_stop_then_cleanup "$cleanup" && (( exit_status == 0 )); then
+        exit_status="$VALIDATION_STOP_UNCONFIRMED_EXIT"
+    fi
+    exit "$exit_status"
+}
+
+_validation_stop_then_cleanup() {
+    local cleanup="$1"
+    if validation_stop_owned_processes; then
+        "$cleanup" || true
+        return 0
+    fi
+    echo "Error: the processes of this run could not all be confirmed stopped; the run tmpdir is kept" >&2
+    return 1
+}
+
+# pair の execution 境界を開く。前回 execution の pair-status（atomic な公開の書きかけの
+# 一時 file を含む）、stage journal、stack dump とその状態、分類失敗の record、runtime
+# receipt を消し、**消えたことを確かめる**。1 つでも残れば非 0 を返し、残った path を
+# stderr に書く。呼び出し側は解析を始めてはならない（残った前回の結果を、今回の結果と
+# 取り違えないため）。
+#   validation_open_pair_execution <pair の output dir> <pair stem>
+validation_open_pair_execution() {
+    local directory="$1" stem="$2" metrics path
+    metrics="$directory/.runtime-metrics"
+    mkdir -p -- "$metrics" 2>/dev/null
+    local -a paths=(
+        "$directory/$stem.pair-status.json"
+        "$directory/$stem.stage.jsonl"
+        "$metrics/$stem.stack-dump.txt"
+        "$metrics/$stem.stack-dump.status.json"
+        "$metrics/$stem.classification-failure.json"
+        "$metrics/$stem.progress.json"
+        "$metrics/$stem.runtime.json"
+    )
+    local -a partials=()
+    shopt -s nullglob
+    partials=("$directory/.$stem.pair-status.json."*)
+    shopt -u nullglob
+    rm -f -- "${paths[@]}" "${partials[@]}" 2>/dev/null
+    local -a remaining=()
+    for path in "${paths[@]}"; do
+        if [[ -e "$path" || -L "$path" ]]; then remaining+=("$path"); fi
+    done
+    shopt -s nullglob
+    for path in "$directory/.$stem.pair-status.json."*; do remaining+=("$path"); done
+    shopt -u nullglob
+    if (( ${#remaining[@]} > 0 )); then
+        printf 'Error: pair execution boundary could not remove: %s\n' "${remaining[@]}" >&2
+        return 1
+    fi
+    if [[ ! -d "$metrics" || ! -w "$metrics" || ! -w "$directory" ]]; then
+        echo "Error: pair execution boundary: output directory is not writable: $directory" >&2
+        return 1
+    fi
+    return 0
+}
+
+# 分類器が公開した pair-status を、この execution の結果として読む。署名・期待する
+# target・正規の終端・**この execution の nonce** がすべて確かめられたときだけ確定とし、
+# それ以外（status が無い・分類失敗の診断・壊れている・別の target / 別の execution）は
+# INCOMPLETE にする。stdout に "<状態>\t<error_kind>\t<child rc>" を 1 行書き、確定なら
+# 0、未完了なら 3 を返す。理由は stderr に書く。
+#   validation_resolve_pair_execution <python> <status> <target> <public key> <nonce> <classification-failure record>
+validation_resolve_pair_execution() {
+    local python_bin="$1"
+    shift
+    [[ "$python_bin" != */* || "$python_bin" == /* ]] || python_bin="$PWD/$python_bin"
+    (cd "$_VALIDATION_REPO_ROOT" && "$python_bin" -B -m \
+        scripts.function_tracer_pcode.authority.decision.pair_status_authority \
+        --resolve-pair-execution "$1" --expected-pair-target "$2" --public-key "$3" \
+        --expected-execution-nonce "$4" --classification-failure-record "$5")
+}
+
+# 実行記録（run_manifest.txt など）を丸ごと置き換える / 追記する。どちらも同じ dir の一時
+# file に書いてから rename するので、途中で kill されても書きかけの file は残らない。
+validation_install_file_atomically() {
+    local source="$1" destination="$2" temporary
+    temporary="$(mktemp "${destination%/*}/.${destination##*/}.XXXXXX")" || return 1
+    if cp -- "$source" "$temporary" \
+        && chmod "$(printf '%o' $((0666 & ~$(umask))))" "$temporary" \
+        && mv -f -- "$temporary" "$destination"; then
+        return 0
+    fi
+    rm -f -- "$temporary"
+    return 1
+}
+
+# stdin を destination の末尾に足した内容で destination を置き換える。
+validation_append_file_atomically() {
+    local destination="$1" temporary
+    temporary="$(mktemp "${destination%/*}/.${destination##*/}.XXXXXX")" || return 1
+    if { if [[ -e "$destination" ]]; then cat -- "$destination"; fi; cat; } > "$temporary" \
+        && chmod "$(printf '%o' $((0666 & ~$(umask))))" "$temporary" \
+        && mv -f -- "$temporary" "$destination"; then
+        return 0
+    fi
+    rm -f -- "$temporary"
+    return 1
 }
 
 # 実行記録の 1 行に安全に埋め込める形へ整える（改行・復帰を潰す）。
