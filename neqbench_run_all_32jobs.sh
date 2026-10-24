@@ -256,6 +256,14 @@ RUNTIME_RUN_ID="$(validation_new_runtime_run_id "$PYTHON_BIN")" || exit 1
 # 先に組み立てる。FULL_NEQ ではこれを出力先の受理判定にかけ、後で同じ file を manifest の先頭にする。
 # ERROR_ONLY_RERUN is receipt-bound scheduling policy, not part of the
 # semantic analysis-config digest used by reusable pair targets.
+# 評価計画 v2 PR-B: 実行環境の行（tool の version、container の資源上限、wrapper の
+# fingerprint）。analysis_config_digest には入らないが、実行の連鎖の検証器が execution 間で
+# 一致を要求する。
+EXECUTION_ENVIRONMENT_LINES="$(validation_execution_chain "$PYTHON_BIN" \
+    environment-lines --repo-root "$SCRIPT_DIR")" || {
+    echo "Error: could not record the execution environment" >&2
+    exit 1
+}
 RUN_MANIFEST_HEAD="$RUN_TMP/run_manifest.head.txt"
 cat > "$RUN_MANIFEST_HEAD" <<EOF
 run_kind=neqbench_all_same_isa_function_closure_current
@@ -284,7 +292,8 @@ callee_unbound_reuse_shadow=$FT_CALLEE_UNBOUND_REUSE_SHADOW
 skip_completed_results=$SKIP_COMPLETED_RESULTS
 error_only_rerun=$ERROR_ONLY_RERUN
 debug=$EQBENCH_DEBUG
-analysis_config_schema=eqbench-analysis-config-v4
+analysis_config_schema=eqbench-analysis-config-v5
+matrix_publication_schema=eqbench-matrix-publication-manifest-v4
 identical_fast_path=$EQBENCH_IDENTICAL_FAST_PATH
 max_samples=$NEQ_MAX_SAMPLES
 sample_filter=$NEQ_SAMPLE_FILTER
@@ -310,6 +319,7 @@ hostname=$RUN_HOSTNAME
 $RUN_GIT_STATE_LINES
 analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST
 runtime_run_id=$RUNTIME_RUN_ID
+$EXECUTION_ENVIRONMENT_LINES
 EOF
 CONFIG_DIGEST="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt --run-manifest "$RUN_MANIFEST_HEAD" --print-analysis-config-digest)"
 if [[ "$NEQ_RUN_SCOPE" == FULL_NEQ ]]; then
@@ -626,6 +636,18 @@ run_pair() {
     identity="$(PYTHONWARNINGS=ignore::RuntimeWarning "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.production_cutover --print-production-execution-identity --binary1-path "$left" --binary2-path "$right" --binary1-id "$left_id" --binary2-id "$right_id" --function-name1 "$function" --function-name2 "$function" --result-entry-occurrence-nonce "$nonce")"
     IFS=$'\t' read -r result_id source_fp stream <<< "$identity"
     exec_nonce="$(printf '%s' "$result_id" | sed 's/^production-pilot-//')"; checkpoint="$RUN_TMP/process-authority"; authority="$checkpoint/$exec_nonce/supervisor-projection.json"; mkdir -p "$checkpoint"
+    # 評価計画 v2 PR-B: この execution がこの nonce で pair を始めることを、解析より前に残す
+    # （kill されても、署名済みの status をこの execution に結び付けられる）。残せなければ
+    # 解析を始めない。
+    if ! validation_execution_chain "$PYTHON_BIN" issue --root "$OUTPUT_BASE_DIR" \
+        --run-id "$RUNTIME_RUN_ID" --execution-nonce "$exec_nonce" \
+        --pair-status "$out/$pair_stem.pair-status.json" --target-file "$target"; then
+        rm -rf "$pair_tmp"
+        printf '[%s/%s] [%s %s/%s pair=%s/%s] %s <-> %s : ISSUE_FAILED (no analysis started)\n' \
+            "$sample_position" "$SOURCE_PAIR_COUNT" "$sample" \
+            "$function_position" "$function_total" "$count" "$total" "$left_id" "$right_id"
+        return 1
+    fi
     # Issue #160: receipt は pair-status と同じ execution_nonce で束縛する。値は引数で渡す。
     local -a receipt_args=(
         --metrics-dir "$metrics_dir" --stem "$pair_stem"
@@ -664,22 +686,22 @@ run_pair() {
     "$PYTHON_BIN" -m scripts.function_tracer_pcode.authority.decision.canonical_result --classify-pair-log "$log" --supervisor-projection "$authority" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" --supervisor-signing-key-id "$SUPERVISOR_KEY_ID" --supervisor-signing-key-file "$SUPERVISOR_KEY" --worker-signing-key-id "$WORKER_KEY_ID" --worker-signing-key-file "$WORKER_KEY" --pair-status-signing-private-key-file "$PAIR_PRIVATE_KEY" --pair-status-verification-key-file "$PAIR_PUBLIC_KEY" --pair-execution-target-file "$target" --classification-diagnostic-log "$log" --classification-failure-output "$classification_failure" --pair-status-output "$status_file" || true
     # 結果を確定とするかは分類器の exit code ではなく、公開された status を
     # validation_resolve_pair_execution（署名・target・正規の終端・この execution の nonce）が
-    # 決める。確定した結果（ERROR / TIMEOUT を含む）は再利用される確定結果で、Neq runner の
-    # 既存の policy のまま pair job の失敗に数えない。未完了（INCOMPLETE）と cleanup の失敗だけが
-    # 失敗（Eq runner は確定した ERROR も失敗に数える。この契約の差は #276 が PR-B に引き継ぐ）。
-    local resolution status error_kind child_returncode pair_ec=0
+    # 決める。確定した結果（ERROR / TIMEOUT を含む）は再利用される確定結果で、未完了
+    # （INCOMPLETE）とは区別する。pair job の exit code は validation_conclude_pair_job が
+    # 決める（Issue #276: Eq と同じ規則）。
+    local resolution status error_kind child_returncode resolution_ec=0 cleanup_ec=0 pair_ec
     resolution="$(validation_resolve_pair_execution "$PYTHON_BIN" "$status_file" "$target" \
-        "$PAIR_PUBLIC_KEY" "$exec_nonce" "$classification_failure" 2>> "$log")" || pair_ec=1
+        "$PAIR_PUBLIC_KEY" "$exec_nonce" "$classification_failure" 2>> "$log")" || resolution_ec=$?
     IFS=$'\t' read -r status error_kind child_returncode <<< "$resolution"
-    if (( pair_ec != 0 )) || [[ -z "$status" ]]; then
-        status=INCOMPLETE; pair_ec=1
+    if (( resolution_ec != 0 )) || [[ -z "$status" ]]; then
+        status=INCOMPLETE
         [[ -n "${error_kind:-}" ]] || error_kind="PAIR_STATUS_AUTHORITY_INVALID"
         [[ -n "${child_returncode:-}" ]] || child_returncode="-"
     fi
     # Issue #124 PR-124-C: cleanup より前に dump 退避状態を確認して記録する。
     # cleanup 自体は従来どおり必ず実行し、失敗の扱いも変えない。
     validation_record_stack_dump_state "$STACK_DUMP_ARTIFACT_STATE_FILE" "$sample" "$function"_"$left_id"_"$right_id" "$dump_status" "$dump_artifact" "$log"
-    "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.process_authority_cleanup --tmp-root "$EQBENCH_TMPDIR" --run-tmpdir "$RUN_TMP" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" || { printf '%s\t%s\t%s\n' "$sample" "$function" "$exec_nonce" >> "$PROCESS_CLEANUP_FAILURES"; pair_ec=1; }
+    "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.process_authority_cleanup --tmp-root "$EQBENCH_TMPDIR" --run-tmpdir "$RUN_TMP" --checkpoint-root "$checkpoint" --execution-nonce "$exec_nonce" || { printf '%s\t%s\t%s\n' "$sample" "$function" "$exec_nonce" >> "$PROCESS_CLEANUP_FAILURES"; cleanup_ec=1; }
     validation_write_pair_runtime_receipt "$PYTHON_BIN" --state COMPLETED \
         "${receipt_args[@]}" "${usage_args[@]}" --finished-at-epoch "$finished_at" \
         --status "$status" --error-kind "$error_kind" --child-returncode "$child_returncode"
@@ -690,6 +712,9 @@ run_pair() {
         "$sample_position" "$SOURCE_PAIR_COUNT" "$sample" \
         "$function_position" "$function_total" "$count" "$total" \
         "$left_id" "$right_id" "$status"
+    # Issue #276: 確定した結果（ERROR を含む）は pair job の失敗ではない。未完了は 3、
+    # cleanup の失敗は 1（2 本の runner で同じ owner）。
+    validation_conclude_pair_job "$status" "$cleanup_ec" && pair_ec=0 || pair_ec=$?
     return "$pair_ec"
 }
 # Per-function summary, produced by the cross-function pair scheduler once
@@ -719,6 +744,18 @@ validation_install_file_atomically "$RUN_MANIFEST_CANDIDATE" "$RUN_MANIFEST" || 
     echo "Error: could not install run manifest: $RUN_MANIFEST" >&2
     exit 1
 }
+# 評価計画 v2 PR-B: この execution の開始の記録（.executions/<runtime_run_id>/、上書きしない）。
+# pair を始める前に残せなければ、run を始めない。
+validation_execution_chain "$PYTHON_BIN" start --root "$OUTPUT_BASE_DIR" \
+    --run-id "$RUNTIME_RUN_ID" --manifest "$RUN_MANIFEST" || {
+    chain_ec=$?
+    echo "Error: could not record the start of this execution under $OUTPUT_BASE_DIR/.executions" >&2
+    exit "$chain_ec"
+}
+# Issue #276: pair job の結論（確定した ERROR と未完了）を数える file（run の tmp）。
+VALIDATION_PAIR_CONCLUSIONS_FILE="$RUN_TMP/pair-conclusions.txt"
+: > "$VALIDATION_PAIR_CONCLUSIONS_FILE"
+export VALIDATION_PAIR_CONCLUSIONS_FILE
 PAIR_STATUS_RESUME_COMPAT_ARGS=()
 SUMMARY_SHORTCUT_AUTHORIZED=0
 if compatible_identity="$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt \
@@ -940,6 +977,8 @@ missing_binary_count=$MISSING_BINARY_COUNT
 function_census_failure_count=$FUNCTION_CENSUS_FAILURES
 run_pair_failures=$RUN_PAIR_FAILURES
 run_failures=$RUN_PAIR_FAILURES
+decided_error_pair_jobs=$(validation_count_pair_conclusions "$VALIDATION_PAIR_CONCLUSIONS_FILE" ERROR)
+incomplete_pair_jobs=$(validation_count_pair_conclusions "$VALIDATION_PAIR_CONCLUSIONS_FILE" INCOMPLETE)
 benchmark_gate_status=$VALIDATION_BENCHMARK_GATE_STATUS
 benchmark_gate_failures=$VALIDATION_BENCHMARK_GATE_FAILURES
 analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
@@ -954,6 +993,13 @@ if (( RUN_PAIR_FAILURES > 0 || RUN_COMPILE_FAILURES > 0 || MISSING_BINARY_COUNT 
     exit_status=1
 fi
 "$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_receipt --repo-root "$SCRIPT_DIR" --private-key "$PAIR_PRIVATE_KEY" --public-key "$PAIR_PUBLIC_KEY" --output "$OUTPUT_BASE_DIR/validation-execution-receipt.json" --matrix-root "$OUTPUT_BASE_DIR" --source-digest-start "$ANALYSIS_SOURCE_DIGEST" --analysis-config-digest "$CONFIG_DIGEST" --exit-status "$exit_status" -- "env" "NEQ_RUN_SCOPE=$NEQ_RUN_SCOPE" "NEQ_BUILD_POLICY=$NEQ_BUILD_POLICY" "ERROR_RERUN_MANIFEST_SHA256=$ERROR_RERUN_MANIFEST_SHA256" "ERROR_RERUN_RUN_ID=$ERROR_RERUN_RUN_ID" "SKIP_COMPLETED_RESULTS=$SKIP_COMPLETED_RESULTS" "ERROR_ONLY_RERUN=$ERROR_ONLY_RERUN" "EQBENCH_BENCHMARK_GATE=${EQBENCH_BENCHMARK_GATE:-1}" "EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS=${EQBENCH_BENCHMARK_GATE_FAIL_ON_SUSPICIOUS:-0}" "EQBENCH_GROUND_TRUTH_FILE=${EQBENCH_GROUND_TRUTH_FILE:-}" "ANALYSIS_TIMEOUT=${ANALYSIS_TIMEOUT-}" "ANALYSIS_TIMEOUT_MARGIN=${ANALYSIS_TIMEOUT_MARGIN-}" "./neqbench_run_all_32jobs.sh"
+# 評価計画 v2 PR-B: 正常に終えた execution の最終の記録を、その execution の記録に複製する。
+validation_execution_chain "$PYTHON_BIN" seal --root "$OUTPUT_BASE_DIR" \
+    --run-id "$RUNTIME_RUN_ID" || {
+    chain_ec=$?
+    echo "Error: could not seal this execution under $OUTPUT_BASE_DIR/.executions" >&2
+    exit "$chain_ec"
+}
 echo "NeqBench same-ISA caller-closure matrix finished: $OUTPUT_BASE_DIR"
 if (( VALIDATION_BENCHMARK_GATE_FAILURES > 0 )); then
     echo "Error: benchmark validation gate $VALIDATION_BENCHMARK_GATE_STATUS; see $OUTPUT_BASE_DIR/benchmark_validation_gate.txt" >&2

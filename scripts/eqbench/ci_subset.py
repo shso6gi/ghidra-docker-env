@@ -97,7 +97,7 @@ BENCHMARK_GATE_PASS = "PASS"
 BINARY_MANIFEST_HEADER = "# eqbench-binary-manifest-v1"
 PAIR_STATUS_SUFFIX = ".pair-status.json"
 
-DEFAULT_ANALYSIS_CONFIG_SCHEMA = "eqbench-analysis-config-v4"
+DEFAULT_ANALYSIS_CONFIG_SCHEMA = "eqbench-analysis-config-v5"
 
 #: ``subset_manifest.txt``'s ``pr`` field when ``SUBSET_PR`` was never set.
 #: The CI workflow leaves it that way on purpose: that field says which pull
@@ -126,7 +126,12 @@ DIAGNOSTIC_OUTCOMES = ("ERROR", "TIMEOUT")
 
 #: The run's own account of the pairs it meant to produce (Issue #104 / #123).
 PUBLICATION_MANIFEST_FILE = "matrix-publication-manifest.json"
-PUBLICATION_MANIFEST_SCHEMA = "eqbench-matrix-publication-manifest-v3"
+PUBLICATION_MANIFEST_SCHEMA = "eqbench-matrix-publication-manifest-v4"
+#: v3 is what the runners published before the execution chain (eval plan v2
+#: PR-B); both carry the same expected-pair census this module reads.
+PUBLICATION_MANIFEST_SCHEMAS = (
+    "eqbench-matrix-publication-manifest-v3", PUBLICATION_MANIFEST_SCHEMA,
+)
 
 #: The fixed subset's definition -- the source of truth for which samples and
 #: pair ids the subset is, so the expected pair set is never a number written
@@ -646,10 +651,10 @@ def _publication_manifest(run_dir: Path, half: str) -> Mapping[str, object]:
             f"{half}/{PUBLICATION_MANIFEST_FILE} is not a JSON object"
         )
     schema = payload.get("schema")
-    if schema != PUBLICATION_MANIFEST_SCHEMA:
+    if schema not in PUBLICATION_MANIFEST_SCHEMAS:
         raise SubsetCiError(
-            f"{half}/{PUBLICATION_MANIFEST_FILE} has schema {schema!r}, expected "
-            f"{PUBLICATION_MANIFEST_SCHEMA!r}"
+            f"{half}/{PUBLICATION_MANIFEST_FILE} has schema {schema!r}, expected one of "
+            f"{PUBLICATION_MANIFEST_SCHEMAS!r}"
         )
     paths = payload.get("expected_pair_status_paths")
     if not isinstance(paths, list) or not paths or not all(

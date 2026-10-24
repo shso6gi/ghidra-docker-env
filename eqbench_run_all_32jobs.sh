@@ -505,6 +505,18 @@ run_pair() {
         <<< "$identity_line"
     local execution_nonce checkpoint_root authority_output
     execution_nonce="${result_occurrence_id#production-pilot-}"
+    # 評価計画 v2 PR-B: この execution がこの nonce で pair を始めることを、解析より前に残す
+    # （kill されても、署名済みの status をこの execution に結び付けられる）。残せなければ
+    # 解析を始めない。
+    if ! validation_execution_chain "$PYTHON_BIN" issue --root "$OUTPUT_BASE_DIR" \
+        --run-id "$RUNTIME_RUN_ID" --execution-nonce "$execution_nonce" \
+        --pair-status "$output_dir/${pair_stem}.pair-status.json" \
+        --target-file "$pair_target_file"; then
+        rm -rf -- "$pair_tmpdir"
+        printf '[%s] [%s %s/%s] %s <-> %s : ISSUE_FAILED (no analysis started)\n' \
+            "$sample_label" "$function_name" "$count" "$total" "$left_id" "$right_id"
+        return 1
+    fi
     checkpoint_root="${EQBENCH_RUN_TMPDIR}/process-authority"
     authority_output="${checkpoint_root}/${execution_nonce}/supervisor-projection.json"
     mkdir -p "$checkpoint_root"
@@ -637,9 +649,8 @@ run_pair() {
     # 結果を確定とするかは分類器の exit code ではなく、公開された status を
     # validation_resolve_pair_execution（署名・target・正規の終端・この execution の nonce）が
     # 決める。確定した結果（ERROR / TIMEOUT を含む）は再利用される確定結果で、未完了
-    # （INCOMPLETE）とは区別する。pair job の exit code は下で、Eq runner の既存の policy の
-    # まま決める（確定した ERROR も pair job の失敗に数える。Neq runner とも verification
-    # ledger の記述とも異なる。この契約の差は #276 が PR-B に引き継ぐ）。
+    # （INCOMPLETE）とは区別する。pair job の exit code は validation_conclude_pair_job が
+    # 決める（Issue #276: Neq と同じ規則）。
     if PYTHONWARNINGS="ignore::RuntimeWarning" "$PYTHON_BIN" -m \
         scripts.function_tracer_pcode.authority.decision.canonical_result \
         --classify-pair-log "$log_file" \
@@ -697,14 +708,9 @@ run_pair() {
     printf ' (error_kind=%s child_exit=%s supervisor_exit=%s)' \
         "$error_kind" "$child_returncode" "$ec"
     printf '\n'
-    # Eq runner の既存の policy（Issue #165 T18）: 確定した ERROR は分類器の exit 1 のまま
-    # pair job の失敗、分類器自身の失敗はその exit code。それ以外で未完了になった pair
-    # （公開されなかった・この execution の status ではない）は 3。
-    run_pair_ec="$classification_ec"
-    if [[ "$status" == INCOMPLETE ]] && (( run_pair_ec < 2 )); then run_pair_ec=3; fi
-    if (( cleanup_ec != 0 && run_pair_ec == 0 )); then
-        run_pair_ec="$cleanup_ec"
-    fi
+    # Issue #276: 確定した結果（ERROR を含む）は pair job の失敗ではない。未完了は 3、
+    # cleanup の失敗はその exit code（2 本の runner で同じ owner）。
+    validation_conclude_pair_job "$status" "$cleanup_ec" && run_pair_ec=0 || run_pair_ec=$?
     return "$run_pair_ec"
 }
 
@@ -842,6 +848,14 @@ PAIR_PROCESS_DEADLINE_POLICY_DIGEST="$(printf '%s' \
     | sha256sum | awk '{print $1}')"
 # Issue #160: run manifest は出力先の外（run の tmp）で先に組み立て、FULL scope ではそれを
 # 出力先の受理判定にかける。出力先へは判定の後で初めて書く（拒否した dir は変えない）。
+# 評価計画 v2 PR-B: 実行環境の行（tool の version、container の資源上限、wrapper の
+# fingerprint）。analysis_config_digest には入らないが、実行の連鎖の検証器が execution 間で
+# 一致を要求する。
+EXECUTION_ENVIRONMENT_LINES="$(validation_execution_chain "$PYTHON_BIN" \
+    environment-lines --repo-root "$SCRIPT_DIR")" || {
+    echo "Error: could not record the execution environment" >&2
+    exit 1
+}
 CANDIDATE_RUN_MANIFEST_FILE="$EQBENCH_RUN_TMPDIR/run_manifest.candidate.txt"
 cat > "$CANDIDATE_RUN_MANIFEST_FILE" <<EOF
 run_kind=eqbench_all_eq_matrix_current
@@ -875,7 +889,8 @@ callee_unbound_reuse_shadow=$FT_CALLEE_UNBOUND_REUSE_SHADOW
 skip_completed_results=$SKIP_COMPLETED_RESULTS
 error_only_rerun=$ERROR_ONLY_RERUN
 debug=$EQBENCH_DEBUG
-analysis_config_schema=eqbench-analysis-config-v4
+analysis_config_schema=eqbench-analysis-config-v5
+matrix_publication_schema=eqbench-matrix-publication-manifest-v4
 identical_fast_path=$EQBENCH_IDENTICAL_FAST_PATH
 eqbench_tmpdir=$EQBENCH_TMPDIR
 authority_keyset_id=$AUTHORITY_KEYSET_ID
@@ -895,6 +910,7 @@ $RUN_GIT_STATE_LINES
 analysis_source_digest_start=$ANALYSIS_SOURCE_DIGEST_START
 runtime_run_id=$RUNTIME_RUN_ID
 dry_run=$DRY_RUN
+$EXECUTION_ENVIRONMENT_LINES
 EOF
 ANALYSIS_CONFIG_DIGEST="$("$PYTHON_BIN" -m \
     scripts.function_tracer_pcode.reporting.execution_receipt \
@@ -972,6 +988,18 @@ validation_install_file_atomically "$CANDIDATE_RUN_MANIFEST_FILE" "$RUN_MANIFEST
     echo "Error: could not install run manifest: $RUN_MANIFEST_FILE" >&2
     exit 1
 }
+# 評価計画 v2 PR-B: この execution の開始の記録（.executions/<runtime_run_id>/、上書きしない）。
+# pair を始める前に残せなければ、run を始めない。
+validation_execution_chain "$PYTHON_BIN" start --root "$OUTPUT_BASE_DIR" \
+    --run-id "$RUNTIME_RUN_ID" --manifest "$RUN_MANIFEST_FILE" || {
+    chain_ec=$?
+    echo "Error: could not record the start of this execution under $OUTPUT_BASE_DIR/.executions" >&2
+    exit "$chain_ec"
+}
+# Issue #276: pair job の結論（確定した ERROR と未完了）を数える file（run の tmp）。
+VALIDATION_PAIR_CONCLUSIONS_FILE="$EQBENCH_RUN_TMPDIR/pair-conclusions.txt"
+: > "$VALIDATION_PAIR_CONCLUSIONS_FILE"
+export VALIDATION_PAIR_CONCLUSIONS_FILE
 PAIR_STATUS_RESUME_COMPAT_ARGS=()
 SUMMARY_SHORTCUT_AUTHORIZED=0
 if compatible_identity="$("$PYTHON_BIN" -m \
@@ -1418,6 +1446,8 @@ missing_binary_count=$MISSING_BINARY_COUNT
 function_census_failure_count=$FUNCTION_CENSUS_FAILURES
 process_authority_cleanup_failure_count=$PROCESS_AUTHORITY_CLEANUP_FAILURES
 run_pair_failures=$RUN_PAIR_FAILURES
+decided_error_pair_jobs=$(validation_count_pair_conclusions "$VALIDATION_PAIR_CONCLUSIONS_FILE" ERROR)
+incomplete_pair_jobs=$(validation_count_pair_conclusions "$VALIDATION_PAIR_CONCLUSIONS_FILE" INCOMPLETE)
 benchmark_gate_status=$VALIDATION_BENCHMARK_GATE_STATUS
 benchmark_gate_failures=$VALIDATION_BENCHMARK_GATE_FAILURES
 analysis_source_digest_end=$("$PYTHON_BIN" -m scripts.function_tracer_pcode.reporting.execution_identity --repo-root "$SCRIPT_DIR" --print-source-digest)
@@ -1475,6 +1505,13 @@ fi
     "ANALYSIS_TIMEOUT=${ANALYSIS_TIMEOUT-}" \
     "ANALYSIS_TIMEOUT_MARGIN=${ANALYSIS_TIMEOUT_MARGIN-}" \
     "./eqbench_run_all_32jobs.sh"
+# 評価計画 v2 PR-B: 正常に終えた execution の最終の記録を、その execution の記録に複製する。
+validation_execution_chain "$PYTHON_BIN" seal --root "$OUTPUT_BASE_DIR" \
+    --run-id "$RUNTIME_RUN_ID" || {
+    chain_ec=$?
+    echo "Error: could not seal this execution under $OUTPUT_BASE_DIR/.executions" >&2
+    exit "$chain_ec"
+}
 
 echo ""
 echo "EqBench all-sample matrix finished."

@@ -134,12 +134,15 @@ NARROWING_LIMIT_KEY = "max_samples"
 #       did not build, and its pairs were never run.
 #   missing_binary_count -- an axis binary is absent (Eq :1232-1239, Neq via
 #       `record_missing_variant_axes`), so pairs over it cannot be formed.
-#   run_pair_failures -- a pair job exited non-zero, i.e. failed canonical
-#       classification or a run-health check (`pair_scheduler.sh:200-202`, and
-#       the runner's own message at Eq :1484).  A TIMEOUT or ERROR *outcome*
-#       does not bump it: the fixed subset carries 5 such pairs with
-#       run_pair_failures=0.  So a non-zero value means a pair nobody could
-#       evaluate, not a pair that was evaluated and came out badly.
+#   run_pair_failures -- a pair job exited non-zero: the pair ended without a
+#       decided status of its execution (INCOMPLETE) or an operational step
+#       failed (execution boundary, issue record, cleanup).  A decided TIMEOUT
+#       or ERROR *outcome* does not bump it in either runner: one owner,
+#       `validation_conclude_pair_job` in `validation_matrix_common.sh`, decides
+#       a pair job's exit for both (Issue #276), and the decided ERRORs are
+#       counted on their own as `decided_error_pair_jobs`.  So a non-zero value
+#       means a pair nobody could evaluate, not a pair that was evaluated and
+#       came out badly.
 #
 # The benchmark gate is deliberately absent from this list: it lives in
 # `VALIDATION_BENCHMARK_GATE_FAILURES` / `benchmark_gate_failures`, which is not
@@ -373,9 +376,10 @@ def collect_coverage(layout: RunLayout) -> Tuple[Dict[str, Any], str, str]:
 
     ``completed_scope`` is fail-closed: a tree whose publication manifest is
     absent or unreadable makes the whole run ``unknown``, and a tree with a
-    missing, unexpected or merely reused pair makes it ``partial``.  Only a run
-    in which every tree expected some pairs and executed all of them is
-    ``complete``.
+    missing, unexpected or unproven reused pair makes it ``partial``.  Only a
+    run in which every tree expected some pairs and executed all of them -- or,
+    for a FULL scope, reused only pairs the execution chain verifier proved
+    (``CLOSED_SAME_IDENTITY``) -- is ``complete``.
     """
     parts = []
     per_tree: Dict[str, Any] = {}
@@ -415,6 +419,9 @@ def collect_coverage(layout: RunLayout) -> Tuple[Dict[str, Any], str, str]:
         "pairs_missing": sum(len(part.pairs_missing) for part in parts),
         "pairs_unexpected": sum(len(part.pairs_unexpected) for part in parts),
         "pairs_verified_skipped": sum(part.pairs_verified_skipped for part in parts),
+        # Eval plan v2 PR-B: reused pairs the execution chain verifier proved to
+        # come from an earlier execution of the same identity (FULL scope only).
+        "pairs_reused_proven": sum(part.pairs_reused_proven for part in parts),
         "pairs_incomparable": pairs_incomparable,
         "trees_expected": list(layout.expected_tree_names),
         "trees_missing": list(layout.missing_tree_names),

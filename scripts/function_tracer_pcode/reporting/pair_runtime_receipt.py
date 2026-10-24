@@ -41,6 +41,18 @@ result the tree holds, but not of the latest run.  Anything else is
 *unusable*.  Comparisons use measured receipts only and report the other two
 as counts, so a run that executed nothing never looks like a complete,
 zero-delta measurement.
+
+**Chain view** (``load_chain_measurements``, eval plan v2 PR-B).  A tree
+finished over several executions holds, for each decided pair, the receipt of
+the execution that produced it.  The chain view takes every receipt bound to
+its pair status and made by an execution the tree records (its
+``.executions`` start record), and reports per execution how many pairs it
+measured and how many expected pairs have no such receipt.  A missing
+measurement is counted, never read as 0 seconds.  The executions may have run
+under different load (another parallel job count is impossible -- it is in the
+identity -- but the host was not otherwise controlled), so the chain's times
+are a sum of separately taken measurements.  ``load_tree_measurements`` (the
+latest run's delta) is unchanged.
 """
 
 from __future__ import annotations
@@ -334,6 +346,86 @@ def load_tree_measurements(root: Path) -> TreeMeasurements:
     )
 
 
+@dataclass(frozen=True)
+class ChainMeasurements:
+    """The chain view of a tree's receipts (see the module docstring)."""
+
+    executions: Tuple[str, ...]
+    measured: Dict[PairKey, float] = field(default_factory=dict)
+    measured_by_execution: Dict[str, int] = field(default_factory=dict)
+    #: Receipts bound to their status but made by an execution the tree does not record.
+    unrecorded_execution: int = 0
+    unusable: int = 0
+    #: Expected pairs (by the tree's publication) with no accepted receipt.
+    pairs_without_measurement: Optional[int] = None
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "executions": list(self.executions),
+            "pairs_measured": len(self.measured),
+            "measured_by_execution": dict(sorted(self.measured_by_execution.items())),
+            "measured_seconds_total": round(sum(self.measured.values()), 3),
+            "receipts_from_unrecorded_execution": self.unrecorded_execution,
+            "receipts_unusable": self.unusable,
+            "pairs_without_measurement": self.pairs_without_measurement,
+        }
+
+
+def load_chain_measurements(root: Path) -> ChainMeasurements:
+    """Every pair's measurement by the execution that produced it, with coverage."""
+    from scripts.function_tracer_pcode.reporting import execution_chain
+    from scripts.function_tracer_pcode.reporting.pair_outcomes import (
+        identity_from_status_path,
+    )
+
+    root = Path(root)
+    executions, _unrecognised = execution_chain.execution_ids(root)
+    recorded = {
+        run_id for run_id in executions
+        if (root / execution_chain.EXECUTIONS_DIR / run_id / execution_chain.START_RECORD).is_file()
+    }
+    measured: Dict[PairKey, float] = {}
+    by_execution: Dict[str, int] = {run_id: 0 for run_id in sorted(recorded)}
+    unrecorded = unusable = 0
+    for path in sorted(root.rglob(f"*{RUNTIME_SUFFIX}")):
+        relative = path.relative_to(root)
+        if len(relative.parts) < 4 or relative.parts[-2] != RUNTIME_METRICS_DIR:
+            unusable += 1
+            continue
+        status_path = path.parent.parent / (
+            path.name[: -len(RUNTIME_SUFFIX)] + PAIR_STATUS_SUFFIX
+        )
+        try:
+            key = identity_from_status_path(root, status_path)
+        except ValueError:
+            unusable += 1
+            continue
+        receipt = _read_json_object(path)
+        kind, seconds = classify_receipt(
+            receipt, function_name=key[1], left_binary_id=key[2], right_binary_id=key[3],
+            pair_status=_read_json_object(status_path), run_id=None,
+        )
+        if kind == RECEIPT_UNUSABLE or seconds is None:
+            unusable += 1
+            continue
+        producer = str((receipt or {}).get("run_id"))
+        if producer not in recorded:
+            unrecorded += 1
+            continue
+        measured[key] = seconds
+        by_execution[producer] += 1
+    expected_count: Optional[int] = None
+    publication = _read_json_object(root / execution_chain.PUBLICATION_FILE)
+    rows = (publication or {}).get("expected_pair_status_paths")
+    if isinstance(rows, list):
+        expected_count = len(rows) - len(measured)
+    return ChainMeasurements(
+        executions=tuple(sorted(recorded)), measured=measured,
+        measured_by_execution=by_execution, unrecorded_execution=unrecorded,
+        unusable=unusable, pairs_without_measurement=expected_count,
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -353,9 +445,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     for name in (*_NUMBER_FIELDS, *_INTEGER_FIELDS, *_TEXT_FIELDS):
         write.add_argument("--" + name.replace("_", "-"), dest=name, default="-")
     sub.add_parser("new-run-id", help="print a fresh runtime_run_id (runner use)")
+    chain = sub.add_parser(
+        "chain-coverage", help="per-execution measurement coverage of a resumed tree",
+    )
+    chain.add_argument("--root", required=True)
     args = parser.parse_args(argv)
     if args.command == "new-run-id":
         print(new_run_id())
+        return 0
+    if args.command == "chain-coverage":
+        print(json.dumps(load_chain_measurements(Path(args.root)).as_dict(), indent=2))
         return 0
     fields = {
         name: getattr(args, name)

@@ -823,13 +823,15 @@ def test_the_receipt_measures_the_execution_including_its_recovery(
 
 
 def _signed_status(tree: Path, private_key: Path, public_key: Path, relative: str,
-                   *, source: str, config: str) -> None:
+                   *, source: str, config: str, path_of=None, **target_changes) -> None:
+    """A sealed status whose target names the pair at ``path_of`` (default: ``relative``)."""
     from scripts.function_tracer_pcode.tests.unit.test_outcome_transition_axes_and_reason_sets import (  # noqa: E501
         _status_body,
     )
-    body = _status_body("sample", "f", "B1", "B2", "UNKNOWN", "RESOLVED")
+    left, right = Path(path_of or relative).name[: -len(".pair-status.json")].split("_")[1:]
+    body = _status_body("sample", "f", left, right, "UNKNOWN", "RESOLVED")
     target = {k: v for k, v in body["pair_execution_target"].items() if k != "target_digest"}
-    target.update(analysis_source_digest=source, analysis_config_digest=config)
+    target.update(analysis_source_digest=source, analysis_config_digest=config, **target_changes)
     body["pair_execution_target"] = {**target, "target_digest": authority_digest(target)}
     sealed = seal_pair_status(body, private_key_path=private_key, public_key_path=public_key)
     path = tree / relative
@@ -838,8 +840,11 @@ def _signed_status(tree: Path, private_key: Path, public_key: Path, relative: st
 
 
 def test_audit_flags_a_pair_status_of_another_identity(tmp_path):
+    from scripts.function_tracer_pcode.tests.unit.test_outcome_transition_axes_and_reason_sets import (  # noqa: E501
+        DIGEST,
+    )
     from scripts.function_tracer_pcode.tests.unit.test_verification_ledger import (
-        build_formal_publication_manifest,
+        build_formal_publication_manifest, seal_execution_receipt_for,
     )
     expected = ["sample/f/f_B1_B2.pair-status.json", "sample/f/f_B1_B3.pair-status.json",
                 "sample/f/f_B1_B4.pair-status.json"]
@@ -848,7 +853,15 @@ def test_audit_flags_a_pair_status_of_another_identity(tmp_path):
     public_key = tree / "pair-status-verification-key.json"
     tree.mkdir()
     generate_pair_status_keypair(private_key, public_key)
-    publication = build_formal_publication_manifest(tree, expected, run_scope="FULL_NEQ")
+    build_formal_publication_manifest(tree, expected, run_scope="FULL_NEQ")
+    # the binaries the statuses name, as the build receipts record them
+    (tree / "used_build_receipts.jsonl").write_text(json.dumps({"binary_axes": [
+        {"binary_path": "left.bin", "binary_sha256": DIGEST},
+        {"binary_path": "right.bin", "binary_sha256": DIGEST},
+    ]}) + "\n", encoding="utf-8")
+    publication = er.build_matrix_publication_manifest(tree)
+    (tree / er.MATRIX_PUBLICATION_MANIFEST_FILE).write_text(json.dumps(publication), encoding="utf-8")
+    seal_execution_receipt_for(tree, publication)
     source = publication["analysis_source_digest_start"]
     config = publication["analysis_config_digest"]
     _signed_status(tree, private_key, public_key, expected[0], source=source, config=config)
@@ -861,6 +874,17 @@ def test_audit_flags_a_pair_status_of_another_identity(tmp_path):
     _signed_status(tree, private_key, public_key, expected[1], source=source, config=config)
     _signed_status(tree, private_key, public_key, expected[2], source=source, config=config)
     assert er.audit_matrix_pair_identity(tree)["passed"] is True
+    # Eval plan v2 PR-B: the audit is a view of the chain verifier's per-pair check, so a
+    # status at another pair's path or naming a binary the build receipts did not record
+    # fails it too.
+    _signed_status(tree, private_key, public_key, expected[2], source=source, config=config,
+                   path_of=expected[1])
+    report = er.audit_matrix_pair_identity(tree)
+    assert report["passed"] is False and report["inconsistent_pair_status_paths"] == [expected[2]]
+    _signed_status(tree, private_key, public_key, expected[2], source=source, config=config,
+                   left_binary_sha256="e" * 64)
+    report = er.audit_matrix_pair_identity(tree)
+    assert report["passed"] is False and report["inconsistent_pair_status_paths"] == [expected[2]]
     # A classification failure's unsigned diagnostic has no identity to compare;
     # it is listed, not counted as matching, and does not fail the audit.
     (tree / expected[2]).write_text(json.dumps({

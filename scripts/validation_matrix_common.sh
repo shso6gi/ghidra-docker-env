@@ -331,6 +331,50 @@ validation_resolve_pair_execution() {
         --expected-execution-nonce "$4" --classification-failure-record "$5")
 }
 
+# pair job の結論（Issue #276、評価計画 v2 PR-B）。2 本の runner の唯一の owner。
+# 確定した結果（ERROR / TIMEOUT を含む、署名済みの終端 status）は pair job の失敗ではない:
+# 一次結果として分母に残り、再開で再利用される。失敗に数えるのは、未完了（INCOMPLETE）と
+# 運用上の失敗（cleanup など。<operational_ec> が非 0）だけ。確定した ERROR と未完了は、
+# run の記録で別の数として数える（VALIDATION_PAIR_CONCLUSIONS_FILE に 1 行ずつ追記し、
+# 終了時に validation_count_pair_conclusions で数える）。
+#   validation_conclude_pair_job <status> <operational_ec>   # return: 0 / 3（未完了）/ <operational_ec>
+validation_conclude_pair_job() {
+    local status="$1" operational_ec="${2:-0}"
+    if [[ -n "${VALIDATION_PAIR_CONCLUSIONS_FILE:-}" ]]; then
+        printf '%s\n' "$status" >> "$VALIDATION_PAIR_CONCLUSIONS_FILE"
+    fi
+    if [[ "$status" == INCOMPLETE ]]; then
+        return 3
+    fi
+    if (( operational_ec != 0 )); then
+        return "$operational_ec"
+    fi
+    return 0
+}
+
+#   validation_count_pair_conclusions <file> <status>   # stdout: その status の pair job の数
+validation_count_pair_conclusions() {
+    local file="$1" status="$2"
+    if [[ ! -e "$file" ]]; then
+        printf '0\n'
+        return 0
+    fi
+    awk -v status="$status" '$0 == status { n++ } END { print n + 0 }' "$file"
+}
+
+# 実行の連鎖の記録（評価計画 v2 PR-B、scripts/function_tracer_pcode/reporting/execution_chain.py）。
+# start: 出力先に install した manifest を、その execution の開始の記録として残す（上書きしない）。
+# issue: pair の解析を始める前に、その execution が nonce で pair を始めたことを残す。残せなければ
+#        解析を始めない（呼び出し側）。seal: 正常に終えた execution の最終の manifest・publication・
+#        receipt を、その execution の記録に複製する。
+# 出力先などの相対 path は呼び出し側の cwd から読む（cd しない）。
+validation_execution_chain() {
+    local python_bin="$1"
+    shift
+    PYTHONPATH="$_VALIDATION_REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" "$python_bin" -B -m \
+        scripts.function_tracer_pcode.reporting.execution_chain "$@"
+}
+
 # 実行記録（run_manifest.txt など）を丸ごと置き換える / 追記する。どちらも同じ dir の一時
 # file に書いてから rename するので、途中で kill されても書きかけの file は残らない。
 validation_install_file_atomically() {

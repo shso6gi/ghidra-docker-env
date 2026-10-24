@@ -1026,9 +1026,12 @@ class TreeCompleteness:
     """What a result tree's own publication manifest says it should hold.
 
     ``status`` is ``complete`` only when the manifest could be read *and*
-    every pair it expects is on disk *and* the run actually executed all of
-    them.  A manifest that is missing or unreadable gives ``unknown``, never
-    ``complete``: "we could not check" must not read as "we checked".
+    every pair it expects is on disk *and* either the run actually executed all
+    of them or -- for a FULL-scope tree only -- every pair it reused is proven,
+    by the execution chain verifier, to come from an earlier execution of the
+    same identity (eval plan v2 PR-B).  A manifest that is missing or unreadable
+    gives ``unknown``, never ``complete``: "we could not check" must not read as
+    "we checked".
     """
 
     root: str
@@ -1039,6 +1042,12 @@ class TreeCompleteness:
     pairs_missing: Tuple[str, ...]
     pairs_unexpected: Tuple[str, ...]
     pairs_verified_skipped: int
+    #: Reused pairs the execution chain verifier proved (0 when it was not run).
+    pairs_reused_proven: int = 0
+    #: The chain verifier's verdict, or ``None`` when the tree reused nothing or
+    #: is not a FULL scope (then the verifier is not consulted).
+    execution_chain_verdict: Optional[str] = None
+    executions: int = 0
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -1050,6 +1059,10 @@ class TreeCompleteness:
             "pairs_missing": len(self.pairs_missing),
             "pairs_unexpected": len(self.pairs_unexpected),
             "pairs_verified_skipped": self.pairs_verified_skipped,
+            "pairs_reused_proven": self.pairs_reused_proven,
+            "pairs_reused_unproven": self.pairs_verified_skipped - self.pairs_reused_proven,
+            "execution_chain_verdict": self.execution_chain_verdict,
+            "executions": self.executions,
             "missing_paths": list(self.pairs_missing[:20]),
             "unexpected_paths": list(self.pairs_unexpected[:20]),
         }
@@ -1082,7 +1095,8 @@ def _census(payload: Mapping[str, Any], key: str) -> set:
 
 def tree_completeness(root: Path) -> TreeCompleteness:
     from scripts.function_tracer_pcode.reporting.execution_receipt import (
-        MATRIX_PUBLICATION_SCHEMA,
+        FULL_RUN_SCOPES,
+        MATRIX_PUBLICATION_SCHEMAS,
     )
 
     root = Path(root)
@@ -1099,8 +1113,8 @@ def tree_completeness(root: Path) -> TreeCompleteness:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         if not isinstance(payload, Mapping):
             raise ValueError("not an object")
-        if payload.get("schema") != MATRIX_PUBLICATION_SCHEMA:
-            raise ValueError(f"schema is not {MATRIX_PUBLICATION_SCHEMA}")
+        if payload.get("schema") not in MATRIX_PUBLICATION_SCHEMAS:
+            raise ValueError(f"schema is not one of {sorted(MATRIX_PUBLICATION_SCHEMAS)}")
         expected = _census(payload, "expected_pair_status_paths")
         skipped = _census(payload, "verified_skipped_pair_status_paths")
     except (OSError, ValueError) as exc:
@@ -1111,12 +1125,38 @@ def tree_completeness(root: Path) -> TreeCompleteness:
             pairs_missing=(), pairs_unexpected=(), pairs_verified_skipped=0,
         )
     # A verified-skipped pair was reused from an earlier run, not executed by
-    # this one, so it is not evidence about the code this run was made for.
+    # this one.  It is evidence about the code this run was made for only when
+    # the execution chain verifier proves it came from an earlier execution of
+    # exactly this identity -- and that is asked only of a FULL-scope tree,
+    # whose resume never crosses identities.  A REPRESENTATIVE tree may reuse
+    # across identities, so its reuse stays partial.
     missing = tuple(sorted(expected - observed))
     unexpected = tuple(sorted(observed - expected))
+    proven, verdict, executions = 0, None, 0
     if missing or unexpected:
         status = COMPLETENESS_PARTIAL
         detail = f"{len(missing)} expected pair(s) missing, {len(unexpected)} unexpected"
+    elif skipped and payload.get("run_scope") in FULL_RUN_SCOPES:
+        from scripts.function_tracer_pcode.reporting.execution_chain import (
+            VERDICT_CLOSED,
+            verify_execution_chain,
+        )
+
+        chain = verify_execution_chain(root)
+        verdict, proven = chain["verdict"], chain["pairs_reused_proven"]
+        executions = len(chain["executions"])
+        if verdict == VERDICT_CLOSED:
+            status = COMPLETENESS_COMPLETE
+            detail = (
+                f"complete across {executions} executions ({len(skipped)} pair(s) reused "
+                "and proven)"
+            )
+        else:
+            status = COMPLETENESS_PARTIAL
+            detail = (
+                f"{len(skipped)} pair(s) reused from an earlier run; execution chain "
+                f"{verdict}: {', '.join(chain['reasons'])}"
+            )
     elif skipped:
         status = COMPLETENESS_PARTIAL
         detail = f"{len(skipped)} pair(s) reused from an earlier run, not executed here"
@@ -1126,7 +1166,8 @@ def tree_completeness(root: Path) -> TreeCompleteness:
         root=str(root), status=status, detail=detail,
         pairs_expected=len(expected), pairs_with_status=len(observed),
         pairs_missing=missing, pairs_unexpected=unexpected,
-        pairs_verified_skipped=len(skipped),
+        pairs_verified_skipped=len(skipped), pairs_reused_proven=proven,
+        execution_chain_verdict=verdict, executions=executions,
     )
 
 

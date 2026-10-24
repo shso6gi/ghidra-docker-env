@@ -94,7 +94,7 @@ def test_the_mode_is_recorded_in_the_run_manifest(runner):
 
     source = (REPO_ROOT / runner).read_text(encoding="utf-8")
 
-    assert "analysis_config_schema=eqbench-analysis-config-v4" in source
+    assert "analysis_config_schema=eqbench-analysis-config-v5" in source
     assert "identical_fast_path=$EQBENCH_IDENTICAL_FAST_PATH" in source
     digest = source.index("--print-analysis-config-digest")
     assert source.index("identical_fast_path=$EQBENCH_IDENTICAL_FAST_PATH") < digest

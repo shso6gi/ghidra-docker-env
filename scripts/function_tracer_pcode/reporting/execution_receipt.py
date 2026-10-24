@@ -33,6 +33,17 @@ MATRIX_PUBLICATION_MANIFEST_FILE = "matrix-publication-manifest.json"
 BENCHMARK_GATE_REPORT_FILE = "benchmark_validation_gate.json"
 FUNCTION_DIFF_MANIFEST_FILE = "function_diff_manifest.json"
 MATRIX_PUBLICATION_SCHEMA = "eqbench-matrix-publication-manifest-v3"
+# Eval plan v2 PR-B.  v4 adds the execution chain: the publishing execution's
+# ``runtime_run_id``, the start records of the executions before it, evidence
+# for every pair it reused (signed body digest, target digest and producing
+# execution), a digest over every expected pair's signed body and producer, and
+# the decided-ERROR / incomplete pair counts kept apart from
+# ``run_pair_failures`` (Issue #276).  A run manifest opts in by naming the
+# schema in ``matrix_publication_schema``; one that does not is published as v3
+# exactly as before, so a stored v3 publication still rebuilds to itself.
+MATRIX_PUBLICATION_SCHEMA_V4 = "eqbench-matrix-publication-manifest-v4"
+MATRIX_PUBLICATION_SCHEMAS = frozenset({MATRIX_PUBLICATION_SCHEMA, MATRIX_PUBLICATION_SCHEMA_V4})
+MATRIX_PUBLICATION_SCHEMA_KEY = "matrix_publication_schema"
 SEAL_FIELDS = frozenset({"body_digest", "signature"})
 BODY_FIELDS = frozenset({
     "schema", "authority_kind", "execution_kind", "command",
@@ -56,6 +67,10 @@ MATRIX_PUBLICATION_FIELDS = frozenset({
     "build_receipts", "expected_pair_status_paths",
     "verified_skipped_pair_status_paths", "artifact_digest",
 })
+MATRIX_PUBLICATION_V4_FIELDS = MATRIX_PUBLICATION_FIELDS | {
+    "runtime_run_id", "prior_executions", "reused_pair_evidence",
+    "pair_status_evidence_digest", "decided_error_pair_jobs", "incomplete_pair_jobs",
+}
 ANALYSIS_CONFIG_V1_FIELDS = frozenset({
     "schema", "authority_kind", "run_scope", "build_policy", "max_samples",
     "sample_filter", "pair_filter", "debug", "skip_completed_results",
@@ -86,8 +101,22 @@ ANALYSIS_CONFIG_V4_FIELDS = ANALYSIS_CONFIG_V3_FIELDS | {
     "analysis_timeout_seconds", "analysis_timeout_margin_seconds",
 }
 ANALYSIS_CONFIG_V4_SCHEMA = "eqbench-analysis-config-v4"
+# Eval plan v2 PR-B.  The ``FT_*`` knobs the runners pass to every analysis
+# child change what it computes (the expander's dedup case limit and the
+# callee-unbound reuse and its shadow), so they join the identity: runs that
+# differ in any of them get different ``analysis_config_digest`` values and
+# never reuse each other's pair statuses.  v5 is never projected onto an older
+# schema -- an older config did not record the knobs, so nothing shows it ran
+# with the same values.
+ANALYSIS_CONFIG_V5_FIELDS = ANALYSIS_CONFIG_V4_FIELDS | {
+    "expander_dedup_case_limit", "callee_unbound_reuse", "callee_unbound_reuse_shadow",
+}
+ANALYSIS_CONFIG_V5_SCHEMA = "eqbench-analysis-config-v5"
+ANALYSIS_CONFIG_SCHEMAS_WITH_DEADLINE = frozenset({
+    ANALYSIS_CONFIG_V4_SCHEMA, ANALYSIS_CONFIG_V5_SCHEMA,
+})
 ANALYSIS_CONFIG_SCHEMAS_WITH_FAST_PATH = frozenset({
-    ANALYSIS_CONFIG_V3_SCHEMA, ANALYSIS_CONFIG_V4_SCHEMA,
+    ANALYSIS_CONFIG_V3_SCHEMA, *ANALYSIS_CONFIG_SCHEMAS_WITH_DEADLINE,
 })
 ANALYSIS_CONFIG_SCHEMA_KEY = "analysis_config_schema"
 MATRIX_RUN_SCOPES = frozenset({"REPRESENTATIVE", "FULL_EQBENCH", "FULL_NEQ"})
@@ -137,9 +166,13 @@ def analysis_config_from_run(run: Mapping[str, str]) -> Mapping[str, Any]:
         if schema in ANALYSIS_CONFIG_SCHEMAS_WITH_FAST_PATH:
             config["schema"] = schema
             config["identical_fast_path"] = _exact_flag(run["identical_fast_path"])
-        if schema == ANALYSIS_CONFIG_V4_SCHEMA:
+        if schema in ANALYSIS_CONFIG_SCHEMAS_WITH_DEADLINE:
             config["analysis_timeout_seconds"] = run[KEY_ANALYSIS_TIMEOUT]
             config["analysis_timeout_margin_seconds"] = run[KEY_ANALYSIS_TIMEOUT_MARGIN]
+        if schema == ANALYSIS_CONFIG_V5_SCHEMA:
+            config["expander_dedup_case_limit"] = run["expander_dedup_case_limit_effective"]
+            config["callee_unbound_reuse"] = run["callee_unbound_reuse"]
+            config["callee_unbound_reuse_shadow"] = run["callee_unbound_reuse_shadow"]
     except (KeyError, ValueError) as exc:
         raise ValueError("matrix run manifest lacks typed analysis config") from exc
     validate_analysis_config(config)
@@ -166,14 +199,20 @@ def validate_analysis_config(config: Mapping[str, Any]) -> None:
         "eqbench-analysis-config-v2": ANALYSIS_CONFIG_V2_FIELDS,
         ANALYSIS_CONFIG_V3_SCHEMA: ANALYSIS_CONFIG_V3_FIELDS,
         ANALYSIS_CONFIG_V4_SCHEMA: ANALYSIS_CONFIG_V4_FIELDS,
+        ANALYSIS_CONFIG_V5_SCHEMA: ANALYSIS_CONFIG_V5_FIELDS,
     }.get(config.get("schema"))
     bool_fields = {"debug", "dry_run"}
     if config.get("schema") == "eqbench-analysis-config-v1":
         bool_fields.add("skip_completed_results")
     if config.get("schema") in ANALYSIS_CONFIG_SCHEMAS_WITH_FAST_PATH:
         bool_fields.add("identical_fast_path")
-    if config.get("schema") == ANALYSIS_CONFIG_V4_SCHEMA:
+    if config.get("schema") in ANALYSIS_CONFIG_SCHEMAS_WITH_DEADLINE:
         timeout_fields += ["analysis_timeout_seconds", "analysis_timeout_margin_seconds"]
+    if config.get("schema") == ANALYSIS_CONFIG_V5_SCHEMA and any(
+        type(config.get(field)) is not str or not config[field]
+        for field in ANALYSIS_CONFIG_V5_FIELDS - ANALYSIS_CONFIG_V4_FIELDS
+    ):
+        raise ValueError("EqBench typed analysis config is invalid")
     if (
         expected_fields is None or set(config) != expected_fields
         or config["authority_kind"] != "EqBenchAnalysisConfig"
@@ -215,6 +254,7 @@ def normalize_semantic_analysis_config(config: Mapping[str, Any]) -> Mapping[str
         return projected
     if config["schema"] in (
         "eqbench-analysis-config-v2", ANALYSIS_CONFIG_V3_SCHEMA, ANALYSIS_CONFIG_V4_SCHEMA,
+        ANALYSIS_CONFIG_V5_SCHEMA,
     ):
         # A v3 config is *not* projected onto v2: dropping the fast-path field
         # would make an ON run and an OFF run compare equal, which is exactly
@@ -489,8 +529,11 @@ def build_matrix_publication_manifest(matrix_root: Path) -> Mapping[str, Any]:
         json.loads(line) for line in
         (matrix_root / "used_build_receipts.jsonl").read_text(encoding="utf-8").splitlines()
     ]
+    publication_schema = run.get(MATRIX_PUBLICATION_SCHEMA_KEY, MATRIX_PUBLICATION_SCHEMA)
+    if publication_schema not in MATRIX_PUBLICATION_SCHEMAS:
+        raise ValueError("matrix run manifest names an unknown publication schema")
     body = {
-        "schema": MATRIX_PUBLICATION_SCHEMA,
+        "schema": publication_schema,
         "authority_kind": "EqBenchMatrixPublicationManifest",
         **integers,
         **strings,
@@ -521,13 +564,48 @@ def build_matrix_publication_manifest(matrix_root: Path) -> Mapping[str, Any]:
         body["prefilter_source_paths"]
     ):
         raise ValueError("matrix prefilter source census digest differs")
+    if publication_schema == MATRIX_PUBLICATION_SCHEMA_V4:
+        body.update(_execution_chain_fields(matrix_root, run, body))
     return {**body, "artifact_digest": authority_digest(body)}
 
 
+def _execution_chain_fields(
+    matrix_root: Path, run: Mapping[str, str], body: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """The v4 fields, read from the tree's own execution records and pair statuses."""
+    from scripts.function_tracer_pcode.reporting import execution_chain
+
+    try:
+        run_id = run[execution_chain.RUN_ID_KEY]
+        counters = {
+            field: int(run[field])
+            for field in ("decided_error_pair_jobs", "incomplete_pair_jobs")
+        }
+    except (KeyError, ValueError) as exc:
+        raise ValueError("matrix run manifest lacks the execution chain fields") from exc
+    evidence_digest, reused = execution_chain.pair_status_evidence(
+        matrix_root, body["expected_pair_status_paths"],
+        body["verified_skipped_pair_status_paths"], run_id,
+    )
+    return {
+        "runtime_run_id": run_id,
+        "prior_executions": execution_chain.prior_executions(matrix_root, run_id),
+        "reused_pair_evidence": reused,
+        "pair_status_evidence_digest": evidence_digest,
+        **counters,
+    }
+
+
 def validate_matrix_publication_manifest(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    if not isinstance(payload, Mapping) or set(payload) != MATRIX_PUBLICATION_FIELDS:
+    if not isinstance(payload, Mapping):
         raise ValueError("matrix publication manifest schema differs")
-    body = {key: payload[key] for key in MATRIX_PUBLICATION_FIELDS - {"artifact_digest"}}
+    fields = (
+        MATRIX_PUBLICATION_V4_FIELDS
+        if payload.get("schema") == MATRIX_PUBLICATION_SCHEMA_V4 else MATRIX_PUBLICATION_FIELDS
+    )
+    if set(payload) != fields:
+        raise ValueError("matrix publication manifest schema differs")
+    body = {key: payload[key] for key in fields - {"artifact_digest"}}
     integer_fields = (
         "prefilter_source_count", "target_sources",
         "completed_samples", "skipped_samples", "dry_run",
@@ -544,7 +622,7 @@ def validate_matrix_publication_manifest(payload: Mapping[str, Any]) -> Mapping[
         "verified_skipped_pair_status_paths",
     )
     if (
-        payload["schema"] != MATRIX_PUBLICATION_SCHEMA
+        payload["schema"] not in MATRIX_PUBLICATION_SCHEMAS
         or payload["authority_kind"] != "EqBenchMatrixPublicationManifest"
         or any(type(payload[field]) is not int or payload[field] < 0 for field in integer_fields)
         or any(type(payload[field]) is not str for field in (
@@ -570,7 +648,47 @@ def validate_matrix_publication_manifest(payload: Mapping[str, Any]) -> Mapping[
     ):
         raise ValueError("matrix publication manifest body is invalid")
     validate_analysis_config(payload["analysis_config"])
+    if payload["schema"] == MATRIX_PUBLICATION_SCHEMA_V4:
+        _validate_execution_chain_fields(payload)
     return body
+
+
+def _validate_execution_chain_fields(payload: Mapping[str, Any]) -> None:
+    hexes = re.compile(r"[0-9a-f]{64}")
+    prior = payload["prior_executions"]
+    reused = payload["reused_pair_evidence"]
+    if (
+        type(payload["runtime_run_id"]) is not str
+        or not re.fullmatch(r"[0-9a-f]{32}", payload["runtime_run_id"])
+        or any(
+            type(payload[field]) is not int or payload[field] < 0
+            for field in ("decided_error_pair_jobs", "incomplete_pair_jobs")
+        )
+        or type(payload["pair_status_evidence_digest"]) is not str
+        or not hexes.fullmatch(payload["pair_status_evidence_digest"])
+        or type(prior) is not list
+        or any(
+            not isinstance(row, Mapping)
+            or set(row) != {"runtime_run_id", "start_record_sha256"}
+            or not isinstance(row["start_record_sha256"], str)
+            or not hexes.fullmatch(row["start_record_sha256"])
+            or row["runtime_run_id"] == payload["runtime_run_id"]
+            for row in prior
+        )
+        or len({row["runtime_run_id"] for row in prior}) != len(prior)
+        or type(reused) is not list
+        or any(
+            not isinstance(row, Mapping)
+            or set(row) != {
+                "pair_status_path", "pair_status_body_digest", "target_digest",
+                "producing_run_id",
+            }
+            for row in reused
+        )
+        or sorted(row["pair_status_path"] for row in reused)
+        != sorted(payload["verified_skipped_pair_status_paths"])
+    ):
+        raise ValueError("matrix publication manifest execution chain fields are invalid")
 
 
 def _sign(body: Mapping[str, Any], private_key_path: Path) -> str:
@@ -745,22 +863,25 @@ def audit_matrix_pair_identity(matrix_root: Path) -> Mapping[str, Any]:
 
     Run after an evaluation (Issue #160): the tree's signed publication and
     execution receipt must validate and bind to each other, and every expected
-    pair status must exist, carry a valid pair-status signature, and name the
-    publication's analysis source digest and config digest in its
-    ``pair_execution_target``.  A pair reused from a run of another identity
-    therefore shows up here even if it slipped past the runner.  Diagnostic:
-    the verification ledger does not read this report.
+    pair status must exist, carry a valid pair-status signature with a regular
+    terminal state, name the publication's analysis source and config digests,
+    sit at the path its own target names, and name the binary SHA-256 values the
+    published build receipts recorded.  The per-pair check is the execution
+    chain verifier's (``execution_chain.check_pair_status``), so this audit is a
+    view of it and the two never disagree about what a valid pair is
+    (eval plan v2 PR-B).  Diagnostic: the verification ledger does not read
+    this report.
 
     The unsigned diagnostic a runner writes when classification fails is
     listed on its own and does not fail the audit: it carries no identity to
     compare, it is never reused (resume reschedules every unsigned status), and
-    it is counted as an ERROR pair by every consumer.
+    it is counted as an INCOMPLETE pair by every consumer.
     """
 
     from scripts.function_tracer_pcode.authority.decision.pair_status_authority import (
         pair_status_operational_diagnostic,
-        validate_signed_pair_status,
     )
+    from scripts.function_tracer_pcode.reporting import execution_chain
 
     publication_path = matrix_root / MATRIX_PUBLICATION_MANIFEST_FILE
     receipt_path = matrix_root / MATRIX_EXECUTION_RECEIPT_FILE
@@ -779,9 +900,11 @@ def audit_matrix_pair_identity(matrix_root: Path) -> Mapping[str, Any]:
     if publication["analysis_source_digest_end"] != source:
         raise ValueError("the publication's source digest changed during the run")
     config = publication["analysis_config_digest"]
+    binary_shas = execution_chain.build_receipt_binary_shas(publication["build_receipts"])
     missing: list[str] = []
     invalid: list[str] = []
     foreign: list[str] = []
+    inconsistent: list[str] = []
     diagnostics: list[str] = []
     for relative in publication["expected_pair_status_paths"]:
         path = matrix_root / relative
@@ -789,20 +912,23 @@ def audit_matrix_pair_identity(matrix_root: Path) -> Mapping[str, Any]:
             missing.append(relative)
             continue
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if pair_status_operational_diagnostic(payload) is not None:
+            if pair_status_operational_diagnostic(
+                json.loads(path.read_text(encoding="utf-8"))
+            ) is not None:
                 diagnostics.append(relative)
                 continue
-            body = validate_signed_pair_status(payload, public_key_path=public_key_path)
         except (OSError, UnicodeError, ValueError, TypeError):
+            pass
+        _payload, _body, reason = execution_chain.check_pair_status(
+            matrix_root, relative, public_key_path=public_key_path,
+            source_digest=source, config_digest=config, binary_shas=binary_shas,
+        )
+        if reason == execution_chain.R_NOT_DECIDED:
             invalid.append(relative)
-            continue
-        target = body["pair_execution_target"]
-        if (
-            target.get("analysis_source_digest") != source
-            or target.get("analysis_config_digest") != config
-        ):
+        elif reason == execution_chain.R_TARGET:
             foreign.append(relative)
+        elif reason is not None:
+            inconsistent.append(relative)
     expected = len(publication["expected_pair_status_paths"])
     return {
         "matrix_root": str(matrix_root),
@@ -810,13 +936,15 @@ def audit_matrix_pair_identity(matrix_root: Path) -> Mapping[str, Any]:
         "analysis_config_digest": config,
         "expected_pairs": expected,
         "matching_pairs": (
-            expected - len(missing) - len(invalid) - len(foreign) - len(diagnostics)
+            expected - len(missing) - len(invalid) - len(foreign) - len(inconsistent)
+            - len(diagnostics)
         ),
         "unsigned_diagnostic_pair_status_paths": diagnostics,
         "missing_pair_status_paths": missing,
         "invalid_pair_status_paths": invalid,
         "foreign_identity_pair_status_paths": foreign,
-        "passed": not (missing or invalid or foreign),
+        "inconsistent_pair_status_paths": inconsistent,
+        "passed": not (missing or invalid or foreign or inconsistent),
     }
 
 
