@@ -703,10 +703,14 @@ def test_the_chain_view_counts_each_execution_and_never_zero_fills(tmp_path):
     _receipt(tree, tree.pairs[0], e1, 10.0, nonce=nonces[tree.pairs[0]])
     _receipt(tree, tree.pairs[2], e2, 5.0, nonce=nonces[tree.pairs[2]])
     _receipt(tree, tree.pairs[3], e2, 7.0, nonce=nonces[tree.pairs[3]])
+    # 状態に束縛されていても、tree が記録していない execution の receipt は chain の計測ではない。
+    _receipt(tree, tree.pairs[1], _run_id(99), 3.0, nonce=nonces[tree.pairs[1]])
     view = prr.load_chain_measurements(tree.root).as_dict()
     assert view["measured_by_execution"] == {e1: 1, e2: 2}
     assert view["pairs_measured"] == 3 and view["pairs_without_measurement"] == 1
+    assert view["receipts_from_unrecorded_execution"] == 1
     assert view["measured_seconds_total"] == 22.0
-    # 最新の run だけの delta の意味は変わらない（E1 の receipt は retained）。
+    # 最新の run だけの delta の意味は変わらない（最新以外の run の receipt は、記録の有無に
+    # かかわらず retained）。
     latest = prr.load_tree_measurements(tree.root)
-    assert len(latest.measured) == 2 and len(latest.retained) == 1
+    assert len(latest.measured) == 2 and len(latest.retained) == 2
