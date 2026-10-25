@@ -189,3 +189,81 @@ def test_executions_must_match_the_launches_that_recorded_them(h, capsys):
     (h.ev.out / ".executions" / stray).mkdir()
     problems = records.attribution_problems(check, summarize.execution_dirs(h.ev.out))
     assert any("not started by a recorded launch" in p for p in problems)
+
+
+def test_a_gap_in_the_launch_numbers_is_damage_on_its_own(tmp_path):
+    """journal も execution も手掛かりにならない欠番（launch 1 と 3 だけがある）。"""
+    root = tmp_path / records.LAUNCHES_DIR
+    for number in (1, 3):
+        (root / str(number)).mkdir(parents=True)
+        wrapper.write_json(root / str(number) / records.LAUNCH, {
+            "schema": records.LAUNCH_SCHEMA, "launch": number, "execution_ids_before": []})
+        wrapper.write_json(root / str(number) / records.EXIT, {
+            "schema": records.EXIT_SCHEMA, "kind": records.KIND_NOT_STARTED, "launch": number,
+            "container_id": None, "runtime_run_ids": []})
+        wrapper.write_json(root / str(number) / records.RELEASED, {
+            "schema": records.RELEASED_SCHEMA, "container_id": None})
+    (tmp_path / records.JOURNAL).write_text("")
+    check = records.read_records(tmp_path)
+    assert check.problems == ["launch record(s) missing: [2]"]
+
+
+def test_an_execution_no_launch_recorded_makes_the_evaluation_unverifiable(h, monkeypatch):
+    """出力先に、どの launch も記録していない execution がある（wrapper の外で runner を動かした）。"""
+    h.complete_evaluation()
+    stray = h.ev.out / ".executions" / ("e" * 32)
+    stray.mkdir()
+    monkeypatch.setenv("EVAL_HOST_STATE", json.dumps({"container": "absent", "observed": True}))
+    result = summarize.completion(wrapper.REPO, h.ev.out, h.ev.wrapper, "neq")
+    assert result["verdict"] == "UNVERIFIABLE"
+    assert "execution_attribution" in [r["code"] for r in result["reasons"]]
+
+
+def _synthetic_launch(directory, *, drop=(), change=None):
+    """journal を使わずに、終端した ``ran`` の launch の記録を組み立てる（規則ごとの単体の検査用）。"""
+    import hashlib
+
+    directory.mkdir(parents=True)
+    container = "a" * 64
+    log = b"runner output\n"
+    files = {
+        records.LAUNCH: {"schema": records.LAUNCH_SCHEMA, "launch": 1, "execution_ids_before": []},
+        records.CONTAINER: {"schema": records.CONTAINER_SCHEMA, "container_id": container},
+        records.EXIT: {"schema": records.EXIT_SCHEMA, "kind": records.KIND_RAN, "launch": 1,
+                       "container_id": container, "runtime_run_ids": [],
+                       "runner_log": {"sha256": hashlib.sha256(log).hexdigest(), "bytes": len(log)}},
+        records.EVIDENCE: {"schema": records.EVIDENCE_SCHEMA},
+        records.RELEASED: {"schema": records.RELEASED_SCHEMA, "container_id": container},
+    }
+    if change:
+        change(files)
+    for name, payload in files.items():
+        if name not in drop:
+            wrapper.write_json(directory / name, payload)
+    if records.RUNNER_LOG not in drop:
+        (directory / records.RUNNER_LOG).write_bytes(log)
+
+
+@pytest.mark.parametrize("drop, change, problem", [
+    ((), None, None),
+    ((records.EVIDENCE,), None, "released.json exists without evidence.json"),
+    ((records.CONTAINER,), None, "container.json is missing for a launch whose container ran"),
+    ((records.EXIT,), None, "released.json exists without exit.json"),
+    ((records.RUNNER_LOG,), None, "runner.log is missing"),
+    ((records.LAUNCH,), None, "launch.json is missing"),
+    ((), lambda f: f[records.RELEASED].update(container_id="b" * 64), "released.json names another container"),
+    ((), lambda f: f[records.EXIT].update(container_id="b" * 64), "exit.json and container.json name different containers"),
+    ((), lambda f: f[records.EXIT].update(launch=2), "exit.json describes another launch"),
+    ((), lambda f: f[records.EXIT].update(kind="maybe"), "exit.json is malformed"),
+    ((), lambda f: f[records.EXIT].update(kind=records.KIND_NOT_STARTED), "has container records"),
+    ((), lambda f: f[records.EXIT]["runner_log"].update(bytes=1), "runner.log differs"),
+    ((), lambda f: f[records.LAUNCH].update(launch=7), "launch.json does not describe this launch"),
+])
+def test_each_record_rule_is_checked_on_its_own(tmp_path, drop, change, problem):
+    _synthetic_launch(tmp_path / "1", drop=drop, change=change)
+    launch = records.read_launch(tmp_path / "1", 1)
+    if problem is None:
+        assert launch.problems == [] and launch.state == records.STATE_RELEASED
+    else:
+        assert any(problem in item for item in launch.problems), launch.problems
+        assert launch.state == records.STATE_DAMAGED

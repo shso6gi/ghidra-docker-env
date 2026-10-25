@@ -654,3 +654,25 @@ def test_start_refuses_while_a_launch_is_unfinished(h, capsys):
     assert h.run("stop") == wrapper.EXIT_OK
     (launch,) = h.records().launches
     assert launch.exit_kind == records.KIND_NOT_STARTED and launch.terminal
+
+
+def test_observations_are_saved_at_the_observation_interval_not_the_period(tmp_path, monkeypatch):
+    """review 1 P2: 保存は観測ごと（0.2 秒）。周期（ここでは 1000 秒）の行だけにしない。"""
+    h = Harness(tmp_path, monkeypatch, poll="0.2", period="1000")
+    cgroup = h.cgroup / f"{1:064x}"
+    cgroup.mkdir(parents=True)
+    (cgroup / "memory.events").write_text("oom 0\noom_kill 0\n")
+    (cgroup / "memory.peak").write_text("1\n")
+    (cgroup / "memory.current").write_text("1\n")
+    assert h.start() == wrapper.EXIT_OK
+    time.sleep(1.5)
+    (cgroup / "memory.events").write_text("oom 1\noom_kill 1\n")
+    time.sleep(1.0)
+    h.end_container(exit_code=0)
+    h.wait_released()
+    (launch,) = h.records().launches
+    assert len(launch.watch) >= 8, len(launch.watch)
+    assert sum(1 for row in launch.watch if "other_running_containers" in row) == 1
+    assert [row["oom_kill"] for row in launch.watch][-1] == 1
+    (increment,) = [i for i in records.counter_intervals(launch.watch) if i.delta]
+    assert increment.end - increment.start < 1.0  # 直前の観測から（周期の行からではない）
