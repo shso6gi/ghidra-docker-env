@@ -68,6 +68,14 @@ jobs:
           -q -rs --durations=25 -p no:cacheprovider
           -m "not recorded_replay"
 
+      # The evaluation wrapper (eval/) sits outside the analysis source digest,
+      # so its tests live outside the package suite. They need no Docker: a
+      # fake docker records every call and runs the read-only summary for real.
+      - name: Evaluation wrapper tests
+        run: >
+          python3 -B -m pytest eval/tests
+          -q -rs --durations=10 -p no:cacheprovider
+
   recorded-fast:
     name: recorded-fast
     runs-on: ubuntu-latest
