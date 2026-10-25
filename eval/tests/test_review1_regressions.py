@@ -88,6 +88,8 @@ def test_p2_an_oom_increment_is_not_attributed_to_a_pair_that_ended_before_the_l
     begin = time.time()
     run_id = "e" * 32
     (h.ev.out / ".executions" / run_id).mkdir(parents=True)  # この launch の execution
+    (h.ev.out / ".executions" / run_id / "run_manifest.start.txt").write_text(
+        f"runtime_run_id={run_id}\n")
     metrics = h.ev.out / "S" / "Neq" / "f" / ".runtime-metrics"
     metrics.mkdir(parents=True)
     receipt = {"run_id": run_id, "execution_nonce": "n" * 24, "state": "COMPLETED",

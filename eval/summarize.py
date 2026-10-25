@@ -114,11 +114,6 @@ def _start_values(out: Path, key: str) -> Dict[str, Optional[str]]:
     return values
 
 
-def execution_dirs(out: Path) -> List[str]:
-    directory = out / ".executions"
-    return sorted(p.name for p in directory.iterdir()) if directory.is_dir() else []
-
-
 # ---------------------------------------------------------------------------
 # launch の証拠（container の終了の直後、次の再開が pair の診断を消す前に写す）
 # ---------------------------------------------------------------------------
@@ -511,29 +506,52 @@ def _host_state() -> Optional[Dict[str, Any]]:
 
 
 def completion(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, Any]:
-    """評価が完了したか（``summary`` と ``start`` が共有する唯一の判定）。
+    """評価が完了したか、再開してよいか（``summary`` と ``start`` が共有する唯一の判定）。
 
     返り値の ``verdict`` は COMPLETE / INCOMPLETE / UNVERIFIABLE、``reasons`` は
-    ``{code, category, detail}`` の列。COMPLETE は理由が 1 つも無いときだけ。各条件の判定は
-    owner の結果を読むだけで、ここで条件を足しも緩めもしない。
+    ``{code, category, detail}`` の列（分類は ``protocol.REASONS``）。``checks`` には
+    ``protocol.MANDATORY_CHECKS`` のすべてを、実施した（``done``）か、出力の状態から該当しない
+    （``not_applicable`` と理由）かで必ず書く。初回・出力が無い・空・開始の記録の前に止まった
+    出力（``output_state``）でも、wrapper の記録・恒久的な失敗・回収の状態・execution との対応の
+    検査は省かない。各条件の判定は owner の結果を読むだけで、条件を足しも緩めもしない。
     """
     from scripts.function_tracer_pcode.reporting.execution_identity import source_tree_digest
 
     reasons: List[Dict[str, str]] = []
+    checks: Dict[str, Dict[str, str]] = {}
 
     def reason(code: str, detail: str) -> None:
         # 分類は登録表（protocol.REASONS）だけが決める。
         reasons.append({"code": code, "category": protocol.REASONS[code], "detail": detail})
 
+    def done(name: str) -> None:
+        checks[name] = {"status": protocol.CHECK_DONE}
+
+    def not_applicable(name: str, because: str) -> None:
+        checks[name] = {"status": protocol.CHECK_NOT_APPLICABLE, "because": because}
+
     result: Dict[str, Any] = {"schema": COMPLETION_SCHEMA, "matrix": matrix,
-                              "output": str(out), "wrapper": str(wrapper)}
+                              "output": str(out), "wrapper": str(wrapper), "checks": checks}
+    state = records.output_state(out)
+    result["output_state"] = state
+    done("output")
+
+    # meta（wrapper の記録の起点）。wrapper の dir は meta.json ごと rename で確定するので、
+    # dir が無いのは「この wrapper の評価が始まっていない」、dir があって meta が読めないのは破損。
     meta = _read_json(wrapper / records.META)
     fingerprint = meta.get("fingerprint") if isinstance(meta, dict) else None
     result["fingerprint"] = fingerprint
     result["freeze_commit"] = ((meta or {}).get("conditions") or {}).get("freeze_commit") \
         if isinstance(meta, dict) else None
-    if fingerprint is None:
+    if not wrapper.exists() and not wrapper.is_symlink():
+        if state in (protocol.OUTPUT_ABSENT, protocol.OUTPUT_EMPTY):
+            reason("evaluation_not_started", "no wrapper records and no output yet")
+        else:
+            reason("output_without_records",
+                   f"the output holds entries ({state}) but this wrapper never recorded starting it")
+    elif fingerprint is None:
         reason("meta_unreadable", "wrapper meta.json is missing or unreadable")
+    done("meta")
 
     host = _host_state()
     result["host_state"] = host
@@ -541,7 +559,9 @@ def completion(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, A
         reason("container_unobserved", "the evaluation container's state was not observed")
     elif host.get("container") != "absent":
         reason("container_present", f"an evaluation container is {host.get('container')}")
+    done("container")
 
+    # wrapper の記録（破損・回収の状態）と、恒久的な失敗。出力の状態によらず必ず読む。
     check = records.read_records(wrapper)
     result["records"] = {"launches": [_launch_view(launch) for launch in check.launches],
                          "problems": check.problems, "debris": check.debris,
@@ -552,25 +572,36 @@ def completion(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, A
         reason("records_damaged", problem)
     if check.unfinished is not None:
         reason("unfinished_launch", f"launch {check.unfinished.number} is {check.unfinished.state}")
+    done("records")
     for launch in check.launches:
         if launch.exit_kind == records.KIND_EXIT_UNOBSERVED:
             reason("exit_unobserved", f"launch {launch.number}: {launch.exit.get('reason')}")
+    done("permanent")
     result["_check"] = check
 
-    try:
-        result["current_source_digest"] = source_tree_digest(repo)
-    except Exception as exc:  # noqa: BLE001
-        reason("source_digest_unreadable", f"{type(exc).__name__}: {exc}")
-    if not out.is_dir():
-        if check.launches and any(
-                (launch.exit or {}).get("runtime_run_ids") for launch in check.launches):
-            reason("records_damaged", "launches recorded executions but the output does not exist")
-        reason("output_absent", "the output directory does not exist yet")
+    # launch が記録した execution と、出力にある（開始の記録が確定した）execution の対応。
+    # 出力が無い・開始前の出力でも、launch が execution を記録していれば食い違いとして残る。
+    for problem in records.attribution_problems(check, records.started_executions(out)):
+        reason("execution_attribution", problem)
+    done("attribution")
+
+    if state == protocol.OUTPUT_STARTED:
+        try:
+            result["current_source_digest"] = source_tree_digest(repo)
+        except Exception as exc:  # noqa: BLE001
+            reason("source_digest_unreadable", f"{type(exc).__name__}: {exc}")
+    else:
+        why = f"the output is {state}: no execution started, nothing to verify"
+        if state == protocol.OUTPUT_NEVER_STARTED:
+            reason("output_never_started",
+                   "the output holds only what an execution wrote before it recorded its start")
+        else:
+            reason("output_absent", f"the output is {state}")
         result["start_source_digests"] = {}
+        for name in ("chain", "fingerprints", "source", "ledger"):
+            not_applicable(name, why)
         return _verdict(result, reasons)
 
-    for problem in records.attribution_problems(check, execution_dirs(out)):
-        reason("execution_attribution", problem)
     verify, verify_error = _verify(out)
     result["_verify"] = verify
     result["verify"] = _verify_view(verify)
@@ -579,11 +610,13 @@ def completion(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, A
     elif verify.get("verdict") != "CLOSED_SAME_IDENTITY":
         reason("chain_open", "execution chain is OPEN: "
                + ", ".join(verify.get("reasons") or {}))
+    done("chain")
     try:
         fingerprints = start_record_fingerprints(out)
         result["start_source_digests"] = _start_values(out, "analysis_source_digest_start")
     except Exception as exc:  # noqa: BLE001
         fingerprints = {}
+        result["start_source_digests"] = {}
         reason("start_records_unreadable", f"{type(exc).__name__}: {exc}")
     foreign = sorted(run_id for run_id, value in fingerprints.items() if value != fingerprint)
     result["start_record_fingerprints"] = {"executions": len(fingerprints),
@@ -591,6 +624,13 @@ def completion(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, A
     if foreign and fingerprint is not None:
         reason("foreign_execution", f"{len(foreign)} execution(s) did not run under "
                f"this evaluation's conditions: {', '.join(foreign[:3])}")
+    done("fingerprints")
+    digests = {value for value in result["start_source_digests"].values()}
+    current = result.get("current_source_digest")
+    if current is not None and digests and digests != {current}:
+        reason("source_differs", "the output was started from another analysis source than "
+               "this worktree")
+    done("source")
     try:
         formal = _formal(out, matrix, repo)
     except Exception as exc:  # noqa: BLE001
@@ -603,6 +643,7 @@ def completion(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, A
     if formal.get("code_matches_head") is not None and formal.get("code_matches_head") != "yes":
         reason("head_mismatch", "not evidence about the code at HEAD: "
                f"{formal.get('code_matches_head_detail')}")
+    done("ledger")
     return _verdict(result, reasons)
 
 
@@ -637,7 +678,7 @@ def report(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, Any]:
     check = result["_check"]
     result["interruptions"] = timed("interruptions", lambda: interruptions(check.launches),
                                     {"totals": {}, "pairs": []})
-    if out.is_dir():
+    if result.get("output_state") == protocol.OUTPUT_STARTED:
         from scripts.function_tracer_pcode.reporting.outcome_transition import tree_completeness
         from scripts.function_tracer_pcode.reporting.pair_runtime_receipt import (
             load_chain_measurements,

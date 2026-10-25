@@ -274,7 +274,7 @@ def test_an_output_without_wrapper_records_is_refused(h, capsys):
     (h.ev.out / "run_manifest.txt").write_text("run_kind=x\n")
     before = h.snapshot()
     assert h.start() == wrapper.EXIT_REFUSED
-    assert "no wrapper record" in capsys.readouterr().err
+    assert "output_without_records" in capsys.readouterr().err
     assert h.snapshot() == before
 
 
@@ -381,7 +381,7 @@ def test_an_output_stopped_before_its_start_record_is_moved_aside_not_deleted(h,
     (h.ev.out / "CLEVER" / "x").mkdir(parents=True)
     (h.ev.out / "neq_source_pairs.tsv").write_text("x\n")
     (h.ev.out / "pair-status-verification-key.json").write_text("{}")
-    assert wrapper.never_recorded_a_start(h.ev.out)
+    assert records.output_state(h.ev.out) == "never_started"
     assert h.start() == wrapper.EXIT_OK
     launch = json.loads((h.ev.launch_dir(2) / records.LAUNCH).read_text())
     aside = Path(launch["moved_aside_output"])
@@ -395,14 +395,15 @@ def test_an_output_with_a_start_record_or_a_pair_is_never_moved_aside(h):
     out = h.ev.out
     (out / ".executions" / ("a" * 32)).mkdir(parents=True)
     (out / ".executions" / ("a" * 32) / "run_manifest.start.txt").write_text("x=1\n")
-    assert not wrapper.never_recorded_a_start(out)
+    assert records.output_state(out) == "started"
     (out / ".executions" / ("a" * 32) / "run_manifest.start.txt").unlink()
+    assert records.output_state(out) == "never_started"  # 書きかけの dir だけなら開始前
     (out / "S" / "f").mkdir(parents=True)
     (out / "S" / "f" / "f_B1_B2.pair-status.json").write_text("{}")
-    assert not wrapper.never_recorded_a_start(out)
+    assert records.output_state(out) == "started"
     (out / "S" / "f" / "f_B1_B2.pair-status.json").unlink()
     (out / "run_manifest.txt").write_text("x=1\n")
-    assert not wrapper.never_recorded_a_start(out)
+    assert records.output_state(out) == "started"
 
 
 # ---------------------------------------------------------------------------
@@ -629,7 +630,7 @@ def test_start_refuses_while_a_launch_is_unfinished(h, capsys):
                               "EVAL_TEST_CRASH_MARK": str(mark)})
     before = h.snapshot()
     assert h.start() == wrapper.EXIT_REFUSED
-    assert "launch 1 is unfinished (requested); run `stop`" in capsys.readouterr().err
+    assert "unfinished_launch: launch 1 is requested" in capsys.readouterr().err
     assert h.snapshot() == before
     assert h.run("stop") == wrapper.EXIT_OK
     (launch,) = h.records().launches

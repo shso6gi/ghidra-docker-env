@@ -184,10 +184,13 @@ def test_an_unfinished_launch_before_a_later_launch_is_damage(tmp_path):
 def test_executions_must_match_the_launches_that_recorded_them(h, capsys):
     _released_launch(h)
     check = h.records()
-    assert records.attribution_problems(check, summarize.execution_dirs(h.ev.out)) == []
-    stray = "f" * 32
-    (h.ev.out / ".executions" / stray).mkdir()
-    problems = records.attribution_problems(check, summarize.execution_dirs(h.ev.out))
+    assert records.attribution_problems(check, records.started_executions(h.ev.out)) == []
+    stray = h.ev.out / ".executions" / ("f" * 32)
+    stray.mkdir()
+    # 開始の記録の無い dir は execution ではない（pair を始めていない）。
+    assert records.attribution_problems(check, records.started_executions(h.ev.out)) == []
+    (stray / records.START_RECORD).write_text("runtime_run_id=" + "f" * 32 + "\n")
+    problems = records.attribution_problems(check, records.started_executions(h.ev.out))
     assert any("not started by a recorded launch" in p for p in problems)
 
 
@@ -213,6 +216,7 @@ def test_an_execution_no_launch_recorded_makes_the_evaluation_unverifiable(h, mo
     h.complete_evaluation()
     stray = h.ev.out / ".executions" / ("e" * 32)
     stray.mkdir()
+    (stray / records.START_RECORD).write_text("runtime_run_id=" + "e" * 32 + "\n")
     monkeypatch.setenv("EVAL_HOST_STATE", json.dumps({"container": "absent", "observed": True}))
     result = summarize.completion(wrapper.REPO, h.ev.out, h.ev.wrapper, "neq")
     assert result["verdict"] == "UNVERIFIABLE"

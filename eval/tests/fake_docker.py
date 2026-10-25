@@ -259,6 +259,10 @@ def main(argv):
                                    capture_output=True, text=True)
         stdout, returncode = completed.stdout, completed.returncode
         if override:
+            if "drop_check" in override:
+                value = json.loads(stdout)
+                value.get("checks", {}).pop(override["drop_check"], None)
+                stdout = json.dumps(value)
             if "replace_json" in override:
                 value = json.loads(stdout)
                 value.update(override["replace_json"])

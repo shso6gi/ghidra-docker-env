@@ -54,7 +54,11 @@ CATEGORIES = (RESUMABLE, BLOCKING, PERMANENT, UNVERIFIABLE)
 
 #: 理由 code → 分類（唯一の登録表。completion はここから分類を引く）。
 REASONS: Dict[str, str] = {
+    # 評価がまだ始まっていない（wrapper の記録も出力も無い、または出力が空）。
+    "evaluation_not_started": RESUMABLE,
     "output_absent": RESUMABLE,
+    # 出力が、開始の記録を残す前に止まった execution のものだけ（start が退避して新規に始める）。
+    "output_never_started": RESUMABLE,
     "chain_open": RESUMABLE,
     "no_full_verdict": RESUMABLE,
     # ledger の HEAD の照合（最新の execution が記録した commit と dirty）。start は worktree が
@@ -68,6 +72,10 @@ REASONS: Dict[str, str] = {
     "foreign_execution": PERMANENT,
     # container の終了を観測できなかった launch の証拠は、後から得られない。
     "exit_unobserved": PERMANENT,
+    # 出力に wrapper の記録が無い（この wrapper が始めた評価ではない）。
+    "output_without_records": PERMANENT,
+    # 出力の開始の記録が、今の worktree と別の analysis source のもの。
+    "source_differs": PERMANENT,
     "meta_unreadable": UNVERIFIABLE,
     "container_unobserved": UNVERIFIABLE,
     "records_damaged": UNVERIFIABLE,
@@ -77,6 +85,20 @@ REASONS: Dict[str, str] = {
     "start_records_unreadable": UNVERIFIABLE,
     "ledger_failed": UNVERIFIABLE,
 }
+
+#: completion が必ず実施する検査（実施した ``done`` か、該当しない理由付きの ``not_applicable``）。
+#: どれかが欠けた応答は受理しない: 呼び出し側が特別な経路で検査を省略できないようにする。
+MANDATORY_CHECKS = ("meta", "container", "records", "permanent", "attribution", "output",
+                    "chain", "fingerprints", "source", "ledger")
+CHECK_DONE = "done"
+CHECK_NOT_APPLICABLE = "not_applicable"
+
+#: 出力の状態（``records.output_state`` が決める。退避の可否はこれだけから決まる）。
+OUTPUT_ABSENT = "absent"
+OUTPUT_EMPTY = "empty"
+OUTPUT_NEVER_STARTED = "never_started"
+OUTPUT_STARTED = "started"
+OUTPUT_STATES = (OUTPUT_ABSENT, OUTPUT_EMPTY, OUTPUT_NEVER_STARTED, OUTPUT_STARTED)
 
 DECISION_COMPLETE = "complete"
 DECISION_LAUNCH = "launch"
@@ -90,10 +112,17 @@ def verdict_of(categories: Iterable[str]) -> str:
     return VERDICT_INCOMPLETE if categories else VERDICT_COMPLETE
 
 
-def start_decision(completion: Optional[Mapping[str, Any]]) -> Tuple[str, str]:
-    """``(complete | launch | refuse, 説明)``。completion の verdict と理由の分類だけを見る。"""
-    if completion is None:
-        return DECISION_LAUNCH, "first launch"
+def start_decision(completion: Any) -> Tuple[str, str]:
+    """``(complete | launch | refuse, 説明)``。completion の verdict と理由の分類だけを見る。
+
+    入力は ``completion`` の応答の契約（必須の検査をすべて含む）を満たさなければならない。
+    省略（``None``）や一部だけの判定は受け付けず、拒否する: 初回や退避対象の出力も、同じ
+    completion を経て決める。
+    """
+    try:
+        validate_completion(completion)
+    except Rejected as exc:
+        return DECISION_REFUSE, f"no complete judgement of the evaluation was given ({exc})"
     verdict = completion.get("verdict")
     reasons = list(completion.get("reasons") or [])
     text = "; ".join(f"{r.get('code')}: {r.get('detail')}" for r in reasons)
@@ -148,14 +177,33 @@ def validate_reasons(value: Any) -> None:
              "the verdict does not follow from the reasons")
 
 
+def validate_checks(value: Any) -> None:
+    """必須の検査がすべて実施（または該当なしと明示）され、出力の状態が報告されていること。"""
+    checks = value.get("checks")
+    _require(isinstance(checks, dict), "checks is not an object")
+    missing = [name for name in MANDATORY_CHECKS if name not in checks]
+    _require(not missing, f"mandatory checks missing: {missing}")
+    for name in MANDATORY_CHECKS:
+        entry = checks[name]
+        _require(isinstance(entry, dict) and entry.get("status") in (CHECK_DONE, CHECK_NOT_APPLICABLE),
+                 f"check {name} has no status")
+        if entry["status"] == CHECK_NOT_APPLICABLE:
+            _require(isinstance(entry.get("because"), str) and entry["because"],
+                     f"check {name} is not applicable without a reason")
+    _require(value.get("output_state") in OUTPUT_STATES,
+             f"output_state {value.get('output_state')!r}")
+
+
 def validate_completion(value: Any) -> None:
     validate_reasons(value)
     _require(value.get("schema") == COMPLETION_SCHEMA, f"schema {value.get('schema')!r}")
+    validate_checks(value)
 
 
 def validate_summary(value: Any) -> None:
     validate_reasons(value)
     _require(value.get("schema") == SUMMARY_SCHEMA, f"schema {value.get('schema')!r}")
+    validate_checks(value)
     _require(isinstance(value.get("report_errors"), list), "report_errors is not a list")
 
 

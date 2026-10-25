@@ -25,6 +25,15 @@ CODE_OF = {category: next(code for code, c in protocol.REASONS.items() if c == c
 CODE_OF["something new"] = "not_registered"
 
 
+ALL_CHECKS = {name: {"status": "done"} for name in protocol.MANDATORY_CHECKS}
+
+
+def _judgement(verdict, reasons, **extra):
+    """completion の応答の形（必須の検査をすべて含む）。"""
+    return {"schema": protocol.COMPLETION_SCHEMA, "verdict": verdict, "reasons": reasons,
+            "checks": dict(ALL_CHECKS), "output_state": "started", **extra}
+
+
 def _subsets(items):
     return chain.from_iterable(combinations(items, n) for n in range(len(items) + 1))
 
@@ -44,7 +53,7 @@ def _expected(categories) -> str:
 @pytest.mark.parametrize("categories", list(_subsets(CATEGORIES)), ids=lambda c: "+".join(c) or "none")
 def test_the_start_decision_follows_the_contract_for_every_combination(categories):
     reasons = [{"code": CODE_OF[c], "category": c, "detail": "x"} for c in categories]
-    completion = {"verdict": protocol.verdict_of(categories), "reasons": reasons}
+    completion = _judgement(protocol.verdict_of(categories), reasons)
     decision, text = protocol.start_decision(completion)
     assert decision == _expected(categories)
     if protocol.PERMANENT in categories and decision == protocol.DECISION_REFUSE and not (
@@ -53,8 +62,8 @@ def test_the_start_decision_follows_the_contract_for_every_combination(categorie
 
 
 def test_a_completion_that_claims_complete_with_reasons_is_refused():
-    completion = {"verdict": "COMPLETE", "reasons": [{"code": "chain_open", "category": "resumable",
-                                                      "detail": "x"}]}
+    completion = _judgement("COMPLETE", [{"code": "chain_open", "category": "resumable",
+                                          "detail": "x"}])
     assert protocol.start_decision(completion)[0] == protocol.DECISION_REFUSE
 
 
@@ -70,7 +79,7 @@ def test_every_registered_reason_has_a_known_category():
 
 def _completion(verdict="INCOMPLETE", reasons=None):
     reasons = [{"code": "chain_open", "category": "resumable", "detail": "x"}] if reasons is None else reasons
-    return {"schema": protocol.COMPLETION_SCHEMA, "verdict": verdict, "reasons": reasons}
+    return _judgement(verdict, reasons)
 
 
 VALID = {
@@ -130,7 +139,8 @@ def test_a_completion_inconsistent_with_the_registry_is_rejected(reasons, verdic
 
 def test_an_unknown_category_is_refused_even_when_the_verdict_claims_incomplete():
     """受理の検査を経ない入力でも、決定は未知の分類で再開しない（二重の防御）。"""
-    completion = {"verdict": "INCOMPLETE",
+    completion = {**_judgement("INCOMPLETE", [{"code": "chain_open", "category": "resumable",
+                                               "detail": "x"}]),
                   "reasons": [{"code": "x", "category": "something new", "detail": "x"},
                               {"code": "chain_open", "category": "resumable", "detail": "x"}]}
     assert protocol.start_decision(completion)[0] == protocol.DECISION_REFUSE

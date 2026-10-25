@@ -47,7 +47,9 @@ launch（`start` 1 回）の記録は、次の順に 1 つずつ確定し、上�
 
 1. `launch.json` — 起動の要求（staging dir に書き、rename 1 回で `launches/<n>` になる）
 2. `container.json` — `docker run` が返した container（作られていたのに記録の前に止まった場合は、
-   回収が名前と label で見つけて記録する）
+   回収が名前と label で見つけて記録する。container も見つからないときは、起動の要求の時点の出力
+   （`launch.json` の `output_before`）と比べ、変わっていれば container が動いて外部で消されたとして
+   `exit_unobserved`、変わっていなければ `not_started`）
 3. `runner.log` → `exit.json` — 終了の観測（exit code・`OOMKilled`・この launch の execution・
    `runner.log` の sha256）。`docker logs` が失敗したら何も保存しない
 4. `evidence.json` — 未終端の pair の写しと検証器の判定（次の再開が pair の診断を消す前に取る）
@@ -82,8 +84,17 @@ launch（`start` 1 回）の記録は、次の順に 1 つずつ確定し、上�
 | unverifiable | 判定できない | 記録の破損、読み取りの失敗、container の状態を観測できない |
 
 `start` は、COMPLETE なら何もしない。permanent・blocking・unverifiable（または未知の分類）が
-**1 つでもあれば**、他の理由が何であっても何も書かずに拒否する。permanent のときは、この評価の記録を
-残したまま、別の評価（別の `--tag`）として始め直す。resumable だけのときだけ再開する。
+**1 つでもあれば**、他の理由が何であっても、出力の状態（無い・空・開始前・開始後）が何であっても、
+何も書かずに拒否する（退避も launch も container の起動もしない）。permanent のときは、この評価の
+記録を残したまま、別の評価（別の `--tag`）として始め直す。resumable だけのときだけ再開する。
+
+この判定は、初回・出力が無い・空・開始の記録の前に止まった出力・通常の再開・完了後のどの経路でも
+同じ `completion` が行う。`completion` は必須の検査（meta・container・記録・恒久的な失敗・execution
+との対応・出力の状態・連鎖・fingerprint・source・ledger）をすべて実施したか、出力の状態から該当しない
+ことを明示した応答だけを返し、`start` はそれ以外の応答を受け付けない。開始の記録の前に止まった出力の
+退避は、この判定が再開を許した後で、同じ出力の状態の判定（`records.output_state`）を lock の下で
+確かめ直してから行う。launch が記録する execution は、開始の記録が確定したものだけ（書きかけの dir は
+数えない）なので、退避しても記録と出力の対応は崩れない。
 
 **reader の応答の受理**: 読み取り専用の container の応答（完了の判定・launch の証拠・検証器・summary）は、
 要求ごとの終了コードと応答の形の **両方** を満たすときだけ受理する。非 0 終了の正しい JSON も、0 終了の

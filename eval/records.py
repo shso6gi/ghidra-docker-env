@@ -353,6 +353,7 @@ def attribution_problems(check: RecordCheck, executions: Iterable[str]) -> List[
     launch のものとして扱う（まだ記録していない）。
     """
     on_disk = {run_id for run_id in executions if _RUN_ID.fullmatch(run_id)}
+    # executions は ``started_executions``（開始の記録が確定したもの）を渡す。
     owner: Dict[str, int] = {}
     problems: List[str] = []
     for launch in check.launches:
@@ -432,3 +433,70 @@ def oom_attribution(watch: Sequence[Mapping[str, Any]], *, start: Optional[float
         return OOM_UNOBSERVED
     covered = bool(intervals) and intervals[0].start <= lo and intervals[-1].end >= hi
     return OOM_NO if covered else OOM_UNOBSERVED
+
+
+# ---------------------------------------------------------------------------
+# 出力の状態（退避の可否と、execution との対応の母集合）
+# ---------------------------------------------------------------------------
+
+START_RECORD = "run_manifest.start.txt"
+RUN_MANIFEST = "run_manifest.txt"
+
+
+def started_executions(out: Path) -> List[str]:
+    """開始の記録が確定した execution（``.executions/<id>/run_manifest.start.txt``）。
+
+    開始の記録の前に止まった execution の dir（書きかけだけ）は、pair を 1 つも始めていない
+    （PR-B）。launch が記録する execution も、出力との対応の検査も、この集合だけを使う。
+    """
+    directory = Path(out) / ".executions"
+    if not directory.is_dir():
+        return []
+    return sorted(entry.name for entry in directory.iterdir()
+                  if _RUN_ID.fullmatch(entry.name) and (entry / START_RECORD).is_file())
+
+
+def output_state(out: Path) -> str:
+    """``absent`` / ``empty`` / ``never_started`` / ``started``（``protocol.OUTPUT_STATES``）。
+
+    ``never_started``: 出力に entry はあるが、run manifest も確定した開始の記録も pair-status も
+    無い（runner は manifest と開始の記録を確定してから pair を始めるので、pair は 1 つも始まって
+    いない）。runner の FULL 受理判定はこの出力を拒否し続けるので、再開してよいと判定された
+    ときだけ start が退避する。退避してよいかはこの状態だけで決まり、再開してよいかは決めない。
+    """
+    out = Path(out)
+    if not out.exists() and not out.is_symlink():
+        return protocol.OUTPUT_ABSENT
+    if not out.is_dir() or out.is_symlink():
+        return protocol.OUTPUT_STARTED  # 想定外の形は「始まった」側に倒す（退避しない）
+    if not any(out.iterdir()):
+        return protocol.OUTPUT_EMPTY
+    if (out / RUN_MANIFEST).exists() or (out / RUN_MANIFEST).is_symlink() or started_executions(out):
+        return protocol.OUTPUT_STARTED
+    if any(out.rglob("*.pair-status.json")):
+        return protocol.OUTPUT_STARTED
+    return protocol.OUTPUT_NEVER_STARTED
+
+
+def output_fingerprint(out: Path) -> Optional[str]:
+    """出力の top level と ``.executions`` の entry の (名前, 大きさ, mtime) の digest。
+
+    launch の要求の時点で記録し、container の記録が無いまま container が見つからないときに、
+    container が動いたか（出力が変わったか）を判断するのに使う。出力が無ければ ``None``。
+    """
+    import hashlib
+
+    out = Path(out)
+    if not out.is_dir():
+        return None
+    rows = []
+    for base in (out, out / ".executions"):
+        if not base.is_dir():
+            continue
+        for entry in sorted(base.iterdir()):
+            try:
+                stat = entry.lstat()
+            except OSError:
+                continue
+            rows.append(f"{entry.relative_to(out).as_posix()}\t{stat.st_size}\t{stat.st_mtime_ns}")
+    return hashlib.sha256("\n".join(rows).encode()).hexdigest()

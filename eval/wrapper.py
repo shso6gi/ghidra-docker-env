@@ -614,7 +614,6 @@ class Plan:
     completion: Optional[Dict[str, Any]]
     leftovers: List[str]
     others: Optional[List[str]]
-    aborted_output: bool = False
 
 
 def worktree_state(ev: Evaluation) -> None:
@@ -650,25 +649,10 @@ def preflight(ev: Evaluation) -> Plan:
     minimum = int(os.environ.get("EVAL_MIN_FREE_GIB", DEFAULT_MIN_FREE_GIB)) * 2**30
     if free_bytes(ev.log_root if ev.log_root.exists() else ev.main / "logs") < minimum:
         raise Refused(f"less than {minimum // 2**30} GiB free under {ev.log_root}")
-    meta_path = ev.wrapper / records.META
-    meta = read_json(meta_path) if meta_path.exists() else None
-    if meta_path.exists() and not (isinstance(meta, dict) and meta.get("schema") == META_SCHEMA):
-        raise Refused(f"{meta_path} is unreadable; the evaluation's conditions cannot be checked")
     if ev.out.exists() and not ev.out.is_dir():
         raise Refused(f"{ev.out} is not a directory")
-    out_entries = sorted(p.name for p in ev.out.iterdir()) if ev.out.is_dir() else []
-    if meta is None and out_entries:
-        raise Refused(f"{ev.out} holds results but no wrapper record ({meta_path}); it was not "
-                      "started by this wrapper -- use a new output (another --tag or commit)")
-    if meta is None and ev.wrapper.exists() and any(ev.wrapper.iterdir()):
-        raise Refused(f"{ev.wrapper} exists without meta.json; inspect it before starting")
-    check = records.read_records(ev.wrapper)
-    if check.damaged:
-        raise Refused("the wrapper records are damaged (nothing is repaired or hidden):\n  "
-                      + "\n  ".join(check.problems))
-    if check.unfinished is not None:
-        raise Refused(f"launch {check.unfinished.number} is unfinished "
-                      f"({check.unfinished.state}); run `stop` to record it first")
+    meta = read_json(ev.wrapper / records.META)
+    meta = meta if isinstance(meta, dict) and meta.get("schema") == META_SCHEMA else None
     probe = probe_environment(ev, profile["IMAGE"], profile["CONTAINER_MEMORY"])
     conditions = build_conditions(ev, profile, profile_sha, image, probe)
     fingerprint = fingerprint_of(conditions)
@@ -679,38 +663,18 @@ def preflight(ev: Evaluation) -> Plan:
                 "the conditions differ from the ones this evaluation started with: "
                 + ", ".join(differing_keys(recorded, conditions) or ["fingerprint"])
                 + ". To change them, start a separate evaluation (another --tag).")
-    aborted = bool(out_entries) and never_recorded_a_start(ev.out)
-    completion = None
-    if meta is not None and not aborted:
-        # 完了の判定は summary と同じ 1 つの関数（summarize.completion）だけが行う。
-        try:
-            completion = read_json_from(
-                ev, profile["IMAGE"], "completion",
-                env={"EVAL_HOST_STATE": json.dumps({"container": "absent", "observed": True})})
-        except Unobservable as exc:
-            raise Refused(f"cannot judge the evaluation: {exc}")
-        digests = set((completion.get("start_source_digests") or {}).values())
-        if digests and digests != {completion.get("current_source_digest")}:
-            raise Refused("the output was made from another analysis source than this worktree")
+    # 再開してよいかは、どの経路（初回・出力が無い・空・開始前の出力・通常の再開・完了後）でも
+    # 同じ completion だけが決める。呼び出し側は判定を省略も複製もしない。
+    try:
+        completion = read_json_from(
+            ev, profile["IMAGE"], "completion",
+            env={"EVAL_HOST_STATE": json.dumps({"container": "absent", "observed": True})})
+    except Unobservable as exc:
+        raise Refused(f"cannot judge the evaluation: {exc}")
     leftovers = sorted(p.name for p in ev.tmp.iterdir()) if ev.tmp.is_dir() else []
     return Plan(profile=profile, conditions=conditions, fingerprint=fingerprint,
-                first=meta is None, completion=completion, leftovers=leftovers,
-                others=other_running_containers(ev), aborted_output=aborted)
-
-
-def never_recorded_a_start(out: Path) -> bool:
-    """出力先が、開始の記録を残す前に止まった最初の execution のものか。
-
-    runner は ``run_manifest.txt`` を置き、開始の記録を確定してから pair を始める。どちらも無く、
-    pair-status も無い出力先では、pair は 1 つも始まっていない（関数選択などの途中で止まった）。
-    runner の FULL 受理判定はこの出力先を拒否し続けるので、wrapper が脇へ移して新規に始める。
-    """
-    if (out / "run_manifest.txt").exists() or (out / "run_manifest.txt").is_symlink():
-        return False
-    executions = out / ".executions"
-    if executions.is_dir() and any(executions.glob("*/run_manifest.start.txt")):
-        return False
-    return not any(out.rglob("*.pair-status.json"))
+                first=meta is None and not ev.wrapper.exists(), completion=completion,
+                leftovers=leftovers, others=other_running_containers(ev))
 
 
 #: start の決定は protocol（理由の分類の owner）が持つ。ここは呼ぶだけ。
@@ -749,8 +713,8 @@ def clean_leftovers(ev: Evaluation, names: Sequence[str]) -> List[Dict[str, Any]
 
 
 def existing_execution_ids(ev: Evaluation) -> List[str]:
-    directory = ev.out / ".executions"
-    return sorted(p.name for p in directory.iterdir()) if directory.is_dir() else []
+    """出力にある、開始の記録が確定した execution（launch が記録する母集合）。"""
+    return records.started_executions(ev.out)
 
 
 def next_launch(ev: Evaluation) -> int:
@@ -838,8 +802,11 @@ def _start_locked(ev: Evaluation, lock: int) -> int:
     journal(ev, "start_requested", planned_launch=number)
     removed = clean_leftovers(ev, plan.leftovers)
     moved_aside = None
-    if plan.aborted_output:
-        # 削除せずに wrapper の dir へ移す（同じ file system の rename 1 回。名前は一意）。
+    if plan.completion["output_state"] == protocol.OUTPUT_NEVER_STARTED:
+        # 判定（completion）が再開を許した後でだけ、開始の記録の前に止まった出力を退避する。
+        # 退避の可否は同じ owner（records.output_state）で lock の下に確かめ直す。
+        if records.output_state(ev.out) != protocol.OUTPUT_NEVER_STARTED:
+            raise WrapperError(f"{ev.out} changed since it was judged; nothing was moved")
         aside = ev.wrapper / "aborted-outputs" / f"{utc_now()}-{secrets.token_hex(3)}"
         aside.parent.mkdir(exist_ok=True)
         os.rename(ev.out, aside)
@@ -850,6 +817,7 @@ def _start_locked(ev: Evaluation, lock: int) -> int:
     directory = commit_launch(ev, number, {
         "schema": records.LAUNCH_SCHEMA, "launch": number, "requested_at": utc_now(),
         "fingerprint": plan.fingerprint, "execution_ids_before": before,
+        "output_before": records.output_fingerprint(ev.out),
         "removed_leftovers": removed, "other_running_containers": plan.others,
         "moved_aside_output": moved_aside,
         "completion_before": None if plan.completion is None else {
@@ -1049,14 +1017,22 @@ def advance(ev: Evaluation, number: int, *, watch_running: bool) -> records.Laun
         if state == records.STATE_REQUESTED:
             found = container_state(ev)
             if found is None:
+                # container の記録が無く、container も無い。container が作られなかったのか、
+                # 動いて wrapper の外で消されたのかを、要求の時点の出力と比べて区別する。
+                # 区別できなければ（要求の時点の記録が無い）「作られなかった」とは言わない。
                 new = _new_executions(ev, launch)
-                kind = records.KIND_EXIT_UNOBSERVED if new else records.KIND_NOT_STARTED
+                launch_record = launch.launch or {}
+                changed = ("output_before" not in launch_record
+                           or records.output_fingerprint(ev.out) != launch_record["output_before"])
+                ran = bool(new) or changed
+                kind = records.KIND_EXIT_UNOBSERVED if ran else records.KIND_NOT_STARTED
                 write_json(ev.launch_dir(number) / records.EXIT, _exit_payload(
                     ev, launch, kind, reason=(
-                        "no container exists and none was recorded; the output gained "
-                        "executions, so a container ran and was removed outside the wrapper"
-                        if new else "no container was created (docker run failed, or the "
-                        "launch stopped before it)")), exclusive=True)
+                        "no container exists and none was recorded, but the output changed "
+                        "after the launch was requested: a container ran and was removed "
+                        "outside the wrapper" if ran else "no container was created (docker "
+                        "run failed, or the launch stopped before it); the output is as it was "
+                        "when the launch was requested")), exclusive=True)
                 journal(ev, "exit_recorded", launch=number, kind=kind)
                 continue
             if found.get("eval") != ev.eval_id or found.get("launch") != str(number):
