@@ -1,27 +1,37 @@
 # -*- coding: utf-8 -*-
-"""評価 wrapper の読み取り専用の集計（評価計画 v2 PR-D）。
+"""評価 wrapper の読み取り専用の判定と集計（評価計画 v2 PR-D）。
 
-評価の完了・正式性の判定を、ここでは**作らない**。呼ぶだけにする:
+**完了の判定はこの module の ``completion`` 1 つだけ**。``summary``（``report``）と ``start``
+の「完了済み」はどちらもこれを呼ぶ。条件はそれぞれの owner の判定を並べるだけで、自分の規則を
+足さない:
 
-* 実行の連鎖の完全性: ``reporting.execution_chain.verify_execution_chain``
-* tree の完全性: ``reporting.outcome_transition.tree_completeness``
-* 正式な full verdict: ``reporting.verification_ledger.build_row`` +
-  ``full_scope_evidence``（ledger の条件はそのまま。ledger file には書かない）
-* gate: ``soundness_gate.build_gate_report``（メモリ上）と、runner が書いた
-  ``benchmark_validation_gate.json``（読み戻すだけ）
-* 時間: ``pair_runtime_receipt.load_chain_measurements``
+======================  ===============================================================
+条件                     owner
+======================  ===============================================================
+実行の連鎖              ``reporting.execution_chain.verify_execution_chain``（CLOSED）
+正式な full verdict      ``verification_ledger.build_row`` + ``full_scope_evidence``
+HEAD の一致              ``verification_ledger.head_match``
+条件（fingerprint）      wrapper の ``meta.json`` と、各 execution の開始の記録
+wrapper の記録           ``eval/records.py``（launch の状態機械・破損・execution との対応）
+container の状態         host の wrapper が観測して ``EVAL_HOST_STATE`` で渡す
+======================  ===============================================================
 
-この module が自分で持つのは、wrapper が記録した条件（fingerprint）と tree の開始の記録の
-照合、中断の記録（container の終了・cgroup の ``oom_kill``・未終端の pair）の突き合わせ、
-表示だけ。出力先にも wrapper の dir にも書かない（呼び出し側は read-only の mount で動かす）。
+理由ごとに分類する（``start`` はこの分類だけを見る）:
 
-使い方（container の中、repo を ``--repo`` に置く）::
+* ``resumable``: runner を同じ条件で再び動かせば進む（出力先が無い、連鎖が OPEN、full verdict
+  が無い）
+* ``blocking``: 先に人か ``stop`` が要る（未完了の launch、container が残っている、別の条件の
+  execution、HEAD の不一致）
+* ``permanent``: 走らせても直らないが、完了とも言えない（container の終了を観測できなかった launch）
+* 判定できない（verdict が ``UNVERIFIABLE``）: 読み取りの失敗、記録の破損、記録と出力先の
+  execution の対応の食い違い、container の状態が観測されていない
 
-    python3 -B eval/summarize.py preflight --repo R --out OUT
-    python3 -B eval/summarize.py launch-evidence --repo R --out OUT
-    python3 -B eval/summarize.py report --repo R --out OUT --wrapper W --matrix neq [--json]
+使い方（container の中）::
 
-``report`` の終了コード: 0 = 評価が完了（下の COMPLETE）、1 = 未完了、2 = 判定できない。
+    python3 -B eval/summarize.py completion|verify|launch-evidence|report \
+        --repo R --out OUT --wrapper W --matrix neq|eq [--json]
+
+``report`` の終了コード: 0 = 完了、1 = 未完了、2 = 判定できない（集計の欄が作れなかったときも 2）。
 """
 
 from __future__ import annotations
@@ -34,9 +44,18 @@ import sys
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-SUMMARY_SCHEMA = "eval-summary-v1"
-PREFLIGHT_SCHEMA = "eval-preflight-v1"
-LAUNCH_EVIDENCE_SCHEMA = "eval-launch-evidence-v1"
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+import records  # noqa: E402  (eval/ の記録の形式と検査)
+
+SUMMARY_SCHEMA = "eval-summary-v2"
+COMPLETION_SCHEMA = "eval-completion-v1"
+LAUNCH_EVIDENCE_SCHEMA = records.EVIDENCE_SCHEMA
+
+RESUMABLE = "resumable"
+BLOCKING = "blocking"
+PERMANENT = "permanent"
+UNVERIFIABLE = "unverifiable"
 
 VERDICT_COMPLETE = "COMPLETE"
 VERDICT_INCOMPLETE = "INCOMPLETE"
@@ -48,10 +67,6 @@ REQUESTED_SCOPE_BY_MATRIX = {"neq": "full_neq", "eq": "full_eq"}
 # Neq-Core の集計の定義（EvalPrep 計画 v2 §7.4「Neq-Core は集計時に UnchLoop の foo を除いて
 # 作る」）。解析にも判定にも使わない、表示の view だけの定義。(sample identity の接頭辞, 関数名)。
 NEQ_CORE_EXCLUDED = (("CLEVER/UnchLoop/Neq/", "foo"),)
-
-# 中断の突き合わせで、pair の終了時刻と cgroup の観測の間に許す遅れ（秒）。wrapper の
-# 観測間隔（10 秒）より長くする。
-OOM_MATCH_SLACK_SECONDS = 15.0
 
 INCOMPLETE_STATUS = "INCOMPLETE"
 RUNNING_STATE = "RUNNING"
@@ -69,47 +84,11 @@ def _read_json(path: Path) -> Optional[Any]:
         return None
 
 
-def _read_jsonl(path: Path) -> Tuple[List[Mapping[str, Any]], int]:
-    """行ごとの JSON object と、読めなかった行の数（読めない行は黙って捨てない）。"""
-    rows: List[Mapping[str, Any]] = []
-    bad = 0
-    try:
-        text = Path(path).read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return rows, 0
-    except (OSError, UnicodeError):
-        return rows, 1
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        try:
-            value = json.loads(line)
-        except ValueError:
-            bad += 1
-            continue
-        if isinstance(value, dict):
-            rows.append(value)
-        else:
-            bad += 1
-    return rows, bad
-
-
 def start_record_fingerprints(out: Path) -> Dict[str, Optional[str]]:
     """確定した開始の記録ごとの ``environment_fingerprint``（execution_chain の reader で読む）。"""
     from scripts.function_tracer_pcode.reporting import execution_chain
 
-    chain = execution_chain.read_chain_records(out)
-    values: Dict[str, Optional[str]] = {}
-    for run_id, records in sorted(chain.executions.items()):
-        if not records.started:
-            continue
-        try:
-            fields = execution_chain._parse_key_values(records.start_text)
-        except ValueError:
-            values[run_id] = None
-            continue
-        values[run_id] = fields.get("environment_fingerprint")
-    return values
+    return _start_values(out, "environment_fingerprint")
 
 
 def _verify(out: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -121,34 +100,12 @@ def _verify(out: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         return None, f"{type(exc).__name__}: {exc}"
 
 
-# ---------------------------------------------------------------------------
-# preflight（start の前）
-# ---------------------------------------------------------------------------
-
-
-def preflight(repo: Path, out: Path) -> Dict[str, Any]:
-    """start の判断に要る事実だけ: 検証器の判定、開始の記録の fingerprint、今の source digest。"""
-    from scripts.function_tracer_pcode.reporting.execution_identity import source_tree_digest
-
-    report: Dict[str, Any] = {"schema": PREFLIGHT_SCHEMA, "output": str(out)}
-    report["output_exists"] = out.exists()
-    report["output_entries"] = sorted(p.name for p in out.iterdir()) if out.is_dir() else []
-    report["current_source_digest"] = source_tree_digest(repo)
-    if not out.is_dir():
-        report["verify"], report["verify_error"] = None, None
-        report["start_fingerprints"] = {}
-        report["start_source_digests"] = {}
-        return report
+def verify_report(out: Path) -> Dict[str, Any]:
+    """``status --verify``: 検証器だけ（判定には使わない表示）。"""
     started = time.monotonic()
-    report["verify"], report["verify_error"] = _verify(out)
-    report["verify_seconds"] = round(time.monotonic() - started, 1)
-    try:
-        report["start_fingerprints"] = start_record_fingerprints(out)
-        report["start_source_digests"] = _start_values(out, "analysis_source_digest_start")
-    except OSError as exc:
-        report["start_fingerprints"] = None
-        report["start_records_error"] = str(exc)
-    return report
+    verify, error = _verify(out) if out.is_dir() else (None, "the output does not exist")
+    return {"verify": _verify_view(verify), "verify_error": error,
+            "verify_seconds": round(time.monotonic() - started, 1)}
 
 
 def _start_values(out: Path, key: str) -> Dict[str, Optional[str]]:
@@ -156,13 +113,18 @@ def _start_values(out: Path, key: str) -> Dict[str, Optional[str]]:
 
     chain = execution_chain.read_chain_records(out)
     values: Dict[str, Optional[str]] = {}
-    for run_id, records in sorted(chain.executions.items()):
-        if records.started:
+    for run_id, entry in sorted(chain.executions.items()):
+        if entry.started:
             try:
-                values[run_id] = execution_chain._parse_key_values(records.start_text).get(key)
+                values[run_id] = execution_chain._parse_key_values(entry.start_text).get(key)
             except ValueError:
                 values[run_id] = None
     return values
+
+
+def execution_dirs(out: Path) -> List[str]:
+    directory = out / ".executions"
+    return sorted(p.name for p in directory.iterdir()) if directory.is_dir() else []
 
 
 # ---------------------------------------------------------------------------
@@ -429,121 +391,79 @@ def _formal(out: Path, matrix: str, repo: Path) -> Dict[str, Any]:
     }
 
 
-def _launches(wrapper: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """wrapper の launch ごとの記録と、欠けている記録（欠損は黙って捨てない）。"""
-    launches: List[Dict[str, Any]] = []
-    gaps: List[str] = []
-    root = wrapper / "launches"
-    if not root.is_dir():
-        return launches, gaps
-    for directory in sorted(root.iterdir(), key=lambda p: (len(p.name), p.name)):
-        if not directory.is_dir() or not directory.name.isdigit():
-            continue
-        entry: Dict[str, Any] = {"launch": int(directory.name)}
-        entry["launch_record"] = _read_json(directory / "launch.json")
-        for name in ("exit.json", "evidence.json"):
-            entry[name.split(".")[0]] = _read_json(directory / name)
-        watch, bad = _read_jsonl(directory / "watch.jsonl")
-        entry["watch"] = watch
-        if bad:
-            gaps.append(f"launch {directory.name}: {bad} unreadable watch line(s)")
-        if entry["exit"] is None:
-            gaps.append(f"launch {directory.name}: no container exit record")
-        elif entry["exit"].get("container_started") is False:
-            # 起動前に失敗した launch: container も pair も無いので、終了後の証拠は要らない。
-            pass
-        else:
-            if entry["evidence"] is None:
-                gaps.append(f"launch {directory.name}: no post-run evidence")
-            if not (directory / "runner.log").is_file():
-                gaps.append(f"launch {directory.name}: no runner log")
-        launches.append(entry)
-    return launches, gaps
-
-
-def _launch_view(entry: Mapping[str, Any]) -> Dict[str, Any]:
-    exit_record = entry.get("exit") or {}
-    samples = list(entry.get("watch") or [])
-    if isinstance(exit_record.get("last_cgroup_sample"), dict):
-        samples.append(exit_record["last_cgroup_sample"])
-    peaks = [s.get("memory_peak") for s in samples if isinstance(s.get("memory_peak"), int)]
+def _launch_view(launch: records.Launch) -> Dict[str, Any]:
+    exit_record = launch.exit or {}
+    observed = [row for row in launch.watch if row.get("observed") is True]
+    peaks = [row.get("memory_peak") for row in observed if type(row.get("memory_peak")) is int]
     return {
-        "launch": entry.get("launch"),
-        "kind": (entry.get("launch_record") or {}).get("kind"),
+        "launch": launch.number,
+        "state": launch.state,
+        "kind": (launch.launch or {}).get("kind"),
+        "exit_kind": exit_record.get("kind"),
         "exit_code": exit_record.get("exit_code"),
         "runner_exit_meaning": exit_record.get("runner_exit_meaning"),
         "oom_killed": exit_record.get("oom_killed"),
         "started_at": exit_record.get("started_at"),
         "finished_at": exit_record.get("finished_at"),
         "runtime_run_ids": exit_record.get("runtime_run_ids"),
-        "watch_samples": len(entry.get("watch") or []),
+        "observations": len(launch.watch),
+        "observations_unobserved": len(launch.watch) - len(observed),
+        "watch_unreadable_lines": launch.watch_unreadable_lines,
+        "watch_write_failures": exit_record.get("watch_write_failures"),
         "memory_peak_bytes": max(peaks, default=None),
-        "evidence_saved": entry.get("evidence") is not None,
+        "evidence_recorded": launch.evidence is not None,
     }
 
 
-def _oom_windows(watch: Sequence[Mapping[str, Any]]) -> List[Tuple[float, float, int]]:
-    """``oom_kill`` が増えた観測の区間 (前回の観測, 今回の観測, 増分)。"""
-    windows = []
-    previous_at: Optional[float] = None
-    for row in watch:
-        at = row.get("at_epoch")
-        if not isinstance(at, (int, float)):
-            continue
-        delta = row.get("oom_kill_delta")
-        if isinstance(delta, int) and delta > 0:
-            windows.append((previous_at if previous_at is not None else at, at, delta))
-        previous_at = at
-    return windows
-
-
-def interruptions(launches: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+def interruptions(launches: Sequence[records.Launch]) -> Dict[str, Any]:
     """中断の記録の突き合わせ。SIGKILL だけから OOM と断定しない（計画 §10-3）。
 
     * ``external_kill``: child が SIGKILL（rc -9）で終わり、runner が未完了とした pair。
-    * ``possible_oom``: そのうち、同じ launch の cgroup の ``oom_kill`` が、その pair の実行区間に
-      増えていたもの（あるいは container 自体が OOMKilled のもの）。それ以外は OOM と書かない。
+      ``possible_oom`` は ``records.oom_attribution``（直前の有効な counter の観測から今回までの
+      区間に増分があり、それが pair の実行区間に重なる → yes、覆われて増分 0 → no、それ以外は
+      unobserved）。
+    * ``execution_stopped`` / ``incomplete_other``: OOM の判定の対象外。container 自体が
+      OOMKilled のときだけ yes。
     """
     rows = []
     totals: Counter = Counter()
-    for entry in launches:
-        exit_record = entry.get("exit") or {}
-        evidence = entry.get("evidence") or {}
-        windows = _oom_windows(entry.get("watch") or [])
-        container_oom = exit_record.get("oom_killed") is True
-        oom_total = sum(delta for _a, _b, delta in windows)
-        totals["oom_kill_events"] += oom_total
+    for launch in launches:
+        exit_record = launch.exit or {}
+        evidence = launch.evidence or {}
+        container_oom = exit_record.get("oom_killed")
+        for interval in records.counter_intervals(launch.watch):
+            if interval.delta:
+                totals["oom_kill_increments"] += interval.delta
+            elif interval.delta is None:
+                totals["oom_kill_counter_resets"] += 1
         for pair in evidence.get("unterminated_pairs") or []:
             rc = pair.get("child_returncode")
-            start = pair.get("started_at_epoch")
-            end = pair.get("finished_at_epoch")
-            if not isinstance(end, (int, float)):
-                end = exit_record.get("finished_at_epoch")
-            overlap = any(
-                isinstance(start, (int, float)) and isinstance(end, (int, float))
-                and lo <= end + OOM_MATCH_SLACK_SECONDS and hi >= start
-                for lo, hi, _delta in windows
-            )
             if pair.get("kind") == "concluded_incomplete" and rc == -9:
                 cause = "external_kill"
             elif pair.get("kind") == "concluded_incomplete":
                 cause = "incomplete_other"
             else:
                 cause = "execution_stopped"
-            possible_oom = container_oom or (cause == "external_kill" and overlap)
+            end = pair.get("finished_at_epoch")
+            if not isinstance(end, (int, float)):
+                end = exit_record.get("finished_at_epoch")
+            if cause == "external_kill":
+                possible = records.oom_attribution(
+                    launch.watch, start=pair.get("started_at_epoch"), end=end,
+                    container_oom_killed=container_oom)
+            else:
+                possible = records.OOM_YES if container_oom is True else "not_applicable"
             totals[cause] += 1
-            if possible_oom:
-                totals["possible_oom"] += 1
+            totals[f"possible_oom_{possible}"] += 1
             rows.append({
-                "launch": entry.get("launch"), "pair": pair.get("pair"), "cause": cause,
-                "child_returncode": rc, "possible_oom": possible_oom,
-                "run_id": pair.get("run_id"),
+                "launch": launch.number, "pair": pair.get("pair"), "cause": cause,
+                "child_returncode": rc, "possible_oom": possible, "run_id": pair.get("run_id"),
             })
     return {"totals": dict(sorted(totals.items())), "pairs": rows}
 
 
-def _container_state(wrapper: Path) -> Optional[Dict[str, Any]]:
-    """host 側の wrapper が渡した container と lock の状態（無ければ None）。"""
+def _host_state() -> Optional[Dict[str, Any]]:
+    """host の wrapper が渡した container と lock の観測（渡されなければ None = 未観測）。"""
     import os
 
     text = os.environ.get("EVAL_HOST_STATE")
@@ -556,109 +476,181 @@ def _container_state(wrapper: Path) -> Optional[Dict[str, Any]]:
     return value if isinstance(value, dict) else None
 
 
-def report(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, Any]:
-    reasons: List[str] = []
-    unverifiable: List[str] = []
-    meta = _read_json(wrapper / "meta.json")
-    fingerprint = meta.get("fingerprint") if isinstance(meta, dict) else None
-    if fingerprint is None:
-        unverifiable.append("wrapper meta.json is missing or unreadable")
-    result: Dict[str, Any] = {
-        "schema": SUMMARY_SCHEMA, "matrix": matrix, "output": str(out), "wrapper": str(wrapper),
-        "fingerprint": fingerprint,
-        "freeze_commit": (meta or {}).get("conditions", {}).get("freeze_commit")
-        if isinstance(meta, dict) else None,
-        "host_state": _container_state(wrapper),
-    }
-    if not out.is_dir():
-        result.update({"verdict": VERDICT_INCOMPLETE if not unverifiable else VERDICT_UNVERIFIABLE,
-                       "verdict_reasons": unverifiable or ["the output directory does not exist yet"]})
-        return result
+def completion(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, Any]:
+    """評価が完了したか（``summary`` と ``start`` が共有する唯一の判定）。
 
+    返り値の ``verdict`` は COMPLETE / INCOMPLETE / UNVERIFIABLE、``reasons`` は
+    ``{code, category, detail}`` の列。COMPLETE は理由が 1 つも無いときだけ。各条件の判定は
+    owner の結果を読むだけで、ここで条件を足しも緩めもしない。
+    """
+    from scripts.function_tracer_pcode.reporting.execution_identity import source_tree_digest
+
+    reasons: List[Dict[str, str]] = []
+
+    def reason(code: str, category: str, detail: str) -> None:
+        reasons.append({"code": code, "category": category, "detail": detail})
+
+    result: Dict[str, Any] = {"schema": COMPLETION_SCHEMA, "matrix": matrix,
+                              "output": str(out), "wrapper": str(wrapper)}
+    meta = _read_json(wrapper / records.META)
+    fingerprint = meta.get("fingerprint") if isinstance(meta, dict) else None
+    result["fingerprint"] = fingerprint
+    result["freeze_commit"] = ((meta or {}).get("conditions") or {}).get("freeze_commit") \
+        if isinstance(meta, dict) else None
+    if fingerprint is None:
+        reason("meta_unreadable", UNVERIFIABLE, "wrapper meta.json is missing or unreadable")
+
+    host = _host_state()
+    result["host_state"] = host
+    if host is None or host.get("observed") is not True:
+        reason("container_unobserved", UNVERIFIABLE,
+               "the evaluation container's state was not observed")
+    elif host.get("container") != "absent":
+        reason("container_present", BLOCKING, f"an evaluation container is {host.get('container')}")
+
+    check = records.read_records(wrapper)
+    result["records"] = {"launches": [_launch_view(launch) for launch in check.launches],
+                         "problems": check.problems, "debris": check.debris,
+                         "unfinished": None if check.unfinished is None else {
+                             "launch": check.unfinished.number,
+                             "state": check.unfinished.state}}
+    for problem in check.problems:
+        reason("records_damaged", UNVERIFIABLE, problem)
+    if check.unfinished is not None:
+        reason("unfinished_launch", BLOCKING,
+               f"launch {check.unfinished.number} is {check.unfinished.state}")
+    for launch in check.launches:
+        if launch.exit_kind == records.KIND_EXIT_UNOBSERVED:
+            reason("exit_unobserved", PERMANENT,
+                   f"launch {launch.number}: {launch.exit.get('reason')}")
+    result["_check"] = check
+
+    try:
+        result["current_source_digest"] = source_tree_digest(repo)
+    except Exception as exc:  # noqa: BLE001
+        reason("source_digest_unreadable", UNVERIFIABLE, f"{type(exc).__name__}: {exc}")
+    if not out.is_dir():
+        if check.launches and any(
+                (launch.exit or {}).get("runtime_run_ids") for launch in check.launches):
+            reason("records_damaged", UNVERIFIABLE,
+                   "launches recorded executions but the output does not exist")
+        reason("output_absent", RESUMABLE, "the output directory does not exist yet")
+        result["start_source_digests"] = {}
+        return _verdict(result, reasons)
+
+    for problem in records.attribution_problems(check, execution_dirs(out)):
+        reason("execution_attribution", UNVERIFIABLE, problem)
+    verify, verify_error = _verify(out)
+    result["_verify"] = verify
+    result["verify"] = _verify_view(verify)
+    if verify is None:
+        reason("verify_failed", UNVERIFIABLE, f"execution_chain verify failed: {verify_error}")
+    elif verify.get("verdict") != "CLOSED_SAME_IDENTITY":
+        reason("chain_open", RESUMABLE, "execution chain is OPEN: "
+               + ", ".join(verify.get("reasons") or {}))
+    try:
+        fingerprints = start_record_fingerprints(out)
+        result["start_source_digests"] = _start_values(out, "analysis_source_digest_start")
+    except Exception as exc:  # noqa: BLE001
+        fingerprints = {}
+        reason("start_records_unreadable", UNVERIFIABLE, f"{type(exc).__name__}: {exc}")
+    foreign = sorted(run_id for run_id, value in fingerprints.items() if value != fingerprint)
+    result["start_record_fingerprints"] = {"executions": len(fingerprints),
+                                           "differing_from_wrapper": foreign}
+    if foreign and fingerprint is not None:
+        reason("foreign_execution", BLOCKING, f"{len(foreign)} execution(s) did not run under "
+               f"this evaluation's conditions: {', '.join(foreign[:3])}")
+    try:
+        formal = _formal(out, matrix, repo)
+    except Exception as exc:  # noqa: BLE001
+        formal = {"full_verdict": None, "reason": f"ledger row: {type(exc).__name__}: {exc}"}
+    result["formal"] = formal
+    if str(formal.get("reason", "")).startswith("ledger row:"):
+        reason("ledger_failed", UNVERIFIABLE, formal["reason"])
+    elif formal.get("full_verdict") != REQUESTED_SCOPE_BY_MATRIX[matrix]:
+        reason("no_full_verdict", RESUMABLE, f"no full verdict: {formal.get('reason')}")
+    if formal.get("code_matches_head") is not None and formal.get("code_matches_head") != "yes":
+        reason("head_mismatch", BLOCKING, "not evidence about the code at HEAD: "
+               f"{formal.get('code_matches_head_detail')}")
+    return _verdict(result, reasons)
+
+
+def _verdict(result: Dict[str, Any], reasons: List[Dict[str, str]]) -> Dict[str, Any]:
+    result["reasons"] = reasons
+    categories = {item["category"] for item in reasons}
+    if UNVERIFIABLE in categories:
+        result["verdict"] = VERDICT_UNVERIFIABLE
+    elif reasons:
+        result["verdict"] = VERDICT_INCOMPLETE
+    else:
+        result["verdict"] = VERDICT_COMPLETE
+    return result
+
+
+def public(result: Mapping[str, Any]) -> Dict[str, Any]:
+    """JSON に出す部分（``_`` で始まる内部の値を除く）。"""
+    return {key: value for key, value in result.items() if not key.startswith("_")}
+
+
+def report(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, Any]:
+    """``completion`` の判定に、集計の欄を足す（欄の失敗は判定を変えず、別に報告する）。"""
+    result = completion(repo, out, wrapper, matrix)
+    result["schema"] = SUMMARY_SCHEMA
+    result["report_errors"] = []
     timings: Dict[str, float] = {}
 
     def timed(name, call, fallback=None):
-        """1 つの読み取り。失敗は判定できない理由として残し、成功に数えない。"""
         started = time.monotonic()
         try:
             return call()
-        except Exception as exc:  # noqa: BLE001 - 読めないことを結果として表示する
-            unverifiable.append(f"{name} failed: {type(exc).__name__}: {exc}")
+        except Exception as exc:  # noqa: BLE001 - 作れなかった欄として報告する
+            result["report_errors"].append(f"{name}: {type(exc).__name__}: {exc}")
             return fallback
         finally:
             timings[name] = round(time.monotonic() - started, 1)
 
-    from scripts.function_tracer_pcode.reporting.outcome_transition import tree_completeness
-    from scripts.function_tracer_pcode.reporting.pair_runtime_receipt import load_chain_measurements
-
-    verify, verify_error = timed("execution_chain_verify", lambda: _verify(out), (None, None))
-    if verify is None and verify_error:
-        unverifiable.append(f"execution_chain verify failed: {verify_error}")
-    completeness = timed("tree_completeness", lambda: tree_completeness(out).as_dict(), {})
-    fingerprints = timed("start_records", lambda: start_record_fingerprints(out), {})
-    foreign = sorted(run_id for run_id, value in fingerprints.items() if value != fingerprint)
-    soundness_report, soundness = timed("soundness_gate", lambda: _soundness(out), (None, {}))
-    if soundness.get("status") == "unavailable":
-        unverifiable.append(f"soundness gate failed: {soundness.get('detail')}")
-    result["census"] = {
-        "execution_chain": _verify_view(verify),
-        "tree_completeness": completeness,
-        "observed_statuses": timed("observed_statuses", lambda: observed_statuses(out), {}),
-        "note": "decided = attributed by the execution chain verifier; observed counts are not verified",
-    }
-    audit = timed("identity_audit", lambda: _identity_audit(out), {})
-    if audit.get("status") == "unavailable" and (verify or {}).get("verdict") == "CLOSED_SAME_IDENTITY":
-        # 検証器が受理した tree を audit が読めないのは食い違い（未完了の tree では当然読めない）。
-        unverifiable.append(f"identity audit failed on a CLOSED tree: {audit.get('detail')}")
-    result["gates"] = {
-        "execution_chain": {"verdict": (verify or {}).get("verdict"),
-                            "reasons": (verify or {}).get("reasons"), "error": verify_error},
-        "identity_audit": audit,
-        "soundness": soundness,
-        "benchmark": _benchmark_gate(out),
-        "start_record_fingerprints": {
-            "executions": len(fingerprints), "differing_from_wrapper": foreign,
-        },
-    }
-    result["formal"] = timed("ledger", lambda: _formal(out, matrix, repo), {})
-    if result["formal"].get("full_verdict") is None and str(
-            result["formal"].get("reason", "")).startswith("ledger row:"):
-        unverifiable.append(result["formal"]["reason"])
-    result["raw"] = timed("raw_aggregate",
-                          lambda: raw_aggregate(out, matrix, soundness_report), {})
-    result["time"] = timed("chain_coverage", lambda: load_chain_measurements(out).as_dict(), {})
-    result["time"]["note"] = (
-        "each pair is timed by the execution that produced it; executions may have run "
-        "under different host load; missing measurements are counted, never 0")
-    launches, gaps = timed("wrapper_records", lambda: _launches(wrapper), ([], []))
-    result["interruptions"] = timed("interruptions", lambda: interruptions(launches),
+    check = result["_check"]
+    result["interruptions"] = timed("interruptions", lambda: interruptions(check.launches),
                                     {"totals": {}, "pairs": []})
-    result["launches"] = [_launch_view(entry) for entry in launches]
-    result["wrapper_record_gaps"] = gaps
-    result["timings_seconds"] = timings
+    if out.is_dir():
+        from scripts.function_tracer_pcode.reporting.outcome_transition import tree_completeness
+        from scripts.function_tracer_pcode.reporting.pair_runtime_receipt import (
+            load_chain_measurements,
+        )
 
-    # 完了の判定は、検証器・完全性・ledger の結論を並べるだけ（自分の規則を足さない）。
-    if verify is not None and verify.get("verdict") != "CLOSED_SAME_IDENTITY":
-        reasons.append("execution chain is OPEN: " + ", ".join(verify.get("reasons") or {}))
-    if foreign:
-        reasons.append(f"{len(foreign)} execution(s) did not run under this wrapper's conditions")
-    formal = result["formal"]
-    if formal.get("full_verdict") != REQUESTED_SCOPE_BY_MATRIX[matrix]:
-        reasons.append(f"no full verdict: {formal.get('reason')}")
-    if formal.get("code_matches_head") != "yes":
-        reasons.append(f"not evidence about the code at HEAD: {formal.get('code_matches_head_detail')}")
-    host = result["host_state"] or {}
-    if host.get("container") not in (None, "absent"):
-        reasons.append(f"an evaluation container is {host.get('container')}")
-    if gaps:
-        reasons.append("wrapper records have gaps: " + "; ".join(gaps))
-    if unverifiable:
-        result["verdict"] = VERDICT_UNVERIFIABLE
-        result["verdict_reasons"] = unverifiable + reasons
-    else:
-        result["verdict"] = VERDICT_INCOMPLETE if reasons else VERDICT_COMPLETE
-        result["verdict_reasons"] = reasons
+        soundness_report, soundness = timed("soundness_gate", lambda: _soundness(out), (None, {}))
+        if soundness.get("status") == "unavailable":
+            result["report_errors"].append(f"soundness gate: {soundness.get('detail')}")
+        result["census"] = {
+            "execution_chain": result.get("verify"),
+            "tree_completeness": timed("tree_completeness",
+                                       lambda: tree_completeness(out).as_dict(), {}),
+            "observed_statuses": timed("observed_statuses", lambda: observed_statuses(out), {}),
+            "note": "decided = attributed by the execution chain verifier; observed counts are "
+                    "not verified",
+        }
+        result["gates"] = {
+            "execution_chain": {"verdict": (result.get("verify") or {}).get("verdict"),
+                                "reasons": (result.get("verify") or {}).get("reasons")},
+            "identity_audit": timed("identity_audit", lambda: _identity_audit(out), {}),
+            "soundness": soundness,
+            "benchmark": _benchmark_gate(out),
+        }
+        result["raw"] = timed("raw_aggregate",
+                              lambda: raw_aggregate(out, matrix, soundness_report), {})
+        result["time"] = timed("chain_coverage",
+                               lambda: load_chain_measurements(out).as_dict(), {})
+        result["time"]["note"] = (
+            "each pair is timed by the execution that produced it; executions may have run "
+            "under different host load; missing measurements are counted, never 0")
+    result["timings_seconds"] = timings
     return result
+
+
+def exit_code(result: Mapping[str, Any]) -> int:
+    if result.get("report_errors"):
+        return EXIT_BY_VERDICT[VERDICT_UNVERIFIABLE]
+    return EXIT_BY_VERDICT[result["verdict"]]
 
 
 # ---------------------------------------------------------------------------
@@ -680,87 +672,99 @@ def format_report(result: Mapping[str, Any]) -> str:
     census = result.get("census")
     if census:
         chain = census.get("execution_chain") or {}
+        completeness = census.get("tree_completeness") or {}
         lines += ["", "1. Census (are all pairs there?)",
                   _line("pairs_expected", chain.get("pairs_expected")),
                   _line("decided_by_execution", [
                       {"run_id": e.get("runtime_run_id"), "sealed": e.get("sealed"),
                        "decided": e.get("decided_pairs_attributed")}
                       for e in chain.get("executions") or []]),
-                  _line("pairs_reused / proven", f"{chain.get('pairs_reused')} / {chain.get('pairs_reused_proven')}"),
-                  _line("tree_completeness", f"{census['tree_completeness'].get('status')} "
-                        f"({census['tree_completeness'].get('detail')}); missing "
-                        f"{census['tree_completeness'].get('pairs_missing')}"),
+                  _line("pairs_reused / proven",
+                        f"{chain.get('pairs_reused')} / {chain.get('pairs_reused_proven')}"),
+                  _line("tree_completeness", f"{completeness.get('status')} "
+                        f"({completeness.get('detail')}); missing {completeness.get('pairs_missing')}"),
                   _line("observed_statuses (unverified)", census.get("observed_statuses")),
                   _line("never_started_executions", chain.get("never_started_executions")),
                   _line("uncommitted_debris", chain.get("uncommitted_debris"))]
-        gates = result["gates"]
+        gates = result.get("gates") or {}
         lines += ["", "2. Gates",
-                  _line("execution_chain", f"{gates['execution_chain'].get('verdict')} "
-                        f"{json.dumps(gates['execution_chain'].get('reasons') or {}, sort_keys=True)}"),
+                  _line("execution_chain", f"{gates.get('execution_chain', {}).get('verdict')} "
+                        f"{json.dumps(gates.get('execution_chain', {}).get('reasons') or {}, sort_keys=True)}"),
                   _line("identity_audit", gates.get("identity_audit")),
                   _line("soundness_gate", gates.get("soundness")),
                   _line("benchmark_validation_gate", gates.get("benchmark")),
-                  _line("start_record_fingerprints", gates.get("start_record_fingerprints"))]
-        formal = result["formal"]
+                  _line("start_record_fingerprints", result.get("start_record_fingerprints"))]
+        formal = result.get("formal") or {}
         lines += ["", "3. Formal verdict (verification ledger)",
                   _line("full_verdict", formal.get("full_verdict") or "NO"),
                   _line("reason", formal.get("reason") or "-"),
-                  _line("completed_scope", f"{formal.get('completed_scope')} ({formal.get('completed_scope_detail')})"),
-                  _line("code_matches_head", f"{formal.get('code_matches_head')} ({formal.get('code_matches_head_detail')})")]
-        raw = result["raw"]
-        lines += ["", "4. Raw totals (canonical outcome of every pair status; final only when the chain is CLOSED)",
+                  _line("completed_scope",
+                        f"{formal.get('completed_scope')} ({formal.get('completed_scope_detail')})"),
+                  _line("code_matches_head",
+                        f"{formal.get('code_matches_head')} ({formal.get('code_matches_head_detail')})")]
+        raw = result.get("raw") or {}
+        lines += ["", "4. Raw totals (canonical outcome of every pair status; final only when "
+                  "the chain is CLOSED)",
                   _line("pairs / functions", f"{raw.get('pairs')} / {raw.get('functions')}"),
                   _line("outcomes", raw.get("outcomes"))]
         if "neq_core" in raw:
             lines.append(_line("neq_core", raw["neq_core"]))
         lines += [_line("identical_fast_path_eq", raw.get("identical_fast_path_eq")),
                   _line("error_by_kind", raw.get("error_by_kind")),
-                  _line("environment_dependent_error_by_kind", raw.get("environment_dependent_error_by_kind")),
+                  _line("environment_dependent_error_by_kind",
+                        raw.get("environment_dependent_error_by_kind")),
                   _line("by_isa", raw.get("by_isa")),
                   "", "5. NOT_EQ by ground truth (consistent = confirmed; unconfirmed kept apart)",
                   _line("not_eq", raw.get("not_eq_by_ground_truth")),
                   _line("ground_truth", raw.get("ground_truth")),
-                  "", "6. Time (chain coverage)", _line("coverage", result.get("time")),
-                  "", "7. Interruptions and OOM",
-                  _line("totals", result["interruptions"]["totals"])]
-        for row in result["interruptions"]["pairs"][:50]:
-            lines.append(_line("pair", row))
-        if len(result["interruptions"]["pairs"]) > 50:
-            lines.append(f"  ... {len(result['interruptions']['pairs']) - 50} more (see --json)")
-        for launch in result.get("launches") or []:
-            lines.append(_line("launch", launch))
-        lines.append(_line("wrapper_record_gaps", result.get("wrapper_record_gaps")))
-        lines.append(_line("timings_seconds", result.get("timings_seconds")))
+                  "", "6. Time (chain coverage)", _line("coverage", result.get("time"))]
+    interrupted = result.get("interruptions") or {"totals": {}, "pairs": []}
+    lines += ["", "7. Launches, interruptions and OOM", _line("totals", interrupted["totals"])]
+    for row in interrupted["pairs"][:50]:
+        lines.append(_line("pair", row))
+    if len(interrupted["pairs"]) > 50:
+        lines.append(f"  ... {len(interrupted['pairs']) - 50} more (see --json)")
+    recorded = result.get("records") or {}
+    for launch in recorded.get("launches") or []:
+        lines.append(_line("launch", launch))
+    lines.append(_line("record_problems", recorded.get("problems")))
+    lines.append(_line("timings_seconds", result.get("timings_seconds")))
+    for error in result.get("report_errors") or []:
+        lines.append(f"  SUMMARY SECTION FAILED: {error}")
     lines += ["", f"VERDICT: {result.get('verdict')}"]
-    lines += [f"  - {reason}" for reason in result.get("verdict_reasons") or []]
+    lines += [f"  - [{item['category']}] {item['code']}: {item['detail']}"
+              for item in result.get("reasons") or []]
     return "\n".join(lines) + "\n"
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("preflight", "launch-evidence", "report"):
+    for name in ("completion", "verify", "launch-evidence", "report"):
         command = sub.add_parser(name)
         command.add_argument("--repo", required=True, type=Path)
         command.add_argument("--out", required=True, type=Path)
-        if name == "report":
-            command.add_argument("--wrapper", required=True, type=Path)
-            command.add_argument("--matrix", required=True, choices=sorted(REQUESTED_SCOPE_BY_MATRIX))
-            command.add_argument("--json", action="store_true")
+        command.add_argument("--wrapper", required=True, type=Path)
+        command.add_argument("--matrix", required=True, choices=sorted(REQUESTED_SCOPE_BY_MATRIX))
+        command.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     sys.path.insert(0, str(args.repo))
-    if args.command == "preflight":
-        print(json.dumps(preflight(args.repo, args.out), sort_keys=True))
+    if args.command == "completion":
+        print(json.dumps(public(completion(args.repo, args.out, args.wrapper, args.matrix)),
+                         sort_keys=True, default=str))
+        return 0
+    if args.command == "verify":
+        print(json.dumps(verify_report(args.out), sort_keys=True))
         return 0
     if args.command == "launch-evidence":
         print(json.dumps(launch_evidence(args.out), sort_keys=True))
         return 0
     result = report(args.repo, args.out, args.wrapper, args.matrix)
     if args.json:
-        print(json.dumps(result, indent=1, sort_keys=True, default=str))
+        print(json.dumps(public(result), indent=1, sort_keys=True, default=str))
     else:
         sys.stdout.write(format_report(result))
-    return EXIT_BY_VERDICT[result["verdict"]]
+    return exit_code(result)
 
 
 if __name__ == "__main__":

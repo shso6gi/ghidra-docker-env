@@ -89,6 +89,22 @@ def parse_run(args):
     return options
 
 
+def holds_eval_lock():
+    """この docker CLI の process が評価の lock file を開いているか（受け継いだ fd）。"""
+    target = os.environ.get("EVAL_LOCK_FILE")
+    if not target or not os.path.exists(target):
+        return False
+    wanted = os.stat(target)
+    for name in os.listdir("/proc/self/fd"):
+        try:
+            found = os.stat(f"/proc/self/fd/{name}")
+        except OSError:
+            continue
+        if (found.st_dev, found.st_ino) == (wanted.st_dev, wanted.st_ino):
+            return True
+    return False
+
+
 def to_host(path, mounts):
     for source, target, _ro in sorted(mounts, key=lambda m: -len(m[1])):
         if path == target or path.startswith(target + "/"):
@@ -96,12 +112,41 @@ def to_host(path, mounts):
     return path
 
 
+def operation(argv):
+    """失敗の注入の key: ``run-d`` / ``run-rm`` / ``logs`` / ``rm`` / ``stop`` / ``wait`` /
+    ``inspect`` / ``ps`` / ``version`` / ``image``。"""
+    if argv[0] == "run":
+        return "run-d" if "-d" in argv else "run-rm"
+    return argv[0]
+
+
+def consume_failure(data, key):
+    """``fail[key]`` が正なら 1 減らして失敗、-1 なら常に失敗。"""
+    remaining = (data.get("fail") or {}).get(key, 0)
+    if remaining == 0:
+        return False
+    if remaining > 0:
+        data["fail"][key] = remaining - 1
+    return True
+
+
 def main(argv):
     with State() as data:
         data.setdefault("calls", []).append(argv)
-        if data.get("fail") and argv[0] in data["fail"]:
-            print(f"fake docker: {argv[0]} fails", file=sys.stderr)
-            return 1
+        failed = consume_failure(data, operation(argv))
+        if failed and operation(argv) == "run-d" and data.get("create_on_failed_run"):
+            # 作成までは済んで、起動に失敗した（docker run が非 0 を返しても container は残る）。
+            options = parse_run(argv[1:])
+            number = len(data.setdefault("containers_started", [])) + 1
+            identifier = f"{number:064x}"
+            container = {"id": identifier, "name": options["name"], "status": "created",
+                         "exit_code": 0, "labels": options["labels"], "env": options["env"],
+                         "image": options["image"], "command": options["command"]}
+            data.setdefault("containers", []).append(container)
+            data["containers_started"].append(dict(container))
+    if failed:
+        print(f"Error response from daemon: fake docker: {operation(argv)} fails", file=sys.stderr)
+        return 1
     command, args = argv[0], argv[1:]
     if command == "image":
         with State() as data:
@@ -140,7 +185,7 @@ def main(argv):
         with State() as data:
             container = find(data, args[-1])
         if container is None:
-            print("No such container", file=sys.stderr)
+            print(f"Error: No such container: {args[-1]}", file=sys.stderr)
             return 1
         print(json.dumps([{
             "Id": container["id"],
@@ -156,15 +201,13 @@ def main(argv):
         options = parse_run(args)
         if options["detach"]:
             with State() as data:
-                if data.get("fail_detached"):
-                    print("fake docker: cannot start the container", file=sys.stderr)
-                    return 125
                 if find(data, options["name"]) is not None:
                     print("Conflict. The container name is already in use", file=sys.stderr)
                     return 125
                 number = len(data.setdefault("containers_started", [])) + 1
                 identifier = f"{number:064x}"
                 container = {"id": identifier, "name": options["name"], "status": "running",
+                             "cli_holds_eval_lock": holds_eval_lock(),
                              "labels": options["labels"], "env": options["env"],
                              "image": options["image"], "command": options["command"],
                              "mounts": options["mounts"], "memory": options.get("memory"),
@@ -181,10 +224,6 @@ def main(argv):
                 print(f"{key}={value}")
             print("environment_fingerprint=unrecorded")
             return 0
-        with State() as data:
-            if data.get("fail_reader"):
-                print("fake docker: the reader fails", file=sys.stderr)
-                return 1
         mounts = options["mounts"]
         workdir = to_host(options["workdir"], mounts)
         environment = dict(os.environ)
@@ -197,11 +236,6 @@ def main(argv):
         completed = subprocess.run(translated, cwd=workdir, env=environment)
         return completed.returncode
     if command == "wait":
-        with State() as data:
-            if data.get("wait_fails_once"):
-                data["wait_fails_once"] = False
-                print("fake docker: lost the connection", file=sys.stderr)
-                return 1
         while True:
             with State() as data:
                 container = find(data, args[-1])
@@ -217,14 +251,16 @@ def main(argv):
                                   "finished_at": "2026-10-25T00:10:00.000000000Z"})
         return 0
     if command == "logs":
-        print("fake runner output")
+        with State() as data:
+            container = find(data, args[-1])
+        if container is None:
+            print(f"Error: No such container: {args[-1]}", file=sys.stderr)
+            return 1
+        print("fake runner output", flush=True)
+        print("fake runner error line", file=sys.stderr, flush=True)
         return 0
     if command == "rm":
         with State() as data:
-            if data.get("fail_rm_once"):
-                data["fail_rm_once"] = False
-                print("fake docker: rm fails", file=sys.stderr)
-                return 1
             container = find(data, args[-1])
             if container is not None and container["status"] == "running":
                 print("cannot remove a running container", file=sys.stderr)

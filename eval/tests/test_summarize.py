@@ -1,148 +1,135 @@
 # -*- coding: utf-8 -*-
 """eval/summarize.py の契約（評価計画 v2 PR-D）。
 
-* 完了（COMPLETE）は、検証器の CLOSED・全 execution の fingerprint の一致・ledger の full
-  verdict・HEAD の一致・wrapper の記録の欠損なし・container なし、のすべてのときだけ。
-  どれか 1 つでも欠ければ INCOMPLETE（理由付き）、検証器が動かなければ UNVERIFIABLE。
-* 中断の突き合わせは SIGKILL だけから OOM と書かない。cgroup の ``oom_kill`` の増分が
-  その pair の実行区間に重なるとき（または container 自体の OOMKilled）だけ ``possible_oom``。
+* 完了（COMPLETE）は ``completion`` だけが決める: 検証器の CLOSED・全 execution の fingerprint の
+  一致・ledger の full verdict・HEAD の一致・wrapper の記録（終端・破損なし・execution との対応）・
+  container が無いことの観測、のすべてのとき。どれかが欠ければ INCOMPLETE（理由と分類付き）、
+  読めない・壊れている・観測していないなら UNVERIFIABLE。
+* 集計の欄が作れなくても判定は変えず、``report`` は欄の失敗として報告し、exit 2 にする。
+* 中断の突き合わせは SIGKILL だけから OOM と書かない（``records.oom_attribution``）。
 * 未終端の pair（runner が INCOMPLETE と結論した pair / RUNNING のまま止まった pair）を、
   次の再開が消す前に列挙できる。
 
-tree は PR-B の fixture（本番の writer と署名）で作る。
+tree は PR-B の fixture（本番の writer と署名）、wrapper の記録は本番の wrapper（fake docker）で作る。
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-import subprocess
 
 import pytest
 
+import records
 import summarize
+import wrapper
+from harness import Harness
 from scripts.function_tracer_pcode.reporting import execution_chain
 from scripts.function_tracer_pcode.tests.unit import test_execution_chain as fixture
 
-FINGERPRINT = "eval-env-v1:" + "e" * 64
-
-
-def _git_repo(path: Path) -> str:
-    path.mkdir()
-    for args in (["init", "-q"], ["config", "user.email", "t@example.com"],
-                 ["config", "user.name", "t"]):
-        subprocess.run(["git", "-C", str(path), *args], check=True)
-    (path / "README").write_text("x\n")
-    subprocess.run(["git", "-C", str(path), "add", "README"], check=True)
-    subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "x"], check=True)
-    return subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"], check=True,
-                          capture_output=True, text=True).stdout.strip()
-
 
 @pytest.fixture
-def repo(tmp_path):
-    """HEAD の一致を判定させる、SOURCE_ROOTS の汚れの無い git repo。"""
-    path = tmp_path / "repo"
-    return path, _git_repo(path)
+def h(tmp_path, monkeypatch):
+    harness = Harness(tmp_path, monkeypatch)
+    yield harness
+    try:
+        harness.end_container(exit_code=137)
+        harness.wait_released(timeout=60)
+    except (OSError, ValueError, KeyError, AssertionError):
+        pass
 
 
-def _tree(tmp_path, commit, *, fingerprints=(FINGERPRINT, FINGERPRINT), scope="FULL_NEQ"):
-    """2 execution（1 回目は kill、2 回目が再開して封印）の FULL tree。"""
-    tree = fixture.ChainTree(tmp_path / "logs" / "eval_x_neq", scope=scope)
-    e1, e2 = fixture._run_id(1), fixture._run_id(2)
-    tree.start(e1, environment_fingerprint=fingerprints[0], git_commit=commit, git_dirty="0")
-    for pair in tree.pairs[:2]:
-        tree.decide(e1, pair)
-    tree.leave_incomplete(e1, tree.pairs[2])
-    tree.start(e2, environment_fingerprint=fingerprints[1], git_commit=commit, git_dirty="0")
-    for pair in tree.pairs[2:]:
-        tree.decide(e2, pair, outcome="NOT_EQ")
-    tree.finish(e2, reused=tree.pairs[:2])
-    return tree
+def _completion(h, monkeypatch, host=None):
+    monkeypatch.setenv("EVAL_HOST_STATE", json.dumps(
+        host if host is not None else {"container": "absent", "observed": True}))
+    return summarize.completion(wrapper.REPO, h.ev.out, h.ev.wrapper, "neq")
 
 
-def _wrapper(tmp_path, *, launches=1, gaps=()):
-    wrapper = tmp_path / "logs" / "eval_x_neq.wrapper"
-    (wrapper / "launches").mkdir(parents=True)
-    (wrapper / "meta.json").write_text(json.dumps({
-        "schema": "eval-wrapper-meta-v1", "fingerprint": FINGERPRINT,
-        "conditions": {"freeze_commit": "c" * 40}}))
-    for number in range(1, launches + 1):
-        directory = wrapper / "launches" / str(number)
-        directory.mkdir()
-        (directory / "launch.json").write_text(json.dumps({"launch": number, "kind": "first"}))
-        if "exit" not in gaps:
-            (directory / "exit.json").write_text(json.dumps({"exit_code": 0, "oom_killed": False}))
-        if "evidence" not in gaps:
-            (directory / "evidence.json").write_text(json.dumps({"unterminated_pairs": []}))
-        if "log" not in gaps:
-            (directory / "runner.log").write_text("ok\n")
-    return wrapper
+def _codes(result):
+    return {item["code"]: item["category"] for item in result["reasons"]}
 
 
-def _report(repo_path, tree, wrapper, monkeypatch, host=None):
-    monkeypatch.setenv("EVAL_HOST_STATE", json.dumps(host or {"container": "absent"}))
-    return summarize.report(repo_path, tree.root, wrapper, "neq")
-
-
-def test_a_closed_tree_under_the_wrappers_conditions_is_complete(tmp_path, repo, monkeypatch):
-    repo_path, commit = repo
-    tree = _tree(tmp_path, commit)
-    result = _report(repo_path, tree, _wrapper(tmp_path), monkeypatch)
-    assert result["gates"]["execution_chain"]["verdict"] == execution_chain.VERDICT_CLOSED
+def test_a_closed_tree_under_the_wrappers_conditions_is_complete(h, monkeypatch):
+    h.complete_evaluation()
+    result = _completion(h, monkeypatch)
+    assert result["verdict"] == summarize.VERDICT_COMPLETE, result["reasons"]
+    assert result["verify"]["verdict"] == execution_chain.VERDICT_CLOSED
     assert result["formal"]["full_verdict"] == "full_neq"
-    assert result["verdict"] == summarize.VERDICT_COMPLETE, result["verdict_reasons"]
-    assert [e["decided_pairs_attributed"] for e in result["census"]["execution_chain"]["executions"]] == [2, 2]
-    assert result["raw"]["outcomes"] == {"NOT_EQ": 2, "UNKNOWN": 2}
-    text = summarize.format_report(result)
+    report = summarize.report(wrapper.REPO, h.ev.out, h.ev.wrapper, "neq")
+    assert report["verdict"] == result["verdict"] and report["reasons"] == result["reasons"]
+    executions = report["census"]["execution_chain"]["executions"]
+    assert [e["decided_pairs_attributed"] for e in executions] == [2, 2]
+    assert report["raw"]["outcomes"] == {"NOT_EQ": 2, "UNKNOWN": 2}
+    assert summarize.exit_code(report) == 0
+    text = summarize.format_report(report)
     for heading in ("1. Census", "2. Gates", "3. Formal verdict", "4. Raw totals",
-                    "5. NOT_EQ by ground truth", "VERDICT: COMPLETE"):
+                    "5. NOT_EQ by ground truth", "7. Launches", "VERDICT: COMPLETE"):
         assert heading in text
 
 
-@pytest.mark.parametrize("case", ("foreign_fingerprint", "open_chain", "wrapper_gap",
-                                  "container_running", "not_head"))
-def test_any_missing_condition_keeps_the_evaluation_incomplete(tmp_path, repo, monkeypatch, case):
-    repo_path, commit = repo
-    fingerprints = (FINGERPRINT, FINGERPRINT)
+@pytest.mark.parametrize("case, code, category", [
+    ("foreign_fingerprint", "foreign_execution", "blocking"),
+    ("open_chain", "chain_open", "resumable"),
+    ("ledger_rejects", "no_full_verdict", "resumable"),
+    ("container_running", "container_present", "blocking"),
+    ("container_unobserved", "container_unobserved", "unverifiable"),
+    ("not_head", "head_mismatch", "blocking"),
+])
+def test_any_missing_condition_keeps_the_evaluation_from_complete(h, monkeypatch, case, code, category):
+    options = {}
     if case == "foreign_fingerprint":
-        fingerprints = ("eval-env-v1:" + "0" * 64, FINGERPRINT)
-    tree = _tree(tmp_path, commit if case != "not_head" else "b" * 40, fingerprints=fingerprints)
+        options["fingerprint"] = "eval-env-v1:" + "0" * 64
+    if case == "ledger_rejects":
+        options["end_overrides"] = {"run_pair_failures": "1"}
+    if case == "not_head":
+        options["commit"] = "b" * 40
+    assert h.start() == wrapper.EXIT_OK
+    h.build_tree(**options)
+    h.end_container(exit_code=0)
+    h.wait_released()
     if case == "open_chain":
-        (tree.root / tree.relative(tree.pairs[0])).unlink()
-    wrapper = _wrapper(tmp_path, gaps=("evidence",) if case == "wrapper_gap" else ())
-    host = {"container": "running"} if case == "container_running" else None
-    result = _report(repo_path, tree, wrapper, monkeypatch, host)
-    assert result["verdict"] == summarize.VERDICT_INCOMPLETE
-    expected = {
-        "foreign_fingerprint": "did not run under this wrapper's conditions",
-        "open_chain": "execution chain is OPEN",
-        "wrapper_gap": "no post-run evidence",
-        "container_running": "an evaluation container is running",
-        "not_head": "not evidence about the code at HEAD",
-    }[case]
-    assert any(expected in reason for reason in result["verdict_reasons"]), result["verdict_reasons"]
+        next(h.ev.out.rglob("*.pair-status.json")).unlink()
+    host = {"container": "absent", "observed": True}
+    if case == "container_running":
+        host = {"container": "running", "observed": True}
+    if case == "container_unobserved":
+        host = {"container": "unobservable", "observed": False}
+    result = _completion(h, monkeypatch, host)
+    assert _codes(result).get(code) == category, result["reasons"]
+    assert result["verdict"] != summarize.VERDICT_COMPLETE
 
 
-def test_a_verifier_that_cannot_run_is_unverifiable_never_complete(tmp_path, repo, monkeypatch):
-    repo_path, commit = repo
-    tree = _tree(tmp_path, commit)
+def test_a_verifier_that_cannot_run_is_unverifiable_never_complete(h, monkeypatch):
+    h.complete_evaluation()
 
     def broken(_root):
         raise RuntimeError("disk error")
 
     monkeypatch.setattr(execution_chain, "verify_execution_chain", broken)
-    result = _report(repo_path, tree, _wrapper(tmp_path), monkeypatch)
+    result = _completion(h, monkeypatch)
     assert result["verdict"] == summarize.VERDICT_UNVERIFIABLE
-    assert summarize.EXIT_BY_VERDICT[result["verdict"]] == 2
+    assert _codes(result)["verify_failed"] == "unverifiable"
 
 
-def test_missing_wrapper_meta_is_unverifiable(tmp_path, repo, monkeypatch):
-    repo_path, commit = repo
-    tree = _tree(tmp_path, commit)
-    wrapper = _wrapper(tmp_path)
-    (wrapper / "meta.json").unlink()
-    assert _report(repo_path, tree, wrapper, monkeypatch)["verdict"] == summarize.VERDICT_UNVERIFIABLE
+def test_missing_wrapper_meta_is_unverifiable(h, monkeypatch):
+    h.complete_evaluation()
+    (h.ev.wrapper / records.META).unlink()
+    assert _completion(h, monkeypatch)["verdict"] == summarize.VERDICT_UNVERIFIABLE
+
+
+def test_a_report_section_that_fails_does_not_change_the_verdict_but_fails_the_summary(h, monkeypatch):
+    h.complete_evaluation()
+
+    def broken(*_args, **_kwargs):
+        raise OSError("unreadable status")
+
+    monkeypatch.setattr(summarize, "raw_aggregate", broken)
+    monkeypatch.setenv("EVAL_HOST_STATE", json.dumps({"container": "absent", "observed": True}))
+    report = summarize.report(wrapper.REPO, h.ev.out, h.ev.wrapper, "neq")
+    assert report["verdict"] == summarize.VERDICT_COMPLETE  # start と同じ判定のまま
+    assert any("raw_aggregate" in error for error in report["report_errors"])
+    assert summarize.exit_code(report) == 2
+    assert "SUMMARY SECTION FAILED" in summarize.format_report(report)
 
 
 def _receipt(directory: Path, stem: str, **fields) -> None:
@@ -171,38 +158,37 @@ def test_unterminated_pairs_are_listed_by_what_the_runner_recorded(tmp_path):
 
 
 def _launch(pairs, watch=(), oom_killed=False, finished=1000.0):
-    return {"launch": 1, "exit": {"oom_killed": oom_killed, "finished_at_epoch": finished},
-            "evidence": {"unterminated_pairs": pairs}, "watch": list(watch)}
+    return records.Launch(number=1, state=records.STATE_RELEASED,
+                          exit={"oom_killed": oom_killed, "finished_at_epoch": finished},
+                          evidence={"unterminated_pairs": pairs}, watch=list(watch))
 
 
 KILLED = {"pair": "p", "kind": "concluded_incomplete", "child_returncode": -9,
           "started_at_epoch": 100.0, "finished_at_epoch": 160.0}
 
 
+def _obs(at, oom_kill):
+    return {"at_epoch": at, "observed": oom_kill is not None, "oom_kill": oom_kill}
+
+
 def test_sigkill_alone_is_an_external_kill_not_an_oom():
-    result = summarize.interruptions([_launch([KILLED], watch=[
-        {"at_epoch": 50.0, "oom_kill_delta": 0}, {"at_epoch": 400.0, "oom_kill_delta": 0}])])
+    result = summarize.interruptions([_launch([KILLED], watch=[_obs(50, 0), _obs(400, 0)])])
     assert result["pairs"][0]["cause"] == "external_kill"
-    assert result["pairs"][0]["possible_oom"] is False
-    assert result["totals"].get("possible_oom", 0) == 0
+    assert result["pairs"][0]["possible_oom"] == records.OOM_NO
 
 
-def test_an_oom_kill_increment_during_the_pair_marks_a_possible_oom():
-    watch = [{"at_epoch": 150.0, "oom_kill_delta": 0}, {"at_epoch": 160.0, "oom_kill_delta": 1}]
-    result = summarize.interruptions([_launch([KILLED], watch=watch)])
-    assert result["pairs"][0]["possible_oom"] is True
-    # 同じ増分でも、pair の区間から外れていれば OOM と結び付けない。
-    late = [{"at_epoch": 900.0, "oom_kill_delta": 0}, {"at_epoch": 910.0, "oom_kill_delta": 1}]
-    assert summarize.interruptions([_launch([KILLED], watch=late)])["pairs"][0]["possible_oom"] is False
+def test_an_external_kill_without_observations_is_unobserved_not_no():
+    result = summarize.interruptions([_launch([KILLED], watch=[_obs(50, 0), _obs(120, None)])])
+    assert result["pairs"][0]["possible_oom"] == records.OOM_UNOBSERVED
 
 
 def test_a_container_oom_kill_marks_every_unterminated_pair_and_a_stop_is_not_a_kill():
     running = {"pair": "q", "kind": "interrupted_running", "child_returncode": None,
                "started_at_epoch": 100.0, "finished_at_epoch": None}
-    result = summarize.interruptions([_launch([running], oom_killed=True)])
-    assert result["pairs"][0] == {**result["pairs"][0], "cause": "execution_stopped",
-                                  "possible_oom": True}
-    assert summarize.interruptions([_launch([running])])["pairs"][0]["possible_oom"] is False
+    assert summarize.interruptions([_launch([running], oom_killed=True)])["pairs"][0][
+        "possible_oom"] == records.OOM_YES
+    row = summarize.interruptions([_launch([running])])["pairs"][0]
+    assert row["cause"] == "execution_stopped" and row["possible_oom"] == "not_applicable"
 
 
 def test_raw_totals_keep_neq_core_and_unconfirmed_not_eq_apart(tmp_path):
@@ -219,16 +205,3 @@ def test_raw_totals_keep_neq_core_and_unconfirmed_not_eq_apart(tmp_path):
     assert raw["neq_core"]["pairs"] == 2 and raw["neq_core"]["functions"] == 2
     # ground truth（function_diff_manifest.json）の無い Neq の NOT_EQ は確認済みに数えない。
     assert raw["not_eq_by_ground_truth"] == {"unconfirmed": 3}
-
-
-def test_any_reader_that_fails_makes_the_summary_unverifiable(tmp_path, repo, monkeypatch):
-    repo_path, commit = repo
-    tree = _tree(tmp_path, commit)
-
-    def broken(*_args, **_kwargs):
-        raise OSError("unreadable status")
-
-    monkeypatch.setattr(summarize, "raw_aggregate", broken)
-    result = _report(repo_path, tree, _wrapper(tmp_path), monkeypatch)
-    assert result["verdict"] == summarize.VERDICT_UNVERIFIABLE
-    assert any("raw_aggregate failed" in reason for reason in result["verdict_reasons"])

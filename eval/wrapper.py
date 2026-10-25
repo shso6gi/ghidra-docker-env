@@ -4,26 +4,28 @@
 
     eval/neq.sh start --freeze <commit>   # preflight → 背景で実行（再開を含む）
     eval/neq.sh status [--verify]         # 読み取り専用
-    eval/neq.sh stop                      # docker stop（猶予は runner の停止確認より長い）
-    eval/neq.sh summary [--json]          # 読み取り専用。完了の判定は検証器と ledger
+    eval/neq.sh stop                      # 停止（猶予は runner の停止確認より長い）と、未完了の launch の回収
+    eval/neq.sh summary [--json]          # 読み取り専用。完了の判定
 
-**持たないもの**: 解析・確定・完全性・正式性の規則。完了かどうかは
-``execution_chain verify`` と ledger の ``full_scope_evidence``（``eval/summarize.py`` が
-呼ぶ）だけが決める。runner の exit code は記録するが、完了の根拠にしない。
+**持たないもの**: 解析・確定・完全性・正式性の規則。完了は ``eval/summarize.py`` の
+``completion`` だけが決め、``summary`` と ``start`` の「完了済み」は同じ結果を使う（検証器・
+ledger・HEAD・fingerprint・wrapper の記録・container の状態を、それぞれの owner の判定から）。
+runner の exit code は記録するが、完了の根拠にしない。
 
 **持つもの**:
 
 * identity（analysis config / source digest）の外にある実行条件の記録と照合。初回の ``start``
   で ``meta.json`` に書き、その要約（fingerprint）を ``EQBENCH_ENVIRONMENT_FINGERPRINT`` として
-  runner に渡す（runner が開始の記録に残し、検証器が execution 間の一致を要求する）。再開の
-  たびに同じ条件を組み立て直して照合し、違えば何も書かずに拒否する。条件を変えるときは別の
-  出力先（別の評価）にする。
-* 評価の slot の lock（``flock -n``）。``start`` が取り、背景の supervisor が受け継いで、
-  container の終了・記録・削除の確認まで保持する。
-* container の一生と観測: 起動、cgroup の ``oom_kill`` / ``memory.peak`` の監視、終了の記録
-  （exit code・``OOMKilled``・runner の出力）、未終端の pair の写し、削除の確認。
-* run tmpdir の片付け: lock を持ち、評価の container が 1 つも無いことを確かめた後で、
-  この評価専用の tmp に残った前回までの残骸（SIGKILL などで消えなかったもの）を消す。
+  runner に渡す。再開のたびに照合し、違えば何も書かずに拒否する。
+* 評価の slot の lock（``flock -n``）。``start`` が取り、背景の supervisor が受け継ぐ（``docker
+  run`` の CLI にも渡す）。launch が終端するまで保持する。
+* launch の状態機械（``eval/records.py``）: 起動の要求 → container → 終了の記録 → 証拠 → 削除の
+  確認。各段階は 1 回だけ確定する記録で、supervisor が途中で止まっても ``stop`` が続きから進める
+  （``advance``）。container は終了と証拠を記録するまで消さない。
+* 外部操作の観測は「取得できた」「存在しない」「観測できない」を区別する。観測できないときは
+  fail-closed（記録しない・消さない・拒否する）。
+* run tmpdir の片付け: lock を持ち、評価の container が無く、未完了の launch も無いことを
+  確かめた後で、この評価専用の tmp に残った前回までの残骸を消す。
 
 管理 file はすべて出力先の外（``<log root>/eval_<sha12>_<matrix>[_<tag>].wrapper/``）に置く。
 出力先には runner の証跡以外を置かない（FULL の FRESH 受理を壊さないため）。
@@ -51,6 +53,9 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 EVAL_DIR = Path(__file__).resolve().parent
 REPO = EVAL_DIR.parent
+if str(EVAL_DIR) not in sys.path:
+    sys.path.insert(0, str(EVAL_DIR))
+import records  # noqa: E402  (eval/ の記録の形式と検査)
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -300,22 +305,35 @@ def resolve(matrix: str, *, freeze: Optional[str], tag: str, require_freeze: boo
         docker=os.environ.get("EVAL_DOCKER", "docker"),
     )
 
-
 # ---------------------------------------------------------------------------
-# docker
+# docker（外部操作の結果は「取得できた」「存在しない」「観測できない」を区別する）
 # ---------------------------------------------------------------------------
 
 
-def docker(ev: Evaluation, *args: str, check: bool = False,
-           timeout: Optional[float] = None) -> subprocess.CompletedProcess:
+class Unobservable(WrapperError):
+    """外部の状態を観測できなかった（存在しない、とは区別する）。呼び出し側は fail-closed。"""
+
+
+def docker(ev: Evaluation, *args: str, timeout: Optional[float] = None,
+           pass_fds: Sequence[int] = ()) -> subprocess.CompletedProcess:
+    """docker を 1 回呼ぶ。起動できない・時間切れは ``Unobservable``。exit code は呼び出し側が見る。"""
     try:
-        completed = subprocess.run([ev.docker, *args], capture_output=True, text=True,
-                                   timeout=timeout)
+        return subprocess.run([ev.docker, *args], capture_output=True, text=True,
+                              timeout=timeout, pass_fds=tuple(pass_fds))
     except (OSError, subprocess.SubprocessError) as exc:
-        raise WrapperError(f"docker {args[0]}: {exc}") from exc
-    if check and completed.returncode != 0:
-        raise WrapperError(f"docker {' '.join(args[:2])}: {completed.stderr.strip()}")
-    return completed
+        raise Unobservable(f"docker {args[0]}: {exc}") from exc
+
+
+def docker_checked(ev: Evaluation, *args: str, timeout: Optional[float] = None) -> str:
+    """成功しなければ ``Unobservable``（出力は使わない）。"""
+    completed = docker(ev, *args, timeout=timeout)
+    if completed.returncode != 0:
+        raise Unobservable(f"docker {' '.join(args[:2])} failed ({completed.returncode}): "
+                           f"{completed.stderr.strip()[-500:]}")
+    return completed.stdout
+
+
+_ABSENT = ("no such container", "no such object")
 
 
 def image_id(ev: Evaluation, image: str) -> str:
@@ -326,45 +344,59 @@ def image_id(ev: Evaluation, image: str) -> str:
 
 
 def slot_containers(ev: Evaluation) -> List[Dict[str, str]]:
-    """slot の label を持つ container（状態を問わない）。"""
-    completed = docker(ev, "ps", "-a", "--filter", f"label={LABEL_SLOT}=1", "--format",
-                       "{{.Names}}\t{{.State}}\t{{.Label \"" + LABEL_EVAL + "\"}}", check=True)
+    """slot の label を持つ container（状態を問わない）。観測できなければ ``Unobservable``。"""
+    output = docker_checked(ev, "ps", "-a", "--filter", f"label={LABEL_SLOT}=1", "--format",
+                            "{{.Names}}\t{{.State}}\t{{.Label \"" + LABEL_EVAL + "\"}}")
     rows = []
-    for line in completed.stdout.splitlines():
+    for line in output.splitlines():
         if line.strip():
             name, state, label = (line.split("\t") + ["", ""])[:3]
             rows.append({"name": name, "state": state, "eval": label})
     return rows
 
 
-def other_running_containers(ev: Evaluation) -> List[str]:
-    completed = docker(ev, "ps", "--format", "{{.Names}}\t{{.Label \"" + LABEL_SLOT + "\"}}"
-                       + "\t{{.Label \"" + LABEL_READER + "\"}}")
+def other_running_containers(ev: Evaluation) -> Optional[List[str]]:
+    """評価と reader 以外の動いている container。観測できなければ ``None``（「無い」ではない）。"""
+    try:
+        output = docker_checked(ev, "ps", "--format", "{{.Names}}\t{{.Label \"" + LABEL_SLOT
+                                + "\"}}" + "\t{{.Label \"" + LABEL_READER + "\"}}")
+    except Unobservable:
+        return None
     names = []
-    for line in completed.stdout.splitlines():
+    for line in output.splitlines():
         parts = (line.split("\t") + ["", ""])[:3]
         if parts[0] and parts[1] != "1" and parts[2] != "1":
             names.append(parts[0])
     return sorted(names)
 
 
-def container_state(ev: Evaluation) -> Optional[Dict[str, Any]]:
-    completed = docker(ev, "inspect", "--type", "container", ev.container_name)
+def inspect_container(ev: Evaluation, ref: str) -> Optional[Dict[str, Any]]:
+    """container の状態。存在しなければ ``None``、観測できなければ ``Unobservable``。"""
+    completed = docker(ev, "inspect", "--type", "container", ref, timeout=120)
     if completed.returncode != 0:
-        return None
+        if any(marker in completed.stderr.lower() for marker in _ABSENT):
+            return None
+        raise Unobservable(f"docker inspect {ref} failed ({completed.returncode}): "
+                           f"{completed.stderr.strip()[-500:]}")
     try:
         payload = json.loads(completed.stdout)[0]
-    except (ValueError, IndexError, KeyError):
-        raise WrapperError(f"docker inspect {ev.container_name}: unreadable output")
-    state = payload.get("State") or {}
-    labels = (payload.get("Config") or {}).get("Labels") or {}
+        state = payload["State"]
+        labels = (payload.get("Config") or {}).get("Labels") or {}
+        identifier = payload["Id"]
+    except (ValueError, IndexError, KeyError, TypeError) as exc:
+        raise Unobservable(f"docker inspect {ref}: unreadable output ({exc})")
     return {
-        "id": payload.get("Id"), "status": state.get("Status"),
-        "running": state.get("Running"), "exit_code": state.get("ExitCode"),
+        "id": identifier, "status": state.get("Status"),
+        "running": state.get("Running") is True, "exit_code": state.get("ExitCode"),
         "oom_killed": state.get("OOMKilled"), "error": state.get("Error"),
         "started_at": state.get("StartedAt"), "finished_at": state.get("FinishedAt"),
-        "launch": labels.get(LABEL_LAUNCH),
+        "launch": labels.get(LABEL_LAUNCH), "eval": labels.get(LABEL_EVAL),
     }
+
+
+def container_state(ev: Evaluation) -> Optional[Dict[str, Any]]:
+    """この評価の container（名前で引く）。"""
+    return inspect_container(ev, ev.container_name)
 
 
 def _mount_args(ev: Evaluation, *, read_only: bool) -> List[str]:
@@ -396,9 +428,24 @@ def reader(ev: Evaluation, image: str, args: Sequence[str], *, memory: str = REA
                   *environment, *_mount_args(ev, read_only=True), image, *args, timeout=timeout)
 
 
+def read_json_from(ev: Evaluation, image: str, args: Sequence[str],
+                   env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+    """reader の JSON 出力。失敗や読めない出力は ``Unobservable``（空の結果にしない）。"""
+    completed = reader(ev, image, args, env=env, timeout=7200)
+    try:
+        value = json.loads(completed.stdout)
+    except ValueError:
+        value = None
+    if not isinstance(value, dict):
+        raise Unobservable(f"{' '.join(args[2:4])} gave no result (exit {completed.returncode}): "
+                           f"{completed.stderr.strip()[-800:]}")
+    return value
+
+
 def summarize_args(ev: Evaluation, command: str, *extra: str) -> List[str]:
     return ["python3", "-B", "eval/summarize.py", command, "--repo", "/workspace/src",
-            "--out", ev.in_container(ev.out), *extra]
+            "--out", ev.in_container(ev.out), "--wrapper", ev.in_container(ev.wrapper),
+            "--matrix", ev.matrix, *extra]
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +464,17 @@ def try_lock(fd: int) -> bool:
         return True
     except BlockingIOError:
         return False
+
+
+def holds_lock(ev: Evaluation, fd: int) -> bool:
+    """``fd`` がこの評価の lock file を指し、その lock を持っている（または今取れた）か。"""
+    try:
+        if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != (
+                os.stat(ev.lock_file).st_dev, os.stat(ev.lock_file).st_ino):
+            return False
+    except OSError:
+        return False
+    return try_lock(fd)
 
 
 def lock_holders(ev: Evaluation) -> Optional[List[int]]:
@@ -450,6 +508,7 @@ def lock_holders(ev: Evaluation) -> Optional[List[int]]:
         except OSError:
             continue
     return sorted(pids)
+
 
 
 # ---------------------------------------------------------------------------
@@ -529,9 +588,9 @@ class Plan:
     conditions: Dict[str, Any]
     fingerprint: str
     first: bool
-    preflight: Optional[Dict[str, Any]]
+    completion: Optional[Dict[str, Any]]
     leftovers: List[str]
-    others: List[str]
+    others: Optional[List[str]]
     aborted_output: bool = False
 
 
@@ -556,27 +615,37 @@ def preflight(ev: Evaluation) -> Plan:
     except (OSError, UnicodeError, WrapperError) as exc:
         raise Refused(f"profile: {exc}")
     image = image_id(ev, profile["IMAGE"])
-    present = slot_containers(ev)
+    try:
+        present = slot_containers(ev)
+    except Unobservable as exc:
+        raise Refused(f"cannot observe the evaluation-slot containers: {exc}")
     if present:
         raise Refused("an evaluation-slot container exists (running or not removed): "
                       + ", ".join(f"{r['name']} ({r['state']})" for r in present)
-                      + "; use `stop` on its evaluation, or inspect it before removing it")
+                      + "; run `stop` on its evaluation to record and remove it")
     worktree_state(ev)
     minimum = int(os.environ.get("EVAL_MIN_FREE_GIB", DEFAULT_MIN_FREE_GIB)) * 2**30
     if free_bytes(ev.log_root if ev.log_root.exists() else ev.main / "logs") < minimum:
         raise Refused(f"less than {minimum // 2**30} GiB free under {ev.log_root}")
-    meta_path = ev.wrapper / "meta.json"
+    meta_path = ev.wrapper / records.META
     meta = read_json(meta_path) if meta_path.exists() else None
     if meta_path.exists() and not (isinstance(meta, dict) and meta.get("schema") == META_SCHEMA):
         raise Refused(f"{meta_path} is unreadable; the evaluation's conditions cannot be checked")
-    out_entries = sorted(p.name for p in ev.out.iterdir()) if ev.out.is_dir() else []
     if ev.out.exists() and not ev.out.is_dir():
         raise Refused(f"{ev.out} is not a directory")
+    out_entries = sorted(p.name for p in ev.out.iterdir()) if ev.out.is_dir() else []
     if meta is None and out_entries:
         raise Refused(f"{ev.out} holds results but no wrapper record ({meta_path}); it was not "
                       "started by this wrapper -- use a new output (another --tag or commit)")
     if meta is None and ev.wrapper.exists() and any(ev.wrapper.iterdir()):
         raise Refused(f"{ev.wrapper} exists without meta.json; inspect it before starting")
+    check = records.read_records(ev.wrapper)
+    if check.damaged:
+        raise Refused("the wrapper records are damaged (nothing is repaired or hidden):\n  "
+                      + "\n  ".join(check.problems))
+    if check.unfinished is not None:
+        raise Refused(f"launch {check.unfinished.number} is unfinished "
+                      f"({check.unfinished.state}); run `stop` to record it first")
     probe = probe_environment(ev, profile["IMAGE"], profile["CONTAINER_MEMORY"])
     conditions = build_conditions(ev, profile, profile_sha, image, probe)
     fingerprint = fingerprint_of(conditions)
@@ -587,29 +656,22 @@ def preflight(ev: Evaluation) -> Plan:
                 "the conditions differ from the ones this evaluation started with: "
                 + ", ".join(differing_keys(recorded, conditions) or ["fingerprint"])
                 + ". To change them, start a separate evaluation (another --tag).")
-    report = None
     aborted = bool(out_entries) and never_recorded_a_start(ev.out)
-    if out_entries and not aborted:
-        completed = reader(ev, profile["IMAGE"], summarize_args(ev, "preflight"), timeout=3600)
-        report = _parse_json(completed.stdout)
-        if completed.returncode != 0 or not isinstance(report, dict):
-            raise Refused("cannot read the output with the execution chain verifier: "
-                          + (completed.stderr.strip()[-800:] or f"exit {completed.returncode}"))
-        if report.get("verify_error"):
-            raise Refused(f"execution_chain verify failed: {report['verify_error']}")
-        fingerprints = report.get("start_fingerprints")
-        if fingerprints is None:
-            raise Refused(f"start records unreadable: {report.get('start_records_error')}")
-        foreign = sorted(r for r, value in fingerprints.items() if value != fingerprint)
-        if foreign:
-            raise Refused(f"{len(foreign)} execution(s) in {ev.out} did not run under this "
-                          f"evaluation's conditions: {', '.join(foreign[:5])}")
-        digests = {value for value in (report.get("start_source_digests") or {}).values()}
-        if digests and digests != {report.get("current_source_digest")}:
+    completion = None
+    if meta is not None and not aborted:
+        # 完了の判定は summary と同じ 1 つの関数（summarize.completion）だけが行う。
+        try:
+            completion = read_json_from(
+                ev, profile["IMAGE"], summarize_args(ev, "completion"),
+                env={"EVAL_HOST_STATE": json.dumps({"container": "absent", "observed": True})})
+        except Unobservable as exc:
+            raise Refused(f"cannot judge the evaluation: {exc}")
+        digests = set((completion.get("start_source_digests") or {}).values())
+        if digests and digests != {completion.get("current_source_digest")}:
             raise Refused("the output was made from another analysis source than this worktree")
     leftovers = sorted(p.name for p in ev.tmp.iterdir()) if ev.tmp.is_dir() else []
     return Plan(profile=profile, conditions=conditions, fingerprint=fingerprint,
-                first=meta is None, preflight=report, leftovers=leftovers,
+                first=meta is None, completion=completion, leftovers=leftovers,
                 others=other_running_containers(ev), aborted_output=aborted)
 
 
@@ -628,16 +690,23 @@ def never_recorded_a_start(out: Path) -> bool:
     return not any(out.rglob("*.pair-status.json"))
 
 
-def _parse_json(text: str) -> Optional[Any]:
-    try:
-        return json.loads(text)
-    except ValueError:
-        return None
-
-
-def is_closed(plan: Plan) -> bool:
-    verify = (plan.preflight or {}).get("verify") or {}
-    return verify.get("verdict") == "CLOSED_SAME_IDENTITY"
+def start_decision(completion: Optional[Mapping[str, Any]]) -> Tuple[str, str]:
+    """``(launch | complete | refuse, 理由)``。規則は summarize の理由の分類だけを見る。"""
+    if completion is None:
+        return "launch", "first launch"
+    verdict = completion.get("verdict")
+    if verdict == "COMPLETE":
+        return "complete", ""
+    reasons = completion.get("reasons") or []
+    text = "; ".join(f"{r.get('code')}: {r.get('detail')}" for r in reasons)
+    if verdict != "INCOMPLETE":
+        return "refuse", f"the evaluation cannot be judged ({verdict}): {text}"
+    categories = {r.get("category") for r in reasons}
+    if "blocking" in categories or not categories <= {"resumable", "permanent"}:
+        return "refuse", f"not resumable until these are resolved: {text}"
+    if "resumable" not in categories:
+        return "refuse", f"not complete, and running the runner again cannot fix it: {text}"
+    return "launch", text
 
 
 # ---------------------------------------------------------------------------
@@ -677,15 +746,37 @@ def existing_execution_ids(ev: Evaluation) -> List[str]:
 
 
 def next_launch(ev: Evaluation) -> int:
-    root = ev.wrapper / "launches"
+    root = ev.wrapper / records.LAUNCHES_DIR
     numbers = [int(p.name) for p in root.iterdir() if p.name.isdigit()] if root.is_dir() else []
     return max(numbers, default=0) + 1
 
 
+def journal(ev: Evaluation, event: str, **fields: Any) -> None:
+    append_jsonl(ev.wrapper / records.JOURNAL, {"event": event, "at": utc_now(), **fields})
+
+
 def reservation(ev: Evaluation, event: str, launch: int) -> None:
-    append_jsonl(ev.lock_file.parent / "reservations.jsonl", {
-        "event": event, "run_id": f"{ev.eval_id}-launch{launch}", "pid": os.getpid(),
-        "at": utc_now()})
+    """slot の予約の記録（#130 §8.6 の慣習。診断で、判定には使わない）。"""
+    try:
+        append_jsonl(ev.lock_file.parent / "reservations.jsonl", {
+            "event": event, "run_id": f"{ev.eval_id}-launch{launch}", "pid": os.getpid(),
+            "at": utc_now()})
+    except OSError as exc:
+        print(f"Warning: reservation not recorded: {exc}", file=sys.stderr)
+
+
+def commit_launch(ev: Evaluation, number: int, payload: Mapping[str, Any]) -> Path:
+    """起動の要求を確定する: staging dir に ``launch.json`` を書き、rename 1 回で ``<n>`` にする。"""
+    root = ev.wrapper / records.LAUNCHES_DIR
+    final = root / str(number)
+    if final.exists():
+        raise WrapperError(f"{final} already exists")
+    staging = root / records.staging_name(number, secrets.token_hex(4))
+    staging.mkdir(mode=0o700)
+    write_json(staging / records.LAUNCH, payload, exclusive=True)
+    os.rename(staging, final)
+    _fsync_dir(root)
+    return final
 
 
 def command_start(ev: Evaluation) -> int:
@@ -705,103 +796,104 @@ def _start_locked(ev: Evaluation, lock: int) -> int:
         return EXIT_REFUSED
     try:
         plan = preflight(ev)
+        decision, detail = start_decision(plan.completion)
     except Refused as exc:
         print(f"Refused (nothing was written): {exc}", file=sys.stderr)
         return EXIT_REFUSED
-    if is_closed(plan):
-        verify = plan.preflight["verify"]
-        print(f"The evaluation is already complete across {len(verify.get('executions') or [])} "
-              f"execution(s) (execution_chain verify: CLOSED_SAME_IDENTITY); nothing was "
-              f"started or written. Run `summary` for the formal verdict.")
+    if decision == "complete":
+        print("The evaluation is complete (the same verdict `summary` gives: chain, ledger, "
+              "HEAD, fingerprint, wrapper records and container state); nothing was started "
+              "or written.")
         return EXIT_OK
+    if decision == "refuse":
+        print(f"Refused (nothing was written): {detail}", file=sys.stderr)
+        return EXIT_REFUSED
     for path in (ev.repo / "targets", ev.repo / "logs"):
         # container の mount 点（無ければ docker が root 所有で作る）。
         path.mkdir(exist_ok=True)
-    ev.wrapper.mkdir(parents=True, exist_ok=True)
     if plan.first:
-        write_json(ev.wrapper / "meta.json", {
+        # wrapper の dir は meta.json ごと rename 1 回で確定する（途中で止まると staging dir が
+        # 残るだけで、「meta.json の無い wrapper の dir」は作らない）。
+        ev.log_root.mkdir(parents=True, exist_ok=True)
+        staging = ev.log_root / f".{ev.wrapper.name}{records.STAGING_MARK}{secrets.token_hex(4)}"
+        staging.mkdir(mode=0o700)
+        write_json(staging / records.META, {
             "schema": META_SCHEMA, "eval_id": ev.eval_id, "created_at": utc_now(),
             "conditions": plan.conditions, "fingerprint": plan.fingerprint,
             "observations": host_observations(ev),
         }, exclusive=True)
-    for path in (ev.tmp, ev.authority, ev.wrapper / "launches"):
+        os.rename(staging, ev.wrapper)
+        _fsync_dir(ev.log_root)
+    for path in (ev.tmp, ev.authority, ev.wrapper / records.LAUNCHES_DIR):
         path.mkdir(mode=0o700, exist_ok=True)
+    number = next_launch(ev)
+    journal(ev, "start_requested", planned_launch=number)
     removed = clean_leftovers(ev, plan.leftovers)
-    launch = next_launch(ev)
-    directory = ev.launch_dir(launch)
-    directory.mkdir()
     moved_aside = None
     if plan.aborted_output:
-        # 削除せずに wrapper の dir へ移す（同じ file system の rename 1 回）。
-        aside = ev.wrapper / "aborted-outputs" / f"before-launch-{launch}"
+        # 削除せずに wrapper の dir へ移す（同じ file system の rename 1 回。名前は一意）。
+        aside = ev.wrapper / "aborted-outputs" / f"{utc_now()}-{secrets.token_hex(3)}"
         aside.parent.mkdir(exist_ok=True)
         os.rename(ev.out, aside)
         moved_aside = str(aside)
         print(f"The output held only the start of an execution that stopped before it recorded "
               f"its start (no pair was started); moved it aside to {aside}")
-    verify = (plan.preflight or {}).get("verify") or {}
-    write_json(directory / "launch.json", {
-        "launch": launch, "requested_at": utc_now(), "fingerprint": plan.fingerprint,
-        "execution_ids_before": existing_execution_ids(ev),
+    before = existing_execution_ids(ev)
+    directory = commit_launch(ev, number, {
+        "schema": records.LAUNCH_SCHEMA, "launch": number, "requested_at": utc_now(),
+        "fingerprint": plan.fingerprint, "execution_ids_before": before,
         "removed_leftovers": removed, "other_running_containers": plan.others,
         "moved_aside_output": moved_aside,
-        "preflight_verify": {"verdict": verify.get("verdict"), "reasons": verify.get("reasons"),
-                             "seconds": (plan.preflight or {}).get("verify_seconds")},
-        "kind": "first" if not existing_execution_ids(ev) else "resume",
-    }, exclusive=True)
-    append_jsonl(ev.wrapper / "events.jsonl", {"event": "launch_requested", "launch": launch,
-                                               "at": utc_now()})
+        "completion_before": None if plan.completion is None else {
+            "verdict": plan.completion.get("verdict"),
+            "reasons": plan.completion.get("reasons")},
+        "kind": "resume" if before else "first",
+    })
+    journal(ev, "launch_requested", launch=number)
     if removed:
         print(f"Removed {len(removed)} leftover entr(y/ies) of earlier executions from {ev.tmp}")
     if plan.others:
         print("Warning: other containers are running: " + ", ".join(plan.others))
     os.set_inheritable(lock, True)
-    log = open(directory / "supervisor.log", "ab")
-    try:
+    with open(directory / records.SUPERVISOR_LOG, "ab") as log:
         process = subprocess.Popen(
             [sys.executable, "-B", str(Path(__file__).resolve()), "--matrix", ev.matrix,
-             "_supervise", "--freeze", ev.commit, "--tag", ev.tag, "--launch", str(launch),
+             "_supervise", "--freeze", ev.commit, "--tag", ev.tag, "--launch", str(number),
              "--lock-fd", str(lock)],
             stdin=subprocess.DEVNULL, stdout=log, stderr=log, pass_fds=(lock,),
             start_new_session=True, env=dict(os.environ))
-    except OSError as exc:
-        write_json(directory / "exit.json", {"launch": launch, "container_started": False,
-                                              "error": f"supervisor: {exc}", "recorded_at": utc_now()})
-        raise
-    finally:
-        log.close()
     deadline = time.monotonic() + START_CONFIRM_SECONDS
     while time.monotonic() < deadline:
-        if (directory / "container.json").exists():
-            info = read_json(directory / "container.json") or {}
-            print(f"Started launch {launch} ({launch_kind(directory)}): container "
-                  f"{ev.container_name} {str(info.get('id'))[:12]}, supervisor pid {process.pid}.")
+        launch = records.read_launch(directory, number)
+        if launch.container is not None:
+            print(f"Started launch {number} ({launch.launch.get('kind')}): container "
+                  f"{ev.container_name} {launch.container_id[:12]}, supervisor pid {process.pid}.")
             print(f"Output: {ev.out}\nRecords: {directory}\nFollow it with `status`; "
                   f"stop it with `stop`.")
             return EXIT_OK
-        if process.poll() is not None:
-            print(f"Error: the supervisor exited ({process.returncode}) before the container "
-                  f"started; see {directory / 'supervisor.log'}", file=sys.stderr)
+        if launch.exit is not None or process.poll() is not None:
+            print(f"Error: launch {number} did not start a container ({launch.state}); see "
+                  f"{directory / records.SUPERVISOR_LOG}"
+                  + ("" if launch.terminal else "; run `stop` to record it"), file=sys.stderr)
             return EXIT_FAILED
         time.sleep(0.5)
     print(f"Warning: the container has not started within {START_CONFIRM_SECONDS:.0f}s; "
-          f"check `status` and {directory / 'supervisor.log'}", file=sys.stderr)
+          f"check `status` and {directory / records.SUPERVISOR_LOG}", file=sys.stderr)
     return EXIT_FAILED
 
 
-def launch_kind(directory: Path) -> str:
-    return (read_json(directory / "launch.json") or {}).get("kind", "?")
-
-
 def host_observations(ev: Evaluation) -> Dict[str, Any]:
-    """照合しない参考の記録（docker の version など）。"""
-    version = docker(ev, "version", "--format", "{{.Server.Version}}").stdout.strip()
+    """照合しない参考の記録（docker の version など）。観測できなければ null。"""
+    try:
+        version = docker_checked(ev, "version", "--format", "{{.Server.Version}}").strip()
+    except Unobservable:
+        version = None
     return {"docker_server": version or None, "kernel": os.uname().release,
             "hostname": os.uname().nodename}
 
 
 # ---------------------------------------------------------------------------
-# supervisor（背景。lock を保持し、container の一生を記録する）
+# launch の進行（supervisor と stop の回収が共有する）
 # ---------------------------------------------------------------------------
 
 
@@ -830,21 +922,23 @@ def runner_command(ev: Evaluation, conditions: Mapping[str, Any], fingerprint: s
 
 
 def read_cgroup(container_id: str) -> Dict[str, Any]:
+    """1 回の cgroup の観測。読めなければ ``observed: false``（0 にしない）。"""
     directory = Path(os.environ.get("EVAL_CGROUP_TEMPLATE", CGROUP_TEMPLATE).format(id=container_id))
-    values: Dict[str, Any] = {}
+    values: Dict[str, Any] = {"observed": True}
     try:
+        events = {}
         for line in (directory / "memory.events").read_text().splitlines():
             key, _sep, value = line.partition(" ")
-            if key in ("oom", "oom_kill") and value.strip().isdigit():
-                values[key] = int(value)
-        for name in ("memory.peak", "memory.current"):
+            events[key] = value.strip()
+        for key in ("oom", "oom_kill"):
+            if not events.get(key, "").isdigit():
+                raise ValueError(f"memory.events has no {key}")
+            values[key] = int(events[key])
+        for name, key in (("memory.peak", "memory_peak"), ("memory.current", "memory_current")):
             text = (directory / name).read_text().strip()
-            if text.isdigit():
-                values[name.split(".")[1] if name == "memory.current" else "memory_peak"] = int(text)
-    except OSError:
-        return {"cgroup": "unavailable"}
-    if "current" in values:
-        values["memory_current"] = values.pop("current")
+            values[key] = int(text) if text.isdigit() else None
+    except (OSError, ValueError) as exc:
+        return {"observed": False, "error": f"{type(exc).__name__}: {exc}"[:200]}
     return values
 
 
@@ -852,177 +946,253 @@ class _Stop:
     requested = False
 
 
-def command_supervise(ev: Evaluation, launch: int, lock_fd: int) -> int:
-    directory = ev.launch_dir(launch)
-    meta = read_json(ev.wrapper / "meta.json")
-    events = ev.wrapper / "events.jsonl"
+def _launch(ev: Evaluation, number: int) -> records.Launch:
+    launch = records.read_launch(ev.launch_dir(number), number)
+    if launch.state == records.STATE_DAMAGED:
+        raise WrapperError(f"launch {number} records are damaged: {'; '.join(launch.problems)}")
+    return launch
+
+
+def record_container(ev: Evaluation, number: int, container_id: str, how: str) -> None:
+    write_json(ev.launch_dir(number) / records.CONTAINER, {
+        "schema": records.CONTAINER_SCHEMA, "container_id": container_id,
+        "name": ev.container_name, "recorded_at": utc_now(), "how": how,
+    }, exclusive=True)
+    journal(ev, "container_recorded", launch=number, container=container_id[:12], how=how)
+
+
+def _new_executions(ev: Evaluation, launch: records.Launch) -> List[str]:
+    before = set((launch.launch or {}).get("execution_ids_before") or [])
+    return [run_id for run_id in existing_execution_ids(ev) if run_id not in before]
+
+
+def _exit_payload(ev: Evaluation, launch: records.Launch, kind: str, **fields: Any) -> Dict[str, Any]:
+    return {"schema": records.EXIT_SCHEMA, "kind": kind, "launch": launch.number,
+            "container_id": launch.container_id, "recorded_at": utc_now(),
+            "runtime_run_ids": [] if kind == records.KIND_NOT_STARTED else _new_executions(ev, launch),
+            **fields}
+
+
+def save_runner_log(ev: Evaluation, launch: records.Launch) -> Tuple[str, int]:
+    """``docker logs`` の出力（stdout と stderr を時系列で 1 つに）。失敗の出力は保存しない。"""
+    directory = ev.launch_dir(launch.number)
+    final = directory / records.RUNNER_LOG
+    temporary = directory / f".{records.RUNNER_LOG}.tmp-{os.getpid()}-{secrets.token_hex(4)}"
+    try:
+        with open(temporary, "xb") as stream:
+            try:
+                completed = subprocess.run([ev.docker, "logs", launch.container_id],
+                                           stdout=stream, stderr=subprocess.STDOUT, timeout=3600)
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise Unobservable(f"docker logs: {exc}") from exc
+            if completed.returncode != 0:
+                raise Unobservable(f"docker logs failed ({completed.returncode}); its output "
+                                   f"was not saved")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, final)
+        _fsync_dir(directory)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    digest = records._sha256_file(final)
+    if digest is None:
+        raise Unobservable(f"{final} cannot be read back")
+    return digest
+
+
+def capture_evidence(ev: Evaluation, launch: records.Launch) -> None:
+    meta = read_json(ev.wrapper / records.META) or {}
+    image = ((meta.get("conditions") or {}).get("image") or {}).get("id")
+    try:
+        evidence = read_json_from(ev, image, summarize_args(ev, "launch-evidence"))
+    except Unobservable as exc:
+        journal(ev, "evidence_failed", launch=launch.number, detail=str(exc)[-500:])
+        raise
+    write_json(ev.launch_dir(launch.number) / records.EVIDENCE, evidence, exclusive=True)
+    journal(ev, "evidence_recorded", launch=launch.number)
+
+
+def remove_container(ev: Evaluation, container_id: str) -> None:
+    """消して、「存在しない」と観測できるまで確かめる。観測できなければ失敗。"""
+    removed = docker(ev, "rm", container_id, timeout=300)
+    if removed.returncode != 0 and inspect_container(ev, container_id) is not None:
+        raise Unobservable(f"docker rm {container_id[:12]} failed: {removed.stderr.strip()[-300:]}")
+    deadline = time.monotonic() + REMOVE_CONFIRM_SECONDS
+    while inspect_container(ev, container_id) is not None:
+        if time.monotonic() > deadline:
+            raise Unobservable(f"container {container_id[:12]} is still present after docker rm")
+        time.sleep(1.0)
+
+
+def advance(ev: Evaluation, number: int, *, watch_running: bool) -> records.Launch:
+    """launch を終端（released）まで進める。各段階は確定した記録から再開できる。
+
+    失敗（観測できない・記録できない）は例外にし、それまでの記録はそのまま残す。container は
+    終了の記録と証拠の記録が済むまで消さないので、``stop`` が続きから回収できる。
+    """
+    last_observation: Optional[Dict[str, Any]] = None
+    write_failures = 0
+    while True:
+        launch = _launch(ev, number)
+        state = launch.state
+        if state == records.STATE_RELEASED:
+            return launch
+        if state == records.STATE_REQUESTED:
+            found = container_state(ev)
+            if found is None:
+                new = _new_executions(ev, launch)
+                kind = records.KIND_EXIT_UNOBSERVED if new else records.KIND_NOT_STARTED
+                write_json(ev.launch_dir(number) / records.EXIT, _exit_payload(
+                    ev, launch, kind, reason=(
+                        "no container exists and none was recorded; the output gained "
+                        "executions, so a container ran and was removed outside the wrapper"
+                        if new else "no container was created (docker run failed, or the "
+                        "launch stopped before it)")), exclusive=True)
+                journal(ev, "exit_recorded", launch=number, kind=kind)
+                continue
+            if found.get("eval") != ev.eval_id or found.get("launch") != str(number):
+                raise WrapperError(f"container {ev.container_name} belongs to launch "
+                                   f"{found.get('launch')}, not to the unfinished launch {number}")
+            record_container(ev, number, found["id"], "found by inspect after the launch "
+                             "stopped before recording it")
+            continue
+        if state == records.STATE_CONTAINER:
+            found = inspect_container(ev, launch.container_id)
+            if found is not None and found["running"]:
+                if not watch_running:
+                    raise WrapperError(f"container {launch.container_id[:12]} is still running")
+                last_observation, write_failures = watch(ev, number, launch.container_id)
+                continue
+            if found is None:
+                write_json(ev.launch_dir(number) / records.EXIT, _exit_payload(
+                    ev, launch, records.KIND_EXIT_UNOBSERVED,
+                    reason="the container was removed before its exit was recorded"),
+                    exclusive=True)
+                journal(ev, "exit_recorded", launch=number, kind=records.KIND_EXIT_UNOBSERVED)
+                continue
+            sha, size = save_runner_log(ev, launch)
+            write_json(ev.launch_dir(number) / records.EXIT, _exit_payload(
+                ev, launch, records.KIND_RAN, docker_status=found.get("status"),
+                exit_code=found.get("exit_code"), oom_killed=found.get("oom_killed"),
+                docker_error=found.get("error"), started_at=found.get("started_at"),
+                finished_at=found.get("finished_at"),
+                finished_at_epoch=_epoch(found.get("finished_at")),
+                runner_exit_meaning=runner_exit_meaning(found.get("exit_code"), found.get("status")),
+                runner_log={"sha256": sha, "bytes": size},
+                last_observation=last_observation, watch_write_failures=write_failures,
+            ), exclusive=True)
+            journal(ev, "exit_recorded", launch=number, kind=records.KIND_RAN,
+                    exit_code=found.get("exit_code"), oom_killed=found.get("oom_killed"))
+            continue
+        if state == records.STATE_EXIT and launch.exit_kind != records.KIND_NOT_STARTED:
+            capture_evidence(ev, launch)
+            continue
+        # 証拠まで記録した（または container が作られなかった）: 消して確かめてから終える。
+        if launch.exit_kind != records.KIND_NOT_STARTED and launch.container_id:
+            remove_container(ev, launch.container_id)
+        write_json(ev.launch_dir(number) / records.RELEASED, {
+            "schema": records.RELEASED_SCHEMA, "container_id": launch.container_id,
+            "recorded_at": utc_now(),
+        }, exclusive=True)
+        journal(ev, "released", launch=number)
+
+
+def command_supervise(ev: Evaluation, number: int, lock_fd: int) -> int:
+    if not holds_lock(ev, lock_fd):
+        print(f"Error: the supervisor of launch {number} does not hold the evaluation lock",
+              file=sys.stderr)
+        return EXIT_FAILED
 
     def on_signal(_signum, _frame):
         _Stop.requested = True
 
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, on_signal)
-    reservation(ev, "start", launch)
+    reservation(ev, "start", number)
     try:
-        command = runner_command(ev, meta["conditions"], meta["fingerprint"], launch)
-        started = docker(ev, *command)
-        if started.returncode != 0:
-            write_json(directory / "exit.json", {
-                "launch": launch, "container_started": False,
-                "error": started.stderr.strip()[-2000:], "recorded_at": utc_now()})
-            append_jsonl(events, {"event": "container_start_failed", "launch": launch,
-                                  "at": utc_now()})
-            return EXIT_FAILED
-        container = started.stdout.strip()
-        write_json(directory / "container.json", {"id": container, "name": ev.container_name,
-                                                  "started_at": utc_now()})
-        append_jsonl(events, {"event": "container_started", "launch": launch,
-                              "container": container[:12], "at": utc_now()})
-        last_sample = watch(ev, launch, container)
-        return finalize_launch(ev, launch, container, last_sample=last_sample)
+        launch = _launch(ev, number)
+        if launch.state != records.STATE_REQUESTED:
+            raise WrapperError(f"launch {number} is {launch.state}, not requested")
+        meta = read_json(ev.wrapper / records.META)
+        command = runner_command(ev, meta["conditions"], meta["fingerprint"], number)
+        # `docker run` の CLI にも lock を持たせる: supervisor が途中で死んでも、container の
+        # 作成が終わるまで回収（stop）は lock を取れない。
+        started = docker(ev, *command, pass_fds=(lock_fd,), timeout=600)
+        identifier = started.stdout.strip()
+        if started.returncode == 0 and records._CONTAINER_ID.fullmatch(identifier):
+            record_container(ev, number, identifier, "docker run")
+        else:
+            journal(ev, "container_start_failed", launch=number,
+                    detail=started.stderr.strip()[-1000:])
+            print(f"docker run failed ({started.returncode}): {started.stderr.strip()[-1000:]}",
+                  file=sys.stderr)
+        launch = advance(ev, number, watch_running=True)
+        return EXIT_OK if launch.exit_kind == records.KIND_RAN else EXIT_FAILED
     finally:
-        reservation(ev, "end", launch)
+        reservation(ev, "end", number)
         os.close(lock_fd)
 
 
-def watch(ev: Evaluation, launch: int, container: str) -> Dict[str, Any]:
-    """container の終了を待ちながら cgroup を観測する（oom_kill の変化はすぐ、他は 5 分ごと）。
+def watch(ev: Evaluation, number: int, container: str) -> Tuple[Optional[Dict[str, Any]], int]:
+    """container の終了を待ちながら cgroup を観測し、**すべての観測を** 1 行ずつ保存する。
 
-    返り値は最後に読めた観測（終了の直前、最大で観測間隔ぶん前）。container が終わると cgroup
-    は消えるので、終了の記録にはこれを残す。
+    返り値は（最後の有効な観測、保存できなかった観測の数）。終了は ``docker wait`` の終わりと、
+    inspect で「動いていない／存在しない」を観測したことの両方で決める（観測できなければ待ち続ける）。
     """
-    directory = ev.launch_dir(launch)
+    path = ev.launch_dir(number) / records.WATCH
+    grace = str((read_json(ev.wrapper / records.META) or {})["conditions"]["container"]
+                ["stop_grace_seconds"])
 
     def new_waiter() -> subprocess.Popen:
         return subprocess.Popen([ev.docker, "wait", container], stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
 
     waiter = new_waiter()
-    last_oom: Optional[int] = None
+    last_valid: Optional[Dict[str, Any]] = None
+    failures = 0
     last_period = 0.0
     stop_sent = False
-    grace = str((read_json(ev.wrapper / "meta.json") or {})["conditions"]["container"]
-                ["stop_grace_seconds"])
     next_poll = 0.0
-    last_sample: Dict[str, Any] = {}
     while True:
         if waiter.poll() is not None:
-            # `docker wait` が終わった。container がまだ動いていれば（docker の CLI の失敗など）、
-            # 監視をやめずに待ち直す。
-            state = container_state(ev)
-            if state is None or not state.get("running"):
-                break
-            append_jsonl(directory / "watch.jsonl", {"at": utc_now(), "at_epoch": time.time(),
-                                                     "kind": "wait_restarted"})
-            time.sleep(WATCH_POLL_SECONDS)
+            try:
+                found = inspect_container(ev, container)
+            except Unobservable:
+                found = {"running": True}  # 分からなければ終わったとしない
+            if found is None or not found["running"]:
+                return last_valid, failures
             waiter = new_waiter()
         now = time.monotonic()
         if _Stop.requested and not stop_sent:
             # supervisor 自身が止められた: container にも正規の停止を送る（猶予付き）。
             subprocess.Popen([ev.docker, "stop", "-t", grace, container],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            append_jsonl(ev.wrapper / "events.jsonl", {
-                "event": "stop_forwarded_by_supervisor", "launch": launch, "at": utc_now()})
+            try:
+                journal(ev, "stop_forwarded_by_supervisor", launch=number)
+            except OSError:
+                pass
             stop_sent = True
         if now >= next_poll:
             next_poll = now + WATCH_POLL_SECONDS
-            sample = read_cgroup(container)
-            if "cgroup" not in sample:
-                last_sample = {"at": utc_now(), "at_epoch": time.time(), **sample}
-            oom = sample.get("oom_kill")
-            changed = isinstance(oom, int) and last_oom is not None and oom != last_oom
-            if changed or now - last_period >= WATCH_PERIOD_SECONDS or last_oom is None:
-                row = {"at": utc_now(), "at_epoch": time.time(), **sample,
-                       "oom_kill_delta": (oom - last_oom) if changed else 0,
-                       "kind": "oom_kill_change" if changed else "periodic"}
-                if not changed:
-                    row["other_running_containers"] = other_running_containers(ev)
-                    last_period = now
-                append_jsonl(directory / "watch.jsonl", row)
-            if isinstance(oom, int):
-                last_oom = oom
-        time.sleep(1.0)
-    return last_sample
+            row = {"at": utc_now(), "at_epoch": time.time(), **read_cgroup(container)}
+            if row["observed"]:
+                last_valid = row
+            if now - last_period >= WATCH_PERIOD_SECONDS:
+                row["other_running_containers"] = other_running_containers(ev)
+                last_period = now
+            try:
+                append_jsonl(path, row)
+            except OSError:
+                # 保存できなかった観測は数えるだけ（前後の観測がその区間を覆う）。
+                failures += 1
+        time.sleep(min(1.0, WATCH_POLL_SECONDS))
 
 
-def finalize_launch(ev: Evaluation, launch: int, container: str,
-                    last_sample: Optional[Mapping[str, Any]] = None) -> int:
-    """終了した container を記録してから消す。記録できなければ container を残す（証拠を失わない）。"""
-    directory = ev.launch_dir(launch)
-    events = ev.wrapper / "events.jsonl"
-    state = container_state(ev)
-    if state is None or state.get("running"):
-        raise WrapperError(f"container {ev.container_name} is not in an exited state: {state}")
-    logs = docker(ev, "logs", container)
-    write_atomic(directory / "runner.log", (logs.stdout + logs.stderr).encode())
-    after = existing_execution_ids(ev)
-    before = set((read_json(directory / "launch.json") or {}).get("execution_ids_before") or [])
-    exit_record = {
-        "launch": launch, "container_started": True, "container_id": state.get("id"),
-        "exit_code": state.get("exit_code"), "oom_killed": state.get("oom_killed"),
-        "docker_error": state.get("error"), "started_at": state.get("started_at"),
-        "finished_at": state.get("finished_at"),
-        "finished_at_epoch": _epoch(state.get("finished_at")),
-        "runtime_run_ids": [run_id for run_id in after if run_id not in before],
-        "runner_exit_meaning": runner_exit_meaning(state.get("exit_code")),
-        "last_cgroup_sample": dict(last_sample) if last_sample else None,
-        "recorded_at": utc_now(),
-    }
-    recorded = read_json(directory / "exit.json")
-    if recorded is None:
-        write_json(directory / "exit.json", exit_record, exclusive=True)
-        append_jsonl(events, {"event": "container_exited", "launch": launch,
-                              "exit_code": state.get("exit_code"),
-                              "oom_killed": state.get("oom_killed"), "at": utc_now()})
-    elif recorded.get("container_id") != state.get("id"):
-        raise WrapperError(f"{directory / 'exit.json'} records another container")
-    # （記録済みなら、前の記録者が削除の前に止まった。記録はそのまま続ける。）
-    # 証拠（未終端の pair の写しと検証器の判定）は、container を消す前に取る。取れなくても
-    # container の終了の記録は済んでいるので削除へ進み、欠損は summary が欠損として出す。
-    status = EXIT_OK
-    if not (directory / "evidence.json").exists():
-        status = capture_evidence(ev, launch)
-    removed = docker(ev, "rm", container)
-    if removed.returncode != 0:
-        # 記録は済んでいる。container は残し（次の start が止まる）、`stop` で続きから消せる。
-        raise WrapperError(f"container {ev.container_name} could not be removed: "
-                           f"{removed.stderr.strip()}; run `stop` to finish the record")
-    deadline = time.monotonic() + REMOVE_CONFIRM_SECONDS
-    while container_state(ev) is not None:
-        if time.monotonic() > deadline:
-            raise WrapperError(f"container {ev.container_name} could not be removed: "
-                               f"{removed.stderr.strip()}")
-        time.sleep(1.0)
-    append_jsonl(events, {"event": "released", "launch": launch, "at": utc_now()})
-    return status
-
-
-def capture_evidence(ev: Evaluation, launch: int) -> int:
-    directory = ev.launch_dir(launch)
-    events = ev.wrapper / "events.jsonl"
-    meta = read_json(ev.wrapper / "meta.json") or {}
-    image = ((meta.get("conditions") or {}).get("image") or {}).get("id")
-    try:
-        captured = reader(ev, image, summarize_args(ev, "launch-evidence"), timeout=3600)
-        evidence = _parse_json(captured.stdout)
-        if captured.returncode != 0 or not isinstance(evidence, dict):
-            raise WrapperError(captured.stderr.strip()[-1000:] or f"exit {captured.returncode}")
-        write_json(directory / "evidence.json", evidence, exclusive=True)
-        append_jsonl(events, {"event": "evidence_saved", "launch": launch, "at": utc_now()})
-        return EXIT_OK
-    except (WrapperError, OSError) as exc:
-        # 証拠の欠損は summary が欠損として出す（成功にしない）。ここでは記録を試みる。
-        try:
-            append_jsonl(events, {"event": "evidence_failed", "launch": launch,
-                                  "at": utc_now(), "detail": str(exc)[-1000:]})
-        except OSError:
-            pass
-        print(f"Error: post-run evidence of launch {launch} was not saved: {exc}", file=sys.stderr)
-        return EXIT_FAILED
-
-
-def runner_exit_meaning(code: Any) -> str:
+def runner_exit_meaning(code: Any, status: Any = None) -> str:
     """runner の exit code の意味（記録用。完了の根拠にはしない）。"""
+    if status == "created":
+        return "never started (created only)"
     meanings = {0: "finished", 1: "finished with failures (incomplete pairs, gate, census)",
                 3: "incomplete pairs", 75: "stop not confirmed (run tmpdir kept)",
                 129: "stopped (HUP)", 130: "stopped (INT)", 137: "killed (SIGKILL)",
@@ -1042,26 +1212,33 @@ def _epoch(text: Any) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
-# stop
+# stop（停止と回収）
 # ---------------------------------------------------------------------------
 
 
 def command_stop(ev: Evaluation, wait_seconds: float) -> int:
-    state = container_state(ev)
-    meta = read_json(ev.wrapper / "meta.json") or {}
+    meta = read_json(ev.wrapper / records.META) or {}
     grace = ((meta.get("conditions") or {}).get("container") or {}).get("stop_grace_seconds")
+    try:
+        state = container_state(ev)
+    except Unobservable as exc:
+        print(f"Error: cannot observe the container: {exc}", file=sys.stderr)
+        return EXIT_FAILED
     if state is None:
         print(f"No container of this evaluation ({ev.container_name}).")
-    elif state.get("running"):
+    elif state["running"]:
         if not isinstance(grace, int):
             print("Error: meta.json gives no stop grace; refusing to guess one", file=sys.stderr)
             return EXIT_FAILED
         print(f"Stopping {ev.container_name} (grace {grace}s; the runner confirms its own "
               "processes stopped before it exits)...")
-        append_jsonl(ev.wrapper / "events.jsonl", {"event": "stop_requested", "at": utc_now(),
-                                                   "launch": state.get("launch")})
-        docker(ev, "stop", "-t", str(grace), ev.container_name, timeout=grace + 60)
-    # supervisor が記録と削除を終えて lock を離すまで待つ。supervisor が居なければ自分で行う。
+        journal(ev, "stop_requested", launch=state.get("launch"))
+        stopped = docker(ev, "stop", "-t", str(grace), ev.container_name, timeout=grace + 60)
+        if stopped.returncode != 0:
+            print(f"Error: docker stop failed ({stopped.returncode}): "
+                  f"{stopped.stderr.strip()[-500:]}; nothing was recorded", file=sys.stderr)
+            return EXIT_FAILED
+    # supervisor が記録と削除を終えて lock を離すまで待つ。居なければ自分で回収する。
     lock = open_lock(ev)
     try:
         deadline = time.monotonic() + wait_seconds
@@ -1071,41 +1248,47 @@ def command_stop(ev: Evaluation, wait_seconds: float) -> int:
                       "see `status`", file=sys.stderr)
                 return EXIT_FAILED
             time.sleep(1.0)
-        state = container_state(ev)
-        if state is not None:
-            if state.get("running"):
-                print("Error: the container is running but nothing holds the evaluation lock; "
-                      "stop it again", file=sys.stderr)
-                return EXIT_FAILED
-            launch = state.get("launch")
-            if not (isinstance(launch, str) and launch.isdigit()):
-                print("Error: the container has no launch label; inspect it by hand",
-                      file=sys.stderr)
-                return EXIT_FAILED
-            print(f"The supervisor of launch {launch} is gone; recording the container's end.")
-            append_jsonl(ev.wrapper / "events.jsonl", {"event": "finalized_by_stop",
-                                                       "launch": int(launch), "at": utc_now()})
-            finalize_launch(ev, int(launch), state["id"])
+        return _recover_locked(ev)
+    except (WrapperError, OSError) as exc:
+        print(f"Error: the launch could not be recorded to the end: {exc}; its records so far "
+              "are kept, and `stop` continues from them", file=sys.stderr)
+        return EXIT_FAILED
     finally:
         os.close(lock)
-    last = latest_exit(ev)
-    if last:
-        print(f"Launch {last.get('launch')}: runner exit {last.get('exit_code')} "
-              f"({last.get('runner_exit_meaning')}), OOMKilled={last.get('oom_killed')}.")
+
+
+def _recover_locked(ev: Evaluation) -> int:
+    check = records.read_records(ev.wrapper)
+    if check.damaged:
+        print("Error: the wrapper records are damaged; nothing was changed:\n  "
+              + "\n  ".join(check.problems), file=sys.stderr)
+        return EXIT_FAILED
+    found = container_state(ev)
+    if found is not None and (check.unfinished is None
+                              or found.get("launch") != str(check.unfinished.number)
+                              or found.get("eval") != ev.eval_id):
+        print(f"Error: container {ev.container_name} (launch {found.get('launch')}, "
+              f"{found.get('status')}) does not belong to an unfinished launch of this "
+              "evaluation; inspect it by hand", file=sys.stderr)
+        return EXIT_FAILED
+    if found is not None and found["running"]:
+        print("Error: the container is running but nothing holds the evaluation lock; "
+              "stop it again", file=sys.stderr)
+        return EXIT_FAILED
+    if check.unfinished is not None:
+        number = check.unfinished.number
+        print(f"Recording launch {number} from its records ({check.unfinished.state}).")
+        journal(ev, "recovered_by_stop", launch=number, state=check.unfinished.state)
+        advance(ev, number, watch_running=False)
+    last = check.launches[-1] if check.launches else None
+    if last is not None:
+        launch = records.read_launch(ev.launch_dir(last.number), last.number)
+        exit_record = launch.exit or {}
+        print(f"Launch {launch.number}: {launch.state}, {exit_record.get('kind')}, runner exit "
+              f"{exit_record.get('exit_code')} ({exit_record.get('runner_exit_meaning')}), "
+              f"OOMKilled={exit_record.get('oom_killed')}.")
     print("Resume with `start` under the same conditions; `summary` shows what is decided.")
     return EXIT_OK
-
-
-def latest_exit(ev: Evaluation) -> Optional[Dict[str, Any]]:
-    root = ev.wrapper / "launches"
-    if not root.is_dir():
-        return None
-    numbers = sorted(int(p.name) for p in root.iterdir() if p.name.isdigit())
-    for number in reversed(numbers):
-        record = read_json(ev.launch_dir(number) / "exit.json")
-        if record is not None:
-            return record
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1113,24 +1296,18 @@ def latest_exit(ev: Evaluation) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-
-
 def host_state(ev: Evaluation) -> Dict[str, Any]:
-    state = container_state(ev)
-    holders = lock_holders(ev)
-    return {
-        "container": "absent" if state is None else state.get("status"),
-        "container_launch": None if state is None else state.get("launch"),
-        "lock_holders": holders,
-    }
+    """container と lock の観測（summarize に渡す）。観測できなければそう書く。"""
+    try:
+        state = container_state(ev)
+        container = "absent" if state is None else state.get("status")
+        observed = True
+    except Unobservable as exc:
+        state, container, observed = None, "unobservable", False
+        print(f"Warning: {exc}", file=sys.stderr)
+    return {"container": container, "observed": observed,
+            "container_launch": None if state is None else state.get("launch"),
+            "lock_holders": lock_holders(ev)}
 
 
 def tmp_entries(ev: Evaluation, state: Optional[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -1150,43 +1327,41 @@ def tmp_entries(ev: Evaluation, state: Optional[Mapping[str, Any]]) -> List[Dict
 
 
 def command_status(ev: Evaluation, verify: bool) -> int:
-    meta = read_json(ev.wrapper / "meta.json")
-    state = container_state(ev)
+    meta = read_json(ev.wrapper / records.META)
     print(f"Evaluation {ev.eval_id}")
     print(f"  output:  {ev.out} ({'present' if ev.out.is_dir() else 'absent'})")
     print(f"  records: {ev.wrapper} ({'present' if meta else 'no meta.json'})")
     if isinstance(meta, dict):
         print(f"  fingerprint: {meta.get('fingerprint')}")
-    if state is None:
-        print("  container: absent")
-    else:
-        print(f"  container: {state.get('status')} (launch {state.get('launch')}, started "
+    try:
+        state = container_state(ev)
+        print("  container: absent" if state is None else
+              f"  container: {state.get('status')} (launch {state.get('launch')}, started "
               f"{state.get('started_at')}, exit {state.get('exit_code')})")
+    except Unobservable as exc:
+        state = None
+        print(f"  container: unobservable ({exc})")
     holders = lock_holders(ev)
     print("  slot lock: " + ("free" if holders is None else
                              "held by pid " + (", ".join(map(str, holders)) or "unknown")))
-    root = ev.wrapper / "launches"
-    numbers = sorted(int(p.name) for p in root.iterdir() if p.name.isdigit()) if root.is_dir() else []
-    for number in numbers:
-        directory = ev.launch_dir(number)
-        exit_record = read_json(directory / "exit.json")
-        evidence = (directory / "evidence.json").exists()
-        if exit_record is None:
-            print(f"  launch {number}: {launch_kind(directory)}, no exit record yet")
-        else:
-            print(f"  launch {number}: {launch_kind(directory)}, exit "
-                  f"{exit_record.get('exit_code')} ({exit_record.get('runner_exit_meaning')}), "
-                  f"OOMKilled={exit_record.get('oom_killed')}, executions "
-                  f"{exit_record.get('runtime_run_ids')}, evidence {'saved' if evidence else 'MISSING'}")
-        rows = (directory / "watch.jsonl")
-        if rows.exists():
-            lines = rows.read_text(encoding="utf-8").splitlines()
-            if lines:
-                last = _parse_json(lines[-1]) or {}
-                deltas = sum((_parse_json(line) or {}).get("oom_kill_delta") or 0 for line in lines)
-                print(f"    watch: {len(lines)} sample(s), oom_kill increments {deltas}, last "
-                      f"{last.get('at')} peak {last.get('memory_peak')} current "
-                      f"{last.get('memory_current')}")
+    check = records.read_records(ev.wrapper)
+    for launch in check.launches:
+        exit_record = launch.exit or {}
+        print(f"  launch {launch.number}: {launch.state}, {(launch.launch or {}).get('kind')}, "
+              f"exit {exit_record.get('kind')} {exit_record.get('exit_code')} "
+              f"({exit_record.get('runner_exit_meaning')}), OOMKilled="
+              f"{exit_record.get('oom_killed')}, executions {exit_record.get('runtime_run_ids')}")
+        observed = [row for row in launch.watch if row.get("observed")]
+        if launch.watch:
+            last = observed[-1] if observed else {}
+            print(f"    watch: {len(launch.watch)} observation(s), {len(launch.watch) - len(observed)}"
+                  f" unobserved, oom_kill {last.get('oom_kill')}, last {last.get('at')} peak "
+                  f"{last.get('memory_peak')} current {last.get('memory_current')}")
+    if check.unfinished is not None:
+        print(f"  launch {check.unfinished.number} is unfinished ({check.unfinished.state}): "
+              + ("its supervisor holds the lock" if holders else "run `stop` to record it"))
+    for problem in check.problems:
+        print(f"  DAMAGED: {problem}")
     if ev.out.is_dir():
         statuses = sum(1 for _ in ev.out.rglob("*.pair-status.json"))
         executions = existing_execution_ids(ev)
@@ -1198,28 +1373,27 @@ def command_status(ev: Evaluation, verify: bool) -> int:
         print(f"  tmp: {len(entries)} entr(y/ies); {len(leftovers)} left by earlier executions "
               "(removed by the next start)" + (f": {', '.join(leftovers[:5])}" if leftovers else ""))
     if verify and ev.out.is_dir() and isinstance(meta, dict):
-        image = meta["conditions"]["image"]["id"]
-        completed = reader(ev, image, summarize_args(ev, "preflight"), timeout=3600)
-        report = _parse_json(completed.stdout) or {}
-        result = report.get("verify") or {}
-        print(f"  execution_chain verify: {result.get('verdict')} "
-              f"{json.dumps(result.get('reasons') or {}, sort_keys=True)} "
-              f"({report.get('verify_seconds')}s)" if result else
-              f"  execution_chain verify: unavailable ({report.get('verify_error') or completed.stderr.strip()[-300:]})")
+        try:
+            report = read_json_from(ev, meta["conditions"]["image"]["id"],
+                                    summarize_args(ev, "verify"))
+            result = report.get("verify") or {}
+            print(f"  execution_chain verify: {result.get('verdict')} "
+                  f"{json.dumps(result.get('reasons') or {}, sort_keys=True)} "
+                  f"({report.get('verify_seconds')}s)" if result else
+                  f"  execution_chain verify: failed ({report.get('verify_error')})")
+        except Unobservable as exc:
+            print(f"  execution_chain verify: unavailable ({exc})")
     return EXIT_OK
 
 
 def command_summary(ev: Evaluation, as_json: bool) -> int:
-    meta = read_json(ev.wrapper / "meta.json")
+    meta = read_json(ev.wrapper / records.META)
     if not isinstance(meta, dict):
         print(f"No evaluation record at {ev.wrapper} (meta.json); nothing to summarize.",
               file=sys.stderr)
         return 2
-    extra = ["--wrapper", ev.in_container(ev.wrapper), "--matrix", ev.matrix]
-    if as_json:
-        extra.append("--json")
     completed = reader(ev, meta["conditions"]["image"]["id"],
-                       summarize_args(ev, "report", *extra),
+                       summarize_args(ev, "report", *(["--json"] if as_json else [])),
                        env={"EVAL_HOST_STATE": json.dumps(host_state(ev))}, timeout=7200)
     sys.stdout.write(completed.stdout)
     if completed.returncode not in (0, 1, 2):
