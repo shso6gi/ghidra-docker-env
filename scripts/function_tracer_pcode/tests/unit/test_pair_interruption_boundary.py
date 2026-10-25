@@ -1498,6 +1498,10 @@ case "$args" in
       publication-failed) exit 3 ;;
     esac ;;
   *pair_status_authority*) exec "$REAL_PYTHON" "$@" ;;
+  *execution_chain*issue*)
+    [ "$SCENARIO" = issue-failed ] && exit 1
+    echo issued >> "$CALLS"; exit 0 ;;
+  *supervisor_command*) echo supervisor >> "$CALLS"; exit 0 ;;
 esac
 exit 0
 """
@@ -1556,7 +1560,7 @@ def _run_pair_with_classifier(tmp_path, runner, scenario):
         env={**os.environ, "SCENARIO": scenario, "NONCE": _NONCE, "REAL_PYTHON": sys.executable,
              "STALE_STATUS": str(stale), "DECIDED_STATUS": str(decided),
              "DIAGNOSTIC": str(diagnostic), "RECORD": str(record),
-             "PYTHONPATH": str(REPO_ROOT)},
+             "CALLS": str(tmp_path / "calls"), "PYTHONPATH": str(REPO_ROOT)},
     )
     line = next(
         (line for line in result.stdout.splitlines() if "<->" in line), "",
@@ -1566,24 +1570,49 @@ def _run_pair_with_classifier(tmp_path, runner, scenario):
 
 
 @pytest.mark.parametrize("runner", (EQ_RUNNER, NEQ_RUNNER), ids=("eq", "neq"))
-@pytest.mark.parametrize(("scenario", "state", "eq_rc", "neq_rc"), (
+@pytest.mark.parametrize(("scenario", "state", "rc"), (
     # 有効に署名された同じ target の status でも、この execution のものでなければ未完了。
-    ("stale-status", "INCOMPLETE", 3, 1),
+    ("stale-status", "INCOMPLETE", 3),
     # 公開に失敗した（status が無い）。
-    ("publication-failed", "INCOMPLETE", 3, 1),
+    ("publication-failed", "INCOMPLETE", 3),
     # 分類に失敗した（署名の無い診断）。rc は分類器の record から。
-    ("diagnostic", "INCOMPLETE", 2, 1),
-    # この execution の確定した ERROR は確定（Eq は既存の policy で pair job の失敗）。
-    ("decided-error", "ERROR", 1, 0),
+    ("diagnostic", "INCOMPLETE", 3),
+    # この execution の確定した ERROR は確定した一次結果で、pair job の失敗ではない
+    # （Issue #276: Eq と Neq で同じ規則、owner は validation_conclude_pair_job）。
+    ("decided-error", "ERROR", 0),
 ))
 def test_run_pair_accepts_only_this_executions_decided_status(
-    tmp_path, runner, scenario, state, eq_rc, neq_rc,
+    tmp_path, runner, scenario, state, rc,
 ):
-    line, rc, status, result = _run_pair_with_classifier(tmp_path, runner, scenario)
+    line, actual_rc, status, result = _run_pair_with_classifier(tmp_path, runner, scenario)
     assert f": {state}" in line, (line, result.stderr)
-    assert rc == (eq_rc if runner == EQ_RUNNER else neq_rc), (line, result.stderr)
+    assert actual_rc == rc, (line, result.stderr)
     if scenario == "diagnostic" and runner == EQ_RUNNER:
         assert "child_exit=-9" in line
+    # 解析の前に、この execution の issue 記録を書いている。
+    assert (tmp_path / "calls").read_text().split()[:2] == ["issued", "supervisor"]
+
+
+@pytest.mark.parametrize("runner", (EQ_RUNNER, NEQ_RUNNER), ids=("eq", "neq"))
+def test_run_pair_starts_no_analysis_when_the_issue_record_cannot_be_written(tmp_path, runner):
+    line, rc, status, result = _run_pair_with_classifier(tmp_path, runner, "issue-failed")
+    assert "ISSUE_FAILED (no analysis started)" in line, (line, result.stderr)
+    assert rc == 1
+    assert not (tmp_path / "calls").exists()  # supervisor は起動していない
+    assert not status.exists()
+
+
+def test_both_runners_conclude_a_pair_job_through_the_one_owner():
+    """Issue #276: pair job の exit code の規則は validation_conclude_pair_job だけが持つ。"""
+    for runner in (EQ_RUNNER, NEQ_RUNNER):
+        function = _extract_shell_function(runner.read_text(encoding="utf-8"), "run_pair")
+        code = [line for line in function.splitlines() if not line.lstrip().startswith("#")]
+        calls = [line for line in code if "validation_conclude_pair_job" in line]
+        assert len(calls) == 1, (runner.name, calls)
+        # 結論の後で exit code を作り直さない（その行の値をそのまま返す）。
+        after = code[code.index(calls[0]) + 1:]
+        assert [line.strip() for line in after if line.strip()] in (
+            ['return "$run_pair_ec"', "}"], ['return "$pair_ec"', "}"]), (runner.name, after)
 
 
 # ---------------------------------------------------------------------------

@@ -252,7 +252,7 @@ def test_the_effective_values_are_recorded_before_the_config_digest(runner):
 
     source = (REPO_ROOT / runner).read_text(encoding="utf-8")
 
-    assert "analysis_config_schema=eqbench-analysis-config-v4" in source
+    assert "analysis_config_schema=eqbench-analysis-config-v5" in source
     lines = source.index("$ANALYSIS_TIMEOUT_MANIFEST_LINES")
     assert lines < source.index("--print-analysis-config-digest")
     # one resolver call (the E7 tests above show it runs before anything is made)

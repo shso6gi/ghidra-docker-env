@@ -9,17 +9,21 @@ runner（``eqbench_run_all_32jobs.sh``）の ``run_pair`` と、そこから呼�
 production の module。Ghidra の CLI だけを ``runner_child``（harness の worker）へ
 差し替える（``PYTHON_BIN`` の wrapper）。
 
-固定する既存の runner policy:
+固定する runner の契約（pair job の結論は ``validation_conclude_pair_job`` が Eq / Neq の
+唯一の owner。Issue #276、評価計画 v2 PR-B）:
 
 * TIMEOUT pair: supervisor exit 124、pair-status TIMEOUT（``classification_valid``
   true）、``run_pair`` は 0（run を落とさない）。
 * canonical ERROR pair: supervisor は RESOLVED（exit 0）、pair-status ERROR
-  valid、分類器の CLI は ERROR で 1 を返すので ``run_pair`` は 1。
+  valid。確定した ERROR は一次結果で pair job の失敗ではないので ``run_pair`` は 0
+  （PR-B より前の Eq runner は分類器の exit 1 を返していた。Neq runner と ledger の記述は
+  以前から 0）。
 * envelope の無い終了（runner mode）: supervisor INVALID（exit 2）。runner は
   非終端の projection を 1 回だけ再実行し、それも同じ INVALID。分類は失敗し
   pair-status は ``PAIR_STATUS_AUTHORITY_INVALID``（``classification_valid``
-  false）、``run_pair`` は 2。
-* scheduler の失敗数は ``run_pair`` が 0 以外だった pair の数。
+  false）、未完了なので ``run_pair`` は 3。
+* scheduler の失敗数は ``run_pair`` が 0 以外だった pair の数（未完了だけ）。
+* pair の解析の前に、実行の連鎖の issue 記録（production の writer）が書かれる。
 
 Issue #226: どの pair が deadline に当たるかを host の速さで決めない。supervisor は runner の
 引数のまま ``runner_supervisor`` から起こし、deadline は worker が ``stop`` した瞬間に来る
@@ -82,8 +86,12 @@ EQBENCH_DEBUG=0; EQBENCH_PROGRESS_INTERVAL_SECONDS=1; EQBENCH_IDENTICAL_FAST_PAT
 # Issue #160: run_pair passes these to the runtime receipt writer, and times every
 # supervisor invocation with the common GNU time prefix (the runner sources the common file).
 EQBENCH_CPU_TOKENS=16; EQBENCH_PAIR_CPU_TOKENS=8; PARALLEL_JOBS=2; PARALLEL_JOBS_REQUESTED=2
-RUNTIME_RUN_ID=harness-run
+RUNTIME_RUN_ID=00000000000000000000000000000165
+OUTPUT_BASE_DIR="__TMP__/out"
 source "__COMMON__"
+printf 'runtime_run_id=%s\n' "$RUNTIME_RUN_ID" > "__TMP__/start-manifest.txt"
+validation_execution_chain "$PYTHON_BIN" start --root "$OUTPUT_BASE_DIR" \
+    --run-id "$RUNTIME_RUN_ID" --manifest "__TMP__/start-manifest.txt" || exit 9
 FT_EXPANDER_DEDUP_CASE_LIMIT=0; FT_CALLEE_UNBOUND_REUSE=0; FT_CALLEE_UNBOUND_REUSE_SHADOW=0
 STACK_DUMP_ARTIFACT_STATE_FILE="__TMP__/stack-dump-state.tsv"
 export ISSUE165_HARNESS_RECORDS="__TMP__/harness"
@@ -194,12 +202,27 @@ def _status_line(completed, function: str) -> str:
     )
 
 
-def test_t18_runner_counts_only_non_terminal_or_error_pairs_as_failures(runner_result):
+def test_t18_runner_counts_only_incomplete_pairs_as_failures(runner_result):
     tmp, completed = runner_result
     logs = "\n".join(
         path.read_text(encoding="utf-8")[-3000:] for path in sorted((tmp / "out").glob("*/*.log"))
     )
-    assert "RUN_PAIR_FAILURES=2" in completed.stdout, completed.stdout + completed.stderr + logs
+    # invalidpair（未完了）だけ。確定した ERROR / TIMEOUT / UNKNOWN は失敗に数えない（#276）。
+    assert "RUN_PAIR_FAILURES=1" in completed.stdout, completed.stdout + completed.stderr + logs
+
+
+def test_t18_every_pair_is_issued_by_the_execution_before_its_analysis(runner_result):
+    from scripts.function_tracer_pcode.reporting import execution_chain
+
+    tmp, _completed = runner_result
+    by_nonce, problems = execution_chain.issued_records(tmp / "out")
+    assert problems == []
+    issued = {row["pair_status_path"] for rows in by_nonce.values() for row in rows}
+    assert issued == {f"{function}/{function}_B1_B2.pair-status.json" for function in PAIRS}
+    for function in ("timeoutpair", "errorpair", "unknownpair"):
+        status, _rc, _log = _pair(tmp, function)
+        assert by_nonce[status["execution_nonce"]][0]["runtime_run_id"] == (
+            "00000000000000000000000000000165")
 
 
 def test_t18_timeout_pair_is_a_valid_timeout_that_does_not_fail_the_run(runner_result):
@@ -214,10 +237,10 @@ def test_t18_timeout_pair_is_a_valid_timeout_that_does_not_fail_the_run(runner_r
     assert "supervisor_exit=124" in _status_line(completed, "timeoutpair")
 
 
-def test_t18_canonical_error_pair_is_valid_and_fails_the_run_as_before(runner_result):
+def test_t18_canonical_error_pair_is_valid_and_does_not_fail_the_run(runner_result):
     tmp, completed = runner_result
     status, rc, _log = _pair(tmp, "errorpair")
-    assert rc == 1
+    assert rc == 0
     assert status["classification_valid"] is True
     assert status["canonical_outcome"] == "ERROR"
     assert status["supervisor_status"] == "RESOLVED"
@@ -258,7 +281,7 @@ def test_t18_unknown_pair_is_valid(runner_result):
 def test_t18_exit_without_a_result_is_invalid_after_one_resume(runner_result):
     tmp, completed = runner_result
     status, rc, log = _pair(tmp, "invalidpair")
-    assert rc == 2
+    assert rc == 3
     assert status["classification_valid"] is False
     assert status["error_kind"] == "PAIR_STATUS_AUTHORITY_INVALID"
     assert "not a terminal authority" in status["detail"]
