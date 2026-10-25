@@ -223,3 +223,17 @@ def test_the_first_start_goes_through_the_same_judgement(h):
     launch = json.loads((h.ev.launch_dir(1) / records.LAUNCH).read_text())
     assert [r["code"] for r in launch["completion_before"]["reasons"]] == [
         "evaluation_not_started", "output_absent"]
+
+
+def test_an_output_started_from_another_analysis_source_refuses_the_start(h, capsys):
+    assert h.start() == wrapper.EXIT_OK
+    directory = h.ev.out / ".executions" / ("e" * 32)
+    directory.mkdir(parents=True)
+    text = (f"runtime_run_id={'e' * 32}\nenvironment_fingerprint={h.meta()['fingerprint']}\n"
+            f"analysis_source_digest_start={'0' * 64}\n")
+    (h.ev.out / "run_manifest.txt").write_text(text)
+    (directory / "run_manifest.start.txt").write_text(text)
+    h.end_container(exit_code=0)
+    h.wait_released()
+    err = _refused_without_anything(h, capsys, launches=1)
+    assert "source_differs" in err and "separate evaluation (another --tag)" in err
