@@ -259,6 +259,9 @@ def _synthetic_launch(directory, *, drop=(), change=None):
     ((), lambda f: f[records.EXIT].update(kind=records.KIND_NOT_STARTED), "has container records"),
     ((), lambda f: f[records.EXIT]["runner_log"].update(bytes=1), "runner.log differs"),
     ((), lambda f: f[records.LAUNCH].update(launch=7), "launch.json does not describe this launch"),
+    ((), lambda f: f[records.EVIDENCE].update(unterminated_pairs="x"), "evidence.json is malformed"),
+    ((), lambda f: f[records.EVIDENCE].update(unterminated_pairs=[{"pair": "p", "kind": "?"}]),
+     "evidence.json is malformed"),
 ])
 def test_each_record_rule_is_checked_on_its_own(tmp_path, drop, change, problem):
     _synthetic_launch(tmp_path / "1", drop=drop, change=change)

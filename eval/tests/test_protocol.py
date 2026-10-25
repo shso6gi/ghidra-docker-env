@@ -126,3 +126,11 @@ def test_a_response_is_accepted_only_with_both_the_exit_code_and_the_shape(reque
 def test_a_completion_inconsistent_with_the_registry_is_rejected(reasons, verdict):
     with pytest.raises(protocol.Rejected):
         protocol.accept("completion", 0, json.dumps(_completion(verdict, reasons)))
+
+
+def test_an_unknown_category_is_refused_even_when_the_verdict_claims_incomplete():
+    """受理の検査を経ない入力でも、決定は未知の分類で再開しない（二重の防御）。"""
+    completion = {"verdict": "INCOMPLETE",
+                  "reasons": [{"code": "x", "category": "something new", "detail": "x"},
+                              {"code": "chain_open", "category": "resumable", "detail": "x"}]}
+    assert protocol.start_decision(completion)[0] == protocol.DECISION_REFUSE

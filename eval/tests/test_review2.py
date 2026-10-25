@@ -289,3 +289,23 @@ def test_a_receipt_no_launch_recorded_is_reported_apart(h, capsys):
     assert result["pairs"] == []
     assert [(r["run_id"], r["observed_in"]) for r in result["unattributed"]] == [("f" * 32, [2])]
     assert result["totals"]["unattributed"] == 1
+
+
+@pytest.mark.parametrize("body", [
+    '[{"Id": "%s", "State": {"Status": "running"}}]' % ("0" * 63 + "1"),   # Running が無い
+    '[{"Id": "x", "State": {"Status": "exited", "Running": false}}]',      # Id が container の形でない
+])
+def test_stop_does_not_take_a_malformed_inspect_answer_for_a_stopped_container(h, capsys, body):
+    """動いている container について、形の違う inspect の応答を「止まった」と読まない。"""
+    assert h.start() == wrapper.EXIT_OK
+    pid = (wrapper.lock_holders(h.ev) or [None])[0]
+    os.kill(pid, signal.SIGKILL)
+    h.wait_for(lambda: wrapper.lock_holders(h.ev) is None, message="the lock")
+    h.update(lambda d: d.update({"inspect_stdout": body, "inspect_stdout_times": 100}))
+    assert h.run("stop", "--wait", "5") == wrapper.EXIT_FAILED
+    assert "cannot observe the container" in capsys.readouterr().err
+    assert not (h.ev.launch_dir(1) / records.EXIT).exists()
+    assert [c["status"] for c in h.containers()] == ["running"]
+    h.update(lambda d: d.update({"inspect_stdout_times": 0}))
+    assert h.run("stop") == wrapper.EXIT_OK  # 正しい応答なら回収できる
+    assert h.records().launches[0].state == records.STATE_RELEASED
