@@ -86,9 +86,11 @@ def test_p2_an_oom_increment_is_not_attributed_to_a_pair_that_ended_before_the_l
     counter(0)
     assert h.start() == wrapper.EXIT_OK
     begin = time.time()
+    run_id = "e" * 32
+    (h.ev.out / ".executions" / run_id).mkdir(parents=True)  # この launch の execution
     metrics = h.ev.out / "S" / "Neq" / "f" / ".runtime-metrics"
     metrics.mkdir(parents=True)
-    receipt = {"run_id": "r" * 32, "execution_nonce": "n" * 24, "state": "COMPLETED",
+    receipt = {"run_id": run_id, "execution_nonce": "n" * 24, "state": "COMPLETED",
                "status": "INCOMPLETE", "child_returncode": -9,
                "started_at_epoch": begin, "finished_at_epoch": begin + 0.3}
     for suffix in ("progress", "runtime"):

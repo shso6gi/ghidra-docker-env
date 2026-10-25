@@ -54,7 +54,7 @@ launch（`start` 1 回）の記録は、次の順に 1 つずつ確定し、上�
 5. `released.json` — `docker rm` の後、container が「存在しない」と観測できたとき
 
 `exit.json` の種類: `ran`（終了を観測した）／`not_started`（container は作られなかった）／
-`exit_unobserved`（wrapper の外で container が消され、終了を観測できなかった。完了には数えない）。
+`exit_unobserved`（wrapper の外で container が消され、終了を観測できなかった。permanent）。
 
 `watch.jsonl` には cgroup の観測を **毎回**（既定 10 秒ごと）1 行で残す。読めなかった観測も
 `observed: false` で残す。
@@ -70,16 +70,38 @@ launch（`start` 1 回）の記録は、次の順に 1 つずつ確定し、上�
 | 最初の execution が開始の記録の前に止まった | 出力先に manifest も開始の記録も pair も無い | `start` が出力先を `.wrapper/aborted-outputs/` へ移して新規に始める（削除しない） |
 | 完了 | `summary` が `VERDICT: COMPLETE`（exit 0） | 何もしない。`start` は何も書かない |
 | chain は CLOSED だが ledger が正式性を拒否 | `summary`: `no_full_verdict` | `start` は再開する（完了とは言わない） |
+| 正式な完了に到達できない（permanent） | `summary`: `[permanent] ...` | この評価の記録を残し、別の `--tag` で新しい評価を始める |
 
-`start` が再開するのは、未完了の理由が「runner を同じ条件で動かせば進む」もの（出力先が無い、
-連鎖が OPEN、full verdict が無い）だけのとき。人の対応が要る理由（未完了の launch、container の
-残存、別の条件の execution、HEAD の不一致）や、判定できないときは、何も書かずに拒否する。
+**理由の分類と `start` の決定**（`protocol.py` の登録表が唯一の owner。`summary` も同じ分類を出す）
+
+| 分類 | 意味 | 例 |
+|---|---|---|
+| resumable | 同じ条件で runner を再び動かせば進む | 出力先が無い、連鎖が OPEN、full verdict が無い、最新の execution の commit が HEAD と照合できない |
+| blocking | この評価への運用の操作（`stop`）が先に要る。操作の後は続けられる | 未完了の launch、評価の container が残っている |
+| permanent | この評価は正式な完了に到達できない | wrapper の外で container が消され終了を観測できなかった launch、別の条件で動いた execution |
+| unverifiable | 判定できない | 記録の破損、読み取りの失敗、container の状態を観測できない |
+
+`start` は、COMPLETE なら何もしない。permanent・blocking・unverifiable（または未知の分類）が
+**1 つでもあれば**、他の理由が何であっても何も書かずに拒否する。permanent のときは、この評価の記録を
+残したまま、別の評価（別の `--tag`）として始め直す。resumable だけのときだけ再開する。
+
+**reader の応答の受理**: 読み取り専用の container の応答（完了の判定・launch の証拠・検証器・summary）は、
+要求ごとの終了コードと応答の形の **両方** を満たすときだけ受理する。非 0 終了の正しい JSON も、0 終了の
+別の形の JSON も、途中で切れた出力も受理しない。受理しなかった応答からは何も記録せず、container を
+残す（`stop` が正常な応答で再試行する）。`summary` の終了コードも受理した結果から決める。
 
 確定した ERROR / TIMEOUT は再開で再実行しない（一次結果として残る）。外部から kill されて終端
-しなかった pair は未完了として再試行される。`summary` は、そのような pair を「外部 kill」と列挙し、
-OOM の可能性を `yes`（その pair の実行中に、直前の有効な観測からの区間で `oom_kill` が増えた、
-または container が OOMKilled）／`no`（実行区間を観測が覆い、増分が 0）／`unobserved`（それ以外）
-で示す。SIGKILL だけからは OOM と書かない。
+しなかった pair は未完了として再試行される。
+
+**中断の集計**: launch の証拠（`evidence.json`）は、その時点の出力先にある未終端の receipt の写しで、
+前の execution が残したものも含む。集計は、receipt の execution（run_id）を記録した launch に帰属させて
+から行う。同じ `(run_id, nonce, pair)` を複数の launch の写しで見たものは 1 件（重複観測）で、同じ pair
+でも別の execution・nonce で再び止まったものは別の件（実際の再試行）。どの launch も記録していない
+execution の receipt は「帰属不明」として別に出し、どの launch の現象にもしない。
+
+`summary` は、外部 kill の OOM の可能性を、**その件の launch の** 観測と `OOMKilled` から
+`yes`（実行中に、直前の有効な観測からの区間で `oom_kill` が増えた、または container が OOMKilled）／
+`no`（実行区間を観測が覆い、増分が 0）／`unobserved`（それ以外）で示す。SIGKILL だけからは OOM と書かない。
 
 ## 所要時間の目安（全件規模）
 

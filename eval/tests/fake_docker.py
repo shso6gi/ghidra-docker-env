@@ -160,6 +160,11 @@ def main(argv):
         print("29.0-fake")
         return 0
     if command == "ps":
+        with State() as data:
+            body = data.get("ps_stdout")
+        if body is not None:
+            print(body)
+            return 0
         everything = "-a" in args
         label = None
         if "--filter" in args:
@@ -184,6 +189,15 @@ def main(argv):
     if command == "inspect":
         with State() as data:
             container = find(data, args[-1])
+            body = data.get("inspect_stdout")
+            if body is not None and data.get("inspect_stdout_times", 0) > 0:
+                data["inspect_stdout_times"] -= 1
+            else:
+                body = None
+        if body is not None:
+            # 0 で終わるが、container を記述しない応答。
+            print(body)
+            return 0
         if container is None:
             print(f"Error: No such container: {args[-1]}", file=sys.stderr)
             return 1
@@ -233,8 +247,31 @@ def main(argv):
                       for arg in command_line]
         if translated[0] == "python3":
             translated[0] = sys.executable
-        completed = subprocess.run(translated, cwd=workdir, env=environment)
-        return completed.returncode
+        # reader の応答の差し替え（``respond[<request>] = {"returncode", "stdout"|"truncate"|...}``）。
+        request = command_line[3] if len(command_line) > 3 else None
+        with State() as data:
+            override = (data.get("respond") or {}).get(request)
+            if override and override.get("times", 1) > 0:
+                override["times"] = override.get("times", 1) - 1
+            else:
+                override = None
+        completed = subprocess.run(translated, cwd=workdir, env=environment,
+                                   capture_output=True, text=True)
+        stdout, returncode = completed.stdout, completed.returncode
+        if override:
+            if "replace_json" in override:
+                value = json.loads(stdout)
+                value.update(override["replace_json"])
+                stdout = json.dumps(value)
+            if "stdout" in override:
+                stdout = override["stdout"]
+            if override.get("truncate"):
+                stdout = stdout[: len(stdout) // 2]
+            if "returncode" in override:
+                returncode = override["returncode"]
+        sys.stdout.write(stdout)
+        sys.stderr.write(completed.stderr)
+        return returncode
     if command == "wait":
         while True:
             with State() as data:

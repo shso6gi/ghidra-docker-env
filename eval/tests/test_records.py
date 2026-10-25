@@ -232,7 +232,8 @@ def _synthetic_launch(directory, *, drop=(), change=None):
         records.EXIT: {"schema": records.EXIT_SCHEMA, "kind": records.KIND_RAN, "launch": 1,
                        "container_id": container, "runtime_run_ids": [],
                        "runner_log": {"sha256": hashlib.sha256(log).hexdigest(), "bytes": len(log)}},
-        records.EVIDENCE: {"schema": records.EVIDENCE_SCHEMA},
+        records.EVIDENCE: {"schema": records.EVIDENCE_SCHEMA, "captured_at_epoch": 1.0,
+                           "unterminated_pairs": [], "verify": None, "verify_error": "none"},
         records.RELEASED: {"schema": records.RELEASED_SCHEMA, "container_id": container},
     }
     if change:

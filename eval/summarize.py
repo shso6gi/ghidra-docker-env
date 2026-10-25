@@ -16,22 +16,20 @@ wrapper の記録           ``eval/records.py``（launch の状態機械・破�
 container の状態         host の wrapper が観測して ``EVAL_HOST_STATE`` で渡す
 ======================  ===============================================================
 
-理由ごとに分類する（``start`` はこの分類だけを見る）:
+理由の code と分類（resumable / blocking / permanent / unverifiable）、``start`` の決定、
+応答の形（このファイルが出す JSON の schema と終了コード）は ``eval/protocol.py`` が唯一の owner。
+ここは登録表から分類を引き、契約どおりの応答を出すだけ。
 
-* ``resumable``: runner を同じ条件で再び動かせば進む（出力先が無い、連鎖が OPEN、full verdict
-  が無い）
-* ``blocking``: 先に人か ``stop`` が要る（未完了の launch、container が残っている、別の条件の
-  execution、HEAD の不一致）
-* ``permanent``: 走らせても直らないが、完了とも言えない（container の終了を観測できなかった launch）
-* 判定できない（verdict が ``UNVERIFIABLE``）: 読み取りの失敗、記録の破損、記録と出力先の
-  execution の対応の食い違い、container の状態が観測されていない
+中断の集計（``interruptions``）は、launch の証拠の写しを、その receipt の execution を記録した
+launch に帰属させてから数える（``interruption_events``）。
 
 使い方（container の中）::
 
     python3 -B eval/summarize.py completion|verify|launch-evidence|report \
         --repo R --out OUT --wrapper W --matrix neq|eq [--json]
 
-``report`` の終了コード: 0 = 完了、1 = 未完了、2 = 判定できない（集計の欄が作れなかったときも 2）。
+``report`` の終了コード: 0 = 完了、1 = 未完了、2 = 判定できない（集計の欄が作れなかったときも 2。
+``protocol.summary_exit_code``）。wrapper はこの終了コードと JSON の両方を照合して受理する。
 """
 
 from __future__ import annotations
@@ -48,19 +46,13 @@ if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 import records  # noqa: E402  (eval/ の記録の形式と検査)
 
-SUMMARY_SCHEMA = "eval-summary-v2"
-COMPLETION_SCHEMA = "eval-completion-v1"
-LAUNCH_EVIDENCE_SCHEMA = records.EVIDENCE_SCHEMA
+import protocol  # noqa: E402  (応答の契約と理由の分類の唯一の置き場所)
+from protocol import (  # noqa: E402
+    BLOCKING, COMPLETION_SCHEMA, EXIT_BY_VERDICT, PERMANENT, RESUMABLE, SUMMARY_SCHEMA,
+    UNVERIFIABLE, VERDICT_COMPLETE, VERDICT_INCOMPLETE, VERDICT_UNVERIFIABLE, VERIFY_SCHEMA,
+)
 
-RESUMABLE = "resumable"
-BLOCKING = "blocking"
-PERMANENT = "permanent"
-UNVERIFIABLE = "unverifiable"
-
-VERDICT_COMPLETE = "COMPLETE"
-VERDICT_INCOMPLETE = "INCOMPLETE"
-VERDICT_UNVERIFIABLE = "UNVERIFIABLE"
-EXIT_BY_VERDICT = {VERDICT_COMPLETE: 0, VERDICT_INCOMPLETE: 1, VERDICT_UNVERIFIABLE: 2}
+LAUNCH_EVIDENCE_SCHEMA = protocol.EVIDENCE_SCHEMA
 
 REQUESTED_SCOPE_BY_MATRIX = {"neq": "full_neq", "eq": "full_eq"}
 
@@ -104,7 +96,7 @@ def verify_report(out: Path) -> Dict[str, Any]:
     """``status --verify``: 検証器だけ（判定には使わない表示）。"""
     started = time.monotonic()
     verify, error = _verify(out) if out.is_dir() else (None, "the output does not exist")
-    return {"verify": _verify_view(verify), "verify_error": error,
+    return {"schema": VERIFY_SCHEMA, "verify": _verify_view(verify), "verify_error": error,
             "verify_seconds": round(time.monotonic() - started, 1)}
 
 
@@ -415,51 +407,93 @@ def _launch_view(launch: records.Launch) -> Dict[str, Any]:
     }
 
 
+def interruption_events(launches: Sequence[records.Launch]) -> Dict[str, Any]:
+    """launch の snapshot（``evidence.json``）から、中断の event を作る（集計の前の帰属）。
+
+    snapshot は、その launch が終わった時点の出力先にある **すべての** 未終端の receipt の写しで、
+    前の execution が残した receipt も含む。snapshot にあることは、その launch で起きたことを
+    意味しない。そこで:
+
+    * event の同一性は ``(execution の run_id, execution_nonce, pair)``。同じ pair でも、別の
+      execution や nonce で再び止まったものは別の event（実際の再試行）。同じ組を複数の snapshot
+      で見たものは 1 つの event の重複観測で、数えない（何回観測されたかは ``observed_in``）。
+    * event は、その run_id を ``exit.json`` の ``runtime_run_ids`` に記録した launch に帰属させる。
+      OOM の判定には、その launch の観測と ``OOMKilled`` だけを使う。
+    * run_id が無い、またはどの launch も記録していない run_id の receipt は ``unattributed``
+      として別に報告し、どの launch の現象にもしない。
+    """
+    owner: Dict[str, int] = {}
+    for launch in launches:
+        for run_id in (launch.exit or {}).get("runtime_run_ids") or []:
+            owner[run_id] = launch.number
+    events: Dict[Tuple[Any, Any, Any], Dict[str, Any]] = {}
+    unattributed: Dict[Tuple[Any, Any, Any], Dict[str, Any]] = {}
+    for launch in launches:
+        for row in (launch.evidence or {}).get("unterminated_pairs") or []:
+            key = (row.get("run_id"), row.get("execution_nonce"), row.get("pair"))
+            launch_number = owner.get(row.get("run_id")) if isinstance(row.get("run_id"), str) else None
+            target = events if launch_number is not None else unattributed
+            event = target.setdefault(key, {**row, "launch": launch_number, "observed_in": []})
+            event["observed_in"].append(launch.number)
+    return {"events": list(events.values()), "unattributed": list(unattributed.values())}
+
+
 def interruptions(launches: Sequence[records.Launch]) -> Dict[str, Any]:
-    """中断の記録の突き合わせ。SIGKILL だけから OOM と断定しない（計画 §10-3）。
+    """中断の集計。帰属させた event だけを数え、SIGKILL だけから OOM と断定しない（計画 §10-3）。
 
     * ``external_kill``: child が SIGKILL（rc -9）で終わり、runner が未完了とした pair。
-      ``possible_oom`` は ``records.oom_attribution``（直前の有効な counter の観測から今回までの
-      区間に増分があり、それが pair の実行区間に重なる → yes、覆われて増分 0 → no、それ以外は
-      unobserved）。
-    * ``execution_stopped`` / ``incomplete_other``: OOM の判定の対象外。container 自体が
-      OOMKilled のときだけ yes。
+      ``possible_oom`` は ``records.oom_attribution`` に **その event の launch** の観測と
+      ``OOMKilled`` を渡して決める（yes / no / unobserved）。
+    * ``execution_stopped`` / ``incomplete_other``: OOM の判定の対象外。その launch の container
+      自体が OOMKilled のときだけ yes。
+    * 帰属できない receipt は ``unattributed`` に数えるだけ（OOM を結び付けない）。
     """
+    by_number = {launch.number: launch for launch in launches}
+    model = interruption_events(launches)
     rows = []
     totals: Counter = Counter()
     for launch in launches:
-        exit_record = launch.exit or {}
-        evidence = launch.evidence or {}
-        container_oom = exit_record.get("oom_killed")
         for interval in records.counter_intervals(launch.watch):
             if interval.delta:
                 totals["oom_kill_increments"] += interval.delta
             elif interval.delta is None:
                 totals["oom_kill_counter_resets"] += 1
-        for pair in evidence.get("unterminated_pairs") or []:
-            rc = pair.get("child_returncode")
-            if pair.get("kind") == "concluded_incomplete" and rc == -9:
-                cause = "external_kill"
-            elif pair.get("kind") == "concluded_incomplete":
-                cause = "incomplete_other"
-            else:
-                cause = "execution_stopped"
-            end = pair.get("finished_at_epoch")
-            if not isinstance(end, (int, float)):
-                end = exit_record.get("finished_at_epoch")
-            if cause == "external_kill":
-                possible = records.oom_attribution(
-                    launch.watch, start=pair.get("started_at_epoch"), end=end,
-                    container_oom_killed=container_oom)
-            else:
-                possible = records.OOM_YES if container_oom is True else "not_applicable"
-            totals[cause] += 1
-            totals[f"possible_oom_{possible}"] += 1
-            rows.append({
-                "launch": launch.number, "pair": pair.get("pair"), "cause": cause,
-                "child_returncode": rc, "possible_oom": possible, "run_id": pair.get("run_id"),
-            })
-    return {"totals": dict(sorted(totals.items())), "pairs": rows}
+    for event in model["events"]:
+        launch = by_number[event["launch"]]
+        exit_record = launch.exit or {}
+        container_oom = exit_record.get("oom_killed")
+        rc = event.get("child_returncode")
+        if event.get("kind") == "concluded_incomplete" and rc == -9:
+            cause = "external_kill"
+        elif event.get("kind") == "concluded_incomplete":
+            cause = "incomplete_other"
+        else:
+            cause = "execution_stopped"
+        end = event.get("finished_at_epoch")
+        if not isinstance(end, (int, float)):
+            end = exit_record.get("finished_at_epoch")
+        if cause == "external_kill":
+            possible = records.oom_attribution(
+                launch.watch, start=event.get("started_at_epoch"), end=end,
+                container_oom_killed=container_oom)
+        else:
+            possible = records.OOM_YES if container_oom is True else "not_applicable"
+        totals[cause] += 1
+        totals[f"possible_oom_{possible}"] += 1
+        if len(event["observed_in"]) > 1:
+            totals["repeat_observations"] += len(event["observed_in"]) - 1
+        rows.append({
+            "launch": event["launch"], "pair": event.get("pair"), "cause": cause,
+            "child_returncode": rc, "possible_oom": possible, "run_id": event.get("run_id"),
+            "execution_nonce": event.get("execution_nonce"), "observed_in": event["observed_in"],
+        })
+    unattributed = [
+        {"pair": row.get("pair"), "kind": row.get("kind"), "run_id": row.get("run_id"),
+         "execution_nonce": row.get("execution_nonce"), "observed_in": row["observed_in"]}
+        for row in model["unattributed"]
+    ]
+    totals["unattributed"] = len(unattributed)
+    return {"totals": dict(sorted(totals.items())), "pairs": rows, "unattributed": unattributed}
 
 
 def _host_state() -> Optional[Dict[str, Any]]:
@@ -487,8 +521,9 @@ def completion(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, A
 
     reasons: List[Dict[str, str]] = []
 
-    def reason(code: str, category: str, detail: str) -> None:
-        reasons.append({"code": code, "category": category, "detail": detail})
+    def reason(code: str, detail: str) -> None:
+        # 分類は登録表（protocol.REASONS）だけが決める。
+        reasons.append({"code": code, "category": protocol.REASONS[code], "detail": detail})
 
     result: Dict[str, Any] = {"schema": COMPLETION_SCHEMA, "matrix": matrix,
                               "output": str(out), "wrapper": str(wrapper)}
@@ -498,15 +533,14 @@ def completion(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, A
     result["freeze_commit"] = ((meta or {}).get("conditions") or {}).get("freeze_commit") \
         if isinstance(meta, dict) else None
     if fingerprint is None:
-        reason("meta_unreadable", UNVERIFIABLE, "wrapper meta.json is missing or unreadable")
+        reason("meta_unreadable", "wrapper meta.json is missing or unreadable")
 
     host = _host_state()
     result["host_state"] = host
     if host is None or host.get("observed") is not True:
-        reason("container_unobserved", UNVERIFIABLE,
-               "the evaluation container's state was not observed")
+        reason("container_unobserved", "the evaluation container's state was not observed")
     elif host.get("container") != "absent":
-        reason("container_present", BLOCKING, f"an evaluation container is {host.get('container')}")
+        reason("container_present", f"an evaluation container is {host.get('container')}")
 
     check = records.read_records(wrapper)
     result["records"] = {"launches": [_launch_view(launch) for launch in check.launches],
@@ -515,50 +549,47 @@ def completion(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, A
                              "launch": check.unfinished.number,
                              "state": check.unfinished.state}}
     for problem in check.problems:
-        reason("records_damaged", UNVERIFIABLE, problem)
+        reason("records_damaged", problem)
     if check.unfinished is not None:
-        reason("unfinished_launch", BLOCKING,
-               f"launch {check.unfinished.number} is {check.unfinished.state}")
+        reason("unfinished_launch", f"launch {check.unfinished.number} is {check.unfinished.state}")
     for launch in check.launches:
         if launch.exit_kind == records.KIND_EXIT_UNOBSERVED:
-            reason("exit_unobserved", PERMANENT,
-                   f"launch {launch.number}: {launch.exit.get('reason')}")
+            reason("exit_unobserved", f"launch {launch.number}: {launch.exit.get('reason')}")
     result["_check"] = check
 
     try:
         result["current_source_digest"] = source_tree_digest(repo)
     except Exception as exc:  # noqa: BLE001
-        reason("source_digest_unreadable", UNVERIFIABLE, f"{type(exc).__name__}: {exc}")
+        reason("source_digest_unreadable", f"{type(exc).__name__}: {exc}")
     if not out.is_dir():
         if check.launches and any(
                 (launch.exit or {}).get("runtime_run_ids") for launch in check.launches):
-            reason("records_damaged", UNVERIFIABLE,
-                   "launches recorded executions but the output does not exist")
-        reason("output_absent", RESUMABLE, "the output directory does not exist yet")
+            reason("records_damaged", "launches recorded executions but the output does not exist")
+        reason("output_absent", "the output directory does not exist yet")
         result["start_source_digests"] = {}
         return _verdict(result, reasons)
 
     for problem in records.attribution_problems(check, execution_dirs(out)):
-        reason("execution_attribution", UNVERIFIABLE, problem)
+        reason("execution_attribution", problem)
     verify, verify_error = _verify(out)
     result["_verify"] = verify
     result["verify"] = _verify_view(verify)
     if verify is None:
-        reason("verify_failed", UNVERIFIABLE, f"execution_chain verify failed: {verify_error}")
+        reason("verify_failed", f"execution_chain verify failed: {verify_error}")
     elif verify.get("verdict") != "CLOSED_SAME_IDENTITY":
-        reason("chain_open", RESUMABLE, "execution chain is OPEN: "
+        reason("chain_open", "execution chain is OPEN: "
                + ", ".join(verify.get("reasons") or {}))
     try:
         fingerprints = start_record_fingerprints(out)
         result["start_source_digests"] = _start_values(out, "analysis_source_digest_start")
     except Exception as exc:  # noqa: BLE001
         fingerprints = {}
-        reason("start_records_unreadable", UNVERIFIABLE, f"{type(exc).__name__}: {exc}")
+        reason("start_records_unreadable", f"{type(exc).__name__}: {exc}")
     foreign = sorted(run_id for run_id, value in fingerprints.items() if value != fingerprint)
     result["start_record_fingerprints"] = {"executions": len(fingerprints),
                                            "differing_from_wrapper": foreign}
     if foreign and fingerprint is not None:
-        reason("foreign_execution", BLOCKING, f"{len(foreign)} execution(s) did not run under "
+        reason("foreign_execution", f"{len(foreign)} execution(s) did not run under "
                f"this evaluation's conditions: {', '.join(foreign[:3])}")
     try:
         formal = _formal(out, matrix, repo)
@@ -566,24 +597,18 @@ def completion(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, A
         formal = {"full_verdict": None, "reason": f"ledger row: {type(exc).__name__}: {exc}"}
     result["formal"] = formal
     if str(formal.get("reason", "")).startswith("ledger row:"):
-        reason("ledger_failed", UNVERIFIABLE, formal["reason"])
+        reason("ledger_failed", formal["reason"])
     elif formal.get("full_verdict") != REQUESTED_SCOPE_BY_MATRIX[matrix]:
-        reason("no_full_verdict", RESUMABLE, f"no full verdict: {formal.get('reason')}")
+        reason("no_full_verdict", f"no full verdict: {formal.get('reason')}")
     if formal.get("code_matches_head") is not None and formal.get("code_matches_head") != "yes":
-        reason("head_mismatch", BLOCKING, "not evidence about the code at HEAD: "
+        reason("head_mismatch", "not evidence about the code at HEAD: "
                f"{formal.get('code_matches_head_detail')}")
     return _verdict(result, reasons)
 
 
 def _verdict(result: Dict[str, Any], reasons: List[Dict[str, str]]) -> Dict[str, Any]:
     result["reasons"] = reasons
-    categories = {item["category"] for item in reasons}
-    if UNVERIFIABLE in categories:
-        result["verdict"] = VERDICT_UNVERIFIABLE
-    elif reasons:
-        result["verdict"] = VERDICT_INCOMPLETE
-    else:
-        result["verdict"] = VERDICT_COMPLETE
+    result["verdict"] = protocol.verdict_of(item["category"] for item in reasons)
     return result
 
 
@@ -648,9 +673,7 @@ def report(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, Any]:
 
 
 def exit_code(result: Mapping[str, Any]) -> int:
-    if result.get("report_errors"):
-        return EXIT_BY_VERDICT[VERDICT_UNVERIFIABLE]
-    return EXIT_BY_VERDICT[result["verdict"]]
+    return protocol.summary_exit_code(result)
 
 
 # ---------------------------------------------------------------------------
@@ -724,6 +747,8 @@ def format_report(result: Mapping[str, Any]) -> str:
         lines.append(_line("pair", row))
     if len(interrupted["pairs"]) > 50:
         lines.append(f"  ... {len(interrupted['pairs']) - 50} more (see --json)")
+    for row in (interrupted.get("unattributed") or [])[:20]:
+        lines.append(_line("unattributed (not counted for any launch)", row))
     recorded = result.get("records") or {}
     for launch in recorded.get("launches") or []:
         lines.append(_line("launch", launch))

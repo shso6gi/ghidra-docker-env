@@ -44,6 +44,8 @@ from pathlib import Path
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+import protocol  # 同じ dir（eval/）。応答と記録の契約の owner
+
 LAUNCHES_DIR = "launches"
 JOURNAL = "events.jsonl"
 META = "meta.json"
@@ -60,7 +62,7 @@ LAUNCH_SCHEMA = "eval-launch-v2"
 EXIT_SCHEMA = "eval-launch-exit-v2"
 CONTAINER_SCHEMA = "eval-launch-container-v2"
 RELEASED_SCHEMA = "eval-launch-released-v2"
-EVIDENCE_SCHEMA = "eval-launch-evidence-v1"
+EVIDENCE_SCHEMA = protocol.EVIDENCE_SCHEMA
 
 KIND_RAN = "ran"
 KIND_NOT_STARTED = "not_started"
@@ -240,8 +242,11 @@ def read_launch(directory: Path, number: int) -> Launch:
     if evidence is not None:
         if exit_record is None:
             problems.append("evidence.json exists without exit.json")
-        elif evidence.get("schema") != EVIDENCE_SCHEMA:
-            problems.append("evidence.json is malformed")
+        else:
+            try:
+                protocol.validate_evidence(evidence)
+            except protocol.Rejected as exc:
+                problems.append(f"evidence.json is malformed ({exc})")
     if released is not None:
         if released.get("schema") != RELEASED_SCHEMA:
             problems.append("released.json is malformed")

@@ -68,12 +68,12 @@ def test_a_closed_tree_under_the_wrappers_conditions_is_complete(h, monkeypatch)
 
 
 @pytest.mark.parametrize("case, code, category", [
-    ("foreign_fingerprint", "foreign_execution", "blocking"),
+    ("foreign_fingerprint", "foreign_execution", "permanent"),
     ("open_chain", "chain_open", "resumable"),
     ("ledger_rejects", "no_full_verdict", "resumable"),
     ("container_running", "container_present", "blocking"),
     ("container_unobserved", "container_unobserved", "unverifiable"),
-    ("not_head", "head_mismatch", "blocking"),
+    ("not_head", "head_mismatch", "resumable"),
 ])
 def test_any_missing_condition_keeps_the_evaluation_from_complete(h, monkeypatch, case, code, category):
     options = {}
@@ -157,14 +157,18 @@ def test_unterminated_pairs_are_listed_by_what_the_runner_recorded(tmp_path):
     assert rows["S/f/f_N_B1_O_B2.pair-status.json"]["kind"] == "interrupted_running"
 
 
-def _launch(pairs, watch=(), oom_killed=False, finished=1000.0):
-    return records.Launch(number=1, state=records.STATE_RELEASED,
-                          exit={"oom_killed": oom_killed, "finished_at_epoch": finished},
+RUN = "r" * 32
+
+
+def _launch(pairs, watch=(), oom_killed=False, finished=1000.0, number=1, run_ids=(RUN,)):
+    return records.Launch(number=number, state=records.STATE_RELEASED,
+                          exit={"oom_killed": oom_killed, "finished_at_epoch": finished,
+                                "runtime_run_ids": list(run_ids)},
                           evidence={"unterminated_pairs": pairs}, watch=list(watch))
 
 
-KILLED = {"pair": "p", "kind": "concluded_incomplete", "child_returncode": -9,
-          "started_at_epoch": 100.0, "finished_at_epoch": 160.0}
+KILLED = {"pair": "p", "kind": "concluded_incomplete", "child_returncode": -9, "run_id": RUN,
+          "execution_nonce": "n1", "started_at_epoch": 100.0, "finished_at_epoch": 160.0}
 
 
 def _obs(at, oom_kill):
@@ -184,6 +188,7 @@ def test_an_external_kill_without_observations_is_unobserved_not_no():
 
 def test_a_container_oom_kill_marks_every_unterminated_pair_and_a_stop_is_not_a_kill():
     running = {"pair": "q", "kind": "interrupted_running", "child_returncode": None,
+               "run_id": RUN, "execution_nonce": "n2",
                "started_at_epoch": 100.0, "finished_at_epoch": None}
     assert summarize.interruptions([_launch([running], oom_killed=True)])["pairs"][0][
         "possible_oom"] == records.OOM_YES

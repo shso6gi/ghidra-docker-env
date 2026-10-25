@@ -56,6 +56,7 @@ REPO = EVAL_DIR.parent
 if str(EVAL_DIR) not in sys.path:
     sys.path.insert(0, str(EVAL_DIR))
 import records  # noqa: E402  (eval/ の記録の形式と検査)
+import protocol  # noqa: E402  (応答の受理と理由の分類の唯一の置き場所)
 
 EXIT_OK = 0
 EXIT_FAILED = 1
@@ -94,6 +95,9 @@ READER_MEMORY = "16g"
 DEFAULT_MIN_FREE_GIB = 64
 DEFAULT_LOCK_FILE = Path.home() / ".cache" / "ghidra-eval" / "eval.lock"
 CGROUP_TEMPLATE = "/sys/fs/cgroup/system.slice/docker-{id}.scope"
+#: 環境の probe（runner の開始の記録と同じ行）に必ず含まれる key。
+PROBE_KEYS = ("python_version", "ghidra_version", "java_version", "z3_version",
+              "cgroup_memory_max", "cgroup_cpu_max")
 
 
 class Refused(Exception):
@@ -338,9 +342,11 @@ _ABSENT = ("no such container", "no such object")
 
 def image_id(ev: Evaluation, image: str) -> str:
     completed = docker(ev, "image", "inspect", "--format", "{{.Id}}", image)
-    if completed.returncode != 0 or not completed.stdout.strip():
-        raise Refused(f"image {image} is not available: {completed.stderr.strip()}")
-    return completed.stdout.strip()
+    identifier = completed.stdout.strip()
+    if completed.returncode != 0 or not re.fullmatch(r"sha256:[0-9a-f]{64}", identifier):
+        raise Refused(f"image {image} is not available (exit {completed.returncode}, "
+                      f"id {identifier[:80]!r}): {completed.stderr.strip()}")
+    return identifier
 
 
 def slot_containers(ev: Evaluation) -> List[Dict[str, str]]:
@@ -349,9 +355,12 @@ def slot_containers(ev: Evaluation) -> List[Dict[str, str]]:
                             "{{.Names}}\t{{.State}}\t{{.Label \"" + LABEL_EVAL + "\"}}")
     rows = []
     for line in output.splitlines():
-        if line.strip():
-            name, state, label = (line.split("\t") + ["", ""])[:3]
-            rows.append({"name": name, "state": state, "eval": label})
+        if not line.strip():
+            continue
+        fields = line.split("\t")
+        if len(fields) != 3 or not fields[0] or not fields[1]:
+            raise Unobservable(f"docker ps gave a row that is not a container: {line[:120]!r}")
+        rows.append({"name": fields[0], "state": fields[1], "eval": fields[2]})
     return rows
 
 
@@ -364,8 +373,12 @@ def other_running_containers(ev: Evaluation) -> Optional[List[str]]:
         return None
     names = []
     for line in output.splitlines():
-        parts = (line.split("\t") + ["", ""])[:3]
-        if parts[0] and parts[1] != "1" and parts[2] != "1":
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) != 3 or not parts[0]:
+            return None  # 形の違う応答は「他に無い」ではない
+        if parts[1] != "1" and parts[2] != "1":
             names.append(parts[0])
     return sorted(names)
 
@@ -379,10 +392,17 @@ def inspect_container(ev: Evaluation, ref: str) -> Optional[Dict[str, Any]]:
         raise Unobservable(f"docker inspect {ref} failed ({completed.returncode}): "
                            f"{completed.stderr.strip()[-500:]}")
     try:
-        payload = json.loads(completed.stdout)[0]
+        payload = json.loads(completed.stdout)
+        if not (isinstance(payload, list) and len(payload) == 1):
+            raise ValueError("not exactly one container")
+        payload = payload[0]
         state = payload["State"]
         labels = (payload.get("Config") or {}).get("Labels") or {}
         identifier = payload["Id"]
+        if not (isinstance(identifier, str) and records._CONTAINER_ID.fullmatch(identifier)
+                and isinstance(state, dict) and isinstance(state.get("Status"), str)
+                and isinstance(state.get("Running"), bool) and isinstance(labels, dict)):
+            raise ValueError("the inspect output does not describe a container")
     except (ValueError, IndexError, KeyError, TypeError) as exc:
         raise Unobservable(f"docker inspect {ref}: unreadable output ({exc})")
     return {
@@ -428,18 +448,16 @@ def reader(ev: Evaluation, image: str, args: Sequence[str], *, memory: str = REA
                   *environment, *_mount_args(ev, read_only=True), image, *args, timeout=timeout)
 
 
-def read_json_from(ev: Evaluation, image: str, args: Sequence[str],
+def read_json_from(ev: Evaluation, image: str, request: str, *extra: str,
                    env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
-    """reader の JSON 出力。失敗や読めない出力は ``Unobservable``（空の結果にしない）。"""
-    completed = reader(ev, image, args, env=env, timeout=7200)
+    """reader に ``request`` を頼み、契約（``protocol.accept``: 終了コードと応答の形の両方）を
+    満たす応答だけを返す。満たさなければ ``Unobservable``（何も確定させない）。"""
+    completed = reader(ev, image, summarize_args(ev, request, *extra), env=env, timeout=7200)
     try:
-        value = json.loads(completed.stdout)
-    except ValueError:
-        value = None
-    if not isinstance(value, dict):
-        raise Unobservable(f"{' '.join(args[2:4])} gave no result (exit {completed.returncode}): "
-                           f"{completed.stderr.strip()[-800:]}")
-    return value
+        return protocol.accept(request, completed.returncode, completed.stdout)
+    except protocol.Rejected as exc:
+        raise Unobservable(f"the reader's {request} response was not accepted ({exc}); "
+                           f"stderr: {completed.stderr.strip()[-500:]}") from exc
 
 
 def summarize_args(ev: Evaluation, command: str, *extra: str) -> List[str]:
@@ -530,9 +548,14 @@ def probe_environment(ev: Evaluation, image: str, memory: str) -> Dict[str, str]
     rows = {}
     for line in completed.stdout.splitlines():
         key, sep, value = line.partition("=")
-        if sep:
-            rows[key] = value
+        if not sep or key in rows:
+            raise Refused(f"the environment probe gave a malformed row: {line[:120]!r}")
+        rows[key] = value
     rows.pop("environment_fingerprint", None)
+    missing = sorted(set(PROBE_KEYS) - set(rows))
+    if missing:
+        # 途中で切れた応答を条件として記録しない（初回なら meta に入ってしまう）。
+        raise Refused(f"the environment probe did not report {', '.join(missing)}")
     return rows
 
 
@@ -662,7 +685,7 @@ def preflight(ev: Evaluation) -> Plan:
         # 完了の判定は summary と同じ 1 つの関数（summarize.completion）だけが行う。
         try:
             completion = read_json_from(
-                ev, profile["IMAGE"], summarize_args(ev, "completion"),
+                ev, profile["IMAGE"], "completion",
                 env={"EVAL_HOST_STATE": json.dumps({"container": "absent", "observed": True})})
         except Unobservable as exc:
             raise Refused(f"cannot judge the evaluation: {exc}")
@@ -690,23 +713,8 @@ def never_recorded_a_start(out: Path) -> bool:
     return not any(out.rglob("*.pair-status.json"))
 
 
-def start_decision(completion: Optional[Mapping[str, Any]]) -> Tuple[str, str]:
-    """``(launch | complete | refuse, 理由)``。規則は summarize の理由の分類だけを見る。"""
-    if completion is None:
-        return "launch", "first launch"
-    verdict = completion.get("verdict")
-    if verdict == "COMPLETE":
-        return "complete", ""
-    reasons = completion.get("reasons") or []
-    text = "; ".join(f"{r.get('code')}: {r.get('detail')}" for r in reasons)
-    if verdict != "INCOMPLETE":
-        return "refuse", f"the evaluation cannot be judged ({verdict}): {text}"
-    categories = {r.get("category") for r in reasons}
-    if "blocking" in categories or not categories <= {"resumable", "permanent"}:
-        return "refuse", f"not resumable until these are resolved: {text}"
-    if "resumable" not in categories:
-        return "refuse", f"not complete, and running the runner again cannot fix it: {text}"
-    return "launch", text
+#: start の決定は protocol（理由の分類の owner）が持つ。ここは呼ぶだけ。
+start_decision = protocol.start_decision
 
 
 # ---------------------------------------------------------------------------
@@ -800,12 +808,12 @@ def _start_locked(ev: Evaluation, lock: int) -> int:
     except Refused as exc:
         print(f"Refused (nothing was written): {exc}", file=sys.stderr)
         return EXIT_REFUSED
-    if decision == "complete":
+    if decision == protocol.DECISION_COMPLETE:
         print("The evaluation is complete (the same verdict `summary` gives: chain, ledger, "
               "HEAD, fingerprint, wrapper records and container state); nothing was started "
               "or written.")
         return EXIT_OK
-    if decision == "refuse":
+    if decision == protocol.DECISION_REFUSE:
         print(f"Refused (nothing was written): {detail}", file=sys.stderr)
         return EXIT_REFUSED
     for path in (ev.repo / "targets", ev.repo / "logs"):
@@ -1005,7 +1013,7 @@ def capture_evidence(ev: Evaluation, launch: records.Launch) -> None:
     meta = read_json(ev.wrapper / records.META) or {}
     image = ((meta.get("conditions") or {}).get("image") or {}).get("id")
     try:
-        evidence = read_json_from(ev, image, summarize_args(ev, "launch-evidence"))
+        evidence = read_json_from(ev, image, "launch-evidence")
     except Unobservable as exc:
         journal(ev, "evidence_failed", launch=launch.number, detail=str(exc)[-500:])
         raise
@@ -1374,8 +1382,7 @@ def command_status(ev: Evaluation, verify: bool) -> int:
               "(removed by the next start)" + (f": {', '.join(leftovers[:5])}" if leftovers else ""))
     if verify and ev.out.is_dir() and isinstance(meta, dict):
         try:
-            report = read_json_from(ev, meta["conditions"]["image"]["id"],
-                                    summarize_args(ev, "verify"))
+            report = read_json_from(ev, meta["conditions"]["image"]["id"], "verify")
             result = report.get("verify") or {}
             print(f"  execution_chain verify: {result.get('verdict')} "
                   f"{json.dumps(result.get('reasons') or {}, sort_keys=True)} "
@@ -1387,19 +1394,25 @@ def command_status(ev: Evaluation, verify: bool) -> int:
 
 
 def command_summary(ev: Evaluation, as_json: bool) -> int:
+    """reader の ``report`` を契約どおりに受理してから表示する（終了コードは受理した結果から）。"""
     meta = read_json(ev.wrapper / records.META)
     if not isinstance(meta, dict):
         print(f"No evaluation record at {ev.wrapper} (meta.json); nothing to summarize.",
               file=sys.stderr)
-        return 2
-    completed = reader(ev, meta["conditions"]["image"]["id"],
-                       summarize_args(ev, "report", *(["--json"] if as_json else [])),
-                       env={"EVAL_HOST_STATE": json.dumps(host_state(ev))}, timeout=7200)
-    sys.stdout.write(completed.stdout)
-    if completed.returncode not in (0, 1, 2):
-        sys.stderr.write(completed.stderr)
-        return 2
-    return completed.returncode
+        return protocol.EXIT_BY_VERDICT[protocol.VERDICT_UNVERIFIABLE]
+    try:
+        result = read_json_from(ev, meta["conditions"]["image"]["id"], "report", "--json",
+                                env={"EVAL_HOST_STATE": json.dumps(host_state(ev))})
+    except Unobservable as exc:
+        print(f"Error: the summary cannot be produced: {exc}", file=sys.stderr)
+        return protocol.EXIT_BY_VERDICT[protocol.VERDICT_UNVERIFIABLE]
+    import summarize
+
+    if as_json:
+        print(json.dumps(result, indent=1, sort_keys=True, default=str))
+    else:
+        sys.stdout.write(summarize.format_report(result))
+    return protocol.summary_exit_code(result)
 
 
 # ---------------------------------------------------------------------------

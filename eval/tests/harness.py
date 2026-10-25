@@ -99,6 +99,11 @@ class Harness:
     def fail(self, operation: str, times: int = 1) -> None:
         self.update(lambda d: d.setdefault("fail", {}).update({operation: times}))
 
+    def respond(self, request: str, times: int = 1, **override) -> None:
+        """reader の ``request`` の応答を ``times`` 回だけ差し替える（終了コード・本文・切り詰め）。"""
+        self.update(lambda d: d.setdefault("respond", {}).update(
+            {request: {"times": times, **override}}))
+
     def detached_runs(self) -> list:
         return self.read_state().get("containers_started", [])
 

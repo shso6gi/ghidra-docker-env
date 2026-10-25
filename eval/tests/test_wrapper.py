@@ -331,26 +331,6 @@ def test_start_and_summary_give_the_same_verdict_for_every_shape(h, capsys, monk
     assert summary["reasons"] == seen["completion"]["reasons"] == []
 
 
-@pytest.mark.parametrize("completion, decision", [
-    (None, "launch"),
-    ({"verdict": "COMPLETE", "reasons": []}, "complete"),
-    ({"verdict": "INCOMPLETE", "reasons": [{"code": "chain_open", "category": "resumable"}]}, "launch"),
-    ({"verdict": "INCOMPLETE", "reasons": [{"code": "chain_open", "category": "resumable"},
-                                           {"code": "exit_unobserved", "category": "permanent"}]},
-     "launch"),
-    ({"verdict": "INCOMPLETE", "reasons": [{"code": "exit_unobserved", "category": "permanent"}]},
-     "refuse"),
-    ({"verdict": "INCOMPLETE", "reasons": [{"code": "chain_open", "category": "resumable"},
-                                           {"code": "foreign_execution", "category": "blocking"}]},
-     "refuse"),
-    ({"verdict": "UNVERIFIABLE", "reasons": [{"code": "records_damaged", "category": "unverifiable"}]},
-     "refuse"),
-    ({"verdict": "INCOMPLETE", "reasons": [{"code": "x", "category": "something new"}]}, "refuse"),
-])
-def test_the_start_decision_reads_only_the_completion_categories(completion, decision):
-    assert wrapper.start_decision(completion)[0] == decision
-
-
 def test_an_execution_under_other_conditions_in_the_output_is_refused(h, capsys):
     assert h.start() == wrapper.EXIT_OK
     h.build_tree(fingerprint="eval-env-v1:" + "9" * 64)
@@ -536,7 +516,7 @@ def test_a_container_removed_outside_the_wrapper_is_recorded_as_unobserved(h, ca
     # 走らせても直らないので、start は何も書かずに拒否する（完了とも言わない）。
     before = h.snapshot()
     assert h.start() == wrapper.EXIT_REFUSED
-    assert "running the runner again cannot fix it" in capsys.readouterr().err
+    assert "can never become formally complete" in capsys.readouterr().err
     assert h.snapshot() == before
 
 
