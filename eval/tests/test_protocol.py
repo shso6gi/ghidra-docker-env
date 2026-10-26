@@ -138,9 +138,10 @@ def test_a_completion_inconsistent_with_the_registry_is_rejected(reasons, verdic
 
 
 def test_an_unknown_category_is_refused_even_when_the_verdict_claims_incomplete():
-    """受理の検査を経ない入力でも、決定は未知の分類で再開しない（二重の防御）。"""
+    """決定は受理の検査（登録表との照合）を通した入力だけを扱うので、未知の分類では再開しない。"""
     completion = {**_judgement("INCOMPLETE", [{"code": "chain_open", "category": "resumable",
                                                "detail": "x"}]),
                   "reasons": [{"code": "x", "category": "something new", "detail": "x"},
                               {"code": "chain_open", "category": "resumable", "detail": "x"}]}
-    assert protocol.start_decision(completion)[0] == protocol.DECISION_REFUSE
+    decision, why = protocol.start_decision(completion)
+    assert decision == protocol.DECISION_REFUSE and "not registered" in why

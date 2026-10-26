@@ -129,10 +129,9 @@ def start_decision(completion: Any) -> Tuple[str, str]:
     categories = {r.get("category") for r in reasons}
     if verdict == VERDICT_COMPLETE and not reasons:
         return DECISION_COMPLETE, ""
+    # 未知の分類は validate_completion（登録表との照合）が上で拒否している。
     if verdict != VERDICT_INCOMPLETE or UNVERIFIABLE in categories:
         return DECISION_REFUSE, f"the evaluation cannot be judged ({verdict}): {text}"
-    if not categories <= set(CATEGORIES):
-        return DECISION_REFUSE, f"unknown reason categories {sorted(map(str, categories))}: {text}"
     if PERMANENT in categories:
         return DECISION_REFUSE, (
             "this evaluation can never become formally complete; its records are kept. Start a "
