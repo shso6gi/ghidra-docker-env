@@ -1,0 +1,153 @@
+# 全件評価の wrapper（`eval/`）
+
+FULL_NEQ / FULL_EQBENCH の全件評価を、固定の条件（`profile.env`）で、中断と再開を含めて 1 つの
+評価として実行する。`eval/` は analysis source digest の外にあり、ここを変えても評価の identity は
+変わらない。
+
+**完了の判定は 1 つだけ。** `summarize.py` の `completion` が、次の owner の判定を並べて決める。
+`summary` の VERDICT と、`start` の「完了済み（何もしない）」は同じ結果を使う。
+
+| 条件 | owner |
+|---|---|
+| 実行の連鎖が CLOSED | `reporting/execution_chain.verify_execution_chain` |
+| 正式な full verdict | `verification_ledger.build_row` + `full_scope_evidence` |
+| HEAD の一致 | `verification_ledger.head_match` |
+| すべての execution がこの評価の条件 | `meta.json` の fingerprint と各開始の記録 |
+| meta が正常（無い・正常・破損の 3 つ） | `records.read_meta`（wrapper・supervisor・stop・summarize が共有） |
+| 出力の確定した証跡が壊れていない | `records.classify_output`（`execution_chain.read_chain_records` の分類） |
+| launch の要求と起動した container がこの評価の条件 | `records.launch_condition_problems` |
+| wrapper の記録が終端し、壊れていない | `records.py`（launch の状態機械、execution との対応） |
+| 評価の container が無い | host での観測（観測できなければ判定しない） |
+
+runner の exit code は記録するが、完了の根拠にしない。gate（soundness / benchmark）は別の欄に出し、
+完了に混ぜない。
+
+## 使い方
+
+評価用の worktree（freeze の commit、clean）から実行する。Neq を先に、Eq を後に、それぞれ手動で。
+
+```bash
+eval/neq.sh start --freeze <40 桁の commit>   # preflight の後、背景で実行（同じ command で再開）
+eval/neq.sh status [--verify]                 # 読み取り専用（--verify で検証器も呼ぶ）
+eval/neq.sh stop                              # 停止（docker stop、猶予は profile）と、未完了の launch の回収
+eval/neq.sh summary [--json]                  # 読み取り専用。完了の判定と集計
+```
+
+`status` / `stop` / `summary` の `--freeze` の既定は worktree の HEAD。`eval/eq.sh` も同じ。
+
+`summary` の exit code: 0 = 完了、1 = 未完了（理由と分類を列挙）、2 = 判定できない（記録の破損、
+読み取りの失敗、container の状態を観測できない、集計の欄を作れなかった）。
+
+## 置き場所と記録
+
+| 何 | どこ |
+|---|---|
+| 出力先（runner の証跡だけ） | `logs/EqBench/eval_<commit 12 桁>_<neq\|eq>/` |
+| wrapper の記録 | 同じ場所の `.wrapper/`（`meta.json`、`events.jsonl`、`launches/<n>/`、`tmp/`、`authority/`） |
+| slot の lock | `~/.cache/ghidra-eval/eval.lock`（`flock`。背景の supervisor と `docker run` の CLI が保持する） |
+
+launch（`start` 1 回）の記録は、次の順に 1 つずつ確定し、上書きしない（`records.py`）。
+
+1. `launch.json` — 起動の要求（staging dir に書き、rename 1 回で `launches/<n>` になる）
+2. `container.json` — `docker run` が返した container（作られていたのに記録の前に止まった場合は、
+   回収が名前と label で見つけて記録する。container も見つからないときは、起動の要求の時点の出力
+   （`launch.json` の `output_before`）と比べ、変わっていれば container が動いて外部で消されたとして
+   `exit_unobserved`、変わっていなければ `not_started`）
+3. `runner.log` → `exit.json` — 終了の観測（exit code・`OOMKilled`・この launch の execution・
+   `runner.log` の sha256）。`docker logs` が失敗したら何も保存しない
+4. `evidence.json` — 未終端の pair の写しと検証器の判定（次の再開が pair の診断を消す前に取る）
+5. `released.json` — `docker rm` の後、container が「存在しない」と観測できたとき
+
+`exit.json` の種類: `ran`（終了を観測した）／`not_started`（container は作られなかった）／
+`exit_unobserved`（wrapper の外で container が消され、終了を観測できなかった。permanent）。
+
+`watch.jsonl` には cgroup の観測を **毎回**（既定 10 秒ごと）1 行で残す。読めなかった観測も
+`observed: false` で残す。
+
+## 状態と、次にすること
+
+| 状態 | 見え方 | 次にすること |
+|---|---|---|
+| 実行中 | `status`: container running、lock 保持 | 待つ。止めるなら `stop` |
+| 停止・kill・異常終了の後 | container absent、launch は終端 | 同じ条件で `start`（確定済みの pair は再利用、未終端だけ再実行） |
+| launch が未完了（supervisor が消えた、記録・削除・docker の操作が失敗した、起動の前に止まった） | `status`: `launch n is unfinished (...)`。`start` は拒否 | `stop`（container を止め、記録の続きから終端まで進める）→ `start` |
+| 記録が壊れている（確定した記録の欠損・不整合、launch の欠番、journal との食い違い、出力先の execution との対応の不一致、meta の破損、出力の確定した証跡の欠損・破損・未知の entry） | `status`: `DAMAGED: ...`、`summary` は判定できない（`records_damaged` / `meta_invalid` / `output_damaged`） | 自動では直さない。原因を調べる（退避も再開もしない） |
+| 最初の execution が開始の記録の前に止まった | 出力先に、runner の準備の file と書きかけの残骸しか無い（`never_started`） | `start` が出力先を `.wrapper/aborted-outputs/` へ移して新規に始める（削除しない） |
+| 完了 | `summary` が `VERDICT: COMPLETE`（exit 0） | 何もしない。`start` は何も書かない |
+| chain は CLOSED だが ledger が正式性を拒否 | `summary`: `no_full_verdict` | `start` は再開する（完了とは言わない） |
+| 正式な完了に到達できない（permanent） | `summary`: `[permanent] ...` | この評価の記録を残し、別の `--tag` で新しい評価を始める |
+
+**理由の分類と `start` の決定**（`protocol.py` の登録表が唯一の owner。`summary` も同じ分類を出す）
+
+| 分類 | 意味 | 例 |
+|---|---|---|
+| resumable | 同じ条件で runner を再び動かせば進む | 出力先が無い、連鎖が OPEN で理由がすべて次の execution が書き直すもの、full verdict が無い、最新の execution の commit が HEAD と照合できない |
+| blocking | この評価への運用の操作（`stop`）が先に要る。操作の後は続けられる | 未完了の launch、評価の container が残っている |
+| permanent | この評価は正式な完了に到達できない | wrapper の外で container が消され終了を観測できなかった launch、別の条件で動いた execution・launch、どの execution も書き直さない確定した証跡による連鎖の OPEN |
+| unverifiable | 判定できない | 記録の破損、読み取りの失敗、container の状態を観測できない |
+
+`start` は、COMPLETE なら何もしない。permanent・blocking・unverifiable（または未知の分類）が
+**1 つでもあれば**、他の理由が何であっても、出力の状態（無い・空・開始前・開始後・破損）が何であっても、
+何も書かずに拒否する（退避も launch も container の起動もしない）。permanent のときは、この評価の
+記録を残したまま、別の評価（別の `--tag`）として始め直す。resumable だけのときだけ再開する。
+
+この判定は、初回・出力が無い・空・開始の記録の前に止まった出力・通常の再開・完了後のどの経路でも
+同じ `completion` が行う。`completion` は必須の検査（meta・container・記録・恒久的な失敗・execution
+との対応・出力の状態・連鎖・fingerprint・source・ledger）をすべて実施したか、出力の状態から該当しない
+ことを明示した応答だけを返し、`start` はそれ以外の応答を受け付けない。開始の記録の前に止まった出力の
+退避は、この判定が再開を許した後で、同じ出力の分類（`records.classify_output`）を lock の下で
+確かめ直してから行う。launch が記録する execution は、開始の記録が確定したものだけ（書きかけの dir は
+数えない）なので、退避しても記録と出力の対応は崩れない。
+
+**meta の 3 つの状態**: `records.read_meta` だけが決める。`absent` は wrapper の dir が無いとき
+だけ（dir は `meta.json` ごと rename 1 回で確定する）。dir があって `meta.json` が無い・読めない・
+schema や必須項目が違う・fingerprint が条件の要約でない・別の出力先や matrix の条件、はすべて
+`damaged` で、初回にも「照合しない」にもしない。`start` は profile の条件にかかわらず何も書かずに
+拒否し、`summary` は判定できない（`meta_invalid`）。条件を使う側（supervisor・stop・証拠の取得）は
+valid な meta だけを使う。
+
+**条件の一致**: 要求した条件の要約（preflight）、`launch.json` の `fingerprint`、runner に渡す
+`EQBENCH_ENVIRONMENT_FINGERPRINT`、container の label `ghidra-eval.fingerprint`、`container.json`
+の `fingerprint` は同じ値。supervisor は valid な meta と launch の要求が一致しなければ container を
+起動せず（`not_started`）、completion は食い違う launch を `launch_conditions_differ`（permanent）にする。
+
+**出力の分類**: `records.classify_output` が `execution_chain.read_chain_records`（PR-B の reader）の
+分類から決める。`never_started` は「runner の準備の file と書きかけの残骸だけ」と言えたときだけで、
+確定した証跡（manifest・確定した開始の記録・publication・receipt・pair-status・runtime receipt）が
+1 つでもあれば `started`、開始の記録の無い issue / seal・壊れた記録・未知の entry があれば `damaged`
+（終了の記録の前に失われても後に失われても同じ）。launch が記録する execution は、実行中の観測
+（`watch.jsonl` の `executions`）と終了の時点の分類の和なので、実行中に見た execution が消えれば
+記録との対応の検査も破損を報告する。
+
+**連鎖の OPEN の分け方**: 検証器（`verify_execution_chain`）の判定はそのまま使い、OPEN の理由を
+`protocol.CHAIN_REASON_KINDS` で分ける。次の execution は top level の manifest・publication・
+receipt・seal を書き直し、`pair_status_file_skip_decision` が SKIP と言わない pair（未決定・壊れた・
+別の target）を再実行するので、それらに由来する理由（`chain_open`）は再開で直る。execution の記録は
+消えず、再利用の判定は帰属と build receipt を見ないので、帰属できない status・同じ nonce の issue・
+開始の条件の違う execution・開始の記録の無い issue などに由来する理由は再開しても残る
+（`chain_blocked_by_evidence`、permanent。全件の処理を再開しない）。binary と build receipt の食い違い
+は、どちらの側が違うかで直るかが変わるので判定できない（`chain_inputs_disagree`）。分類表に無い理由も
+再開の根拠にしない（`chain_reason_unclassified`）。
+
+**reader の応答の受理**: 読み取り専用の container の応答（完了の判定・launch の証拠・検証器・summary）は、
+要求ごとの終了コードと応答の形の **両方** を満たすときだけ受理する。非 0 終了の正しい JSON も、0 終了の
+別の形の JSON も、途中で切れた出力も受理しない。受理しなかった応答からは何も記録せず、container を
+残す（`stop` が正常な応答で再試行する）。`summary` の終了コードも受理した結果から決める。
+
+確定した ERROR / TIMEOUT は再開で再実行しない（一次結果として残る）。外部から kill されて終端
+しなかった pair は未完了として再試行される。
+
+**中断の集計**: launch の証拠（`evidence.json`）は、その時点の出力先にある未終端の receipt の写しで、
+前の execution が残したものも含む。集計は、receipt の execution（run_id）を記録した launch に帰属させて
+から行う。同じ `(run_id, nonce, pair)` を複数の launch の写しで見たものは 1 件（重複観測）で、同じ pair
+でも別の execution・nonce で再び止まったものは別の件（実際の再試行）。どの launch も記録していない
+execution の receipt は「帰属不明」として別に出し、どの launch の現象にもしない。
+
+`summary` は、外部 kill の OOM の可能性を、**その件の launch の** 観測と `OOMKilled` から
+`yes`（実行中に、直前の有効な観測からの区間で `oom_kill` が増えた、または container が OOMKilled）／
+`no`（実行区間を観測が覆い、増分が 0）／`unobserved`（それ以外）で示す。SIGKILL だけからは OOM と書かない。
+
+## 所要時間の目安（全件規模）
+
+Eq の全件（49,320 pair、3 execution の合成 tree、本番の writer と署名）で、検証器 1 回が約 20 秒、
+`summary` 全体が約 140 秒。`start` の preflight は `completion` を 1 回呼ぶ（検証器と ledger を含む）。
