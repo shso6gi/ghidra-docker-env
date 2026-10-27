@@ -135,7 +135,7 @@ def test_a_first_start_records_the_conditions_and_hands_them_to_the_runner(h):
     assert env["PARALLEL_JOBS"] == "2" and "CONTAINER_MEMORY" not in env and "IMAGE" not in env
     assert run["image"] == IMAGE_ID and run["command"] == ["bash", "neqbench_run_all_32jobs.sh"]
     assert run["labels"] == {"ghidra-eval.slot": "1", "ghidra-eval.eval": h.ev.eval_id,
-                             "ghidra-eval.launch": "1"}
+                             "ghidra-eval.launch": "1", "ghidra-eval.fingerprint": meta["fingerprint"]}
     assert run["memory"] == "24g" and run["stop_timeout"] == "120"
     # docker run の CLI も lock を持つ: supervisor が途中で死んでも、作成中は回収が lock を取れない。
     assert run["cli_holds_eval_lock"] is True
@@ -394,7 +394,8 @@ def test_an_output_stopped_before_its_start_record_is_moved_aside_not_deleted(h,
 def test_an_output_with_a_start_record_or_a_pair_is_never_moved_aside(h):
     out = h.ev.out
     (out / ".executions" / ("a" * 32)).mkdir(parents=True)
-    (out / ".executions" / ("a" * 32) / "run_manifest.start.txt").write_text("x=1\n")
+    (out / ".executions" / ("a" * 32) / "run_manifest.start.txt").write_text(
+        "runtime_run_id=" + "a" * 32 + "\n")
     assert records.output_state(out) == "started"
     (out / ".executions" / ("a" * 32) / "run_manifest.start.txt").unlink()
     assert records.output_state(out) == "never_started"  # 書きかけの dir だけなら開始前

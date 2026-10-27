@@ -76,7 +76,13 @@ REASONS: Dict[str, str] = {
     "output_without_records": PERMANENT,
     # 出力の開始の記録が、今の worktree と別の analysis source のもの。
     "source_differs": PERMANENT,
-    "meta_unreadable": UNVERIFIABLE,
+    # launch・container が、この評価の条件（meta の fingerprint）と別の条件で要求・起動された。
+    "launch_conditions_differ": PERMANENT,
+    # meta.json が無い（wrapper の dir はある）・読めない・形が違う・要約が条件と合わない。
+    "meta_invalid": UNVERIFIABLE,
+    # 出力の確定した証跡（execution の開始・issue・seal の記録）が欠けている・壊れている・
+    # 未知の entry がある（``execution_chain.read_chain_records`` の分類）。退避も再開もしない。
+    "output_damaged": UNVERIFIABLE,
     "container_unobserved": UNVERIFIABLE,
     "records_damaged": UNVERIFIABLE,
     "execution_attribution": UNVERIFIABLE,
@@ -88,17 +94,20 @@ REASONS: Dict[str, str] = {
 
 #: completion が必ず実施する検査（実施した ``done`` か、該当しない理由付きの ``not_applicable``）。
 #: どれかが欠けた応答は受理しない: 呼び出し側が特別な経路で検査を省略できないようにする。
-MANDATORY_CHECKS = ("meta", "container", "records", "permanent", "attribution", "output",
-                    "chain", "fingerprints", "source", "ledger")
+MANDATORY_CHECKS = ("meta", "container", "records", "permanent", "conditions", "attribution",
+                    "output", "chain", "fingerprints", "source", "ledger")
 CHECK_DONE = "done"
 CHECK_NOT_APPLICABLE = "not_applicable"
 
-#: 出力の状態（``records.output_state`` が決める。退避の可否はこれだけから決まる）。
+#: 出力の状態（``records.classify_output`` が ``execution_chain.read_chain_records`` の分類から
+#: 決める）。退避してよいのは ``never_started`` だけで、再開してよいかは決めない。
 OUTPUT_ABSENT = "absent"
 OUTPUT_EMPTY = "empty"
 OUTPUT_NEVER_STARTED = "never_started"
 OUTPUT_STARTED = "started"
-OUTPUT_STATES = (OUTPUT_ABSENT, OUTPUT_EMPTY, OUTPUT_NEVER_STARTED, OUTPUT_STARTED)
+OUTPUT_DAMAGED = "damaged"
+OUTPUT_STATES = (OUTPUT_ABSENT, OUTPUT_EMPTY, OUTPUT_NEVER_STARTED, OUTPUT_STARTED,
+                 OUTPUT_DAMAGED)
 
 DECISION_COMPLETE = "complete"
 DECISION_LAUNCH = "launch"

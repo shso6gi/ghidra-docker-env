@@ -59,7 +59,7 @@ def parse_run(args):
         elif arg == "--rm":
             options["rm"] = True
         elif arg == "--init":
-            pass
+            options["init"] = True
         elif arg in ("-v", "-e", "--label", "--tmpfs", "-w", "--name", "--network", "--memory",
                      "--memory-swap", "-u", "--stop-timeout"):
             value = args[index + 1]
@@ -225,6 +225,9 @@ def main(argv):
                              "labels": options["labels"], "env": options["env"],
                              "image": options["image"], "command": options["command"],
                              "mounts": options["mounts"], "memory": options.get("memory"),
+                             "memory_swap": options.get("memory-swap"),
+                             "user": options.get("u"), "network": options.get("network"),
+                             "init": options.get("init", False),
                              "stop_timeout": options.get("stop-timeout")}
                 data.setdefault("containers", []).append(container)
                 data["containers_started"].append(dict(container))

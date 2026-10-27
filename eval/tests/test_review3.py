@@ -53,12 +53,12 @@ def _kill_supervisor(h):
 
 def _refused_without_anything(h, capsys, *, launches):
     before = h.snapshot()
-    calls = len(h.read_state()["calls"])
+    calls = len(h.read_state().get("calls", []))
     out_state = records.output_state(h.ev.out)
     assert h.start() == wrapper.EXIT_REFUSED
     err = capsys.readouterr().err
     assert h.snapshot() == before, "the output and the wrapper records must not change"
-    assert not [c for c in h.read_state()["calls"][calls:] if c[:2] == ["run", "-d"]]
+    assert not [c for c in h.read_state().get("calls", [])[calls:] if c[:2] == ["run", "-d"]]
     assert len(h.records().launches) == launches
     assert records.output_state(h.ev.out) == out_state
     assert not (h.ev.wrapper / "aborted-outputs").exists() or len(

@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
-"""wrapper の記録の形式・状態・検査（評価計画 v2 PR-D）。標準 library だけ。
+"""wrapper の記録の形式・状態・検査（評価計画 v2 PR-D）。標準 library だけ（出力の分類は
+同じ worktree の ``reporting.execution_chain``、これも標準 library だけ、の reader に委ねる）。
 
 ``eval/wrapper.py``（host）と ``eval/summarize.py``（読み取り専用の container）が同じ規則で
-読む。記録を書くのは wrapper だけ。
+読む。記録を書くのは wrapper だけ。入力の状態はそれぞれ 1 つの関数だけが分類する:
+``read_meta``（meta の無い・正常・破損）と ``classify_output``（出力の無い・空・開始前・開始後・
+破損）。安全側でない状態（初回・開始前）は owner が積極的に言えたときだけで、既定値にしない。
 
 **launch の状態機械**（``<wrapper>/launches/<n>/``。各記録は 1 回だけ確定し、上書きしない）
 
@@ -88,6 +91,11 @@ _CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 #: launch dir に置いてよい、記録ではない file（診断）。
 _DIAGNOSTIC_FILES = frozenset({WATCH, SUPERVISOR_LOG})
+
+
+def _is_fingerprint(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith(FINGERPRINT_PREFIX) and bool(
+        _SHA256.fullmatch(value[len(FINGERPRINT_PREFIX):]))
 
 
 def staging_name(number: int, token: str) -> str:
@@ -208,10 +216,15 @@ def read_launch(directory: Path, number: int) -> Launch:
         problems.append("launch.json is missing")
     elif launch.get("schema") != LAUNCH_SCHEMA or launch.get("launch") != number:
         problems.append("launch.json does not describe this launch")
+    elif not _is_fingerprint(launch.get("fingerprint")):
+        problems.append("launch.json has no conditions fingerprint")
     if container is not None:
         if container.get("schema") != CONTAINER_SCHEMA or not _CONTAINER_ID.fullmatch(
                 str(container.get("container_id"))):
             problems.append("container.json is malformed")
+        elif not (_is_fingerprint(container.get("fingerprint"))
+                  or container.get("fingerprint") is None):
+            problems.append("container.json has a malformed conditions fingerprint")
     if exit_record is not None:
         kind = exit_record.get("kind")
         if exit_record.get("schema") != EXIT_SCHEMA or kind not in EXIT_KINDS:
@@ -344,6 +357,30 @@ def read_records(wrapper: Path) -> RecordCheck:
     return check
 
 
+def launch_condition_problems(check: RecordCheck, fingerprint: Optional[str]) -> List[str]:
+    """launch の要求（``launch.json``）と起動した container（``container.json``、container の
+    label から）が、この評価の条件の要約（valid な meta の fingerprint）と一致するか。
+
+    ``fingerprint`` が ``None``（meta が valid でない）なら照合の基準が無い: 食い違いとは言わず
+    （その評価は ``meta_invalid`` で判定できない）、何も返さない。container が作られなかった
+    launch は条件で何も動かしていない。
+    """
+    problems: List[str] = []
+    if fingerprint is None:
+        return problems
+    for launch in check.launches:
+        if launch.state == STATE_DAMAGED or launch.launch is None:
+            continue
+        requested = launch.launch.get("fingerprint")
+        if requested != fingerprint and launch.exit_kind != KIND_NOT_STARTED:
+            problems.append(f"launch {launch.number} was requested under conditions "
+                            f"{requested}, not this evaluation's {fingerprint}")
+        if launch.container is not None and launch.container.get("fingerprint") != requested:
+            problems.append(f"launch {launch.number}'s container ran under conditions "
+                            f"{launch.container.get('fingerprint')}, not the requested {requested}")
+    return problems
+
+
 def attribution_problems(check: RecordCheck, executions: Iterable[str]) -> List[str]:
     """出力先の execution と launch の対応（起動要求 → container → execution）。
 
@@ -353,7 +390,7 @@ def attribution_problems(check: RecordCheck, executions: Iterable[str]) -> List[
     launch のものとして扱う（まだ記録していない）。
     """
     on_disk = {run_id for run_id in executions if _RUN_ID.fullmatch(run_id)}
-    # executions は ``started_executions``（開始の記録が確定したもの）を渡す。
+    # executions は ``classify_output`` の ``started``（開始の記録が確定したもの）を渡す。
     owner: Dict[str, int] = {}
     problems: List[str] = []
     for launch in check.launches:
@@ -436,46 +473,289 @@ def oom_attribution(watch: Sequence[Mapping[str, Any]], *, start: Optional[float
 
 
 # ---------------------------------------------------------------------------
-# 出力の状態（退避の可否と、execution との対応の母集合）
+# meta.json（評価の条件）: 「無い」「正常」「破損」の 3 つを 1 か所で決める
+# ---------------------------------------------------------------------------
+
+META_SCHEMA = "eval-wrapper-meta-v1"
+CONDITIONS_SCHEMA = "eval-wrapper-conditions-v1"
+FINGERPRINT_PREFIX = "eval-env-v1:"
+MATRICES = ("neq", "eq")
+#: profile のうち wrapper が使い、runner へ渡さない key（必須）。
+WRAPPER_KEYS = ("IMAGE", "CONTAINER_MEMORY", "STOP_GRACE_SECONDS")
+META_KEYS = frozenset({"schema", "eval_id", "created_at", "conditions", "fingerprint",
+                       "observations"})
+CONDITION_KEYS = frozenset({"schema", "matrix", "freeze_commit", "tag", "image", "container",
+                            "profile", "mounts", "container_paths", "runner", "probe", "host"})
+_COMMIT = re.compile(r"[0-9a-f]{40}")
+_TAG = re.compile(r"(|[A-Za-z0-9][A-Za-z0-9._-]{0,39})")
+_USER = re.compile(r"[0-9]+:[0-9]+")
+
+META_ABSENT = "absent"
+META_VALID = "valid"
+META_DAMAGED = "damaged"
+
+
+def canonical_digest(payload: Any) -> str:
+    import hashlib
+
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def fingerprint_of(conditions: Mapping[str, Any]) -> str:
+    """条件の要約（runner の開始の記録に入る ``environment_fingerprint``）。"""
+    return FINGERPRINT_PREFIX + canonical_digest(conditions)
+
+
+def eval_id_of(matrix: str, commit: str, tag: str) -> str:
+    return f"{matrix}-{commit[:12]}" + (f"-{tag}" if tag else "")
+
+
+def _str(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _str_map(value: Any) -> bool:
+    return isinstance(value, dict) and all(isinstance(k, str) and isinstance(v, str)
+                                           for k, v in value.items())
+
+
+def condition_problems(conditions: Any, *, matrix: Optional[str] = None,
+                       output_name: Optional[str] = None) -> List[str]:
+    """条件（``meta.json`` の ``conditions``）が wrapper の書く形か。``matrix`` / ``output_name``
+    （出力先の dir の名前。commit・matrix・tag から決まる）を渡せば、この評価のものかも確かめる。"""
+    if not isinstance(conditions, dict):
+        return ["conditions is not an object"]
+    problems: List[str] = []
+    keys = set(conditions)
+    if keys != CONDITION_KEYS:
+        problems.append(f"conditions keys differ (missing {sorted(CONDITION_KEYS - keys)}, "
+                        f"unexpected {sorted(keys - CONDITION_KEYS)})")
+        return problems
+    rules = [
+        ("schema", conditions["schema"] == CONDITIONS_SCHEMA),
+        ("matrix", conditions["matrix"] in MATRICES
+         and (matrix is None or conditions["matrix"] == matrix)),
+        ("freeze_commit", isinstance(conditions["freeze_commit"], str)
+         and bool(_COMMIT.fullmatch(conditions["freeze_commit"]))),
+        ("tag", isinstance(conditions["tag"], str) and bool(_TAG.fullmatch(conditions["tag"]))),
+        ("runner", _str(conditions["runner"])),
+        ("probe", _str_map(conditions["probe"]) and bool(conditions["probe"])),
+        ("host", isinstance(conditions["host"], dict)),
+    ]
+    image = conditions["image"]
+    rules.append(("image", isinstance(image, dict) and set(image) == {"name", "id"}
+                  and _str(image.get("name")) and _str(image.get("id"))))
+    container = conditions["container"]
+    rules.append(("container", isinstance(container, dict)
+                  and set(container) == {"memory", "memory_swap", "network", "init", "user",
+                                         "stop_grace_seconds"}
+                  and _str(container.get("memory"))
+                  and container.get("memory_swap") == container.get("memory")
+                  and container.get("network") == "none" and container.get("init") is True
+                  and isinstance(container.get("user"), str)
+                  and bool(_USER.fullmatch(container["user"]))
+                  and type(container.get("stop_grace_seconds")) is int
+                  and container["stop_grace_seconds"] > 0))
+    profile = conditions["profile"]
+    values = profile.get("values") if isinstance(profile, dict) else None
+    rules.append(("profile", isinstance(profile, dict) and set(profile) == {"sha256", "values"}
+                  and isinstance(profile.get("sha256"), str)
+                  and bool(_SHA256.fullmatch(profile["sha256"]))
+                  and _str_map(values) and all(key in values for key in WRAPPER_KEYS)))
+    if all(ok for _name, ok in rules[-3:]):  # image・container・profile の形が正しいときだけ
+        # profile の値と、それから作った欄が食い違わない（片方だけ書き換えられていない）。
+        rules.append(("profile.values", values["IMAGE"] == image["name"]
+                      and values["CONTAINER_MEMORY"] == container["memory"]
+                      and values["STOP_GRACE_SECONDS"] == str(container["stop_grace_seconds"])))
+    mounts = conditions["mounts"]
+    rules.append(("mounts", _str_map(mounts)
+                  and set(mounts) == {"workspace", "targets", "logs", "git"}))
+    paths = conditions["container_paths"]
+    rules.append(("container_paths", _str_map(paths)
+                  and set(paths) == {"output", "tmpdir", "private_authority_root"}
+                  and (output_name is None
+                       or paths.get("output", "").rsplit("/", 1)[-1] == output_name)))
+    problems += [f"conditions.{name} is malformed or not this evaluation's"
+                 for name, ok in rules if not ok]
+    return problems
+
+
+@dataclass
+class MetaRead:
+    """``meta.json`` の読み取り。``state`` は ``absent`` / ``valid`` / ``damaged``。
+
+    ``absent`` は wrapper の dir が無いとき **だけ**（dir は meta.json ごと rename 1 回で確定する
+    ので、dir があって meta が無い・読めない・形が違う・要約が条件と合わないのはすべて破損）。
+    条件と fingerprint は ``valid`` のときだけ使える（``require``）。
+    """
+
+    state: str
+    meta: Optional[Dict[str, Any]] = None
+    problems: List[str] = field(default_factory=list)
+
+    @property
+    def conditions(self) -> Dict[str, Any]:
+        return self.require()["conditions"]
+
+    @property
+    def fingerprint(self) -> str:
+        return self.require()["fingerprint"]
+
+    def require(self) -> Dict[str, Any]:
+        if self.state != META_VALID or self.meta is None:
+            raise MetaUnusable(self.describe())
+        return self.meta
+
+    def describe(self) -> str:
+        if self.state == META_ABSENT:
+            return "the evaluation has no wrapper records (meta.json)"
+        if self.state == META_DAMAGED:
+            return "meta.json is damaged: " + "; ".join(self.problems)
+        return "meta.json is valid"
+
+
+class MetaUnusable(Exception):
+    """valid でない meta から条件を使おうとした。"""
+
+
+def read_meta(wrapper: Path, *, matrix: Optional[str] = None) -> MetaRead:
+    """``meta.json`` を読んで分類する（wrapper・summarize・supervisor・stop が共有する唯一の解釈）。
+
+    ``<出力先>.wrapper`` の meta であること（条件の出力先の名前）も確かめる。
+    """
+    wrapper = Path(wrapper)
+    output_name = wrapper.name[:-len(".wrapper")] if wrapper.name.endswith(".wrapper") else None
+    if not wrapper.exists() and not wrapper.is_symlink():
+        return MetaRead(META_ABSENT)
+    if wrapper.is_symlink() or not wrapper.is_dir():
+        return MetaRead(META_DAMAGED, problems=[f"{wrapper.name} is not a directory"])
+    value, error = _load(wrapper / META)
+    if error:
+        return MetaRead(META_DAMAGED, problems=[error])
+    if value is None:
+        return MetaRead(META_DAMAGED, problems=["meta.json is missing from the wrapper records"])
+    if not isinstance(value, dict):
+        return MetaRead(META_DAMAGED, problems=["meta.json is not an object"])
+    problems: List[str] = []
+    keys = set(value)
+    if keys != META_KEYS:
+        problems.append(f"meta.json keys differ (missing {sorted(META_KEYS - keys)}, "
+                        f"unexpected {sorted(keys - META_KEYS)})")
+    if value.get("schema") != META_SCHEMA:
+        problems.append(f"meta.json schema is {value.get('schema')!r}")
+    if not problems:
+        conditions = value["conditions"]
+        problems += condition_problems(conditions, matrix=matrix, output_name=output_name)
+        if output_name is None:
+            problems.append(f"{wrapper.name} is not named after an output (<output>.wrapper)")
+        if not problems:
+            if value["fingerprint"] != fingerprint_of(conditions):
+                problems.append("meta.json fingerprint does not summarize its conditions")
+            if value["eval_id"] != eval_id_of(conditions["matrix"], conditions["freeze_commit"],
+                                              conditions["tag"]):
+                problems.append("meta.json eval_id does not follow from its conditions")
+            if not _str(value["created_at"]) or not isinstance(value["observations"], dict):
+                problems.append("meta.json created_at / observations are malformed")
+    if problems:
+        return MetaRead(META_DAMAGED, meta=value, problems=problems)
+    return MetaRead(META_VALID, meta=value)
+
+
+# ---------------------------------------------------------------------------
+# 出力の状態: runner の記録の分類は execution_chain（PR-B）の reader が唯一の owner
 # ---------------------------------------------------------------------------
 
 START_RECORD = "run_manifest.start.txt"
 RUN_MANIFEST = "run_manifest.txt"
+#: 最新の execution の終わりに top level に置かれる成果物（どれかがあれば pair を始めた後）。
+#: ``pair-status-verification-key.json`` は runner が manifest の前に置く準備の file なので含めない。
+END_ARTIFACTS = ("matrix-publication-manifest.json", "validation-execution-receipt.json")
 
 
-def started_executions(out: Path) -> List[str]:
-    """開始の記録が確定した execution（``.executions/<id>/run_manifest.start.txt``）。
+@dataclass
+class OutputClass:
+    """出力の分類（``classify_output``）。
 
-    開始の記録の前に止まった execution の dir（書きかけだけ）は、pair を 1 つも始めていない
-    （PR-B）。launch が記録する execution も、出力との対応の検査も、この集合だけを使う。
+    * ``state``: ``protocol.OUTPUT_STATES`` の 1 つ。``never_started`` は「runner の証跡が
+      書きかけの残骸だけ」と owner が積極的に言えたときだけで、既定値ではない。
+    * ``started``: 開始の記録が確定した execution（launch の記録と照合する母集合）。
+    * ``damage``: 確定した証跡の欠損・破損・未知の entry（``read_chain_records`` の分類）。
+      1 つでもあれば state は ``damaged``（退避しない・再開しない）。
     """
-    directory = Path(out) / ".executions"
-    if not directory.is_dir():
-        return []
-    return sorted(entry.name for entry in directory.iterdir()
-                  if _RUN_ID.fullmatch(entry.name) and (entry / START_RECORD).is_file())
+
+    state: str
+    started: List[str] = field(default_factory=list)
+    damage: List[str] = field(default_factory=list)
+    evidence: List[str] = field(default_factory=list)
+    debris: List[str] = field(default_factory=list)
+
+
+def classify_output(out: Path) -> OutputClass:
+    """出力先を分類する（completion・wrapper の退避・launch の execution の記録が共有）。"""
+    from scripts.function_tracer_pcode.reporting import execution_chain
+
+    out = Path(out)
+    if not out.exists() and not out.is_symlink():
+        return OutputClass(protocol.OUTPUT_ABSENT)
+    if out.is_symlink() or not out.is_dir():
+        return OutputClass(protocol.OUTPUT_DAMAGED, damage=[f"{out.name} is not a directory"])
+    try:
+        if not any(out.iterdir()):
+            return OutputClass(protocol.OUTPUT_EMPTY)
+        chain = execution_chain.read_chain_records(out)
+    except OSError as exc:
+        return OutputClass(protocol.OUTPUT_DAMAGED, damage=[f"the output is unreadable: {exc}"])
+    result = OutputClass(protocol.OUTPUT_STARTED, started=sorted(chain.started()),
+                         debris=list(chain.never_started))
+    for run_id, execution in sorted(chain.executions.items()):
+        result.debris += [f"{run_id}/{name}" for name in execution.debris]
+        result.damage += [f"execution {run_id}: {problem}" for problem in execution.problems]
+        if not execution.started:
+            held = [name for name, present in (("issue records", execution.issued),
+                                                ("a seal", execution.sealed)) if present]
+            if held:
+                result.damage.append(f"execution {run_id} holds {' and '.join(held)} but no "
+                                     "committed start record")
+    result.damage += [f".executions/{name}: unrecognised entry" for name in chain.unrecognised]
+    # 確定した証跡（どれかがあれば pair を始めた後。退避の対象ではない）。
+    result.evidence += [f"execution {run_id}" for run_id in result.started]
+    for name in (RUN_MANIFEST, *END_ARTIFACTS):
+        if (out / name).exists() or (out / name).is_symlink():
+            result.evidence.append(name)
+    for pattern in ("*" + execution_chain.PAIR_STATUS_SUFFIX, ".runtime-metrics"):
+        found = next(iter(out.rglob(pattern)), None)
+        if found is not None:
+            result.evidence.append(found.relative_to(out).as_posix())
+    if result.damage:
+        result.state = protocol.OUTPUT_DAMAGED
+    elif not result.evidence:
+        result.state = protocol.OUTPUT_NEVER_STARTED
+    return result
 
 
 def output_state(out: Path) -> str:
-    """``absent`` / ``empty`` / ``never_started`` / ``started``（``protocol.OUTPUT_STATES``）。
+    return classify_output(out).state
 
-    ``never_started``: 出力に entry はあるが、run manifest も確定した開始の記録も pair-status も
-    無い（runner は manifest と開始の記録を確定してから pair を始めるので、pair は 1 つも始まって
-    いない）。runner の FULL 受理判定はこの出力を拒否し続けるので、再開してよいと判定された
-    ときだけ start が退避する。退避してよいかはこの状態だけで決まり、再開してよいかは決めない。
+
+def started_executions(out: Path) -> List[str]:
+    """開始の記録が確定した execution（``classify_output`` の ``started``）。"""
+    return classify_output(out).started
+
+
+def observe_start_records(out: Path) -> List[str]:
+    """実行中の観測用: 開始の記録の file がある execution の id（分類ではない）。
+
+    supervisor が実行中に繰り返し呼ぶので、issue の記録を読まない。launch の終了の記録は、
+    この観測と ``classify_output`` の両方の和を「この launch の execution」として記録する
+    （観測した execution が後で消えれば、記録と出力の対応の検査が破損として報告する）。
     """
-    out = Path(out)
-    if not out.exists() and not out.is_symlink():
-        return protocol.OUTPUT_ABSENT
-    if not out.is_dir() or out.is_symlink():
-        return protocol.OUTPUT_STARTED  # 想定外の形は「始まった」側に倒す（退避しない）
-    if not any(out.iterdir()):
-        return protocol.OUTPUT_EMPTY
-    if (out / RUN_MANIFEST).exists() or (out / RUN_MANIFEST).is_symlink() or started_executions(out):
-        return protocol.OUTPUT_STARTED
-    if any(out.rglob("*.pair-status.json")):
-        return protocol.OUTPUT_STARTED
-    return protocol.OUTPUT_NEVER_STARTED
+    directory = Path(out) / ".executions"
+    try:
+        return sorted(entry.name for entry in directory.iterdir()
+                      if _RUN_ID.fullmatch(entry.name) and (entry / START_RECORD).is_file())
+    except OSError:
+        return []
 
 
 def output_fingerprint(out: Path) -> Optional[str]:

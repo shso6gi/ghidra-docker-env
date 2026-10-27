@@ -532,25 +532,34 @@ def completion(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, A
 
     result: Dict[str, Any] = {"schema": COMPLETION_SCHEMA, "matrix": matrix,
                               "output": str(out), "wrapper": str(wrapper), "checks": checks}
-    state = records.output_state(out)
+    # 出力の分類は records.classify_output（execution_chain.read_chain_records の分類）だけ。
+    # 「開始前」は owner が書きかけの残骸だけと言えたときだけで、確定した証跡の欠損・破損・
+    # 未知の entry は damaged（退避しない・再開しない）。
+    output = records.classify_output(out)
+    state = output.state
     result["output_state"] = state
+    result["output_class"] = {"started": output.started, "damage": output.damage,
+                              "evidence": output.evidence[:20], "debris": output.debris[:20]}
+    for problem in output.damage:
+        reason("output_damaged", problem)
     done("output")
 
-    # meta（wrapper の記録の起点）。wrapper の dir は meta.json ごと rename で確定するので、
-    # dir が無いのは「この wrapper の評価が始まっていない」、dir があって meta が読めないのは破損。
-    meta = _read_json(wrapper / records.META)
-    fingerprint = meta.get("fingerprint") if isinstance(meta, dict) else None
+    # meta（評価の条件）。「無い」「正常」「破損」は records.read_meta だけが決め、破損を
+    # 初回や「条件なし」に落とさない（この出力先の meta であることも read_meta が確かめる）。
+    meta = records.read_meta(wrapper, matrix=matrix)
+    result["meta_state"] = meta.state
+    result["meta_problems"] = meta.problems
+    fingerprint = meta.fingerprint if meta.state == records.META_VALID else None
     result["fingerprint"] = fingerprint
-    result["freeze_commit"] = ((meta or {}).get("conditions") or {}).get("freeze_commit") \
-        if isinstance(meta, dict) else None
-    if not wrapper.exists() and not wrapper.is_symlink():
+    result["freeze_commit"] = meta.conditions["freeze_commit"] if fingerprint else None
+    if meta.state == records.META_ABSENT:
         if state in (protocol.OUTPUT_ABSENT, protocol.OUTPUT_EMPTY):
             reason("evaluation_not_started", "no wrapper records and no output yet")
         else:
             reason("output_without_records",
                    f"the output holds entries ({state}) but this wrapper never recorded starting it")
-    elif fingerprint is None:
-        reason("meta_unreadable", "wrapper meta.json is missing or unreadable")
+    elif meta.state == records.META_DAMAGED:
+        reason("meta_invalid", "; ".join(meta.problems))
     done("meta")
 
     host = _host_state()
@@ -579,13 +588,19 @@ def completion(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, A
     done("permanent")
     result["_check"] = check
 
+    # 要求した条件・launch の記録・起動した container が同じ条件か（meta が valid でなければ
+    # 照合の基準が無く、meta_invalid が判定できないことを報告する）。
+    for problem in records.launch_condition_problems(check, fingerprint):
+        reason("launch_conditions_differ", problem)
+    done("conditions")
+
     # launch が記録した execution と、出力にある（開始の記録が確定した）execution の対応。
     # 出力が無い・開始前の出力でも、launch が execution を記録していれば食い違いとして残る。
-    for problem in records.attribution_problems(check, records.started_executions(out)):
+    for problem in records.attribution_problems(check, output.started):
         reason("execution_attribution", problem)
     done("attribution")
 
-    if state == protocol.OUTPUT_STARTED:
+    if state in (protocol.OUTPUT_STARTED, protocol.OUTPUT_DAMAGED):
         try:
             result["current_source_digest"] = source_tree_digest(repo)
         except Exception as exc:  # noqa: BLE001
@@ -678,7 +693,7 @@ def report(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, Any]:
     check = result["_check"]
     result["interruptions"] = timed("interruptions", lambda: interruptions(check.launches),
                                     {"totals": {}, "pairs": []})
-    if result.get("output_state") == protocol.OUTPUT_STARTED:
+    if result.get("output_state") in (protocol.OUTPUT_STARTED, protocol.OUTPUT_DAMAGED):
         from scripts.function_tracer_pcode.reporting.outcome_transition import tree_completeness
         from scripts.function_tracer_pcode.reporting.pair_runtime_receipt import (
             load_chain_measurements,

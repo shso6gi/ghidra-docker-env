@@ -19,6 +19,9 @@ import summarize
 import wrapper
 from harness import Harness
 
+#: 手で組み立てる launch の記録の条件の要約（本番の launch は必ず持つ）。
+FP = records.FINGERPRINT_PREFIX + "0" * 64
+
 
 @pytest.fixture
 def h(tmp_path, monkeypatch):
@@ -163,7 +166,7 @@ def test_states_left_by_a_normal_interruption_are_not_damage(h, tmp_path):
     directory = root / "1"
     directory.mkdir()
     wrapper.write_json(directory / records.LAUNCH, {"schema": records.LAUNCH_SCHEMA, "launch": 1,
-                                                   "execution_ids_before": []})
+                                                   "execution_ids_before": [], "fingerprint": FP})
     (directory / ".exit.json.tmp-1-abcdef01").write_text("partial")
     check = records.read_records(h.ev.wrapper)
     assert not check.problems
@@ -175,7 +178,8 @@ def test_an_unfinished_launch_before_a_later_launch_is_damage(tmp_path):
     for number in (1, 2):
         (root / str(number)).mkdir(parents=True)
         wrapper.write_json(root / str(number) / records.LAUNCH, {
-            "schema": records.LAUNCH_SCHEMA, "launch": number, "execution_ids_before": []})
+            "schema": records.LAUNCH_SCHEMA, "launch": number, "execution_ids_before": [],
+            "fingerprint": FP})
     (tmp_path / records.JOURNAL).write_text("")
     check = records.read_records(tmp_path)
     assert any("unfinished but a later launch exists" in p for p in check.problems)
@@ -200,7 +204,8 @@ def test_a_gap_in_the_launch_numbers_is_damage_on_its_own(tmp_path):
     for number in (1, 3):
         (root / str(number)).mkdir(parents=True)
         wrapper.write_json(root / str(number) / records.LAUNCH, {
-            "schema": records.LAUNCH_SCHEMA, "launch": number, "execution_ids_before": []})
+            "schema": records.LAUNCH_SCHEMA, "launch": number, "execution_ids_before": [],
+            "fingerprint": FP})
         wrapper.write_json(root / str(number) / records.EXIT, {
             "schema": records.EXIT_SCHEMA, "kind": records.KIND_NOT_STARTED, "launch": number,
             "container_id": None, "runtime_run_ids": []})
@@ -231,8 +236,10 @@ def _synthetic_launch(directory, *, drop=(), change=None):
     container = "a" * 64
     log = b"runner output\n"
     files = {
-        records.LAUNCH: {"schema": records.LAUNCH_SCHEMA, "launch": 1, "execution_ids_before": []},
-        records.CONTAINER: {"schema": records.CONTAINER_SCHEMA, "container_id": container},
+        records.LAUNCH: {"schema": records.LAUNCH_SCHEMA, "launch": 1, "execution_ids_before": [],
+                         "fingerprint": FP},
+        records.CONTAINER: {"schema": records.CONTAINER_SCHEMA, "container_id": container,
+                            "fingerprint": FP},
         records.EXIT: {"schema": records.EXIT_SCHEMA, "kind": records.KIND_RAN, "launch": 1,
                        "container_id": container, "runtime_run_ids": [],
                        "runner_log": {"sha256": hashlib.sha256(log).hexdigest(), "bytes": len(log)}},
@@ -263,6 +270,9 @@ def _synthetic_launch(directory, *, drop=(), change=None):
     ((), lambda f: f[records.EXIT].update(kind=records.KIND_NOT_STARTED), "has container records"),
     ((), lambda f: f[records.EXIT]["runner_log"].update(bytes=1), "runner.log differs"),
     ((), lambda f: f[records.LAUNCH].update(launch=7), "launch.json does not describe this launch"),
+    ((), lambda f: f[records.LAUNCH].pop("fingerprint"), "launch.json has no conditions fingerprint"),
+    ((), lambda f: f[records.LAUNCH].update(fingerprint="P=2"), "launch.json has no conditions fingerprint"),
+    ((), lambda f: f[records.CONTAINER].update(fingerprint=3), "malformed conditions fingerprint"),
     ((), lambda f: f[records.EVIDENCE].update(unterminated_pairs="x"), "evidence.json is malformed"),
     ((), lambda f: f[records.EVIDENCE].update(unterminated_pairs=[{"pair": "p", "kind": "?"}]),
      "evidence.json is malformed"),

@@ -53,8 +53,10 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 EVAL_DIR = Path(__file__).resolve().parent
 REPO = EVAL_DIR.parent
-if str(EVAL_DIR) not in sys.path:
-    sys.path.insert(0, str(EVAL_DIR))
+for _path in (EVAL_DIR, REPO):
+    # records は出力の分類を execution_chain（同じ worktree の標準 library だけの module）に委ねる。
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 import records  # noqa: E402  (eval/ の記録の形式と検査)
 import protocol  # noqa: E402  (応答の受理と理由の分類の唯一の置き場所)
 
@@ -62,14 +64,15 @@ EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_REFUSED = 2
 
-META_SCHEMA = "eval-wrapper-meta-v1"
-CONDITIONS_SCHEMA = "eval-wrapper-conditions-v1"
-FINGERPRINT_PREFIX = "eval-env-v1:"
+#: meta と条件の形・要約は records が唯一の owner（summarize と supervisor も同じ規則で読む）。
+META_SCHEMA = records.META_SCHEMA
+CONDITIONS_SCHEMA = records.CONDITIONS_SCHEMA
+FINGERPRINT_PREFIX = records.FINGERPRINT_PREFIX
 
 RUNNERS = {"neq": "neqbench_run_all_32jobs.sh", "eq": "eqbench_run_all_32jobs.sh"}
 RUN_TMP_PREFIXES = {"neq": ("neqbench-run.", "neqbench-tmp."), "eq": ("eqbench-run.", "eqbench-tmp.")}
 #: profile のうち wrapper が使い、runner へ渡さない key（必須）。
-WRAPPER_KEYS = ("IMAGE", "CONTAINER_MEMORY", "STOP_GRACE_SECONDS")
+WRAPPER_KEYS = records.WRAPPER_KEYS
 #: wrapper が決める（profile では指定できない）runner の環境変数。
 CONTROLLED_RUNNER_KEYS = frozenset({
     "OUTPUT_BASE_DIR", "EQBENCH_TMPDIR", "EQBENCH_PRIVATE_AUTHORITY_ROOT",
@@ -86,6 +89,8 @@ LABEL_SLOT = "ghidra-eval.slot"
 LABEL_EVAL = "ghidra-eval.eval"
 LABEL_LAUNCH = "ghidra-eval.launch"
 LABEL_READER = "ghidra-eval.reader"
+#: 評価の container が起動された条件の要約（launch の要求と照合する）。
+LABEL_FINGERPRINT = "ghidra-eval.fingerprint"
 
 WATCH_POLL_SECONDS = float(os.environ.get("EVAL_WATCH_POLL_SECONDS", "10"))
 WATCH_PERIOD_SECONDS = float(os.environ.get("EVAL_WATCH_PERIOD_SECONDS", "300"))
@@ -171,9 +176,7 @@ def utc_now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def canonical_digest(payload: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+canonical_digest = records.canonical_digest
 
 
 # ---------------------------------------------------------------------------
@@ -249,8 +252,7 @@ class Evaluation:
 
     @property
     def eval_id(self) -> str:
-        suffix = f"-{self.tag}" if self.tag else ""
-        return f"{self.matrix}-{self.commit[:12]}{suffix}"
+        return records.eval_id_of(self.matrix, self.commit, self.tag)
 
     @property
     def out(self) -> Path:
@@ -411,6 +413,7 @@ def inspect_container(ev: Evaluation, ref: str) -> Optional[Dict[str, Any]]:
         "oom_killed": state.get("OOMKilled"), "error": state.get("Error"),
         "started_at": state.get("StartedAt"), "finished_at": state.get("FinishedAt"),
         "launch": labels.get(LABEL_LAUNCH), "eval": labels.get(LABEL_EVAL),
+        "fingerprint": labels.get(LABEL_FINGERPRINT),
     }
 
 
@@ -587,8 +590,7 @@ def build_conditions(ev: Evaluation, profile: Mapping[str, str], profile_sha: st
     }
 
 
-def fingerprint_of(conditions: Mapping[str, Any]) -> str:
-    return FINGERPRINT_PREFIX + canonical_digest(conditions)
+fingerprint_of = records.fingerprint_of
 
 
 def differing_keys(a: Any, b: Any, prefix: str = "") -> List[str]:
@@ -598,6 +600,25 @@ def differing_keys(a: Any, b: Any, prefix: str = "") -> List[str]:
             keys += differing_keys(a.get(key), b.get(key), f"{prefix}{key}.")
         return keys
     return [] if a == b else [prefix.rstrip(".")]
+
+
+def valid_meta(ev: Evaluation) -> records.MetaRead:
+    """valid な meta だけを返す（条件を使う側はこれを経る）。それ以外は ``WrapperError``。"""
+    meta = records.read_meta(ev.wrapper, matrix=ev.matrix)
+    if meta.state != records.META_VALID:
+        raise WrapperError(meta.describe())
+    return meta
+
+
+def reader_image(ev: Evaluation, meta: records.MetaRead) -> str:
+    """読み取り専用の container の image: 評価の image（valid な meta）、無ければ profile の image。"""
+    if meta.state == records.META_VALID:
+        return meta.conditions["image"]["id"]
+    try:
+        return load_profile(ev.profile_path)[0]["IMAGE"]
+    except (OSError, UnicodeError, WrapperError) as exc:
+        raise Unobservable(f"no image to read the evaluation with ({meta.describe()}; "
+                           f"profile: {exc})")
 
 
 # ---------------------------------------------------------------------------
@@ -651,14 +672,19 @@ def preflight(ev: Evaluation) -> Plan:
         raise Refused(f"less than {minimum // 2**30} GiB free under {ev.log_root}")
     if ev.out.exists() and not ev.out.is_dir():
         raise Refused(f"{ev.out} is not a directory")
-    meta = read_json(ev.wrapper / records.META)
-    meta = meta if isinstance(meta, dict) and meta.get("schema") == META_SCHEMA else None
+    # 「無い」「正常」「破損」は records.read_meta だけが決める。破損（読めない・形が違う・
+    # 要約が条件と合わない）は初回にも「照合しない」にもせず、何も書かずに拒否する。
+    meta = records.read_meta(ev.wrapper, matrix=ev.matrix)
+    if meta.state == records.META_DAMAGED:
+        raise Refused(f"{meta.describe()}; this evaluation's conditions cannot be compared "
+                      "with the requested ones, so nothing is started. Inspect it; the records "
+                      "are kept (a separate evaluation needs another --tag)")
     probe = probe_environment(ev, profile["IMAGE"], profile["CONTAINER_MEMORY"])
     conditions = build_conditions(ev, profile, profile_sha, image, probe)
     fingerprint = fingerprint_of(conditions)
-    if meta is not None:
-        recorded = meta.get("conditions")
-        if recorded != conditions or meta.get("fingerprint") != fingerprint:
+    if meta.state == records.META_VALID:
+        recorded = meta.conditions
+        if recorded != conditions or meta.fingerprint != fingerprint:
             raise Refused(
                 "the conditions differ from the ones this evaluation started with: "
                 + ", ".join(differing_keys(recorded, conditions) or ["fingerprint"])
@@ -673,7 +699,7 @@ def preflight(ev: Evaluation) -> Plan:
         raise Refused(f"cannot judge the evaluation: {exc}")
     leftovers = sorted(p.name for p in ev.tmp.iterdir()) if ev.tmp.is_dir() else []
     return Plan(profile=profile, conditions=conditions, fingerprint=fingerprint,
-                first=meta is None and not ev.wrapper.exists(), completion=completion,
+                first=meta.state == records.META_ABSENT, completion=completion,
                 leftovers=leftovers, others=other_running_containers(ev))
 
 
@@ -713,7 +739,7 @@ def clean_leftovers(ev: Evaluation, names: Sequence[str]) -> List[Dict[str, Any]
 
 
 def existing_execution_ids(ev: Evaluation) -> List[str]:
-    """出力にある、開始の記録が確定した execution（launch が記録する母集合）。"""
+    """出力にある、開始の記録が確定した execution（``records.classify_output`` の分類）。"""
     return records.started_executions(ev.out)
 
 
@@ -804,8 +830,8 @@ def _start_locked(ev: Evaluation, lock: int) -> int:
     moved_aside = None
     if plan.completion["output_state"] == protocol.OUTPUT_NEVER_STARTED:
         # 判定（completion）が再開を許した後でだけ、開始の記録の前に止まった出力を退避する。
-        # 退避の可否は同じ owner（records.output_state）で lock の下に確かめ直す。
-        if records.output_state(ev.out) != protocol.OUTPUT_NEVER_STARTED:
+        # 退避の可否は同じ owner（records.classify_output）で lock の下に確かめ直す。
+        if records.classify_output(ev.out).state != protocol.OUTPUT_NEVER_STARTED:
             raise WrapperError(f"{ev.out} changed since it was judged; nothing was moved")
         aside = ev.wrapper / "aborted-outputs" / f"{utc_now()}-{secrets.token_hex(3)}"
         aside.parent.mkdir(exist_ok=True)
@@ -890,7 +916,8 @@ def runner_command(ev: Evaluation, conditions: Mapping[str, Any], fingerprint: s
     ]
     return ["run", "-d", "--init", "--name", ev.container_name,
             "--label", f"{LABEL_SLOT}=1", "--label", f"{LABEL_EVAL}={ev.eval_id}",
-            "--label", f"{LABEL_LAUNCH}={launch}", "--network", "none",
+            "--label", f"{LABEL_LAUNCH}={launch}", "--label", f"{LABEL_FINGERPRINT}={fingerprint}",
+            "--network", "none",
             "--memory", memory, "--memory-swap", memory, "--stop-timeout", grace,
             "-u", conditions["container"]["user"], *environment,
             *_mount_args(ev, read_only=False), conditions["image"]["id"],
@@ -929,17 +956,28 @@ def _launch(ev: Evaluation, number: int) -> records.Launch:
     return launch
 
 
-def record_container(ev: Evaluation, number: int, container_id: str, how: str) -> None:
+def record_container(ev: Evaluation, number: int, container_id: str, how: str,
+                     fingerprint: Optional[str]) -> None:
+    """container を記録する。``fingerprint`` は container が起動された条件の要約（``docker run``
+    に渡した値、回収では container の label から読んだ値。読めなければ ``None``）。"""
     write_json(ev.launch_dir(number) / records.CONTAINER, {
         "schema": records.CONTAINER_SCHEMA, "container_id": container_id,
         "name": ev.container_name, "recorded_at": utc_now(), "how": how,
+        "fingerprint": fingerprint,
     }, exclusive=True)
     journal(ev, "container_recorded", launch=number, container=container_id[:12], how=how)
 
 
 def _new_executions(ev: Evaluation, launch: records.Launch) -> List[str]:
+    """この launch の execution: 終了の時点の分類と、実行中に観測した開始の記録の和。
+
+    実行中に観測した execution が終了の前に消えていても記録に残すので、記録と出力の対応の
+    検査がその欠損を報告する（終了の時点の出力だけから数えると、欠損が「無かった」になる）。
+    """
     before = set((launch.launch or {}).get("execution_ids_before") or [])
-    return [run_id for run_id in existing_execution_ids(ev) if run_id not in before]
+    observed = {run_id for row in launch.watch for run_id in (row.get("executions") or [])
+                if isinstance(run_id, str)}
+    return sorted((set(existing_execution_ids(ev)) | observed) - before)
 
 
 def _exit_payload(ev: Evaluation, launch: records.Launch, kind: str, **fields: Any) -> Dict[str, Any]:
@@ -978,11 +1016,10 @@ def save_runner_log(ev: Evaluation, launch: records.Launch) -> Tuple[str, int]:
 
 
 def capture_evidence(ev: Evaluation, launch: records.Launch) -> None:
-    meta = read_json(ev.wrapper / records.META) or {}
-    image = ((meta.get("conditions") or {}).get("image") or {}).get("id")
     try:
+        image = valid_meta(ev).conditions["image"]["id"]
         evidence = read_json_from(ev, image, "launch-evidence")
-    except Unobservable as exc:
+    except WrapperError as exc:  # 観測できない応答・valid でない meta
         journal(ev, "evidence_failed", launch=launch.number, detail=str(exc)[-500:])
         raise
     write_json(ev.launch_dir(launch.number) / records.EVIDENCE, evidence, exclusive=True)
@@ -1039,7 +1076,7 @@ def advance(ev: Evaluation, number: int, *, watch_running: bool) -> records.Laun
                 raise WrapperError(f"container {ev.container_name} belongs to launch "
                                    f"{found.get('launch')}, not to the unfinished launch {number}")
             record_container(ev, number, found["id"], "found by inspect after the launch "
-                             "stopped before recording it")
+                             "stopped before recording it", found.get("fingerprint"))
             continue
         if state == records.STATE_CONTAINER:
             found = inspect_container(ev, launch.container_id)
@@ -1098,14 +1135,27 @@ def command_supervise(ev: Evaluation, number: int, lock_fd: int) -> int:
         launch = _launch(ev, number)
         if launch.state != records.STATE_REQUESTED:
             raise WrapperError(f"launch {number} is {launch.state}, not requested")
-        meta = read_json(ev.wrapper / records.META)
-        command = runner_command(ev, meta["conditions"], meta["fingerprint"], number)
+        # 起動する条件は valid な meta の条件だけで、launch の要求の条件と一致しなければ
+        # 起動しない（launch の記録・runner に渡す fingerprint・container の label が同じ値）。
+        try:
+            meta = valid_meta(ev)
+            if (launch.launch or {}).get("fingerprint") != meta.fingerprint:
+                raise WrapperError(
+                    f"launch {number} was requested under conditions "
+                    f"{(launch.launch or {}).get('fingerprint')}, but the evaluation's are "
+                    f"{meta.fingerprint}")
+        except WrapperError as exc:
+            journal(ev, "launch_refused", launch=number, detail=str(exc)[-1000:])
+            print(f"Not starting a container: {exc}", file=sys.stderr)
+            advance(ev, number, watch_running=False)  # container は無い: not_started で終える
+            return EXIT_FAILED
+        command = runner_command(ev, meta.conditions, meta.fingerprint, number)
         # `docker run` の CLI にも lock を持たせる: supervisor が途中で死んでも、container の
         # 作成が終わるまで回収（stop）は lock を取れない。
         started = docker(ev, *command, pass_fds=(lock_fd,), timeout=600)
         identifier = started.stdout.strip()
         if started.returncode == 0 and records._CONTAINER_ID.fullmatch(identifier):
-            record_container(ev, number, identifier, "docker run")
+            record_container(ev, number, identifier, "docker run", meta.fingerprint)
         else:
             journal(ev, "container_start_failed", launch=number,
                     detail=started.stderr.strip()[-1000:])
@@ -1125,8 +1175,7 @@ def watch(ev: Evaluation, number: int, container: str) -> Tuple[Optional[Dict[st
     inspect で「動いていない／存在しない」を観測したことの両方で決める（観測できなければ待ち続ける）。
     """
     path = ev.launch_dir(number) / records.WATCH
-    grace = str((read_json(ev.wrapper / records.META) or {})["conditions"]["container"]
-                ["stop_grace_seconds"])
+    grace = str(valid_meta(ev).conditions["container"]["stop_grace_seconds"])
 
     def new_waiter() -> subprocess.Popen:
         return subprocess.Popen([ev.docker, "wait", container], stdout=subprocess.DEVNULL,
@@ -1159,7 +1208,8 @@ def watch(ev: Evaluation, number: int, container: str) -> Tuple[Optional[Dict[st
             stop_sent = True
         if now >= next_poll:
             next_poll = now + WATCH_POLL_SECONDS
-            row = {"at": utc_now(), "at_epoch": time.time(), **read_cgroup(container)}
+            row = {"at": utc_now(), "at_epoch": time.time(), **read_cgroup(container),
+                   "executions": records.observe_start_records(ev.out)}
             if row["observed"]:
                 last_valid = row
             if now - last_period >= WATCH_PERIOD_SECONDS:
@@ -1201,8 +1251,9 @@ def _epoch(text: Any) -> Optional[float]:
 
 
 def command_stop(ev: Evaluation, wait_seconds: float) -> int:
-    meta = read_json(ev.wrapper / records.META) or {}
-    grace = ((meta.get("conditions") or {}).get("container") or {}).get("stop_grace_seconds")
+    meta = records.read_meta(ev.wrapper, matrix=ev.matrix)
+    grace = (meta.conditions["container"]["stop_grace_seconds"]
+             if meta.state == records.META_VALID else None)
     try:
         state = container_state(ev)
     except Unobservable as exc:
@@ -1212,7 +1263,8 @@ def command_stop(ev: Evaluation, wait_seconds: float) -> int:
         print(f"No container of this evaluation ({ev.container_name}).")
     elif state["running"]:
         if not isinstance(grace, int):
-            print("Error: meta.json gives no stop grace; refusing to guess one", file=sys.stderr)
+            print(f"Error: no recorded stop grace ({meta.describe()}); refusing to guess one",
+                  file=sys.stderr)
             return EXIT_FAILED
         print(f"Stopping {ev.container_name} (grace {grace}s; the runner confirms its own "
               "processes stopped before it exits)...")
@@ -1311,12 +1363,14 @@ def tmp_entries(ev: Evaluation, state: Optional[Mapping[str, Any]]) -> List[Dict
 
 
 def command_status(ev: Evaluation, verify: bool) -> int:
-    meta = read_json(ev.wrapper / records.META)
+    meta = records.read_meta(ev.wrapper, matrix=ev.matrix)
     print(f"Evaluation {ev.eval_id}")
     print(f"  output:  {ev.out} ({'present' if ev.out.is_dir() else 'absent'})")
-    print(f"  records: {ev.wrapper} ({'present' if meta else 'no meta.json'})")
-    if isinstance(meta, dict):
-        print(f"  fingerprint: {meta.get('fingerprint')}")
+    print(f"  records: {ev.wrapper} (meta {meta.state})")
+    if meta.state == records.META_VALID:
+        print(f"  fingerprint: {meta.fingerprint}")
+    for problem in meta.problems:
+        print(f"  DAMAGED: meta: {problem}")
     try:
         state = container_state(ev)
         print("  container: absent" if state is None else
@@ -1348,17 +1402,17 @@ def command_status(ev: Evaluation, verify: bool) -> int:
         print(f"  DAMAGED: {problem}")
     if ev.out.is_dir():
         statuses = sum(1 for _ in ev.out.rglob("*.pair-status.json"))
-        executions = existing_execution_ids(ev)
+        executions = records.observe_start_records(ev.out)
         print(f"  observed: {statuses} pair status file(s), {len(executions)} execution "
-              "record(s) (not a verdict; `summary` reports what is decided)")
+              "start record(s) (not a verdict; `summary` reports what is decided)")
     entries = tmp_entries(ev, state)
     if entries:
         leftovers = [e["name"] for e in entries if e["state"] == "leftover"]
         print(f"  tmp: {len(entries)} entr(y/ies); {len(leftovers)} left by earlier executions "
               "(removed by the next start)" + (f": {', '.join(leftovers[:5])}" if leftovers else ""))
-    if verify and ev.out.is_dir() and isinstance(meta, dict):
+    if verify and ev.out.is_dir():
         try:
-            report = read_json_from(ev, meta["conditions"]["image"]["id"], "verify")
+            report = read_json_from(ev, reader_image(ev, meta), "verify")
             result = report.get("verify") or {}
             print(f"  execution_chain verify: {result.get('verdict')} "
                   f"{json.dumps(result.get('reasons') or {}, sort_keys=True)} "
@@ -1371,13 +1425,10 @@ def command_status(ev: Evaluation, verify: bool) -> int:
 
 def command_summary(ev: Evaluation, as_json: bool) -> int:
     """reader の ``report`` を契約どおりに受理してから表示する（終了コードは受理した結果から）。"""
-    meta = read_json(ev.wrapper / records.META)
-    if not isinstance(meta, dict):
-        print(f"No evaluation record at {ev.wrapper} (meta.json); nothing to summarize.",
-              file=sys.stderr)
-        return protocol.EXIT_BY_VERDICT[protocol.VERDICT_UNVERIFIABLE]
+    meta = records.read_meta(ev.wrapper, matrix=ev.matrix)
     try:
-        result = read_json_from(ev, meta["conditions"]["image"]["id"], "report", "--json",
+        # meta が無い・壊れていても判定は report（completion）に任せる（理由として報告される）。
+        result = read_json_from(ev, reader_image(ev, meta), "report", "--json",
                                 env={"EVAL_HOST_STATE": json.dumps(host_state(ev))})
     except Unobservable as exc:
         print(f"Error: the summary cannot be produced: {exc}", file=sys.stderr)

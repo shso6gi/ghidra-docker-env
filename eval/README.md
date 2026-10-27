@@ -13,6 +13,9 @@ FULL_NEQ / FULL_EQBENCH の全件評価を、固定の条件（`profile.env`）�
 | 正式な full verdict | `verification_ledger.build_row` + `full_scope_evidence` |
 | HEAD の一致 | `verification_ledger.head_match` |
 | すべての execution がこの評価の条件 | `meta.json` の fingerprint と各開始の記録 |
+| meta が正常（無い・正常・破損の 3 つ） | `records.read_meta`（wrapper・supervisor・stop・summarize が共有） |
+| 出力の確定した証跡が壊れていない | `records.classify_output`（`execution_chain.read_chain_records` の分類） |
+| launch の要求と起動した container がこの評価の条件 | `records.launch_condition_problems` |
 | wrapper の記録が終端し、壊れていない | `records.py`（launch の状態機械、execution との対応） |
 | 評価の container が無い | host での観測（観測できなければ判定しない） |
 
@@ -68,8 +71,8 @@ launch（`start` 1 回）の記録は、次の順に 1 つずつ確定し、上�
 | 実行中 | `status`: container running、lock 保持 | 待つ。止めるなら `stop` |
 | 停止・kill・異常終了の後 | container absent、launch は終端 | 同じ条件で `start`（確定済みの pair は再利用、未終端だけ再実行） |
 | launch が未完了（supervisor が消えた、記録・削除・docker の操作が失敗した、起動の前に止まった） | `status`: `launch n is unfinished (...)`。`start` は拒否 | `stop`（container を止め、記録の続きから終端まで進める）→ `start` |
-| 記録が壊れている（確定した記録の欠損・不整合、launch の欠番、journal との食い違い、出力先の execution との対応の不一致） | `status`: `DAMAGED: ...`、`summary` は判定できない | 自動では直さない。原因を調べる |
-| 最初の execution が開始の記録の前に止まった | 出力先に manifest も開始の記録も pair も無い | `start` が出力先を `.wrapper/aborted-outputs/` へ移して新規に始める（削除しない） |
+| 記録が壊れている（確定した記録の欠損・不整合、launch の欠番、journal との食い違い、出力先の execution との対応の不一致、meta の破損、出力の確定した証跡の欠損・破損・未知の entry） | `status`: `DAMAGED: ...`、`summary` は判定できない（`records_damaged` / `meta_invalid` / `output_damaged`） | 自動では直さない。原因を調べる（退避も再開もしない） |
+| 最初の execution が開始の記録の前に止まった | 出力先に、runner の準備の file と書きかけの残骸しか無い（`never_started`） | `start` が出力先を `.wrapper/aborted-outputs/` へ移して新規に始める（削除しない） |
 | 完了 | `summary` が `VERDICT: COMPLETE`（exit 0） | 何もしない。`start` は何も書かない |
 | chain は CLOSED だが ledger が正式性を拒否 | `summary`: `no_full_verdict` | `start` は再開する（完了とは言わない） |
 | 正式な完了に到達できない（permanent） | `summary`: `[permanent] ...` | この評価の記録を残し、別の `--tag` で新しい評価を始める |
@@ -84,7 +87,7 @@ launch（`start` 1 回）の記録は、次の順に 1 つずつ確定し、上�
 | unverifiable | 判定できない | 記録の破損、読み取りの失敗、container の状態を観測できない |
 
 `start` は、COMPLETE なら何もしない。permanent・blocking・unverifiable（または未知の分類）が
-**1 つでもあれば**、他の理由が何であっても、出力の状態（無い・空・開始前・開始後）が何であっても、
+**1 つでもあれば**、他の理由が何であっても、出力の状態（無い・空・開始前・開始後・破損）が何であっても、
 何も書かずに拒否する（退避も launch も container の起動もしない）。permanent のときは、この評価の
 記録を残したまま、別の評価（別の `--tag`）として始め直す。resumable だけのときだけ再開する。
 
@@ -92,9 +95,29 @@ launch（`start` 1 回）の記録は、次の順に 1 つずつ確定し、上�
 同じ `completion` が行う。`completion` は必須の検査（meta・container・記録・恒久的な失敗・execution
 との対応・出力の状態・連鎖・fingerprint・source・ledger）をすべて実施したか、出力の状態から該当しない
 ことを明示した応答だけを返し、`start` はそれ以外の応答を受け付けない。開始の記録の前に止まった出力の
-退避は、この判定が再開を許した後で、同じ出力の状態の判定（`records.output_state`）を lock の下で
+退避は、この判定が再開を許した後で、同じ出力の分類（`records.classify_output`）を lock の下で
 確かめ直してから行う。launch が記録する execution は、開始の記録が確定したものだけ（書きかけの dir は
 数えない）なので、退避しても記録と出力の対応は崩れない。
+
+**meta の 3 つの状態**: `records.read_meta` だけが決める。`absent` は wrapper の dir が無いとき
+だけ（dir は `meta.json` ごと rename 1 回で確定する）。dir があって `meta.json` が無い・読めない・
+schema や必須項目が違う・fingerprint が条件の要約でない・別の出力先や matrix の条件、はすべて
+`damaged` で、初回にも「照合しない」にもしない。`start` は profile の条件にかかわらず何も書かずに
+拒否し、`summary` は判定できない（`meta_invalid`）。条件を使う側（supervisor・stop・証拠の取得）は
+valid な meta だけを使う。
+
+**条件の一致**: 要求した条件の要約（preflight）、`launch.json` の `fingerprint`、runner に渡す
+`EQBENCH_ENVIRONMENT_FINGERPRINT`、container の label `ghidra-eval.fingerprint`、`container.json`
+の `fingerprint` は同じ値。supervisor は valid な meta と launch の要求が一致しなければ container を
+起動せず（`not_started`）、completion は食い違う launch を `launch_conditions_differ`（permanent）にする。
+
+**出力の分類**: `records.classify_output` が `execution_chain.read_chain_records`（PR-B の reader）の
+分類から決める。`never_started` は「runner の準備の file と書きかけの残骸だけ」と言えたときだけで、
+確定した証跡（manifest・確定した開始の記録・publication・receipt・pair-status・runtime receipt）が
+1 つでもあれば `started`、開始の記録の無い issue / seal・壊れた記録・未知の entry があれば `damaged`
+（終了の記録の前に失われても後に失われても同じ）。launch が記録する execution は、実行中の観測
+（`watch.jsonl` の `executions`）と終了の時点の分類の和なので、実行中に見た execution が消えれば
+記録との対応の検査も破損を報告する。
 
 **reader の応答の受理**: 読み取り専用の container の応答（完了の判定・launch の証拠・検証器・summary）は、
 要求ごとの終了コードと応答の形の **両方** を満たすときだけ受理する。非 0 終了の正しい JSON も、0 終了の
