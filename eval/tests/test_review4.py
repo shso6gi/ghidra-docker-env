@@ -230,6 +230,53 @@ def test_a_launch_that_ran_under_other_conditions_is_permanent(h, capsys, record
     assert "another --tag" in err
 
 
+def test_a_container_that_ran_its_request_under_other_conditions_is_permanent(h, capsys):
+    """launch の要求と container は互いに一致するが、どちらもこの評価の条件（meta）と違う。
+
+    container と要求の照合だけでは見えない: 要求と meta の照合がそれだけで検出する。
+    """
+    h.finished_launch()
+    other = records.FINGERPRINT_PREFIX + "d" * 64
+    for name in (records.LAUNCH, records.CONTAINER):
+        path = h.ev.launch_dir(1) / name
+        payload = json.loads(path.read_text())
+        payload["fingerprint"] = other
+        path.write_text(json.dumps(payload))
+    assert records.launch_condition_problems(h.records(), h.meta()["fingerprint"]) == [
+        f"launch 1 was requested under conditions {other}, not this evaluation's "
+        f"{h.meta()['fingerprint']}"]
+    _code, result = _summary(h, capsys)
+    reasons = {r["code"]: r["category"] for r in result["reasons"]}
+    assert reasons.get("launch_conditions_differ") == "permanent", result["reasons"]
+    _refused_without_anything(h, capsys, launches=1)
+
+
+def test_an_output_that_started_after_it_was_judged_is_not_moved_aside(h, capsys):
+    """判定（completion）は「開始前」と言ったが、退避の前に execution が開始の記録を確定した。
+
+    退避は同じ owner（``records.classify_output``）で lock の下に確かめ直し、何も動かさない。
+    判定と退避の間の変化は、判定の応答を「開始前」に差し替えて作る。
+    """
+    from test_review2 import _execution
+
+    h.finished_launch()
+    _execution(h, "a" * 32)
+    assert records.classify_output(h.ev.out).state == protocol.OUTPUT_STARTED
+    h.update(lambda d: d.setdefault("respond", {}).update({"completion": {
+        "times": 1, "replace_json": {
+            "verdict": protocol.VERDICT_INCOMPLETE, "output_state": protocol.OUTPUT_NEVER_STARTED,
+            "reasons": [{"code": "output_never_started", "category": protocol.RESUMABLE,
+                         "detail": "replaced"}]}}}))
+    runs = len([c for c in h.read_state()["calls"] if c[:2] == ["run", "-d"]])
+    capsys.readouterr()
+    assert h.start() != wrapper.EXIT_OK
+    assert "changed since it was judged" in capsys.readouterr().err
+    assert records.classify_output(h.ev.out).state == protocol.OUTPUT_STARTED
+    assert not (h.ev.wrapper / "aborted-outputs").exists()
+    assert len([c for c in h.read_state()["calls"] if c[:2] == ["run", "-d"]]) == runs
+    assert len(h.records().launches) == 1
+
+
 # ---------------------------------------------------------------------------
 # 確定した証跡の欠損 × wrapper の終了の記録の前・後
 # ---------------------------------------------------------------------------
