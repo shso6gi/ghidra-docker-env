@@ -8,6 +8,8 @@
 * R4-2: issue を確定した後、wrapper の終了の記録の前に manifest と開始の記録が消えた出力を、
   開始前として退避して再開した（実行中の観測の有無の 2 通り）
 * R4-3: launch の要求の条件と meta の条件が食い違っても、supervisor が container を起動した
+* R4-4: 確定した証跡（帰属できない status）が原因で再開しても CLOSED にならない OPEN を
+  resumable として、全件の処理を再開した
 """
 
 from __future__ import annotations
@@ -105,5 +107,20 @@ def test_r4_3_the_supervisor_does_not_start_a_launch_requested_under_other_condi
         wrapper.main(["--matrix", "neq", "_supervise", "--freeze", COMMIT, "--launch", "1",
                       "--lock-fd", str(lock)])
         assert _detached(h) == [], "a container was started under other conditions"
+    finally:
+        _cleanup(h)
+
+
+def test_r4_4_an_open_chain_no_resume_can_close_is_not_resumed(tmp_path, monkeypatch):
+    h = Harness(tmp_path, monkeypatch)
+    try:
+        h.complete_evaluation()
+        e1 = fixture._run_id(1)
+        status = h.ev.out / "S0" / "f" / "f_B1_B2.pair-status.json"
+        nonce = json.loads(status.read_text())["execution_nonce"]
+        (h.ev.out / ".executions" / e1 / "issued" / f"{nonce}.json").unlink()  # 帰属できない status
+        runs = len(_detached(h))
+        assert h.start() == wrapper.EXIT_REFUSED, "a resume that cannot close the chain was started"
+        assert len(_detached(h)) == runs
     finally:
         _cleanup(h)

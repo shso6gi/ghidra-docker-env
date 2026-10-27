@@ -11,7 +11,8 @@
 ==============  ===========================================================================
 分類            意味
 ==============  ===========================================================================
-resumable       同じ条件で runner を再び動かせば進む（出力先が無い・連鎖が OPEN・full verdict が無い・
+resumable       同じ条件で runner を再び動かせば進む（出力先が無い・連鎖が OPEN で理由がすべて次の
+                execution が書き直すもの（``CHAIN_REASONS_REWRITTEN_BY_RESUME``）・full verdict が無い・
                 最新の execution の commit が HEAD と照合できない）
 blocking        この評価への運用の操作（``stop`` での回収）が先に要る。操作の後は続けられる
 permanent       この評価は正式な完了に到達できない。記録は残し、別の評価（別の ``--tag``）として
@@ -59,7 +60,15 @@ REASONS: Dict[str, str] = {
     "output_absent": RESUMABLE,
     # 出力が、開始の記録を残す前に止まった execution のものだけ（start が退避して新規に始める）。
     "output_never_started": RESUMABLE,
+    # 検証器が OPEN と言った理由のうち、次の execution が書き直すものだけ（下の CHAIN_REASONS）。
     "chain_open": RESUMABLE,
+    # 検証器が OPEN と言った理由のうち、どの execution も書き直さない確定した証跡によるもの
+    # （再開しても CLOSED にならない）。全件の処理を再開させない。
+    "chain_blocked_by_evidence": PERMANENT,
+    # 検証器の理由が下の分類表に無い（分類されていない新しい理由は再開の根拠にしない）。
+    "chain_reason_unclassified": UNVERIFIABLE,
+    # pair の binary と build receipt が食い違い、再開で直るかがどちらの側が違うかで決まる。
+    "chain_inputs_disagree": UNVERIFIABLE,
     "no_full_verdict": RESUMABLE,
     # ledger の HEAD の照合（最新の execution が記録した commit と dirty）。start は worktree が
     # clean で HEAD が freeze であることを先に確かめるので、次の execution はその commit を記録し、
@@ -91,6 +100,57 @@ REASONS: Dict[str, str] = {
     "start_records_unreadable": UNVERIFIABLE,
     "ledger_failed": UNVERIFIABLE,
 }
+
+#: 実行の連鎖の検証器（``reporting.execution_chain.verify_execution_chain``）の OPEN の理由を、
+#: 同じ条件で runner を再開したとき次の execution が直すかで分ける（検証器の条件はそのまま）。
+#: 根拠は次の execution の振る舞い（runner と ``pair_status_authority`` の再開の判定）:
+#:
+#: * 次の execution は top level の manifest・publication・receipt・seal を書き直し、
+#:   ``prior_executions`` と census を出力の記録から作り直す（latest / publication の理由）。
+#: * pair は ``pair_status_file_skip_decision`` が SKIP と言うもの（署名・期待した target・
+#:   正規の終端）だけを再利用し、それ以外（未決定・壊れた・別の target）は再実行して
+#:   上書きする。
+#: * execution の記録（開始・issue・seal）は確定したら消えない。再利用の判定は帰属（issue の
+#:   記録）と build receipt との一致を見ないので、帰属できない・同じ nonce の issue が複数ある・
+#:   build receipt と食い違う status は再利用され、同じ理由が残る。開始の条件の違う execution の
+#:   開始の記録も残る。
+#:
+#: 分類表に無い理由は再開の根拠にしない（``chain_reason_unclassified``）。
+CHAIN_REASONS_REWRITTEN_BY_RESUME = frozenset({
+    "latest_publication_invalid", "publication_has_no_execution_chain",
+    "latest_execution_binding_failed", "latest_start_record_missing_or_differs",
+    "latest_execution_seal_missing_or_differs", "prior_executions_differ_from_records",
+    "pair_census_inconsistent", "pair_status_not_decided", "pair_target_identity_differs",
+    "pair_status_path_differs_from_target", "executed_pair_not_produced_by_latest_execution",
+    "reused_pair_produced_by_latest_execution", "reused_pair_evidence_differs",
+})
+CHAIN_REASONS_FROM_EVIDENCE = frozenset({
+    "unrecognised_execution_record", "execution_has_no_start_record", "execution_record_damaged",
+    "sealed_execution_invalid", "execution_conditions_differ",
+    "pair_status_not_attributed_to_an_execution", "execution_nonce_issued_more_than_once",
+    "producing_execution_has_no_start_record",
+})
+#: どちらの側が違うかで変わる: pair の binary の sha と publication の build receipt が食い違う。
+#: status の側が違えば期待した target と一致せず再実行で直り、build receipt の側が違えば
+#: （#279）status は再利用されて残る。どちらとも確定できないので再開の根拠にしない。
+CHAIN_REASONS_DEPEND_ON_INPUTS = frozenset({"binary_sha_differs_from_build_receipt"})
+#: 読めなかった（判定できない）。
+CHAIN_REASONS_UNOBSERVED = frozenset({"execution_records_unreadable"})
+CHAIN_REASON_KINDS = (("rewritten", CHAIN_REASONS_REWRITTEN_BY_RESUME),
+                      ("evidence", CHAIN_REASONS_FROM_EVIDENCE),
+                      ("inputs", CHAIN_REASONS_DEPEND_ON_INPUTS),
+                      ("unobserved", CHAIN_REASONS_UNOBSERVED))
+
+
+def classify_chain_reasons(reasons: Iterable[str]) -> Dict[str, list]:
+    """検証器の OPEN の理由を ``CHAIN_REASON_KINDS`` の種類と ``unclassified`` に分ける。"""
+    result: Dict[str, list] = {kind: [] for kind, _codes in CHAIN_REASON_KINDS}
+    result["unclassified"] = []
+    for reason in sorted(set(reasons)):
+        kind = next((k for k, codes in CHAIN_REASON_KINDS if reason in codes), "unclassified")
+        result[kind].append(reason)
+    return result
+
 
 #: completion が必ず実施する検査（実施した ``done`` か、該当しない理由付きの ``not_applicable``）。
 #: どれかが欠けた応答は受理しない: 呼び出し側が特別な経路で検査を省略できないようにする。

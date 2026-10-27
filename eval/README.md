@@ -81,9 +81,9 @@ launch（`start` 1 回）の記録は、次の順に 1 つずつ確定し、上�
 
 | 分類 | 意味 | 例 |
 |---|---|---|
-| resumable | 同じ条件で runner を再び動かせば進む | 出力先が無い、連鎖が OPEN、full verdict が無い、最新の execution の commit が HEAD と照合できない |
+| resumable | 同じ条件で runner を再び動かせば進む | 出力先が無い、連鎖が OPEN で理由がすべて次の execution が書き直すもの、full verdict が無い、最新の execution の commit が HEAD と照合できない |
 | blocking | この評価への運用の操作（`stop`）が先に要る。操作の後は続けられる | 未完了の launch、評価の container が残っている |
-| permanent | この評価は正式な完了に到達できない | wrapper の外で container が消され終了を観測できなかった launch、別の条件で動いた execution |
+| permanent | この評価は正式な完了に到達できない | wrapper の外で container が消され終了を観測できなかった launch、別の条件で動いた execution・launch、どの execution も書き直さない確定した証跡による連鎖の OPEN |
 | unverifiable | 判定できない | 記録の破損、読み取りの失敗、container の状態を観測できない |
 
 `start` は、COMPLETE なら何もしない。permanent・blocking・unverifiable（または未知の分類）が
@@ -118,6 +118,16 @@ valid な meta だけを使う。
 （終了の記録の前に失われても後に失われても同じ）。launch が記録する execution は、実行中の観測
 （`watch.jsonl` の `executions`）と終了の時点の分類の和なので、実行中に見た execution が消えれば
 記録との対応の検査も破損を報告する。
+
+**連鎖の OPEN の分け方**: 検証器（`verify_execution_chain`）の判定はそのまま使い、OPEN の理由を
+`protocol.CHAIN_REASON_KINDS` で分ける。次の execution は top level の manifest・publication・
+receipt・seal を書き直し、`pair_status_file_skip_decision` が SKIP と言わない pair（未決定・壊れた・
+別の target）を再実行するので、それらに由来する理由（`chain_open`）は再開で直る。execution の記録は
+消えず、再利用の判定は帰属と build receipt を見ないので、帰属できない status・同じ nonce の issue・
+開始の条件の違う execution・開始の記録の無い issue などに由来する理由は再開しても残る
+（`chain_blocked_by_evidence`、permanent。全件の処理を再開しない）。binary と build receipt の食い違い
+は、どちらの側が違うかで直るかが変わるので判定できない（`chain_inputs_disagree`）。分類表に無い理由も
+再開の根拠にしない（`chain_reason_unclassified`）。
 
 **reader の応答の受理**: 読み取り専用の container の応答（完了の判定・launch の証拠・検証器・summary）は、
 要求ごとの終了コードと応答の形の **両方** を満たすときだけ受理する。非 0 終了の正しい JSON も、0 終了の

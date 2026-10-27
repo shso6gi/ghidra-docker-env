@@ -623,8 +623,27 @@ def completion(repo: Path, out: Path, wrapper: Path, matrix: str) -> Dict[str, A
     if verify is None:
         reason("verify_failed", f"execution_chain verify failed: {verify_error}")
     elif verify.get("verdict") != "CLOSED_SAME_IDENTITY":
-        reason("chain_open", "execution chain is OPEN: "
-               + ", ".join(verify.get("reasons") or {}))
+        # OPEN を一律に「再開すれば進む」としない: 理由ごとに、次の execution が書き直すか、
+        # 確定した証跡が残るかを protocol の分類表で分ける（検証器の判定はそのまま使う）。
+        kinds = protocol.classify_chain_reasons(verify.get("reasons") or {})
+        result["chain_reason_kinds"] = kinds
+        if kinds["evidence"]:
+            reason("chain_blocked_by_evidence", "execution chain is OPEN because of committed "
+                   "evidence that no later execution rewrites: " + ", ".join(kinds["evidence"]))
+        if kinds["inputs"]:
+            reason("chain_inputs_disagree", "a pair's binaries and the published build receipts "
+                   "disagree; whether a resume re-runs the pair depends on which side is wrong: "
+                   + ", ".join(kinds["inputs"]))
+        if kinds["unobserved"]:
+            reason("verify_failed", "execution chain records unreadable: "
+                   + ", ".join(kinds["unobserved"]))
+        if kinds["unclassified"]:
+            reason("chain_reason_unclassified", "execution chain is OPEN for reasons this "
+                   "wrapper has not classified: " + ", ".join(kinds["unclassified"]))
+        if kinds["rewritten"]:
+            reason("chain_open", "execution chain is OPEN: " + ", ".join(kinds["rewritten"]))
+        if not any(kinds.values()):
+            reason("chain_reason_unclassified", "execution chain is OPEN without a reason")
     done("chain")
     try:
         fingerprints = start_record_fingerprints(out)
