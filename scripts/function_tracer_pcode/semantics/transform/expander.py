@@ -15,6 +15,7 @@ from scripts.function_tracer_pcode.core import (
     ExpansionBudgetTruncation,
     PcodeOpRef,
 )
+from scripts.function_tracer_pcode.core.structural import structural_sort_key
 from scripts.function_tracer_pcode.core.intrinsics import resolve_pcode_intrinsic
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
 from scripts.function_tracer_pcode.core.deadline import hot_checkpoint as deadline_hot_checkpoint
@@ -216,7 +217,8 @@ class ExpressionExpander(MultiequalExpansionMixin, CallExpansionMixin, Canonical
             flattened: List[Expression] = []
             self._collect_commutative_operands(expr, expr.operator, flattened)
             operand_sigs = sorted(
-                self._expansion_expression_signature(operand) for operand in flattened
+                (self._expansion_expression_signature(operand) for operand in flattened),
+                key=structural_sort_key,
             )
             return (
                 "commutative",

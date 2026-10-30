@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.core import (
     LocationBaseRef,
     expression_key_safe,
 )
+from scripts.function_tracer_pcode.core.structural import structural_sort_key
 from scripts.function_tracer_pcode.analysis.effects._shared import (
     ConditionSimplifier,
 )
@@ -117,7 +118,9 @@ def _impl__additive_signature(expr: Optional[Expression]) -> Optional[Tuple[int,
 
     if modulus is not None:
         const_value %= modulus
-    terms = tuple(sorted((key, coeff) for key, coeff in term_counts.items() if coeff))
+    terms = tuple(sorted(
+        ((key, coeff) for key, coeff in term_counts.items() if coeff), key=structural_sort_key
+    ))
     return const_value, terms, bit_width
 
 

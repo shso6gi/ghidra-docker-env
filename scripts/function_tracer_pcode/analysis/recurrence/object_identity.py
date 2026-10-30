@@ -11,7 +11,7 @@ from scripts.function_tracer_pcode.core import (
     ReturnInfo,
     StorageInfo,
 )
-from scripts.function_tracer_pcode.core.structural import unidentified_identity
+from scripts.function_tracer_pcode.core.structural import structural_sort_key, unidentified_identity
 from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     ConditionNormalizer,
     CountedLoopAccumulator,
@@ -674,7 +674,9 @@ def _impl__canonicalize_expression(self, expr: Optional[Expression]) -> Optional
             "BOOL_XOR",
             "INT_EQUAL",
             "INT_NOTEQUAL",
-        } and _runtime_expression_signature(right) < _runtime_expression_signature(left):
+        } and structural_sort_key(_runtime_expression_signature(right)) < structural_sort_key(
+            _runtime_expression_signature(left)
+        ):
             left, right = right, left
         if left is expr.operands[0] and right is expr.operands[1]:
             return expr

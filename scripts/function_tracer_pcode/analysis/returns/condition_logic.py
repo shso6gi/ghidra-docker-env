@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple, cast
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.errors import AnalysisLimitation
+from scripts.function_tracer_pcode.core.structural import structural_sort_key
 from scripts.function_tracer_pcode.analysis.returns._shared import (
     ConditionNormalizer,
     ConditionSMTOracle,
@@ -466,7 +467,7 @@ class ConditionLogicService:
             ConditionNormalizer.normalize_for_contradiction(condition)
             for condition in (conditions or [])
         ]
-        parts.sort()
+        parts.sort(key=structural_sort_key)
         return tuple(parts)
 
     def condition_sets_are_complementary(
