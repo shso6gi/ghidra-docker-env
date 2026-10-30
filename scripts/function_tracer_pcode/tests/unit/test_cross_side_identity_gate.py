@@ -1608,6 +1608,9 @@ def test_the_rewrite_proof_falls_back_to_the_solver_when_the_pair_is_not_certifi
     right = _raw("g", [_d("m", 0), _d("n", 1)], _p("n", 1))
     monkeypatch.setattr(rewrite, "_build_rewrite_candidate", lambda expr, _settings: expr.clone_with())
     monkeypatch.setattr(rewrite, "value_identity", lambda expr: id(expr))
+    # 前提「書き換えが描画を変えた」（証明の経路へ進む）を明示する。以前は未公開の複製の描画が失敗して
+    # 別の形の鍵へ落ちることで偶然に成り立っていた（Issue #281: 鍵は公開を要求しない描画で取る）
+    monkeypatch.setattr(rewrite, "_exact_expr_key", lambda expr: id(expr))
     monkeypatch.setattr(rewrite, "_prove_rewrite", lambda *_a, **_k: object())
     monkeypatch.setattr(rewrite, "build_pair_query", lambda *_a, **_k: "(check-sat)")
     solved = []
