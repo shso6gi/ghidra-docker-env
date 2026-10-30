@@ -20,6 +20,7 @@ from typing import (
 )
 
 from scripts.function_tracer_pcode.core.evidence_authority import record_function_unary_evidence
+from scripts.function_tracer_pcode.core.operand_derivation import OperandDerivationRefused
 from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     Condition,
@@ -511,10 +512,17 @@ class BoundedCallRefiner:
 
         results: List[ExpressionExpansion] = []
         for operands, extra_conditions, state_callees in states[: self.max_cases]:
-            rebuilt = self._clone_expression_with_operands(expr, operands)
             merged_conditions = ConditionSimplifier.simplify_conditions(extra_conditions)
             if ConditionSimplifier.is_contradiction(merged_conditions):
                 continue
+            try:
+                rebuilt = expr.derive_with_operands(operands)
+            except OperandDerivationRefused as refusal:
+                # Issue #281: 候補の一部だけを捨てない。ref を保てない派生が 1 つでもあれば、この node の
+                # 展開をまるごとあきらめ、元の式（producer が作った、ref と operand が整合した値。展開しない
+                # ときに使う値と同じ）に戻る。他の候補だけを残すと、拒否した候補の値が黙って消える
+                self._record_operand_derivation_refusal(analysis, refusal)
+                return [_unexpanded(expr)]
             results.append(
                 ExpressionExpansion(rebuilt, merged_conditions, state_callees)
             )
@@ -947,25 +955,16 @@ class BoundedCallRefiner:
             return (analysis.deferred_calls or {}).get(deferred_key)
         return None
 
-    def _clone_expression_with_operands(
+    def _record_operand_derivation_refusal(
         self,
-        expr: Expression,
-        operands: Sequence[Expression],
-    ) -> Expression:
-        cloned = Expression(
-            expr.expr_type,
-            value=expr.value,
-            operator=expr.operator,
-            operands=list(operands),
-            size=expr.size,
-            name=expr.name,
-            data_type=expr.data_type,
-            data_type_obj=getattr(expr, "data_type_obj", None),
-            storage_info=expr.storage_info,
-            read_order_key=getattr(expr, "read_order_key", None),
-            runtime_ref=getattr(expr, "runtime_ref", None),
+        analysis: Optional[FunctionReturnAnalysis],
+        refusal: OperandDerivationRefused,
+    ) -> None:
+        self._record_note(
+            analysis,
+            f"bounded_call_refinement_operand_derivation_refused:{refusal.reason}:{refusal.ref_type}",
         )
-        return cloned
+        self._debug(f"Kept an unexpanded node: {refusal}")
 
     def _deduplicate_condition_sets(
         self,

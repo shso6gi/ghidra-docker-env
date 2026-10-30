@@ -385,7 +385,19 @@ class Expression:
         if not fields:
             return self
         return self.clone_with(**fields)
-    
+
+    def derive_with_operands(self, operands: List['Expression']) -> 'Expression':
+        """operand だけを差し替えた **新しい式** を返す（Issue #281）。元の式は変えない。
+
+        field と runtime ref の扱い（保つ・無効化・拒否）は `core/operand_derivation.py` が
+        唯一の owner。ref を正しく保てなければ `OperandDerivationRefused` を投げる。
+        operand がすべて同じ object なら自分を返す。
+        """
+
+        from scripts.function_tracer_pcode.core.operand_derivation import derive_with_operands
+
+        return derive_with_operands(self, operands)
+
     @classmethod
     def set_constant_format(cls, fmt: str, threshold: int = 256):
         """定数の表示形式を設定"""
