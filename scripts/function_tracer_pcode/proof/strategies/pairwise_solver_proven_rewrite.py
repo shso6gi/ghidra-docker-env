@@ -372,7 +372,7 @@ def _apply_solver_proven_candidate_rewrites(expr: Expression) -> Expression:
         "INT_EQUAL",
         "INT_NOTEQUAL",
     }:
-        ordered = sorted([left, right], key=_exact_expr_key)
+        ordered = _order_commutative_operands(left, right)
         if ordered[0] is not left or ordered[1] is not right:
             return Expression(
                 ExpressionType.BINARY_OP,
@@ -463,26 +463,48 @@ def _same_operand(left: Expression, right: Expression) -> bool:
 
 
 def _exact_expr_key(expr: Expression) -> str:
-    """描画した文字列（**並べる順と、書き換えが描画を変えたかの検出だけ**。一致の判定・identity に使わない）。
+    """描画した文字列（**公開済みの式の、書き換えが描画を変えたかの検出だけ**。一致の判定・identity に使わない）。
 
-    並べた結果は書き換えの候補で、`_prove_rewrite` が元の式との等しさを solver で証明する。描画を
-    変えない書き換えは元の式のまま使う。operand の一致は `_exprs_match`（値の identity）が決める
-    （#218 PR-D。名前は broad except の baseline の key なので変えない）。
+    書き換えが描画を変えたら `_prove_rewrite` が元の式との等しさを solver で証明し、変えていなければ元の式を
+    使う（どちらに外れても、証明の無い書き換えは使わない）。operand の一致は `_exprs_match`（値の identity）が
+    決める（#218 PR-D。名前は broad except の baseline の key なので変えない）。
 
-    描画は solver へ渡さない証拠・表示用の入口（`render_expression_smt_evidence`）で行う。鍵を取るのは
-    候補を組み立てている途中（`_apply_solver_proven_candidate_rewrites` が作り直した子は公開点の前）なので、
-    公開を要求する `to_smt` では未公開の入力として内部バグになる（Issue #281 の V281 で観測）。公開済みの
-    入力に対する文字列は `to_smt` と同じなので、並べる順と変化の検出は変わらない。solver へ渡す論理式は
-    従来どおり公開した候補から `_prove_rewrite` が作る。
+    入力は公開済みの候補と元の式（とその部分式）だけで、solver へ渡す描画（`to_smt`）とその出力予算の契約を
+    そのまま使う: 予算を超えれば限界として台帳に残る（その候補は solver へも渡せない）。組み立て途中の
+    未公開の node を並べる鍵は `_construction_order_key`（Issue #281）。
     """
 
     try:
-        return render_expression_smt_evidence(expr, float_mode="fp")
+        return expr.to_smt(float_mode="fp")
     except Exception:
         structural_key = getattr(expr, "structural_key", None)
         if callable(structural_key):
             return repr(structural_key(budget=256))
         return repr(expr)
+
+
+def _construction_order_key(expr: Expression) -> str:
+    """候補を組み立てている途中で、可換演算の 2 項を並べる鍵（Issue #281）。
+
+    並べる対象は `_apply_solver_proven_candidate_rewrites` が作り直した **未公開** の node を含むので、
+    公開を要求する `to_smt` は使えない（未公開の入力として内部バグになる。V281 で観測）。描画は solver へ
+    渡さない入口（`render_expression_smt_evidence`）で行い、公開済みの入力では `to_smt` と同じ文字列なので
+    並べる順は従来と変わらない。
+
+    出力予算（`render_bytes`）はここへ当てない: 予算の owner は solver へ渡す描画だけで、それ以外へ渡すことは
+    禁じている（`test_architecture_boundaries` の 2 つの契約）。予算は、並べた候補を solver の描画へ通す
+    ところで掛かる（変化の検出の `_exact_expr_key` と `_prove_rewrite`。部分式の描画が予算を超える候補は
+    そこで限界として台帳に残る）。描画の費用の大半は出力でなく計画で、出力の上限を当てても時間・メモリは
+    減らない（PR #283 の計測。並べ替えの鍵は修正前も各可換 node で部分式を描画していた）。
+    """
+
+    return render_expression_smt_evidence(expr, float_mode="fp")
+
+
+def _order_commutative_operands(left: Expression, right: Expression) -> list:
+    """可換演算の 2 項を描画の順に並べる（`sorted` と同じ安定な順: 等しければ元の順）。"""
+
+    return [right, left] if _construction_order_key(right) < _construction_order_key(left) else [left, right]
 
 
 def _prove_rewrite(

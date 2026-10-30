@@ -563,6 +563,50 @@ def test_build_rewrite_candidate_reorders_nested_commuted_operands_without_inter
     assert rewritten_commuted.to_smt() == rewritten_canonical.to_smt()
 
 
+def _wide_sum(count: int) -> Expression:
+    expr = _param("param_1")
+    for index in range(count):
+        expr = Expression.binary_op("INT_ADD", expr, _const(index + 3))
+    return expr
+
+
+def test_construction_order_key_matches_the_solver_rendering_for_published_input():
+    """Issue #281: 組み立て途中の鍵は、公開済みの入力では `to_smt` と同じ文字列（並べる順は従来どおり）。"""
+
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_solver_proven_rewrite import (
+        _construction_order_key,
+    )
+
+    expr = published(Expression.binary_op("INT_ADD", _param("param_2"), _const(7)))
+    assert _construction_order_key(expr) == expr.to_smt(float_mode="fp")
+
+
+def test_change_detection_keeps_the_solver_render_budget_contract():
+    """公開済みの式の変化の検出は `to_smt`（予算を超えれば限界として台帳に残る。修正前と同じ契約）。"""
+
+    from scripts.function_tracer_pcode.core.budget_policy import BudgetPolicy, budget_policy_scope
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope, pending_pair_failure
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_solver_proven_rewrite import _exact_expr_key
+
+    wide = published(_wide_sum(64))
+    limit = len(wide.to_smt(float_mode="fp")) // 2
+    with pair_failure_scope("issue-281-change-budget", "session"), budget_policy_scope(BudgetPolicy(render_bytes=limit)):
+        _exact_expr_key(wide)
+        pending = pending_pair_failure()
+    assert pending is not None
+    assert "render_bytes" in repr(pending)
+
+
+def test_a_reorder_only_rewrite_is_detected_as_a_change_and_goes_to_the_proof():
+    """並べ替えだけの書き換えも描画が変わる（`changed`）ので `_prove_rewrite` の証明（receipt）を通る。"""
+
+    from scripts.function_tracer_pcode.proof.strategies import pairwise_solver_proven_rewrite as rewrite
+
+    original = published(Expression.binary_op("INT_ADD", _param("param_2"), _param("param_1")))
+    candidate = _build_rewrite_candidate(original, NormalizationSettings.safe())
+    assert rewrite._exact_expr_key(candidate) != rewrite._exact_expr_key(original)
+
+
 def test_build_rewrite_candidate_collapses_division_remainder_expansion():
     a = _param("param_1")
     b = _param("param_2")
