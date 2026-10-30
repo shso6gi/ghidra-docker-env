@@ -199,7 +199,15 @@ def _address_resolver():
     return holder
 
 
-@pytest.mark.parametrize("name,opcode,arity", [("PTRADD", PTRADD_OPCODE, 3), ("PTRSUB", PTRSUB_OPCODE, 2)])
+@pytest.mark.parametrize(
+    "name,opcode,arity",
+    [
+        ("PTRADD", PTRADD_OPCODE, 3),
+        ("PTRSUB", PTRSUB_OPCODE, 2),
+        # opcode の無い PTRADD も production に居る（consumer は名前でも見分ける）
+        ("PTRADD", None, 3),
+    ],
+)
 def test_pointer_address_ref_is_invalidated_and_resolution_follows_the_operands(name, opcode, arity):
     old_operands = [_const(0x1000), _const(2), _const(4)][:arity]
     new_operands = [_const(0x2000), _const(2), _const(4)][:arity]

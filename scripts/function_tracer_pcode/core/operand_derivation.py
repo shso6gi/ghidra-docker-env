@@ -100,9 +100,9 @@ def _keep(expr: Expression, operands: Sequence[Expression]) -> Any:
 
 
 def _address_value(expr: Expression, operands: Sequence[Expression]) -> Any:
-    if expr.expr_type is ExpressionType.INTRINSIC and getattr(expr, "opcode", None) in (
-        PTRADD_OPCODE,
-        PTRSUB_OPCODE,
+    # PTRADD / PTRSUB の見分け方は consumer（`_resolve_concrete_address_offset`）と同じ: opcode か名前
+    if expr.expr_type is ExpressionType.INTRINSIC and (
+        getattr(expr, "opcode", None) in (PTRADD_OPCODE, PTRSUB_OPCODE) or expr.name in ("PTRADD", "PTRSUB")
     ):
         return None
     return _refuse_operand_dependent(expr, operands)
