@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
+from scripts.function_tracer_pcode.core.operand_derivation import OperandDerivationRefused
 from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     CanonicalLocation,
@@ -744,15 +745,32 @@ def _impl_summarize_store_effects(
                                 callee_summary.parameter_refs,
                                 substitution_args,
                             )
-                            substituted_value = substitute_expression(effect.value, substitutions, parameters)
+                            try:
+                                substituted_value = substitute_expression(effect.value, substitutions, parameters)
+                                substituted_conditions = [
+                                    substitute_condition(cond, substitutions, parameters)
+                                    for cond in effect.conditions
+                                ]
+                            except OperandDerivationRefused:
+                                # Issue #281: 引数へ置き換えた派生が ref を保てない。callee の元の値は caller の
+                                # 文脈では別の値なので使えない。location が置き換えられないときと同じく、この
+                                # 呼び出しを effect の分からない呼び出しにする（summary は不完全になる）
+                                has_unsupported_call = True
+                                unsupported_call_sites.append(
+                                    _unsupported_call_effect_ref(
+                                        op,
+                                        target_ref=target_ref,
+                                        target_expr=target_expr,
+                                        arguments=variant_args,
+                                        path_conditions=active_conditions,
+                                        reason="substituted_effect_value_derivation_refused",
+                                    )
+                                )
+                                continue
                             substituted_value = _reduce_expression_under_conditions(
                                 substituted_value,
                                 active_conditions,
                             )
-                            substituted_conditions = [
-                                substitute_condition(cond, substitutions, parameters)
-                                for cond in effect.conditions
-                            ]
                             substituted_conditions = _reduce_conditions_under_context(
                                 substituted_conditions,
                                 active_conditions,

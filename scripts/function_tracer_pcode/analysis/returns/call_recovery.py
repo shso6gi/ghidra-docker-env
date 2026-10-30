@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, cast
 from dataclasses import replace
+from scripts.function_tracer_pcode.core.operand_derivation import OperandDerivationRefused
 from scripts.function_tracer_pcode.core.stage_clock import stage_region
 from scripts.function_tracer_pcode.core.analysis import (
     DeferredCallInfo,
@@ -1672,7 +1673,16 @@ def _impl__resolve_call_expansions(
         )
         return None
 
-    specialized = analysis if already_specialized else self._specialize_call_analysis(analysis, args)
+    if already_specialized:
+        specialized = analysis
+    else:
+        try:
+            specialized = self._specialize_call_analysis(analysis, args)
+        except OperandDerivationRefused as refusal:
+            # Issue #281: 引数へ置き換えた派生が ref を保てない。callee の元の式は caller の文脈では別の値
+            # なので、その node だけを戻せない。この呼び出しの展開をまるごとやめる（上の None と同じ扱い）
+            self._debug_print(f"Call expansion skipped for '{target_label}': {refusal}")
+            return None
     if specialized.deferred_calls:
         # bounded refinement の marker は specialized 自身へ載る（呼び出し元 session
         # には混ぜない）。下の callee_analysis marker がそれを参照 ID で拾う。
@@ -1878,7 +1888,13 @@ def _impl__resolve_local_code_target_expansions(
     tracer.record_deferred_call = self._make_deferred_call_recorder(containing)
     expanded = self._expand_linear_code_target(addr, tracer, containing)
     if expanded:
-        expanded = self._specialize_local_target_expansions(expanded, tracer, args)
+        try:
+            expanded = self._specialize_local_target_expansions(expanded, tracer, args)
+        except OperandDerivationRefused as refusal:
+            # Issue #281: 引数へ置き換えた派生が ref を保てない。置き換え前の値は callee の parameter を
+            # 指すので使えない: 展開をまるごとやめる（他の失敗と同じく None を cache する）
+            self._debug_print(f"Local target expansion skipped: {refusal}")
+            expanded = None
     self._local_target_cache[cache_key] = expanded
     return expanded
 

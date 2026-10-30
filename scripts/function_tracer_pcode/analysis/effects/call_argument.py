@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 import re
 from itertools import product
+from scripts.function_tracer_pcode.core.operand_derivation import OperandDerivationRefused
 from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     CanonicalLocation,
@@ -2794,7 +2795,12 @@ def _impl__apply_condition_parameter_replacements(
 
     current = expr
     for _ in range(4):
-        rewritten = substitute_expression(current, replacements, parameters)
+        try:
+            rewritten = substitute_expression(current, replacements, parameters)
+        except OperandDerivationRefused:
+            # Issue #281: 同じ文脈（caller の parameter を条件の下で等しい値へ置き換える）なので、置き換える
+            # 前の式はそのまま正しい値。置き換えをここで止める
+            break
         if _expressions_equivalent(rewritten, current):
             break
         current = rewritten

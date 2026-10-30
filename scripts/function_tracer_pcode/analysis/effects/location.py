@@ -28,7 +28,6 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _callee_location_base_matches_ref,
     _canonicalize_address_expression,
     _canonicalize_expression_for_effect_value_identity,
-    _clone_expression_with_operands,
     _coerce_callee_parameter_refs,
     _coerce_storage_info,
     _collect_definite_active_effects,
@@ -596,7 +595,10 @@ def _impl_substitute_expression(
         new_operands = [substitute_expression(op, replacements, parameters) for op in expr.operands]
         if all(new is old for new, old in zip(new_operands, expr.operands)):
             return _simplify_substituted_expression(expr, parameters)
-        rebuilt = _clone_expression_with_operands(expr, new_operands)
+        # Issue #281: field と runtime ref の扱いは `derive_with_operands` が決める。ref を保てなければ
+        # `OperandDerivationRefused` が上がる。callee の元の node は caller の文脈では別の値なので、ここで
+        # 元の node に戻してはいけない: 境界（呼び出しの展開・effect の置き換え）が展開をまるごとやめる
+        rebuilt = expr.derive_with_operands(new_operands)
         return _simplify_substituted_expression(rebuilt, parameters)
 
     if expr.expr_type == ExpressionType.PHI and expr.value:

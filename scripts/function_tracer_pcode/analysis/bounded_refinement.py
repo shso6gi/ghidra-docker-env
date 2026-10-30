@@ -604,6 +604,23 @@ class BoundedCallRefiner:
         fuel: int,
         trail: Set[Tuple[object, ...]],
     ) -> List[ExpressionExpansion]:
+        try:
+            return self._expand_deferred_call_candidates(deferred, caller_analysis, fuel, trail)
+        except OperandDerivationRefused as refusal:
+            # Issue #281: callee の式を caller の引数へ置き換える派生が ref を保てない。callee の元の式は
+            # caller の文脈では別の値（callee の parameter を指す）なので、その node だけを元に戻すことは
+            # できない。候補の一部だけを捨てると、その target の値が黙って消える。呼び出しの展開を
+            # まるごとやめ、呼び出し側は展開しない deferred call（`_unexpanded`）を使う
+            self._record_operand_derivation_refusal(caller_analysis, refusal)
+            return []
+
+    def _expand_deferred_call_candidates(
+        self,
+        deferred: DeferredCallInfo,
+        caller_analysis: FunctionReturnAnalysis,
+        fuel: int,
+        trail: Set[Tuple[object, ...]],
+    ) -> List[ExpressionExpansion]:
         results: List[ExpressionExpansion] = []
         candidates = self._resolve_deferred_call_candidates(
             deferred
@@ -618,6 +635,15 @@ class BoundedCallRefiner:
 
         had_alignment_failure = False
         had_return_expansion = False
+        # 展開の evidence は、呼び出しの展開がまるごと確定してから記録する（後の候補の派生が拒否されたら
+        # 展開ごと使わないので、先に記録した evidence が使われない展開を指してしまう。Issue #281）
+        pending_evidence: List[Dict[str, Any]] = []
+
+        def _flush_pending_evidence() -> None:
+            for evidence in pending_evidence:
+                self._record_bounded_call_refinement_expansion_evidence(**evidence)
+            pending_evidence.clear()
+
         for _target_ref, target_conditions, callee_analysis in candidates:
             already_specialized = self._analysis_is_fully_argument_specialized(callee_analysis)
             if already_specialized:
@@ -719,22 +745,26 @@ class BoundedCallRefiner:
                             )
                         )
                         if len(results) >= self.max_cases:
+                            _flush_pending_evidence()
                             self._record_note(
                                 caller_analysis,
                                 "bounded_call_refinement_deferred_expanded",
                             )
                             return results[: self.max_cases]
             if candidate_result_count:
-                self._record_bounded_call_refinement_expansion_evidence(
-                    caller_analysis=caller_analysis,
-                    deferred=deferred,
-                    target_ref=_target_ref,
-                    target_conditions=target_conditions,
-                    callee_analysis=callee_analysis,
-                    aligned_arguments=aligned_arguments,
-                    result_count=candidate_result_count,
+                pending_evidence.append(
+                    dict(
+                        caller_analysis=caller_analysis,
+                        deferred=deferred,
+                        target_ref=_target_ref,
+                        target_conditions=target_conditions,
+                        callee_analysis=callee_analysis,
+                        aligned_arguments=aligned_arguments,
+                        result_count=candidate_result_count,
+                    )
                 )
 
+        _flush_pending_evidence()
         if results:
             self._record_note(caller_analysis, "bounded_call_refinement_deferred_expanded")
         elif had_alignment_failure:
