@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import certify_owner_free_identity
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
+from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.core.live_values import UndecidableComparison
 from scripts.function_tracer_pcode.core.structural import value_identity
@@ -467,10 +468,16 @@ def _exact_expr_key(expr: Expression) -> str:
     並べた結果は書き換えの候補で、`_prove_rewrite` が元の式との等しさを solver で証明する。描画を
     変えない書き換えは元の式のまま使う。operand の一致は `_exprs_match`（値の identity）が決める
     （#218 PR-D。名前は broad except の baseline の key なので変えない）。
+
+    描画は solver へ渡さない証拠・表示用の入口（`render_expression_smt_evidence`）で行う。鍵を取るのは
+    候補を組み立てている途中（`_apply_solver_proven_candidate_rewrites` が作り直した子は公開点の前）なので、
+    公開を要求する `to_smt` では未公開の入力として内部バグになる（Issue #281 の V281 で観測）。公開済みの
+    入力に対する文字列は `to_smt` と同じなので、並べる順と変化の検出は変わらない。solver へ渡す論理式は
+    従来どおり公開した候補から `_prove_rewrite` が作る。
     """
 
     try:
-        return expr.to_smt(float_mode="fp")
+        return render_expression_smt_evidence(expr, float_mode="fp")
     except Exception:
         structural_key = getattr(expr, "structural_key", None)
         if callable(structural_key):

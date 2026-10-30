@@ -534,6 +534,35 @@ def test_build_rewrite_candidate_canonicalizes_commuted_add_for_solver():
     assert published(rewritten_canonical).to_smt() == published(rewritten_commuted).to_smt()
 
 
+def test_build_rewrite_candidate_reorders_nested_commuted_operands_without_internal_bug():
+    """Issue #281: 作り直した子（公開点の前）を鍵にしても内部バグを記録しない。
+
+    `_apply_solver_proven_candidate_rewrites` は可換な子を並べ替えて作り直し、親の並べ替えで
+    その子の鍵を取る。鍵を `to_smt`（公開済みの入力だけを受ける）で取ると、未公開の
+    BINARY_OP として内部バグが台帳に残り、broad except が例外を握り潰しても pair が ERROR になる。
+    """
+
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope, pending_pair_failure
+
+    param1 = _param("param_1")
+    param2 = _param("param_2")
+    seven = _const(7)
+    nested_commuted = Expression.binary_op(
+        "INT_ADD", Expression.binary_op("INT_ADD", param2, param1), seven
+    )
+    nested_canonical = Expression.binary_op(
+        "INT_ADD", seven, Expression.binary_op("INT_ADD", param1, param2)
+    )
+
+    with pair_failure_scope("issue-281-nested", "session"):
+        rewritten_commuted = _build_rewrite_candidate(nested_commuted, NormalizationSettings.safe())
+        rewritten_canonical = _build_rewrite_candidate(nested_canonical, NormalizationSettings.safe())
+        assert pending_pair_failure() is None
+
+    assert rewritten_commuted.is_published
+    assert rewritten_commuted.to_smt() == rewritten_canonical.to_smt()
+
+
 def test_build_rewrite_candidate_collapses_division_remainder_expansion():
     a = _param("param_1")
     b = _param("param_2")
