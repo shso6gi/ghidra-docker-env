@@ -382,6 +382,10 @@ class Expression:
         精緻化した値は別の値なので、その完成を宣言できるのは作った側だけ。
         """
 
+        if "operands" in fields:
+            # operand の差し替えは field の書き足しではない: 写した runtime ref が新しい operand と
+            # 食い違い得る（Issue #281）。扱いの owner は `derive_with_operands` だけ
+            raise TypeError("derive_with does not replace operands; use derive_with_operands")
         if not fields:
             return self
         return self.clone_with(**fields)
