@@ -9,8 +9,8 @@ callee の戻り値を入れた値）。この契約の下で、node が持つ f
 扱い                       対象
 ========================  ==========================================================================
 保つ                       operand に依存しない field（`expr_type`・`opcode`・`operator`・`name`・
-                           `size`・`value`・型・`storage_info`・`read_order_key`・
-                           `call_argument_width_evidence`）。#281 は `opcode` を落としていた
+                           `size`・`value`・型・`read_order_key`・`call_argument_width_evidence`）。
+                           #281 は `opcode` を落としていた
 無効化する                 `_recurrence_semantic_key`（operand の key を含む）。PTRADD / PTRSUB の
                            `AddressValueRef`（operand から計算した値。consumer は ref が無ければ
                            operand から計算し直す。古い ref を残すと古い番地に解決される）
@@ -22,15 +22,34 @@ callee の戻り値を入れた値）。この契約の下で、node が持つ f
                            global の基底そのもの」という主張。operand が変われば主張が古く、core では
                            計算し直せない。落とすと location の照合が別の基底に化け、store と読み出しの
                            対応を失い得る）。表に無い ref（loop / readonly の要約など、中身が operand と
-                           同じ式）も拒否する
+                           同じ式）も拒否する。operand を持つ node の `storage_info`（「この値はこの
+                           register / stack に在る」という主張。tracer は引数の幅の adapter に
+                           `LocationBaseRef` と一緒に付ける）も同じ理由で拒否する:
+                           `_address_root_is_stack_frame` は途中の node の `storage_info` を読み、
+                           stack と言われれば store を観測不能とする
 ========================  ==========================================================================
 
-位置だけを持つ `ObservedMemoryReadRef`（`order_key` / `pcode_op_ref`）は load の位置なので保つ。
+位置だけを持つ `ObservedMemoryReadRef`（`order_key` / `pcode_op_ref`）は load の位置なので保つ。consumer は
+`order_key` を effect との順序と「観測した load」の印にだけ使い、`pcode_op_ref` から番地・location を
+導く consumer は無い（Issue #281 の review で production の読み手を棚卸しした）。番地は operand から読まれる。
 
-**番地が変わったかは、この module が自分で確かめる**（呼び出し側の申告を受け取らない）。同じ object、
-または予算の無い厳密な構造 identity（`exact_structural_identity`。識別できない部分を含めば何とも
-等しくならない）が等しいときだけ「変わらない」とする。確かめられなければ変わったとみなす（fail-closed）。
-identity の計算は式の lifecycle を進めない（構築中の operand を凍結しない）。
+**番地が変わったかは、この module が自分で確かめる**（呼び出し側の申告を受け取らない）。「変わらない」は
+**新しい番地の operand が元の operand と同じ object** のときだけで、そのとき MEMORY（operand は番地 1 つ）は
+派生せず元の式そのものを返す。それ以外は変わったとみなす（fail-closed）。
+
+構造の比較（`exact_structural_identity` など）を使わない理由: 番地を読む consumer は、番地の部分木の
+node の field のうち構造 key が見ないものを読む。VARIABLE / CONSTANT / PTRADD の `AddressValueRef`
+（`_resolve_concrete_address_offset` は ref を operand より先に読む。VARIABLE は ref だけが番地の値）、
+PARAMETER / VARIABLE / 値の node の `LocationBaseRef` と `storage_info`（基底と stack の判定）、
+入れ子の MEMORY の ref などで、既定の構造 key はこれらを持たない（Issue #281 の review: 同名の
+VARIABLE に `AddressValueRef(0x1000)` / `(0x2000)` が付いても等しい）。consumer が読む field を全部
+並べた identity は、consumer が増えるたびに足し忘れ得る。
+
+同じ object なら十分である理由: 使われる node の (ref, 番地の operand) の組は元の node の組と object
+として同じなので、その組から何を読む consumer も元の node と同じ答えを得る（ref は Expression を
+持たない frozen な値: `core/runtime_refs/locations.py`）。operand が構築中で後から書き換わっても、
+元と派生は同じ object を共有するので、派生が元より食い違うことは無い。費用: 番地を作り直したが値は
+同じ、という派生は拒否になる（元の式に戻るので意味は失わない）。V281 の probe で数える。
 
 拒否は `OperandDerivationRefused`（理由つき）。呼び出し側は派生をあきらめ、元の式（ref と operand が
 producer の作ったとおりに整合している値）を使う。拒否した派生の一部だけを捨ててはいけない（他の候補だけが
@@ -70,16 +89,7 @@ class OperandDerivationRefused(Exception):
 #: 拒否の理由（計測と test が参照する語彙）
 REFUSED_ADDRESS_CHANGED = "located_memory_ref_address_changed"
 REFUSED_OPERAND_DEPENDENT_REF = "operand_dependent_runtime_ref"
-
-
-def _same_operand(old: Expression, new: Expression) -> bool:
-    """`new` が `old` と同じ値か（同じ object、または予算の無い厳密な構造 identity が等しい）。"""
-
-    if new is old:
-        return True
-    from scripts.function_tracer_pcode.core.structural import exact_structural_identity
-
-    return exact_structural_identity(old) == exact_structural_identity(new)
+REFUSED_OPERAND_DEPENDENT_STORAGE = "operand_dependent_storage_info"
 
 
 def _observed_read_is_located(ref: ObservedMemoryReadRef) -> bool:
@@ -111,8 +121,8 @@ def _address_value(expr: Expression, operands: Sequence[Expression]) -> Any:
 def _bound_to_address(expr: Expression, operands: Sequence[Expression]) -> Any:
     if expr.expr_type is not ExpressionType.MEMORY or len(operands) != 1 or len(expr.operands) != 1:
         return _refuse_operand_dependent(expr, operands)
-    if _same_operand(expr.operands[0], operands[0]):
-        return _KEEP
+    # MEMORY の operand は番地 1 つなので、ここへ来たときは番地が同じ object ではない（同じなら
+    # `derive_with_operands` が元の式を返す）。同じ object 以外を「同じ番地」としない理由は module の docstring
     raise OperandDerivationRefused(
         REFUSED_ADDRESS_CHANGED,
         expr_type=expr.expr_type.name,
@@ -167,6 +177,13 @@ def derive_with_operands(expr: Expression, operands: Sequence[Expression]) -> Ex
         # PHI の子は operand ではなく value の枝（`Expression.phi` で作り直す）
         raise ValueError("derive_with_operands does not rebuild PHI branches")
 
+    if getattr(expr, "storage_info", None) is not None:
+        # ここへ来るのは operand のどれかが変わったとき（同じなら上で自分を返す）
+        raise OperandDerivationRefused(
+            REFUSED_OPERAND_DEPENDENT_STORAGE,
+            expr_type=expr.expr_type.name,
+            ref_type=type(getattr(expr, "runtime_ref", None)).__name__,
+        )
     runtime_ref = getattr(expr, "runtime_ref", None)
     handler = RUNTIME_REF_POLICY.get(type(runtime_ref), _refuse_operand_dependent)
     decided = handler(expr, new_operands)
@@ -180,7 +197,6 @@ def derive_with_operands(expr: Expression, operands: Sequence[Expression]) -> Ex
         name=expr.name,
         data_type=expr.data_type,
         data_type_obj=getattr(expr, "data_type_obj", None),
-        storage_info=expr.storage_info,
         read_order_key=expr.read_order_key,
         runtime_ref=derived_ref,
         opcode=getattr(expr, "opcode", None),

@@ -37,15 +37,18 @@ from scripts.function_tracer_pcode.core import (
     UnknownValueRef,
 )
 from scripts.function_tracer_pcode.core.intrinsics import PTRADD_OPCODE, PTRSUB_OPCODE
+from scripts.function_tracer_pcode.analysis.effects.location import _address_root_is_stack_frame
 from scripts.function_tracer_pcode.core.operand_derivation import (
     REFUSED_ADDRESS_CHANGED,
     REFUSED_OPERAND_DEPENDENT_REF,
+    REFUSED_OPERAND_DEPENDENT_STORAGE,
     RUNTIME_REF_POLICY,
     OperandDerivationRefused,
 )
 from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.core.structural import (
     StructuralKeyNotOrderable,
+    exact_structural_identity,
     expression_key,
     structural_sort_key,
     unidentified_identity,
@@ -147,7 +150,6 @@ def test_structural_sort_key_is_deterministic_across_processes():
 
 
 def test_derive_keeps_every_operand_independent_field():
-    storage = StorageInfo(is_register=True, register_name="x0", size=8)
     expr = Expression(
         ExpressionType.INTRINSIC,
         value=None,
@@ -156,14 +158,13 @@ def test_derive_keeps_every_operand_independent_field():
         size=8,
         name="PTRADD",
         data_type="long *",
-        storage_info=storage,
         read_order_key=7,
         opcode=PTRADD_OPCODE,
         call_argument_width_evidence=("evidence",),
     )
     derived = expr.derive_with_operands([_param("b"), _const(4), _const(8)])
     assert derived is not expr
-    for field in ("expr_type", "value", "operator", "size", "name", "data_type", "storage_info",
+    for field in ("expr_type", "value", "operator", "size", "name", "data_type",
                   "read_order_key", "opcode", "call_argument_width_evidence"):
         assert getattr(derived, field) == getattr(expr, field), field
     assert derived.operands[0].name == "b"
@@ -273,15 +274,56 @@ def test_located_memory_ref_refuses_a_changed_address(make_ref):
 
 
 @pytest.mark.parametrize("make_ref", LOCATED_MEMORY_REFS)
-def test_located_memory_ref_is_kept_when_the_address_is_structurally_the_same(make_ref):
+def test_located_memory_ref_is_kept_only_when_the_address_is_the_same_object(make_ref):
     ref = make_ref()
-    expr = Expression.memory(Expression.binary_op("INT_ADD", _param("n"), _const(8)), size=8, runtime_ref=ref)
-    same_address = Expression.binary_op("INT_ADD", _param("n"), _const(8))
-    assert same_address is not expr.operands[0]
-    derived = expr.derive_with_operands([same_address])
-    assert derived.runtime_ref is ref
-    # 確かめるのは API 自身: 呼び出し側から「番地は変わらない」と申告する経路は無い
-    assert not same_address.is_frozen
+    address = Expression.binary_op("INT_ADD", _param("n"), _const(8))
+    expr = Expression.memory(address, size=8, runtime_ref=ref)
+    # 正例: 番地が同じ object なら派生は起きず、ref と番地の組はそのまま
+    assert expr.derive_with_operands([address]) is expr
+    # 構造が同じでも別の object なら変わったとみなす（番地を読む consumer が読む field を構造 key が持たない
+    # ことがある: 下の test。値を失わない費用として拒否し、呼び出し側は元の式に戻る）
+    rebuilt = Expression.binary_op("INT_ADD", _param("n"), _const(8))
+    with pytest.raises(OperandDerivationRefused) as raised:
+        expr.derive_with_operands([rebuilt])
+    assert raised.value.reason == REFUSED_ADDRESS_CHANGED
+    # 確かめるのは API 自身: 呼び出し側から「番地は変わらない」と申告する経路は無く、operand も凍結しない
+    assert not rebuilt.is_frozen
+
+
+@pytest.mark.parametrize("make_ref", LOCATED_MEMORY_REFS)
+def test_located_memory_ref_refuses_an_address_that_differs_only_in_a_runtime_ref(make_ref):
+    """review の再現: 同名・同形の VARIABLE で `AddressValueRef` だけが違う番地。"""
+
+    def _global(offset):
+        return Expression.variable("g", size=8).clone_with(runtime_ref=AddressValueRef(address_offset=offset))
+
+    ref = make_ref()
+    old_address, new_address = _global(0x1000), _global(0x2000)
+    expr = Expression.memory(old_address, size=8, runtime_ref=ref)
+    # 番地を読む consumer は ref を読むので、2 つの番地は違う
+    resolver = _address_resolver()
+    assert resolver._resolve_concrete_address_offset(old_address) == 0x1000
+    assert resolver._resolve_concrete_address_offset(new_address) == 0x2000
+    # 負例（修正前の判定）: 既定の厳密な構造 identity は 2 つを等しいとし、古い location を残していた
+    assert exact_structural_identity(old_address) == exact_structural_identity(new_address)
+    with pytest.raises(OperandDerivationRefused) as raised:
+        expr.derive_with_operands([new_address])
+    assert raised.value.reason == REFUSED_ADDRESS_CHANGED
+
+
+def test_storage_info_on_a_value_node_is_refused():
+    """operand を持つ node の `storage_info` は「この値の在りか」の主張で、operand が変われば古い。"""
+
+    stack = StorageInfo(is_register=False, space_name="stack", offset=-16, size=8)
+    expr = Expression.unary_op("INT_ZEXT", _param("a", size=4)).clone_with(size=8, storage_info=stack)
+    replacement = Expression.binary_op("INT_ADD", _param("b", size=4), _const(4, size=4))
+    with pytest.raises(OperandDerivationRefused) as raised:
+        expr.derive_with_operands([replacement])
+    assert raised.value.reason == REFUSED_OPERAND_DEPENDENT_STORAGE
+    # 負例（写す複製）: 古い stack の主張が残り、新しい値の番地まで stack の frame と判定される
+    stale = expr.clone_with(operands=[replacement])
+    assert _address_root_is_stack_frame(stale) is True
+    assert _address_root_is_stack_frame(Expression.unary_op("INT_ZEXT", replacement)) is False
 
 
 def test_unidentifiable_address_counts_as_changed():
