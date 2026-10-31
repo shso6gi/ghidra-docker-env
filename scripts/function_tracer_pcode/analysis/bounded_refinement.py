@@ -695,7 +695,7 @@ class BoundedCallRefiner:
             # lowering していた。callee の effect の後の状態は caller の言葉で表せない（`call_boundary`）ので、
             # その読み出しは境界で拒否され、lowering は行わない
             site = CallSite.for_deferred_call(
-                deferred.deferred_call_ref,
+                deferred,
                 _analysis_entry_offset(caller_analysis),
             )
             timeline = CalleeTimeline.from_effect_summary(

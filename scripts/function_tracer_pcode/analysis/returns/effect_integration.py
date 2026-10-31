@@ -764,7 +764,9 @@ class EffectIntegrationService:
                 bound_parameter_values=callee_bound_parameter_values,
                 bound_parameter_storage_values=callee_bound_parameter_storage_values,
             )
-            callee_tracer.record_deferred_call = self.make_deferred_call_recorder(callee)
+            callee_tracer.record_deferred_call = self.make_deferred_call_recorder(
+                callee, program_order=getattr(callee_tracer, "program_order", None)
+            )
             callee_tracker = ConditionTracker(callee_tracer)
             callee_tracer.condition_tracker = callee_tracker
             from scripts.function_tracer_pcode.analysis.phi_resolver import PhiHandler

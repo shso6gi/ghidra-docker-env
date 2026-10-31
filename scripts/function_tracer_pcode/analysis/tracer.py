@@ -170,17 +170,24 @@ class PcodeTracer(CallRecoveryMixin, ParameterStorageMixin, AddressRefMixin):
                 return str(name)
         return None
 
+    def program_order(self):
+        """この関数の program point の順序（`core.program_order`）。CFG を読めなければ None。"""
+
+        if not hasattr(self, "_program_order_cache"):
+            from scripts.function_tracer_pcode.analysis.program_points import program_order_for_high_function
+
+            self._program_order_cache = program_order_for_high_function(self.high_function)
+        return self._program_order_cache
+
     def _get_op_order_key(self, pcode_op) -> Optional[int]:
-        """Return a comparable intra-address P-code op order, if available.
+        """op の program point の key（Issue #281 / #285）。分からなければ None。
 
-        This is intentionally narrower than ``PcodeOpRef.stable_key()``. Memory
-        read ordering and live-in checks need a monotonic integer order for
-        comparisons, not a structural identity tuple.
+        読み出し・書き込み・呼び出しの位置は、どれもこの key で比べる（`core.program_order`: 関数の CFG の
+        線形拡大）。以前の `SequenceNumber.getOrder()` は基本 block の中の位置で、block をまたいで比べられなかった。
         """
-        # 規則の実装は 1 つ: callee の読み出しを caller の呼び出し位置へ移す境界も同じ値を使う（Issue #281）
-        from scripts.function_tracer_pcode.analysis.effects.call_boundary import read_order_key_for_op
+        from scripts.function_tracer_pcode.analysis.program_points import op_program_key
 
-        return read_order_key_for_op(pcode_op)
+        return op_program_key(self.program_order(), pcode_op)
 
     def _clone_expression(self, expr: Optional[Expression]) -> Optional[Expression]:
         if expr is None:
@@ -747,6 +754,10 @@ class PcodeTracer(CallRecoveryMixin, ParameterStorageMixin, AddressRefMixin):
                 output = pcode_op.getOutput()
                 size = output.getSize() if output else 4
                 order_key = self._get_op_order_key(pcode_op)
+                if order_key is None and self.program_order() is not None:
+                    # 関数の順序はあるのに、この読み出しの位置が分からない: 順序の無い読み出しは出口の状態の
+                    # 読み出しと読まれる（Issue #281 / #285）ので、memory の値として出さない
+                    return Expression.unknown("memory_read_order_unavailable")
                 return Expression.memory(
                     addr,
                     size,

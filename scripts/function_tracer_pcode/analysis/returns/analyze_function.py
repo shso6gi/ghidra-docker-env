@@ -189,7 +189,9 @@ def _impl_analyze_function(
         bound_parameter_values=normalized_bound_parameter_values,
         bound_parameter_storage_values=normalized_bound_parameter_storage_values,
     )
-    tracer.record_deferred_call = self._make_deferred_call_recorder(function)
+    tracer.record_deferred_call = self._make_deferred_call_recorder(
+        function, program_order=getattr(tracer, "program_order", None)
+    )
     condition_tracker = ConditionTracker(tracer)
     tracer.condition_tracker = condition_tracker
     from scripts.function_tracer_pcode.analysis.phi_resolver import PhiHandler

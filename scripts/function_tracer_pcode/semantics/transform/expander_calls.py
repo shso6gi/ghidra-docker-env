@@ -230,7 +230,7 @@ class CallExpansionMixin:
                     resolved = self.call_resolver(
                         target_ref,
                         effective_args,
-                        call_site=CallSite.for_op(pcode_op),
+                        call_site=_call_site_for_op(self.tracer, pcode_op),
                     )
                     if not resolved:
                         if self.debug:
@@ -504,3 +504,13 @@ class CallExpansionMixin:
                 depth,
             )
         return resolved
+
+
+def _call_site_for_op(tracer, pcode_op) -> CallSite:
+    """呼び出しの op の位置（tracer の program point の key: Issue #281 / #285）。
+
+    順序の API を持たない tracer（test double）では位置は不明（callee の読み出しを移せず、境界が拒否する）。
+    """
+
+    get_order_key = getattr(tracer, "_get_op_order_key", None)
+    return CallSite(get_order_key(pcode_op) if callable(get_order_key) else None)

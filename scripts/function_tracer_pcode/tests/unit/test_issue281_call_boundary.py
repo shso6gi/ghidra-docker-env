@@ -27,7 +27,6 @@ from scripts.function_tracer_pcode.analysis.effects.call_boundary import (
     CalleeTimeline,
     import_callee_condition,
     import_callee_expression,
-    read_order_key_for_op,
 )
 from scripts.function_tracer_pcode.analysis.effects.location import substitute_expression
 from scripts.function_tracer_pcode.analysis.effects.models import EffectSummary, StoreEffect
@@ -163,6 +162,25 @@ def test_a_callee_write_before_the_read_is_refused():
 
     with pytest.raises(CallBoundaryRefused) as refused:
         import_callee_expression(_callee_read(), CallSite(3), _timeline(_callee_effect(order=1)))
+    assert refused.value.reason == REFUSED_CALLEE_WRITE_MAY_PRECEDE_READ
+
+
+def test_a_callee_read_before_every_callee_write_is_moved_even_in_the_return_context():
+    """`x = *p; *p = 0; return x;`: 読み出し（10）は callee の書き込み（20）より前。callee の入口の値なので移す。
+
+    順序つきの読み出しは自分の key で書き込みと比べる（読み出しと effect が同じ key: #285）。
+    """
+
+    moved = import_callee_expression(_callee_read(order=10), CallSite(3), _timeline(_callee_effect(order=20)))
+    assert moved.read_order_key == 3
+
+
+def test_an_untimed_callee_read_in_the_return_context_with_any_callee_write_is_refused():
+    """順序の無い読み出しは callee の出口の状態と読まれる: 書き込みが 1 つでもあれば入口の値ではない。"""
+
+    untimed = Expression.memory(_callee_pointer(), 4)
+    with pytest.raises(CallBoundaryRefused) as refused:
+        import_callee_expression(untimed, CallSite(3), _timeline(_callee_effect(order=20)))
     assert refused.value.reason == REFUSED_CALLEE_WRITE_MAY_PRECEDE_READ
 
 
@@ -328,13 +346,6 @@ def test_the_call_expansion_is_abandoned_when_the_boundary_refuses():
 # ---------------------------------------------------------------------------
 
 
-def test_the_call_site_order_uses_the_same_rule_as_the_tracer_read_order():
-    seqnum = SimpleNamespace(getOrder=lambda: 4)
-    op = SimpleNamespace(getSeqnum=lambda: seqnum)
-    assert read_order_key_for_op(op) == 4
-    assert CallSite.for_op(op).read_order_key == 4
-
-
 def _deferred_ref(caller_entry_offset, seq_order=4):
     return DeferredCallRef(
         caller_entry_offset=caller_entry_offset,
@@ -344,15 +355,43 @@ def _deferred_ref(caller_entry_offset, seq_order=4):
     )
 
 
-def test_a_deferred_call_of_the_caller_itself_has_a_known_site():
-    assert CallSite.for_deferred_call(_deferred_ref(0x4000), 0x4000).read_order_key == 4
+def _deferred_call(caller_entry_offset, call_site_order_key=4):
+    return DeferredCallInfo(
+        placeholder_name="call",
+        target_ref=CallTargetRef.from_name("callee"),
+        deferred_call_ref=_deferred_ref(caller_entry_offset),
+        call_site_order_key=call_site_order_key,
+    )
+
+
+def test_a_deferred_call_of_the_caller_itself_has_its_recorded_site():
+    """記録したときに caller の `ProgramOrder` で作った key を使う（op の `getOrder()` ではない）。"""
+
+    assert CallSite.for_deferred_call(_deferred_call(0x4000, call_site_order_key=(3 << 32) | 4), 0x4000).read_order_key == (
+        3 << 32
+    ) | 4
+    assert _deferred_call(0x4000).clone().call_site_order_key == 4
 
 
 @pytest.mark.parametrize("caller_entry", [0x5000, None], ids=["merged-from-a-callee", "caller-entry-unknown"])
 def test_a_deferred_call_merged_from_a_callee_has_an_unknown_site(caller_entry):
     """callee の展開から合流した deferred call の op は callee のもの: caller の時間軸での位置は分からない。"""
 
-    assert CallSite.for_deferred_call(_deferred_ref(0x4000), caller_entry).read_order_key is None
+    assert CallSite.for_deferred_call(_deferred_call(0x4000), caller_entry).read_order_key is None
+
+
+def test_a_deferred_call_recorded_without_an_order_has_an_unknown_site():
+    assert CallSite.for_deferred_call(_deferred_call(0x4000, call_site_order_key=None), 0x4000).read_order_key is None
+
+
+def test_the_recorder_keys_the_site_with_the_caller_program_order():
+    from scripts.function_tracer_pcode.core.program_order import ProgramOrder
+
+    order = ProgramOrder({0: [1], 1: []})
+    op_ref = PcodeOpRef(block_index=1, seq_order=2)
+    assert call_recovery._deferred_call_site_order_key(lambda: order, op_ref) == order.key(1, 2)
+    assert call_recovery._deferred_call_site_order_key(None, op_ref) is None
+    assert call_recovery._deferred_call_site_order_key(lambda: None, op_ref) is None
 
 
 def test_bounded_refinement_abandons_the_whole_expansion_when_one_candidate_cannot_be_moved():

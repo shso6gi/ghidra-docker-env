@@ -2215,7 +2215,9 @@ def _impl__analyze_return_value(
             resolve_callee_parameters=self._get_freshest_callee_parameters,
             read_memory_value=self._read_memory_value,
             image_base=self.program.getImageBase().getOffset(),
-            record_deferred_call=self._make_deferred_call_recorder(current_function),
+            record_deferred_call=self._make_deferred_call_recorder(
+                current_function, program_order=getattr(tracer, "program_order", None)
+            ),
             budget_sink=self._make_expansion_budget_sink(
                 surface="return_value",
                 owner_scope_key=self._current_analysis_scope_key,
@@ -2234,7 +2236,9 @@ def _impl__analyze_return_value(
             resolve_callee_parameters=self._get_freshest_callee_parameters,
             read_memory_value=self._read_memory_value,
             image_base=self.program.getImageBase().getOffset(),
-            record_deferred_call=self._make_deferred_call_recorder(current_function),
+            record_deferred_call=self._make_deferred_call_recorder(
+                current_function, program_order=getattr(tracer, "program_order", None)
+            ),
             budget_sink=self._make_expansion_budget_sink(
                 surface="return_value",
                 owner_scope_key=self._current_analysis_scope_key,

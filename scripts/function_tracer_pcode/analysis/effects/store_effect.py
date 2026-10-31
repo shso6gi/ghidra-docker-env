@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
 from scripts.function_tracer_pcode.core.operand_derivation import OperandDerivationRefused
+from scripts.function_tracer_pcode.analysis.program_points import op_program_key
 from scripts.function_tracer_pcode.analysis.effects.call_boundary import (
     CallBoundaryRefused,
     CallSite,
@@ -324,10 +325,10 @@ def _impl_summarize_store_effects(
 
         for op_ordinal, op in enumerate(block_info.pcode_ops):
             mnemonic = op.getMnemonic()
-            op_order_key = _try_get_order_key(op)
+            op_order_key = _effect_order_key(tracer, op, block_index=getattr(block_info, "index", None))
             # caller の中の呼び出しの位置（callee の読み出しを caller の時間軸へ移す: Issue #281）。
-            # 順序が取れない op（sequence number が無い）は位置も分からない
-            call_site = CallSite.for_op(op) if op_order_key is not None else CallSite(None)
+            # 書き込みと同じ key（`core.program_order`）なので、caller の読み出し・effect と比べられる
+            call_site = CallSite(op_order_key)
             if mnemonic in {"CALL", "CALLIND"} or (
                 mnemonic == "INDIRECT" and _op_output_is_memory(op)
             ):
@@ -889,7 +890,7 @@ def _impl_summarize_store_effects(
                 continue
             if store_kind == "global":
                 store_path_global_locations.append(location)
-            order_key = _try_get_order_key(right_op)
+            order_key = _effect_order_key(tracer, right_op)
             if order_key is None:
                 incomplete_reasons.add(_EFFECT_ORDER_UNAVAILABLE_REASON)
                 continue
@@ -950,6 +951,18 @@ def _impl_summarize_store_effects(
         # symbolic base address and need no gate.
         incomplete_reasons.add(_EFFECT_GLOBAL_READ_IDENTITY_REASON)
 
+    # Issue #281 / #285: effect の key は読み出しと同じ `core.program_order` の key。巡回する成分（loop）の
+    # 中の point どうしの前後は key で表せない（繰り返しの 2 回目は 1 回目の後ろの op の後に実行される）ので、
+    # loop の中の書き込みがあれば、読み出しが見る値も、最後の書き込みも決められない。両方の判定を止める
+    program_order = _tracer_program_order(tracer)
+    if program_order is not _LEGACY_ORDER and effects:
+        if program_order is None:
+            incomplete_reasons.add(_EFFECT_PROGRAM_ORDER_UNAVAILABLE_REASON)
+            has_unsupported_call = True
+        elif any(program_order.in_cycle(effect.order_key) for effect in effects):
+            incomplete_reasons.add(_EFFECT_ORDER_IN_CYCLE_REASON)
+            has_unsupported_call = True
+
     # Issue #20 PR-D: 効果レーンの経路列挙が届かなかった呼び出しサイトを、
     # object 由来の ABI 証拠だけで拾い直す。ここで作る行は「引数が観測できた
     # ことの証拠」であって、未検証の deferred 引数の昇格ではない。
@@ -980,6 +993,35 @@ def _impl_summarize_store_effects(
         call_target_resolution_evidence=tuple(call_target_resolution_evidence),
         call_site_effect_summary_evidence=tuple(call_site_effect_summary_evidence),
     )
+
+#: loop の中の書き込み（Issue #281 / #285）
+_EFFECT_ORDER_IN_CYCLE_REASON = "effect_order_in_cycle"
+#: 関数の CFG から順序を作れなかった
+_EFFECT_PROGRAM_ORDER_UNAVAILABLE_REASON = "effect_program_order_unavailable"
+#: tracer が順序の API を持たない（CFG の無い test double）。旧来の番地の順の key を使う
+_LEGACY_ORDER = object()
+
+
+def _tracer_program_order(tracer):
+    program_order = getattr(tracer, "program_order", None)
+    if not callable(program_order):
+        return _LEGACY_ORDER
+    return program_order()
+
+
+def _effect_order_key(tracer, op, *, block_index: Optional[int] = None) -> Optional[int]:
+    """effect（STORE・呼び出し）の op の key。読み出しと同じ `core.program_order` の key（Issue #281 / #285）。
+
+    順序の API を持たない tracer（CFG の無い test double）だけ、旧来の `(番地 << 8) | getOrder()` を使う。
+    production の tracer（`PcodeTracer`）は必ず API を持ち、key が分からなければ None（呼び出し側が
+    `effect_order_unavailable` にする）。
+    """
+
+    program_order = _tracer_program_order(tracer)
+    if program_order is _LEGACY_ORDER:
+        return _try_get_order_key(op)
+    return op_program_key(program_order, op, block_index=block_index)
+
 
 def _impl__block_has_effect_sensitive_ops(block_info) -> bool:
     for op in getattr(block_info, "pcode_ops", []) or ():
@@ -1164,7 +1206,7 @@ def _impl__collect_ram_output_write_effects(
                 if debug:
                     print(f"[EffectSummary] unmodeled global exit state: {out}")
                 continue
-            order_key = _try_get_order_key(op)
+            order_key = _effect_order_key(tracer, op)
             if order_key is None:
                 reasons.add(_EFFECT_ORDER_UNAVAILABLE_REASON)
                 continue
@@ -1463,7 +1505,7 @@ def _impl__resolve_direct_call_value_effects(
         explicit_args,
     )
 
-    call_site = CallSite.for_op(def_op) if _try_get_order_key(def_op) is not None else CallSite(None)
+    call_site = CallSite(_effect_order_key(tracer, def_op))
     expanded = direct_call_expander(target_ref, args, call_site=call_site)
     if not expanded:
         return []

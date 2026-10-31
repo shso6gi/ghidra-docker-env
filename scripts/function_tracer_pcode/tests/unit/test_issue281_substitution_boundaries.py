@@ -25,6 +25,7 @@ import pytest
 
 from scripts.function_tracer_pcode.analysis import bounded_refinement as bounded_refinement_module
 from scripts.function_tracer_pcode.analysis.bounded_refinement import BoundedCallRefiner, ExpressionExpansion
+from scripts.function_tracer_pcode.analysis.effects.call_boundary import REFUSED_CALLEE_PLACE
 from scripts.function_tracer_pcode.analysis.effects.call_argument import (
     _impl__apply_condition_parameter_replacements as apply_condition_parameter_replacements,
 )
@@ -183,8 +184,10 @@ def test_a_refused_candidate_abandons_the_whole_call_expansion(monkeypatch):
     assert expansions == []
     # 使わない展開の evidence を残さない
     assert evidence == []
+    # callee の parameter の基底を主張する値の node は、置き換えの前に関数境界（`call_boundary`）が拒否する
+    # （review 4。以前は置き換えの派生が `operand_dependent_runtime_ref` で拒否していた）
     assert any(
-        note.startswith("bounded_call_refinement_operand_derivation_refused:" + REFUSED_OPERAND_DEPENDENT_REF)
+        note.startswith("bounded_call_refinement_operand_derivation_refused:" + REFUSED_CALLEE_PLACE)
         for note in caller.analysis_notes
     )
 
@@ -256,7 +259,7 @@ def test_local_target_expansion_is_abandoned_and_cached_when_specialization_is_r
         _bound_parameter_values_from_call_args=lambda args, params: {},
         _bound_parameter_storage_values_from_call_args=lambda args, params: {},
         _make_tracer=lambda *a, **k: tracer,
-        _make_deferred_call_recorder=lambda containing: None,
+        _make_deferred_call_recorder=lambda containing, program_order=None: None,
         _expand_linear_code_target=lambda addr, tracer_, containing: [object()],
         _specialize_local_target_expansions=_refusing,
         _debug_print=lambda message: None,

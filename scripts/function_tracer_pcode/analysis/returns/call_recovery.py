@@ -394,7 +394,21 @@ def _impl__cached_callee_analysis_for_outcome_summary(
     return None
 
 
-def _impl__make_deferred_call_recorder(self, current_function=None):
+def _deferred_call_site_order_key(program_order, pcode_op_ref) -> Optional[int]:
+    """deferred call の op の program point の key（`PcodeOpRef` の block と block の中の位置から）。"""
+
+    order = program_order() if callable(program_order) else None
+    if order is None or pcode_op_ref is None:
+        return None
+    return order.key(pcode_op_ref.block_index, pcode_op_ref.seq_order)
+
+
+def _impl__make_deferred_call_recorder(self, current_function=None, program_order=None):
+    """呼び出しを deferred call として記録する callback。
+
+    `program_order` は記録する関数の tracer の `program_order`（呼び出しの位置の key を作る: Issue #281 / #285）。
+    渡さなければ位置は不明（callee の読み出しをその位置へ移せない）。
+    """
     current_function_ref = (
         CallTargetRef.from_function(current_function)
         if current_function is not None
@@ -457,6 +471,7 @@ def _impl__make_deferred_call_recorder(self, current_function=None):
             deferred_call_ref=deferred_call_ref,
             placeholder_name=deferred_call_ref.display_name(),
             call_model_candidate=call_model_candidate_for(target_ref),
+            call_site_order_key=_deferred_call_site_order_key(program_order, pcode_op_ref),
         )
         self._current_deferred_calls[deferred_call_ref.stable_key()] = info
         if self.debug:
@@ -1552,11 +1567,18 @@ def _impl__is_passthrough_storage_live_in_for_call(
     if call_order is None:
         return True
 
+    # 呼び出しより前に実行され得る op だけを見る。key は関数の CFG の線形拡大（`core.program_order`）で、
+    # loop の中では呼び出しの後ろの op も次の回では前になる（Issue #281 / #285）
+    program_order_of = getattr(tracer, "program_order", None)
+    program_order = program_order_of() if callable(program_order_of) else None
     for op in tracer.get_all_pcode_ops():
         op_order = self._coerce_order_key(get_order_key(op))
         if op_order is None:
             continue
-        if op_order >= call_order:
+        if program_order is not None:
+            if not program_order.may_precede(op_order, call_order):
+                continue
+        elif op_order >= call_order:
             continue
         output = getattr(op, "getOutput", lambda: None)()
         if output is None:
@@ -1907,7 +1929,9 @@ def _impl__resolve_local_code_target_expansions(
         bound_parameter_values=bound_parameter_values,
         bound_parameter_storage_values=bound_parameter_storage_values,
     )
-    tracer.record_deferred_call = self._make_deferred_call_recorder(containing)
+    tracer.record_deferred_call = self._make_deferred_call_recorder(
+        containing, program_order=getattr(tracer, "program_order", None)
+    )
     expanded = self._expand_linear_code_target(addr, tracer, containing)
     if expanded:
         try:
@@ -2356,6 +2380,7 @@ def _impl__specialize_call_analysis(
             abi_return_type_policy=getattr(info, "abi_return_type_policy", None),
             call_site_multiplicity=getattr(info, "call_site_multiplicity", None),
             call_model_candidate=getattr(info, "call_model_candidate", None),
+            call_site_order_key=getattr(info, "call_site_order_key", None),
         )
         specialized_deferred_calls[info.deferred_call_ref.stable_key()] = specialized_info
         original_to_specialized[info.deferred_call_ref.stable_key()] = specialized_info
@@ -2488,6 +2513,7 @@ def _impl__merge_deferred_calls_into_current_analysis(
                 abi_return_type_policy=getattr(info, "abi_return_type_policy", None),
                 call_site_multiplicity=getattr(info, "call_site_multiplicity", None),
                 call_model_candidate=getattr(info, "call_model_candidate", None),
+                call_site_order_key=getattr(info, "call_site_order_key", None),
             )
 
 
@@ -2832,7 +2858,9 @@ def _impl__recover_implicit_return_from_terminal_call(
         resolve_callee_parameters=self._get_freshest_callee_parameters,
         read_memory_value=self._read_memory_value,
         image_base=self.program.getImageBase().getOffset(),
-        record_deferred_call=self._make_deferred_call_recorder(current_function),
+        record_deferred_call=self._make_deferred_call_recorder(
+            current_function, program_order=getattr(tracer, "program_order", None)
+        ),
         budget_sink=self._make_expansion_budget_sink(
             surface="call_wrapper",
             owner_scope_key=self._current_analysis_scope_key,
