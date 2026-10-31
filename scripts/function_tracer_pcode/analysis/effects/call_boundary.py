@@ -242,10 +242,14 @@ class _Importer:
                 changed = changed or new_cond is not cond or new_value is not value
             if not changed and not drop_ref:
                 return expr
+            if not drop_ref and getattr(expr, "runtime_ref", None) is not None:
+                # 枝を作り直した PHI に元の ref を写すと、ref が新しい枝と食い違い得る（写しの owner は
+                # `core.operand_derivation` で、PHI の枝は扱わない）。持ち込めないので拒否する
+                raise CallBoundaryRefused(
+                    REFUSED_CALLEE_SUMMARY_REF, expr_type=expr.expr_type.name, ref_type=type(expr.runtime_ref).__name__
+                )
             rebuilt = Expression.phi(branches)
             rebuilt.size = expr.size
-            if not drop_ref and getattr(expr, "runtime_ref", None) is not None:
-                rebuilt = rebuilt.clone_with(runtime_ref=expr.runtime_ref)
             return rebuilt
         # 落とす主張は operand の派生より先に落とす（派生は位置つきの ref を持つ値の node を拒否する）
         base = expr.derive_with(runtime_ref=None) if drop_ref else expr
