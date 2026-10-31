@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Tuple
 
 from scripts.function_tracer_pcode.authority.contracts import (
     SCHEMA_VERSION,
     VALIDATED_ONCE,
+    assert_deep_immutable,
     authority_digest,
     canonical_value,
     freeze_authority_value,
@@ -496,6 +498,49 @@ class RecordedEvent:
     authority_digest: str
 
 
+class _VerifiedEventRegistry:
+    """記録された event 自身だけで決まる検証の結果を、同じ event object についてプロセス内で 1 回にする。
+
+    event 自身だけで決まる検証は 3 つ: header の `authority_payload_digest` が payload の digest と等しい、
+    `authority_digest` が header と payload の digest と等しい、payload が event type の型に合う。どれも
+    stream の中の位置（順番・前の event の digest）に依らない。位置の検証（連番・連鎖）は stream ごとに行う。
+
+    stream の検証は、prefix view・封印した stream・replay の内部の stream を作るたびに全 event を
+    再ダイジェストしていた。finalize は return の ABI 関係を 1 つ完成させるたびに stream 全体を再生するので、
+    費用が「関係の数 × event の数」になっていた（Issue #281 review 5: factln の pair が 600 秒を超えた）。
+
+    記録できるのは header と authority payload が深く不変（`assert_deep_immutable`）な event だけ
+    （diagnostic payload は digest に入らないので問わない）。event は弱参照で追跡し、回収されれば記録も消える
+    ので id の再利用で誤判定しない（`VALIDATED_ONCE` と同じ規則。event 全体は diagnostic payload の dict の
+    ために深く不変ではないので、別の記録にする）。
+    """
+
+    def __init__(self) -> None:
+        self._refs: Dict[int, weakref.ref] = {}
+
+    def is_verified(self, event: "RecordedEvent") -> bool:
+        ref = self._refs.get(id(event))
+        return ref is not None and ref() is event
+
+    def mark(self, event: "RecordedEvent") -> None:
+        try:
+            assert_deep_immutable(event.header)
+            assert_deep_immutable(event.authority_payload)
+        except TypeError:
+            return
+        key = id(event)
+        try:
+            self._refs[key] = weakref.ref(event, lambda _ref, key=key: self._refs.pop(key, None))
+        except TypeError:
+            return
+
+    def __len__(self) -> int:
+        return len(self._refs)
+
+
+_VERIFIED_EVENTS = _VerifiedEventRegistry()
+
+
 @dataclass(frozen=True)
 class EventStreamEnvelope:
     stream_id: str
@@ -561,12 +606,14 @@ class SealedEventStream:
                 raise ValueError("event sequence is not continuous")
             if header.predecessor_authority_digest != predecessor:
                 raise ValueError("event predecessor digest mismatch")
-            if header.authority_payload_digest != authority_digest(event.authority_payload):
-                raise ValueError("event authority payload digest mismatch")
-            validate_event_authority_payload(header.event_type, event.authority_payload)
-            expected_digest = _event_digest(header, event.authority_payload)
-            if event.authority_digest != expected_digest:
-                raise ValueError("event authority digest mismatch")
+            if not _VERIFIED_EVENTS.is_verified(event):
+                if header.authority_payload_digest != authority_digest(event.authority_payload):
+                    raise ValueError("event authority payload digest mismatch")
+                validate_event_authority_payload(header.event_type, event.authority_payload)
+                expected_digest = _event_digest(header, event.authority_payload)
+                if event.authority_digest != expected_digest:
+                    raise ValueError("event authority digest mismatch")
+                _VERIFIED_EVENTS.mark(event)
             predecessor = event.authority_digest
         if self.envelope.first_sequence != 1:
             raise ValueError("event stream must begin at sequence one")
@@ -664,15 +711,20 @@ class EventStreamPrefixView:
                 != self.source_snapshot_fingerprint
                 or header.sequence_number != expected_sequence
                 or header.predecessor_authority_digest != predecessor
-                or header.authority_payload_digest
-                != authority_digest(event.authority_payload)
-                or event.authority_digest
-                != _event_digest(header, event.authority_payload)
             ):
                 raise ValueError("event-stream prefix chain is invalid")
-            validate_event_authority_payload(
-                header.event_type, event.authority_payload
-            )
+            if not _VERIFIED_EVENTS.is_verified(event):
+                if (
+                    header.authority_payload_digest
+                    != authority_digest(event.authority_payload)
+                    or event.authority_digest
+                    != _event_digest(header, event.authority_payload)
+                ):
+                    raise ValueError("event-stream prefix chain is invalid")
+                validate_event_authority_payload(
+                    header.event_type, event.authority_payload
+                )
+                _VERIFIED_EVENTS.mark(event)
             predecessor = event.authority_digest
         if self.prefix_chain_digest != predecessor:
             raise ValueError("event-stream prefix digest mismatch")
