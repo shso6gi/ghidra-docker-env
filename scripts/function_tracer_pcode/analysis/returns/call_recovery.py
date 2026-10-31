@@ -26,6 +26,12 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
 from scripts.function_tracer_pcode.core.signature import get_declared_type_signedness
 from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.core.structural import StructuralKey
+from scripts.function_tracer_pcode.analysis.effects.call_boundary import (
+    CallSite,
+    CalleeTimeline,
+    import_callee_condition,
+    import_callee_expression,
+)
 from scripts.function_tracer_pcode.analysis.effects.pure_function_catalog import (
     resolve_call_model_candidate_ref,
 )
@@ -1613,7 +1619,7 @@ def _impl__make_call_resolver(
     collector と summary cache key を渡すこと。省略時は現在の解析 session。
     """
 
-    def resolve_call(target, args):
+    def resolve_call(target, args, call_site: Optional[CallSite] = None):
         return self._resolve_call_expansions(
             target,
             args,
@@ -1621,6 +1627,7 @@ def _impl__make_call_resolver(
             current_function,
             budget_collector=budget_collector,
             budget_owner_scope_key=budget_owner_scope_key,
+            call_site=call_site,
         )
 
     return resolve_call
@@ -1635,9 +1642,16 @@ def _impl__resolve_call_expansions(
     *,
     budget_collector=None,
     budget_owner_scope_key=None,
+    call_site: Optional[CallSite] = None,
 ):
+    """callee の return case を caller の呼び出し位置へ展開する。
+
+    `call_site` は caller の中の呼び出しの位置（Issue #281: callee の memory 読み出しを caller の時間軸へ移す
+    `analysis.effects.call_boundary` が使う）。渡さなければ位置は不明で、memory を読む callee は展開しない。
+    """
     from scripts.function_tracer_pcode.semantics.transform.expander import ExpandedValue
 
+    call_site = call_site if call_site is not None else CallSite(None)
     target_ref = self._coerce_runtime_target_ref(target)
     if target_ref is None:
         return None
@@ -1649,6 +1663,7 @@ def _impl__resolve_call_expansions(
             active_functions,
             current_function,
             args=args,
+            call_site=call_site,
         )
 
     active_key = self._target_active_key(target_ref)
@@ -1673,16 +1688,21 @@ def _impl__resolve_call_expansions(
         )
         return None
 
-    if already_specialized:
-        specialized = analysis
-    else:
-        try:
-            specialized = self._specialize_call_analysis(analysis, args)
-        except OperandDerivationRefused as refusal:
-            # Issue #281: 引数へ置き換えた派生が ref を保てない。callee の元の式は caller の文脈では別の値
-            # なので、その node だけを戻せない。この呼び出しの展開をまるごとやめる（上の None と同じ扱い）
-            self._debug_print(f"Call expansion skipped for '{target_label}': {refusal}")
-            return None
+    try:
+        # Issue #281: 引数で特殊化済みの callee も、式は callee の時間軸の上にある。置き換えは要らないが、
+        # memory 読み出しは caller の呼び出し位置へ移す（`call_boundary`）
+        specialized = self._specialize_call_analysis(
+            analysis,
+            args,
+            call_site,
+            substitute_parameters=not already_specialized,
+        )
+    except OperandDerivationRefused as refusal:
+        # Issue #281: 引数へ置き換えた派生が ref を保てない、または memory 読み出しを caller の時間軸へ
+        # 移せない（`CallBoundaryRefused` はこの型の派生）。callee の元の式は caller の文脈では別の値なので、
+        # その node だけを戻せない。この呼び出しの展開をまるごとやめる（上の None と同じ扱い）
+        self._debug_print(f"Call expansion skipped for '{target_label}': {refusal}")
+        return None
     if specialized.deferred_calls:
         # bounded refinement の marker は specialized 自身へ載る（呼び出し元 session
         # には混ぜない）。下の callee_analysis marker がそれを参照 ID で拾う。
@@ -1794,10 +1814,12 @@ def _impl__resolve_local_code_target_expansions(
     active_functions: Set[Tuple[Any, ...]],
     current_function=None,
     args: Optional[List[Expression]] = None,
+    call_site: Optional[CallSite] = None,
 ):
 
     args = list(args or [])
-    cache_key = self._local_target_cache_key(address_value, args)
+    call_site = call_site if call_site is not None else CallSite(None)
+    cache_key = self._local_target_cache_key(address_value, args, call_site)
     if cache_key in self._local_target_cache:
         return self._local_target_cache[cache_key]
 
@@ -1889,10 +1911,11 @@ def _impl__resolve_local_code_target_expansions(
     expanded = self._expand_linear_code_target(addr, tracer, containing)
     if expanded:
         try:
-            expanded = self._specialize_local_target_expansions(expanded, tracer, args)
+            expanded = self._specialize_local_target_expansions(expanded, tracer, args, call_site)
         except OperandDerivationRefused as refusal:
-            # Issue #281: 引数へ置き換えた派生が ref を保てない。置き換え前の値は callee の parameter を
-            # 指すので使えない: 展開をまるごとやめる（他の失敗と同じく None を cache する）
+            # Issue #281: 引数へ置き換えた派生が ref を保てない、または memory 読み出しを caller の時間軸へ
+            # 移せない。置き換え前の値は callee の parameter・時間軸を指すので使えない: 展開をまるごとやめる
+            # （他の失敗と同じく None を cache する）
             self._debug_print(f"Local target expansion skipped: {refusal}")
             expanded = None
     self._local_target_cache[cache_key] = expanded
@@ -1903,10 +1926,13 @@ def _impl__local_target_cache_key(
     self,
     address_value: int,
     args: List[Expression],
+    call_site: Optional[CallSite] = None,
 ) -> Tuple[object, ...]:
     return (
         "local_target",
         int(address_value),
+        # 展開の結果は呼び出し位置に依る（memory 読み出しを caller の時間軸へ移す: Issue #281）
+        None if call_site is None else call_site.read_order_key,
         tuple(
             arg.structural_key(budget=256)
             for arg in (args or [])
@@ -1920,8 +1946,23 @@ def _impl__specialize_local_target_expansions(
     expanded: List[Any],
     tracer: PcodeTracer,
     args: List[Expression],
+    call_site: Optional[CallSite] = None,
 ) -> List[Any]:
-    if not expanded or not getattr(tracer, "_parameter_descriptors", None):
+    if not expanded:
+        return expanded
+    # Issue #281: 展開した code の memory 読み出しは、その code の op の時間軸の上にある。caller の呼び出し
+    # 位置へ移すには「読み出しより前に書き込みが無い」が要るが、code target の effect 要約は無い（書き込みが
+    # 分からない）ので、memory を読む展開は `CallBoundaryRefused` になる（呼び出し側が展開をやめる）
+    site = call_site if call_site is not None else CallSite(None)
+    timeline = CalleeTimeline.unknown()
+    expanded = [
+        item.__class__(
+            value=import_callee_expression(item.value, site, timeline),
+            conditions=[import_callee_condition(cond, site, timeline) for cond in (item.conditions or [])],
+        )
+        for item in expanded
+    ]
+    if not getattr(tracer, "_parameter_descriptors", None):
         return expanded
     if not args:
         return expanded
@@ -2251,8 +2292,39 @@ def _impl__specialize_call_analysis(
     self,
     analysis: FunctionReturnAnalysis,
     args: List[Expression],
+    call_site: Optional[CallSite] = None,
+    *,
+    substitute_parameters: bool = True,
 ) -> FunctionReturnAnalysis:
-    replacements = _build_parameter_replacements(analysis.parameters, args)
+    """callee の解析を caller の呼び出し位置の値にする。
+
+    1. memory 読み出しを caller の時間軸へ移す（Issue #281: `call_boundary`。callee の parameter の言葉のまま
+       行う。移せなければ `CallBoundaryRefused`）。
+    2. callee の parameter を引数へ置き換える（`substitute_parameters`。引数で特殊化済みの callee では行わない）。
+    """
+    site = call_site if call_site is not None else CallSite(None)
+    timeline = CalleeTimeline.from_effect_summary(
+        getattr(analysis, "effect_summary", None),
+        analysis.parameters,
+    )
+    replacements = (
+        _build_parameter_replacements(analysis.parameters, args)
+        if substitute_parameters
+        else {}
+    )
+
+    def _specialize(expr: Optional[Expression]) -> Optional[Expression]:
+        imported = import_callee_expression(expr, site, timeline)
+        if imported is None or not substitute_parameters:
+            return imported
+        return substitute_expression(imported, replacements, analysis.parameters)
+
+    def _specialize_condition(cond: Condition) -> Condition:
+        imported = import_callee_condition(cond, site, timeline)
+        if not substitute_parameters:
+            return imported
+        return substitute_condition(imported, replacements, analysis.parameters)
+
     specialized_deferred_calls: Dict[Tuple[object, ...], DeferredCallInfo] = {}
     original_to_specialized: Dict[Tuple[object, ...], DeferredCallInfo] = {}
 
@@ -2260,12 +2332,9 @@ def _impl__specialize_call_analysis(
         specialized_info = DeferredCallInfo(
             placeholder_name=info.placeholder_name,
             target_ref=info.target_ref,
-            arguments=[
-                substitute_expression(arg, replacements, analysis.parameters)
-                for arg in (info.arguments or [])
-            ],
+            arguments=[_specialize(arg) for arg in (info.arguments or [])],
             call_target_expr=(
-                substitute_expression(info.call_target_expr, replacements, analysis.parameters)
+                _specialize(info.call_target_expr)
                 if info.call_target_expr is not None
                 else None
             ),
@@ -2307,7 +2376,7 @@ def _impl__specialize_call_analysis(
 
     specialized_returns: List[ReturnInfo] = []
     for ret in analysis.returns:
-        specialized_value = substitute_expression(ret.value, replacements, analysis.parameters)
+        specialized_value = _specialize(ret.value)
         specialized_value = self._rewrite_deferred_runtime_refs_in_expression(
             specialized_value,
             original_to_specialized,
@@ -2315,7 +2384,7 @@ def _impl__specialize_call_analysis(
         specialized_conditions = [
             Condition(
                 self._rewrite_deferred_runtime_refs_in_expression(
-                    substitute_condition(cond, replacements, analysis.parameters).expression,
+                    _specialize_condition(cond).expression,
                     original_to_specialized,
                 ),
                 cond.negated,

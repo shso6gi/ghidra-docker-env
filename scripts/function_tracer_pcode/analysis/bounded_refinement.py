@@ -35,8 +35,13 @@ from scripts.function_tracer_pcode.analysis.condition import (
     ConditionSimplifier,
     ConditionNormalizer,
 )
+from scripts.function_tracer_pcode.analysis.effects.call_boundary import (
+    CallSite,
+    CalleeTimeline,
+    import_callee_condition,
+    import_callee_expression,
+)
 from scripts.function_tracer_pcode.analysis.effects.summary import (
-    StoreEffect,
     _build_parameter_replacements,
     _call_arguments_width_safe_for_callee_analysis,
     _coerce_argument_to_callee_parameter,
@@ -44,7 +49,6 @@ from scripts.function_tracer_pcode.analysis.effects.summary import (
     _enumerate_constant_expression_branches,
     _resolve_parameter_descriptor,
     _storage_infos_match,
-    lower_post_state_expression_for_smt_if_needed,
     substitute_condition,
     substitute_expression,
 )
@@ -78,6 +82,13 @@ def _unexpanded(expr: Optional[Expression]) -> ExpressionExpansion:
     """展開できなかった（= callee を採用していない）式をそのまま返す。"""
 
     return ExpressionExpansion(expr, [], frozenset())
+
+
+def _analysis_entry_offset(analysis: Optional[FunctionReturnAnalysis]) -> Optional[int]:
+    """解析した関数の入口（deferred call が caller 自身の op かを見分ける: Issue #281）。"""
+
+    function_ref = getattr(analysis, "function_ref", None)
+    return getattr(function_ref, "entry_offset", None)
 
 
 def _runtime_expression_signature(expr: Optional[Expression]):
@@ -677,32 +688,35 @@ class BoundedCallRefiner:
                     callee_analysis.parameters,
                     aligned_arguments,
                 )
-            substituted_effects = self._substitute_effects_for_deferred_call(
-                callee_analysis,
-                replacements,
+            # Issue #281: callee の式の memory 読み出しは callee の時間軸の上にある。caller の呼び出し位置へ
+            # 移してから（callee の parameter の言葉のまま）引数へ置き換える。移せなければ
+            # `CallBoundaryRefused` で、`_expand_deferred_call` が呼び出しの展開をまるごとやめる。
+            # 以前はここで callee の post-state の読み出しを、置き換えた callee の effect と caller の parameter で
+            # lowering していた。callee の effect の後の状態は caller の言葉で表せない（`call_boundary`）ので、
+            # その読み出しは境界で拒否され、lowering は行わない
+            site = CallSite.for_deferred_call(
+                deferred.deferred_call_ref,
+                _analysis_entry_offset(caller_analysis),
+            )
+            timeline = CalleeTimeline.from_effect_summary(
+                getattr(callee_analysis, "effect_summary", None),
+                callee_analysis.parameters,
             )
             candidate_result_count = 0
 
             for ret in callee_analysis.returns:
-                substituted_value = substitute_expression(ret.value, replacements, callee_analysis.parameters)
-                substituted_conditions = [
-                    substitute_condition(cond, replacements, callee_analysis.parameters)
-                    for cond in ret.conditions
-                ]
-                substituted_value = self._lower_symbolic_post_state_after_substitution(
-                    substituted_value,
-                    substituted_conditions,
-                    substituted_effects,
-                    caller_analysis.parameters,
+                substituted_value = substitute_expression(
+                    import_callee_expression(ret.value, site, timeline),
+                    replacements,
+                    callee_analysis.parameters,
                 )
                 substituted_conditions = [
-                    self._lower_symbolic_post_state_in_condition_after_substitution(
-                        cond,
-                        substituted_conditions,
-                        substituted_effects,
-                        caller_analysis.parameters,
+                    substitute_condition(
+                        import_callee_condition(cond, site, timeline),
+                        replacements,
+                        callee_analysis.parameters,
                     )
-                    for cond in substituted_conditions
+                    for cond in ret.conditions
                 ]
 
                 condition_sets = self._expand_conditions(
@@ -909,63 +923,6 @@ class BoundedCallRefiner:
         ):
             return 100
         return 0
-
-    def _substitute_effects_for_deferred_call(
-        self,
-        callee_analysis: FunctionReturnAnalysis,
-        replacements: Dict[Tuple[object, ...], Expression],
-    ) -> List[StoreEffect]:
-        effect_summary = getattr(callee_analysis, "effect_summary", None)
-        if effect_summary is None or not getattr(effect_summary, "effects", None):
-            return []
-
-        substituted: List[StoreEffect] = []
-        for effect in effect_summary.effects:
-            substituted.append(
-                StoreEffect(
-                    location=effect.location,
-                    value=substitute_expression(effect.value, replacements, callee_analysis.parameters),
-                    conditions=[
-                        substitute_condition(cond, replacements, callee_analysis.parameters)
-                        for cond in (effect.conditions or [])
-                    ],
-                    order_key=effect.order_key,
-                    provenance=effect.provenance,
-                )
-            )
-        return substituted
-
-    def _lower_symbolic_post_state_after_substitution(
-        self,
-        expr: Expression,
-        conditions: Sequence[Condition],
-        effects: Sequence[StoreEffect],
-        parameters: Sequence[Dict],
-    ) -> Expression:
-        lowered = lower_post_state_expression_for_smt_if_needed(
-            expr,
-            conditions,
-            effects,
-            parameters,
-        )
-        return lowered if lowered is not None else expr
-
-    def _lower_symbolic_post_state_in_condition_after_substitution(
-        self,
-        condition: Condition,
-        conditions: Sequence[Condition],
-        effects: Sequence[StoreEffect],
-        parameters: Sequence[Dict],
-    ) -> Condition:
-        lowered_expr = self._lower_symbolic_post_state_after_substitution(
-            condition.expression,
-            conditions,
-            effects,
-            parameters,
-        )
-        if lowered_expr is condition.expression:
-            return condition
-        return Condition(lowered_expr, condition.negated)
 
     def _lookup_deferred_call(
         self,

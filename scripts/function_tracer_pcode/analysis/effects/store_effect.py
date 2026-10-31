@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
 from scripts.function_tracer_pcode.core.operand_derivation import OperandDerivationRefused
+from scripts.function_tracer_pcode.analysis.effects.call_boundary import (
+    CallBoundaryRefused,
+    CallSite,
+    CalleeTimeline,
+    import_callee_condition,
+    import_callee_expression,
+)
 from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     CanonicalLocation,
@@ -318,6 +325,9 @@ def _impl_summarize_store_effects(
         for op_ordinal, op in enumerate(block_info.pcode_ops):
             mnemonic = op.getMnemonic()
             op_order_key = _try_get_order_key(op)
+            # caller の中の呼び出しの位置（callee の読み出しを caller の時間軸へ移す: Issue #281）。
+            # 順序が取れない op（sequence number が無い）は位置も分からない
+            call_site = CallSite.for_op(op) if op_order_key is not None else CallSite(None)
             if mnemonic in {"CALL", "CALLIND"} or (
                 mnemonic == "INDIRECT" and _op_output_is_memory(op)
             ):
@@ -620,6 +630,7 @@ def _impl_summarize_store_effects(
                                 return_expansions = direct_call_expander(
                                     target_ref,
                                     variant_args,
+                                    call_site=call_site,
                                 )
                             except Exception:
                                 return_expansions = None
@@ -746,15 +757,36 @@ def _impl_summarize_store_effects(
                                 substitution_args,
                             )
                             try:
-                                substituted_value = substitute_expression(effect.value, substitutions, parameters)
-                                substituted_conditions = [
-                                    substitute_condition(cond, substitutions, parameters)
+                                # Issue #281: effect の値の memory 読み出しは callee の時間軸の上にある（値は
+                                # その effect の書き込みの前に読まれる）。caller の呼び出し位置へ移してから
+                                # 引数へ置き換える（`call_boundary`）
+                                callee_timeline = CalleeTimeline.from_effect_summary(callee_summary)
+                                imported_value = import_callee_expression(
+                                    effect.value,
+                                    call_site,
+                                    callee_timeline,
+                                    context_order=effect.order_key,
+                                )
+                                imported_conditions = [
+                                    import_callee_condition(
+                                        cond,
+                                        call_site,
+                                        callee_timeline,
+                                        context_order=effect.order_key,
+                                    )
                                     for cond in effect.conditions
                                 ]
-                            except OperandDerivationRefused:
-                                # Issue #281: 引数へ置き換えた派生が ref を保てない。callee の元の値は caller の
-                                # 文脈では別の値なので使えない。location が置き換えられないときと同じく、この
-                                # 呼び出しを effect の分からない呼び出しにする（summary は不完全になる）
+                                substituted_value = substitute_expression(imported_value, substitutions, parameters)
+                                substituted_conditions = [
+                                    substitute_condition(cond, substitutions, parameters)
+                                    for cond in imported_conditions
+                                ]
+                            except OperandDerivationRefused as refusal:
+                                # Issue #281: 引数へ置き換えた派生が ref を保てない、または読み出しを caller の
+                                # 時間軸へ移せない。callee の元の値は caller の文脈では別の値なので使えない。
+                                # location が置き換えられないときと同じく、この呼び出しを effect の分からない
+                                # 呼び出しにする（summary は不完全になり、EQ / NOT_EQ の両方を止める:
+                                # `get_equivalence_blocking_unsafety_reasons` / `get_decisive_sat_unsafety_reasons`）
                                 has_unsupported_call = True
                                 unsupported_call_sites.append(
                                     _unsupported_call_effect_ref(
@@ -763,7 +795,11 @@ def _impl_summarize_store_effects(
                                         target_expr=target_expr,
                                         arguments=variant_args,
                                         path_conditions=active_conditions,
-                                        reason="substituted_effect_value_derivation_refused",
+                                        reason=(
+                                            "substituted_effect_read_not_relocatable"
+                                            if isinstance(refusal, CallBoundaryRefused)
+                                            else "substituted_effect_value_derivation_refused"
+                                        ),
                                     )
                                 )
                                 continue
@@ -1427,7 +1463,8 @@ def _impl__resolve_direct_call_value_effects(
         explicit_args,
     )
 
-    expanded = direct_call_expander(target_ref, args)
+    call_site = CallSite.for_op(def_op) if _try_get_order_key(def_op) is not None else CallSite(None)
+    expanded = direct_call_expander(target_ref, args, call_site=call_site)
     if not expanded:
         return []
 

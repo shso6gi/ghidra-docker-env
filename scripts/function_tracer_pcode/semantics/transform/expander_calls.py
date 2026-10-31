@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.core import (
     CallTargetRef,
 )
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
+from scripts.function_tracer_pcode.analysis.effects.call_boundary import CallSite
 from scripts.function_tracer_pcode.analysis.effects.summary import (
     _reduce_expression_under_conditions,
     _resolve_call_target_ref,
@@ -225,7 +226,12 @@ class CallExpansionMixin:
 
                     if self.call_resolver is None:
                         continue
-                    resolved = self.call_resolver(target_ref, effective_args)
+                    # caller の中の呼び出しの位置（callee の読み出しを caller の時間軸へ移す: Issue #281）
+                    resolved = self.call_resolver(
+                        target_ref,
+                        effective_args,
+                        call_site=CallSite.for_op(pcode_op),
+                    )
                     if not resolved:
                         if self.debug:
                             self._debug_print(

@@ -177,25 +177,10 @@ class PcodeTracer(CallRecoveryMixin, ParameterStorageMixin, AddressRefMixin):
         read ordering and live-in checks need a monotonic integer order for
         comparisons, not a structural identity tuple.
         """
-        if pcode_op is None:
-            return None
-        seqnum = getattr(pcode_op, "getSeqnum", lambda: None)()
-        if seqnum is not None:
-            order = getattr(seqnum, "getOrder", lambda: None)()
-            coerced = self._coerce_op_order_value(order)
-            if coerced is not None:
-                return coerced
-        order = getattr(pcode_op, "getOrder", lambda: None)()
-        return self._coerce_op_order_value(order)
+        # 規則の実装は 1 つ: callee の読み出しを caller の呼び出し位置へ移す境界も同じ値を使う（Issue #281）
+        from scripts.function_tracer_pcode.analysis.effects.call_boundary import read_order_key_for_op
 
-    @staticmethod
-    def _coerce_op_order_value(value) -> Optional[int]:
-        if value is None:
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+        return read_order_key_for_op(pcode_op)
 
     def _clone_expression(self, expr: Optional[Expression]) -> Optional[Expression]:
         if expr is None:

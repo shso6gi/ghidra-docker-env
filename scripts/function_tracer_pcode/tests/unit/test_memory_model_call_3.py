@@ -1666,7 +1666,7 @@ def test_expression_expander_stabilizes_parameter_like_call_arg_from_original_in
 
     captured = {}
 
-    def resolve_call(target_ref, args):
+    def resolve_call(target_ref, args, call_site=None):
         captured["target"] = target_ref
         captured["args"] = list(args)
         return [ExpandedValue(Expression.constant(1, 4), [])]

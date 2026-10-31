@@ -14,6 +14,9 @@
 * call_recovery の `_resolve_call_expansions` / `_resolve_local_code_target_expansions`: `None`
 * `summarize_store_effects`: その呼び出しを effect の分からない呼び出しにする
 * 同じ文脈の置き換え（`_apply_condition_parameter_replacements`）: 置き換える前の式（正しい値）
+
+callee の memory 読み出しの順序・location を caller の時間軸へ移すのは置き換えの前の `call_boundary`
+（`test_issue281_call_boundary.py`）。拒否は同じ境界で扱う。
 """
 
 from types import SimpleNamespace
@@ -248,7 +251,7 @@ def test_local_target_expansion_is_abandoned_and_cached_when_specialization_is_r
     owner = SimpleNamespace(
         program=program,
         _local_target_cache={},
-        _local_target_cache_key=lambda address, args: ("local", address),
+        _local_target_cache_key=lambda address, args, call_site=None: ("local", address),
         _collect_parameters=lambda high_function: [],
         _bound_parameter_values_from_call_args=lambda args, params: {},
         _bound_parameter_storage_values_from_call_args=lambda args, params: {},

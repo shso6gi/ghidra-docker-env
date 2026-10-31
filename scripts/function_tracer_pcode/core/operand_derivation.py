@@ -29,6 +29,10 @@ callee の戻り値を入れた値）。この契約の下で、node が持つ f
                            stack と言われれば store を観測不能とする
 ========================  ==========================================================================
 
+派生は **同じ関数の中** の値の作り直しで、`read_order_key` と ref の順序はその関数の時間軸のまま保つ。callee の式を
+caller へ入れるとき（関数をまたぐ）の順序・location の扱いは `analysis.effects.call_boundary` が持つ（派生の前に
+caller の呼び出し位置へ移す）。
+
 位置だけを持つ `ObservedMemoryReadRef`（`order_key` / `pcode_op_ref`）は load の位置なので保つ。consumer は
 `order_key` を effect との順序と「観測した load」の印にだけ使い、`pcode_op_ref` から番地・location を
 導く consumer は無い（Issue #281 の review で production の読み手を棚卸しした）。番地は operand から読まれる。

@@ -1534,13 +1534,15 @@ def test_bounded_call_refiner_lowers_substituted_symbolic_post_state_reads():
 
     changed = refiner.refine_analysis(caller)
 
-    # Issue #281: callee の post-state 読み出しの location は callee の parameter（trace）基準で、引数へ置き換えると
-    # 番地だけが caller の値になる。location を caller の frame へ移す owner は無い（#282 の memory の対応）ので、
-    # 派生は拒否され、呼び出しの展開をまるごとやめる。callee 基準の location は caller の解析へ漏れない
+    # Issue #281: callee の戻り値は callee の effect（順序 1, 2）の **後の** 状態の読み出し。caller の時間軸では
+    # 「呼び出しの位置の memory に callee の書き込みを適用した値」で、callee の effect を持ち込まないと caller の
+    # 言葉で表せない（`call_boundary`）。以前は置き換えた callee の effect を caller の parameter で読んで
+    # lowering していたが、callee の location（trace 基準）と caller の parameter を混ぜていた。境界で拒否し、
+    # 呼び出しの展開をまるごとやめる。callee の時間軸・location は caller の解析へ漏れない
     assert changed is False
     # 展開しない deferred call（UNKNOWN）のまま
     assert all(ret.value.expr_type is ExpressionType.UNKNOWN for ret in caller.returns)
-    assert "bounded_call_refinement_operand_derivation_refused:located_memory_ref_address_changed:PostStateReadRef" in (
+    assert "bounded_call_refinement_operand_derivation_refused:callee_post_write_state_read:PostStateReadRef" in (
         caller.analysis_notes
     )
     assert all(

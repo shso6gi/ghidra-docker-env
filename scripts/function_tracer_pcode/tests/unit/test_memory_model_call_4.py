@@ -126,7 +126,7 @@ def test_summarize_store_effects_recovers_direct_call_store_values_from_call_exp
             _param("lhs", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
             _param("rhs", size=4, index=2, storage=_reg_storage("x2", size_bytes=4, register_name="w2")),
         ],
-        direct_call_expander=lambda _target_ref, args: [
+        direct_call_expander=lambda _target_ref, args, call_site=None: [
             ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])
         ],
         resolve_callee_parameters=lambda _target_ref: [
@@ -322,7 +322,7 @@ def test_summarize_store_effects_expands_nested_copy_and_arithmetic_store_values
             _param("lhs", size=4, index=1, storage=_reg_storage("x1", size_bytes=4, register_name="w1")),
             _param("rhs", size=4, index=2, storage=_reg_storage("x2", size_bytes=4, register_name="w2")),
         ],
-        direct_call_expander=lambda _target_ref, args: [
+        direct_call_expander=lambda _target_ref, args, call_site=None: [
             ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])
         ],
         resolve_callee_parameters=lambda _target_ref: [
@@ -461,7 +461,7 @@ def test_summarize_store_effects_keeps_effect_free_value_calls_from_poisoning_su
             effects=[],
             has_unsupported_call=False,
         ),
-        direct_call_expander=lambda _target_ref, args: [
+        direct_call_expander=lambda _target_ref, args, call_site=None: [
             ExpandedValue(Expression.binary_op("INT_ADD", args[0], args[1]), [])
         ],
         resolve_callee_parameters=lambda _target_ref: [
@@ -625,7 +625,7 @@ def test_expression_expander_keeps_concrete_call_arg_when_canonical_candidate_is
 
     captured = {}
 
-    def resolve_call(target_ref, args):
+    def resolve_call(target_ref, args, call_site=None):
         captured["target"] = target_ref
         captured["args"] = list(args)
         return [ExpandedValue(Expression.constant(1, 4), [])]
