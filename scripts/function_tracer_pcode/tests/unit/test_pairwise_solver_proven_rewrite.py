@@ -571,14 +571,55 @@ def _wide_sum(count: int) -> Expression:
 
 
 def test_construction_order_key_matches_the_solver_rendering_for_published_input():
-    """Issue #281: 組み立て途中の鍵は、公開済みの入力では `to_smt` と同じ文字列（並べる順は従来どおり）。"""
+    """Issue #281: 典型的な大きさの部分木の鍵は、公開済みの入力では `to_smt` と同じ文字列（並べる順は従来どおり）。"""
 
-    from scripts.function_tracer_pcode.proof.strategies.pairwise_solver_proven_rewrite import (
-        _construction_order_key,
-    )
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_solver_proven_rewrite import _ConstructionOrder
 
     expr = published(Expression.binary_op("INT_ADD", _param("param_2"), _const(7)))
-    assert _construction_order_key(expr) == expr.to_smt(float_mode="fp")
+    assert _ConstructionOrder().key(expr) == (0, expr.to_smt(float_mode="fp"))
+
+
+def test_construction_order_key_of_a_large_subtree_is_a_deterministic_digest_of_its_children():
+    """上限を超える部分木の鍵は子の鍵から合成した digest: 組み立てごとに同じ、等しい部分木は同じ鍵、違えば違う鍵。"""
+
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_solver_proven_rewrite import (
+        _RENDERED_ORDER_KEY_MAX_NODES,
+        _ConstructionOrder,
+    )
+
+    large = _wide_sum(_RENDERED_ORDER_KEY_MAX_NODES)
+    same = _wide_sum(_RENDERED_ORDER_KEY_MAX_NODES)
+    other = Expression.binary_op("INT_ADD", _wide_sum(_RENDERED_ORDER_KEY_MAX_NODES - 1), _const(999))
+
+    first, second = _ConstructionOrder(), _ConstructionOrder()
+    kind, digest = first.key(large)
+    assert kind == 1
+    assert second.key(large) == (kind, digest)
+    assert first.key(same) == (kind, digest)
+    assert first.key(other) != (kind, digest)
+    # 小さい部分木（描画の鍵）と大きい部分木（digest）の比べ方も全順序
+    assert first.key(_param("param_1")) < first.key(large)
+
+
+def test_construction_order_renders_each_subtree_at_most_once_and_only_up_to_the_limit(monkeypatch):
+    """深い鎖でも、描画するのは上限以下の部分木だけで、各部分木は 1 回だけ（組み立ての費用は節点数 × 上限）。"""
+
+    from scripts.function_tracer_pcode.proof.strategies import pairwise_solver_proven_rewrite as rewrite
+
+    rendered = []
+    original_render = rewrite.render_expression_smt_evidence
+
+    def counting_render(expr, **kwargs):
+        rendered.append(expr)
+        return original_render(expr, **kwargs)
+
+    monkeypatch.setattr(rewrite, "render_expression_smt_evidence", counting_render)
+    order = rewrite._ConstructionOrder()
+    chain = _wide_sum(300)
+    rewrite._apply_solver_proven_candidate_rewrites(chain, order)
+
+    assert len({id(expr) for expr in rendered}) == len(rendered)
+    assert all(order._tree_size(expr) <= rewrite._RENDERED_ORDER_KEY_MAX_NODES for expr in rendered)
 
 
 def test_change_detection_keeps_the_solver_render_budget_contract():
