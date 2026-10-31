@@ -1330,7 +1330,6 @@ def _install_adopting_call_resolver(analyzer, callee):
         patch.object(analyzer, "_coerce_runtime_target_ref", side_effect=lambda target: target),
         patch.object(analyzer, "_target_active_key", return_value=None),
         patch.object(analyzer, "_invoke_get_or_analyze_call_target", return_value=callee),
-        patch.object(analyzer, "_analysis_is_fully_argument_specialized", return_value=True),
         patch.object(analyzer, "_call_summary_is_safe", return_value=True),
     ]
 

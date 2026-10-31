@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core import Condition, Expression, StorageInfo
 from scripts.function_tracer_pcode.analysis.effects._shared import (
     CallArgumentWidthEvidence,
@@ -20,7 +20,6 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _resolve_call_argument_expression,
     _resolve_live_in_parameter_descriptor_for_call_storage,
     _storage_identity_key,
-    _try_get_order_key,
 )
 
 
@@ -66,18 +65,32 @@ def _impl__pcode_op_ref_key_from_tracker(condition_tracker, pcode_op) -> Optiona
         return None
 
 
-def _impl__iter_path_ops_before_call(path_blocks, call_op) -> Iterator[object]:
-    call_order = _try_get_order_key(call_op)
-    if call_order is None:
-        return
+def _impl__path_ops_before_call(path_blocks, call_op) -> Optional[List[object]]:
+    """入口から呼び出しまでの 1 つの経路（block の実行順）で、呼び出しより前に実行される op（実行順）。
+
+    順序は経路そのもの（block の並びと block の中の op の並び）。番地の順は使わない: 番地が後ろの block が
+    先に実行される配置では、番地で比べると呼び出しより前の op を落とす（Issue #285 / #281 review 5）。
+    経路が呼び出しの op に着かなければ None（呼び出し側は「前に何も無い」と読んではいけない）。
+    """
+
+    ops: List[object] = []
     for block_info in path_blocks or []:
         for op in getattr(block_info, "pcode_ops", None) or []:
-            if op is call_op:
-                return
-            op_order = _try_get_order_key(op)
-            if op_order is None or op_order >= call_order:
-                continue
-            yield op
+            if _same_pcode_op(op, call_op):
+                return ops
+            ops.append(op)
+    return None
+
+
+def _same_pcode_op(left, right) -> bool:
+    if left is right:
+        return True
+    try:
+        left_seq = left.getSeqnum()
+        right_seq = right.getSeqnum()
+    except (AttributeError, TypeError):
+        return False
+    return left_seq is not None and right_seq is not None and bool(left_seq == right_seq)
 
 
 def _impl__compatible_call_block_paths(

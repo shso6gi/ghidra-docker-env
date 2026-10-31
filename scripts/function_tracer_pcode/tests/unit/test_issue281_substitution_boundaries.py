@@ -159,12 +159,10 @@ def _refiner_with_two_candidates(monkeypatch, refuse_second: bool):
     guard = Condition(Expression.binary_op("INT_EQUAL", Expression.parameter("t", index=1, size=4), _const(0)))
     candidates = [("a", [guard], first), ("b", [Condition(guard.expression, negated=True)], second)]
     monkeypatch.setattr(refiner, "_resolve_deferred_call_candidates", lambda deferred: candidates)
-    monkeypatch.setattr(refiner, "_analysis_is_fully_argument_specialized", lambda analysis: False)
     monkeypatch.setattr(
         refiner, "_align_deferred_arguments_to_callee", lambda deferred, caller, callee: [_caller_argument()]
     )
     monkeypatch.setattr(bounded_refinement_module, "_call_arguments_width_safe_for_callee_analysis", lambda *a: True)
-    monkeypatch.setattr(bounded_refinement_module, "_build_parameter_replacements", lambda params, args: _replacements(args[0]))
     if not refuse_second:
         second.returns[0].value = _callee_param(0)
     evidence = []
@@ -230,7 +228,6 @@ def test_call_expansion_is_abandoned_when_specialization_is_refused():
         _coerce_runtime_target_ref=lambda target: target_ref,
         _target_active_key=lambda ref: None,
         _invoke_get_or_analyze_call_target=lambda *a, **k: analysis,
-        _analysis_is_fully_argument_specialized=lambda a: False,
         _specialize_call_analysis=_refusing,
         _debug_print=messages.append,
     )

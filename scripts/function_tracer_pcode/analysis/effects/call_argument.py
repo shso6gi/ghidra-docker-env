@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 import re
 from itertools import product
 from scripts.function_tracer_pcode.core.operand_derivation import OperandDerivationRefused
+from scripts.function_tracer_pcode.analysis.program_points import op_program_key
 from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     CanonicalLocation,
@@ -80,7 +81,7 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _fixed_prefix_format_recovery_spec,
     _has_ambiguous_storage_windows,
     _has_target_specific_call_argument_evidence,
-    _iter_path_ops_before_call,
+    _path_ops_before_call,
     _location_uses_parameter,
     _matching_explicit_call_argument_storage_windows,
     _materialize_function_pointer_argument,
@@ -139,7 +140,6 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _storage_info_from_identity_key,
     _storage_match_rank,
     _storage_matches_parameter,
-    _try_get_order_key,
     _varnode_storage_match_rank,
     canonicalize_location,
     canonicalize_param_location,
@@ -1491,11 +1491,19 @@ def _impl__select_best_storage_candidate(
     path_blocks=None,
     current_conditions: Optional[Sequence[Condition]] = None,
 ) -> Optional[Expression]:
-    best_candidate = None
-    best_order = None
-    best_rank = -1
-    best_semantic_rank = -1
+    """呼び出しの時点で `target_storage` が持つ値（1 つの経路の上で、呼び出しより前の最後の書き込みの値）。
 
+    `ops` は経路の呼び出しより前の op を実行順に並べたもの（`_path_ops_before_call`）。呼び出しの時点の値は、
+    記憶域に触れる最後の書き込みで決まる。その書き込みが記憶域の一部だけ（rank が完全一致の 3 未満）なら
+    値は分からない（None）。
+
+    以前は「引数らしさ」（`_call_argument_semantic_rank`）と rank の高い候補を、後の書き込みより優先して
+    いた。後の書き込みが記憶域を上書きしていると、呼び出しで渡らない値を引数にしてしまう。また同じ rank の
+    候補の前後を番地の順で決めていた（Issue #285 / #281 review 5）。
+    """
+
+    last_candidate = None
+    last_rank = 0
     for op in ops:
         candidate = _recover_call_argument_candidate_from_op(
             op,
@@ -1508,27 +1516,10 @@ def _impl__select_best_storage_candidate(
         )
         if candidate is None:
             continue
-        candidate_expr, rank, semantic_rank = candidate
-        op_order = _try_get_order_key(op)
-        if op_order is None:
-            continue
-        if (
-            semantic_rank > best_semantic_rank
-            or (
-                semantic_rank == best_semantic_rank
-                and (
-                    rank > best_rank
-                    or (rank == best_rank and (best_order is None or op_order > best_order))
-                )
-            )
-        ):
-            best_candidate = candidate_expr
-            best_order = op_order
-            best_rank = rank
-            best_semantic_rank = semantic_rank
-
-    return best_candidate
-
+        last_candidate, last_rank, _semantic_rank = candidate
+    if last_candidate is None or last_rank < 3:
+        return None
+    return last_candidate
 
 def _impl__recover_call_argument_from_storage(
     call_op,
@@ -1558,7 +1549,10 @@ def _impl__recover_call_argument_from_storage(
         )
         if ConditionSimplifier.is_contradiction(merged_conditions):
             continue
-        path_ops = list(_iter_path_ops_before_call(path_blocks, call_op))
+        path_ops = _path_ops_before_call(path_blocks, call_op)
+        if path_ops is None:
+            # 経路が呼び出しに着かない: 前に何があるか分からない（live-in と読んではいけない）
+            return None
         candidate = _select_best_storage_candidate(
             path_ops,
             target_storage,
@@ -2370,6 +2364,31 @@ def _impl__build_parameter_replacements(
     return replacements
 
 
+def _impl__callee_parameter_reference_keys(
+    callee_params: Sequence[object],
+) -> FrozenSet[Tuple[object, ...]]:
+    """callee の parameter を指す node の identity key の全体（`_build_parameter_replacements` と同じ key）。
+
+    引数が無い・幅を合わせられない parameter の key も含む。境界（`call_boundary`）は、置き換えの無い
+    これらの key を持つ node を caller へ渡さない（Issue #281 review 5）。
+    """
+
+    keys: Set[Tuple[object, ...]] = set()
+    for param, param_ref in zip(callee_params, _coerce_callee_parameter_refs(callee_params)):
+        keys.update(_callee_parameter_identity_keys(param, param_ref))
+        key = _parameter_identity_key_from_base_ref(param_ref)
+        if key is not None:
+            keys.add(key)
+        param_index = (
+            _normalize_parameter_index(param_ref.parameter_index)
+            if param_ref is not None and param_ref.is_parameter()
+            else None
+        )
+        if param_index is not None:
+            keys.add(("parameter", param_index))
+    return frozenset(keys)
+
+
 def _impl__parameter_base_ref(
     *,
     name: Optional[object] = None,
@@ -2677,33 +2696,35 @@ def _impl__recover_parameter_from_stack_load(
     if location is None:
         return None
 
-    load_order = _try_get_order_key(load_op)
+    # Issue #285 / #281 review 5: load の時点の値を決める書き込みは、関数の CFG の順序で選ぶ（番地の順は
+    # 実行順と限らない）。load より前に実行され得る書き込みがちょうど 1 つで、それがどの実行でも load より前に
+    # 実行される（同じ block の前・入口の block）ときだけ、その値を使う。複数あれば経路で値が変わり得る
+    get_program_order = getattr(tracer, "program_order", None)
+    program_order = get_program_order() if callable(get_program_order) else None
+    if program_order is None:
+        return None
+    load_order = op_program_key(program_order, load_op)
     if load_order is None:
         return None
-    best_candidate = None
-    best_order = None
+    candidates = []
     for op in tracer.get_all_pcode_ops():
-        op_order = _try_get_order_key(op)
-        if op_order is None or op_order >= load_order:
-            continue
-
+        writes_slot = None
         output = op.getOutput()
-        if output is not None:
-            output_location = _stack_location_key(output, size=output.getSize())
-            if output_location == location:
-                if best_order is None or op_order > best_order:
-                    best_candidate = ("output", op)
-                    best_order = op_order
-
-        if op.getMnemonic() == "STORE" and op.getNumInputs() >= 3:
-            store_location = _stack_location_key(op.getInput(1), size=op.getInput(2).getSize())
-            if store_location == location:
-                if best_order is None or op_order > best_order:
-                    best_candidate = ("store", op)
-                    best_order = op_order
-
-    if best_candidate is None:
+        if output is not None and _stack_location_key(output, size=output.getSize()) == location:
+            writes_slot = "output"
+        elif op.getMnemonic() == "STORE" and op.getNumInputs() >= 3:
+            if _stack_location_key(op.getInput(1), size=op.getInput(2).getSize()) == location:
+                writes_slot = "store"
+        if writes_slot is None:
+            continue
+        op_order = op_program_key(program_order, op)
+        if op_order is None:
+            return None
+        if program_order.may_precede(op_order, load_order):
+            candidates.append((writes_slot, op, op_order))
+    if len(candidates) != 1 or not program_order.dominates(candidates[0][2], load_order):
         return None
+    best_candidate = candidates[0][:2]
 
     kind, op = best_candidate
     if kind == "output" and op.getNumInputs() >= 1:

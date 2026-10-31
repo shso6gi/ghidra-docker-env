@@ -509,8 +509,8 @@ def test_return_analyzer_local_target_cache_key_depends_on_argument_objects():
 def test_return_analyzer_binds_call_args_to_callee_parameter_indexes():
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     target_expr = Expression.constant(0x401200, size=8)
-    lhs_expr = Expression.parameter("lhs", index=10, size=4)
-    rhs_expr = Expression.parameter("rhs", index=11, size=4)
+    lhs_expr = Expression.constant(7, size=4)
+    rhs_expr = Expression.binary_op("INT_ADD", Expression.constant(1, size=4), Expression.constant(2, size=4))
 
     bound = analyzer._bound_parameter_values_from_call_args(
         [target_expr, lhs_expr, rhs_expr],
@@ -523,8 +523,40 @@ def test_return_analyzer_binds_call_args_to_callee_parameter_indexes():
 
     assert set(bound) == {1, 2, 3}
     assert bound[1].value == 0x401200
-    assert bound[2].name == "lhs"
-    assert bound[3].name == "rhs"
+    assert bound[2].value == 7
+    assert bound[3].operator == "INT_ADD"
+
+
+def test_return_analyzer_binds_only_context_free_call_args():
+    """Issue #281 review 5: caller の parameter・memory の読み出し・frame の番地は callee の解析へ束縛しない。
+
+    束縛すると、caller の順序の読み出しが callee の effect と比べられ、caller の parameter が callee の
+    parameter と同じ key で置き換えられ、caller の frame の番地が callee の frame に分類される。束縛しない
+    引数は、呼び出しの境界（`call_boundary`）の置き換えで caller の値になる。
+    """
+
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    caller_parameter = Expression.parameter("lhs", index=10, size=4)
+    caller_read = Expression.memory(Expression.parameter("p", index=0, size=8), 4, read_order_key=3)
+    caller_frame = Expression.binary_op(
+        "INT_ADD",
+        Expression.variable("sp", size=8, storage_info=StorageInfo(is_register=True, register_name="sp", size=8)),
+        Expression.constant(-16, size=8),
+    )
+    callee_parameters = [
+        {"name": "param_1", "index": 1, "size": 4, "data_type": "int"},
+        {"name": "param_2", "index": 2, "size": 4, "data_type": "int"},
+        {"name": "param_3", "index": 3, "size": 8, "data_type": "int *"},
+        {"name": "param_4", "index": 4, "size": 4, "data_type": "int"},
+    ]
+
+    bound = analyzer._bound_parameter_values_from_call_args(
+        [caller_parameter, caller_read, caller_frame, Expression.constant(5, size=4)],
+        callee_parameters,
+    )
+
+    assert set(bound) == {4}
+    assert bound[4].value == 5
 
 
 def test_return_analyzer_does_not_bind_call_args_by_ordinal_without_identity():
@@ -727,23 +759,47 @@ def test_return_analyzer_scopes_call_analysis_cache_by_bound_argument_objects():
     first = analyzer._get_or_analyze_call_target(
         target_ref,
         set(),
-        args=[Expression.parameter("lhs", index=10, size=4)],
+        args=[Expression.constant(1, size=4)],
     )
     second = analyzer._get_or_analyze_call_target(
         target_ref,
         set(),
-        args=[Expression.parameter("lhs", index=10, size=4)],
+        args=[Expression.constant(1, size=4)],
     )
     third = analyzer._get_or_analyze_call_target(
         target_ref,
         set(),
-        args=[Expression.parameter("rhs", index=11, size=4)],
+        args=[Expression.constant(2, size=4)],
     )
 
     assert first is second
     assert third is not None
     assert analyzer.analyze_function.call_count == 2
 
+
+
+def test_return_analyzer_shares_one_call_analysis_for_symbolic_arguments():
+    """束縛しない引数（caller の parameter）は cache の scope を分けない: callee の解析は 1 回で、
+    呼び出しごとの値は境界の置き換えで入る（Issue #281 review 5）。"""
+
+    analyzer = ReturnAnalyzer(program=Mock(), debug=False)
+    callee = _FakeFunction("callee", 0x401000)
+    analyzer._effect_summary_parameter_cache[analyzer._function_cache_key(callee)] = [
+        {"name": "param_1", "index": 0, "size": 4},
+    ]
+    target_ref = CallTargetRef.from_name("callee", entry_offset=0x401000, function_obj=callee)
+    analysis = create_mock_analysis(
+        "callee",
+        parameters=[{"name": "param_1", "index": 0, "size": 4}],
+        returns=[ReturnInfo(address="0x401000", value=Expression.parameter("param_1", 0, size=4), conditions=[])],
+    )
+    analyzer.analyze_function = Mock(return_value=analysis)
+
+    first = analyzer._get_or_analyze_call_target(target_ref, set(), args=[Expression.parameter("lhs", index=10, size=4)])
+    second = analyzer._get_or_analyze_call_target(target_ref, set(), args=[Expression.parameter("rhs", index=11, size=4)])
+
+    assert first is second
+    assert analyzer.analyze_function.call_count == 1
 
 def test_constant_branch_enumerator_handles_ptrsub_function_targets():
     direct = Expression.intrinsic(

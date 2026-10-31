@@ -151,7 +151,7 @@ _METHOD_MODULES = {
     '_is_test_order_mock': 'expression_forms',
     '_is_zero_constant': 'constant_folding',
     '_iter_expression_nodes': 'expression_forms',
-    '_iter_path_ops_before_call': 'call_paths',
+    '_path_ops_before_call': 'call_paths',
     '_known_nonnull_address_comparison_truth': 'constant_folding',
     '_latest_definite_effect_value_for_location': 'location',
     '_location_sort_key': 'location',

@@ -1666,7 +1666,15 @@ def test_return_analyzer_keeps_safe_call_summary_when_others_are_rejected():
     assert expanded[0].value.value == 11
 
 
-def test_return_analyzer_does_not_rebind_argument_specialized_call_analysis():
+def test_return_analyzer_does_not_expand_a_callee_with_more_parameters_than_arguments():
+    """Issue #281 review 5-2: 引数より parameter が多い callee は展開しない（scope に束縛があっても）。
+
+    修正前はこの test が「束縛が 1 つでもある解析は特殊化済み」として、置き換えを飛ばした展開を期待していた。
+    引数の無い parameter（`free_caller_b`）を指す式が caller の同じ番号の parameter として残り得る。callee の
+    解析へ束縛してよいのは定数だけなので（`is_context_free_value`）、caller の parameter が入った解析も
+    production では作られない。
+    """
+
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     caller_a = _param_expr("caller_a", 1, size=4)
     caller_b = _param_expr("caller_b", 2, size=4)
@@ -1702,11 +1710,7 @@ def test_return_analyzer_does_not_rebind_argument_specialized_call_analysis():
             active_functions=set(),
         )
 
-    assert expanded is not None
-    assert len(expanded) == 1
-    assert expanded[0].value.operator == "INT_XOR"
-    assert expanded[0].value.operands[0].name == "caller_a"
-    assert expanded[0].value.operands[1].name == "caller_b"
+    assert expanded is None
 
 
 def test_return_analyzer_uses_current_function_when_containing_lookup_fails():

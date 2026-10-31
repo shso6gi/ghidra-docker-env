@@ -821,10 +821,8 @@ def _impl__address_root_is_stack_frame(expr: Optional[Expression]) -> bool:
     current = expr
     while current is not None and seen < 64:
         seen += 1
-        if _is_stack_frame_base_expression(current):
-            return True
         storage = _coerce_storage_info(getattr(current, "storage_info", None))
-        if storage is not None and not storage.is_register and storage.space_name == "stack":
+        if storage is not None and storage.claims_frame():
             return True
         expr_type = current.expr_type
         operands = list(getattr(current, "operands", None) or [])

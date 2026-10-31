@@ -21,8 +21,9 @@ caller の effect の順序と比べてしまう（Issue #281 の review: callee
 caller の呼び出し位置の memory の値に等しい。順序は caller の呼び出しの op の key（`CallSite`。caller 自身の
 読み出し・effect と同じ `core.program_order` の key）にし、callee の位置（`location`）は落とす
 （番地の operand から caller の parameter で計算し直される）。caller の consumer は、caller 自身が呼び出しの
-位置で読んだのと同じ扱いをする。呼び出しで caller へ入る callee の effect の key も呼び出しの位置なので、
-移した読み出し（`effect.order_key >= 読み出しの key` を除く）はそれらを見ない。
+位置で読んだのと同じ扱いをする。呼び出しで caller へ入る callee の effect は、呼び出しの op の key の中の
+slot（`CallSite.effect_key`、callee の順）を持つので、移した読み出し（key は呼び出しの key）より後になり、
+その読み出しはそれらを見ない（`effect.order_key >= 読み出しの key` を除く）。
 
 「前に callee の書き込みが無い」の判定（`CalleeTimeline.write_may_precede`）:
 
@@ -48,6 +49,23 @@ caller の consumer はこれらを caller の出口の状態・caller の基底
 落とすか拒否する（review 4: callee が `*p = 5` の後に返す 5 が、caller が `q` を渡して呼んだ後の `*p = 9` の
 9 に化けた）。値の同一性だけの ref（`CALLEE_VALUE_REFS_KEPT`）は保つ。
 
+**parameter の置き換え（review 5）**: 境界は同じ走査で callee の parameter を caller の引数へ置き換える
+（`CalleeBinding`）。順序は (1) 値の node の ref の表、(2) parameter の置き換え、(3) frame の記憶域。post-state の
+読み出しは parameter の key を持ち得る（`*param_1` の post-state は param_1 の基底）ので、(1) を先に見る。
+置き換えた値は caller の値なので、境界の規則を当てない。置き換えの無い parameter を指す node（引数が足りない・
+幅を合わせられない）は `callee_parameter_unbound` で拒否する。callee の解析へ束縛してよいのは文脈を持たない値
+（定数: `is_context_free_value`）だけで、束縛済みの callee も同じく全 parameter を置き換える（束縛済みの
+parameter には同じ定数が入る）。以前は caller の parameter・読み出し・frame の番地も callee の解析へ束縛し、
+束縛が 1 つでもある解析を「特殊化済み」として置き換えを飛ばしていた: caller の値が callee の時間軸・frame と
+比べられ、引数の無い callee の parameter が caller の同じ番号の parameter として残り得た。
+
+**frame の記憶域**: `storage_info` が frame を指す node（`StorageInfo.claims_frame`: stack / frame pointer の
+register、stack 空間）は拒否する。callee の stack で渡る parameter は (2) で caller の引数になっている。
+
+**入れ子の呼び出し**: callee の式の中の deferred call（callee の引数・時間軸の上にある）は、callee の文脈で
+展開してから結果をまるごと境界へ通す（`bounded_refinement`）。境界を通した後に callee の文脈で展開すると、
+入れ子の結果が境界を通らずに caller へ入る。
+
 拒否は `CallBoundaryRefused`（`OperandDerivationRefused` の派生）。呼び出し側は、置き換えの拒否と同じ境界で
 扱う: 呼び出しの展開をまるごとやめるか、その呼び出しの effect をまるごと「分からない呼び出し」にする。
 callee の元の式を caller へ渡してはいけない。
@@ -58,8 +76,8 @@ callee の元の式を caller へ渡してはいけない。
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, FrozenSet, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
@@ -73,6 +91,7 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef
 from scripts.function_tracer_pcode.core.operand_derivation import OperandDerivationRefused
+from scripts.function_tracer_pcode.core.program_order import call_effect_key
 from scripts.function_tracer_pcode.core.runtime_refs import (
     AbiArgumentSlotRef,
     AddressValueRef,
@@ -90,6 +109,8 @@ REFUSED_CALL_SITE_ORDER_UNKNOWN = "call_site_order_unknown"
 REFUSED_UNKNOWN_MEMORY_REF = "callee_memory_ref_unsupported"
 REFUSED_CALLEE_PLACE = "callee_place_claim"
 REFUSED_CALLEE_SUMMARY_REF = "callee_summary_ref_unsupported"
+REFUSED_CALLEE_PARAMETER_UNBOUND = "callee_parameter_unbound"
+REFUSED_CALLEE_EFFECT_ORDER = "callee_effect_order_unavailable"
 
 #: 値の node に付いたまま caller へ持ち込める ref（値の同一性だけを表し、callee の時点・位置を持たない）。
 #: exact type で引く（subclass は別の意味を持ち得る）。ここに無い ref は `_value_ref_is_callee_claim` の表
@@ -144,6 +165,13 @@ class CallSite:
             return cls(None)
         return cls(_coerce_order(getattr(deferred_call, "call_site_order_key", None)))
 
+    def effect_key(self, slot: Optional[int]) -> Optional[int]:
+        """呼び出しの中で `slot` 番目に起きる callee の書き込みの、caller の key（`core.program_order`）。"""
+
+        if slot is None:
+            return None
+        return call_effect_key(self.read_order_key, slot)
+
 
 @dataclass(frozen=True)
 class CalleeTimeline:
@@ -170,6 +198,17 @@ class CalleeTimeline:
     def unknown(cls, parameters: Optional[Sequence[Dict]] = None) -> "CalleeTimeline":
         return cls(None, tuple(parameters or ()))
 
+    def effect_slots(self) -> Optional[Dict[int, int]]:
+        """callee の書き込みの key → 呼び出しの中の slot（1 から、key の順。同じ key は同じ slot）。
+
+        書き込みが分からない・順序の分からない書き込みがあれば None（caller の key を付けられない）。
+        key は callee の CFG の線形拡大なので、順位を付け直しても callee の中の前後は保たれる。
+        """
+
+        if self.effect_orders is None or any(order == _UNKNOWN_EFFECT_ORDER for order in self.effect_orders):
+            return None
+        return {order: slot for slot, order in enumerate(sorted(set(self.effect_orders)), start=1)}
+
     def write_may_precede(self, context_order: Optional[int]) -> bool:
         """文脈の時点（None = callee の出口）より前に書き込みがあり得るか。"""
 
@@ -180,18 +219,91 @@ class CalleeTimeline:
         return any(order == _UNKNOWN_EFFECT_ORDER or order < context_order for order in self.effect_orders)
 
 
+@dataclass(frozen=True)
+class CalleeBinding:
+    """callee の parameter → caller の引数。境界は parameter の置き換えも同じ走査で行う（Issue #281 review 5）。
+
+    * `replacements`: parameter の identity key → caller の値（`_build_parameter_replacements`）。
+    * `parameter_keys`: callee の parameter を指す key の全体（引数の無い parameter も含む）。
+    * `lookup_parameters`: node の key を引くときの parameter の descriptor（置き換えの規則と同じもの）。
+
+    置き換えの無い parameter を指す node（引数が足りない・幅を合わせられない）は `callee_parameter_unbound` で
+    拒否する。以前は「引数で特殊化済み」と判定された callee の置き換えをまるごと飛ばしていて、引数の一部だけを
+    束縛した callee の parameter が caller の同じ番号の parameter として残り得た。
+    """
+
+    replacements: Mapping[Tuple[object, ...], Expression] = field(default_factory=dict)
+    parameter_keys: FrozenSet[Tuple[object, ...]] = frozenset()
+    lookup_parameters: Tuple[object, ...] = ()
+
+    @classmethod
+    def for_arguments(
+        cls,
+        callee_parameters: Sequence[object],
+        args: Sequence[Expression],
+        *,
+        lookup_parameters: Optional[Sequence[object]] = None,
+    ) -> "CalleeBinding":
+        from scripts.function_tracer_pcode.analysis.effects.call_argument import (
+            _impl__build_parameter_replacements as build_parameter_replacements,
+            _impl__callee_parameter_reference_keys as callee_parameter_reference_keys,
+        )
+
+        params = list(callee_parameters or ())
+        return cls(
+            replacements=build_parameter_replacements(params, list(args or ())),
+            parameter_keys=callee_parameter_reference_keys(params),
+            lookup_parameters=tuple(params if lookup_parameters is None else lookup_parameters),
+        )
+
+
+def is_context_free_value(expr: Optional[Expression]) -> bool:
+    """関数の時点・場所・parameter を持たない値か（定数と、定数だけの演算）。
+
+    callee の解析へ引数を束縛してよいのはこの値だけ（`_bound_parameter_values_from_call_args`）。それ以外の
+    caller の値（caller の parameter・memory の読み出し・caller の frame の番地）を束縛すると、caller の順序の
+    読み出しが callee の effect と比べられ、caller の parameter が callee の parameter と同じ key で置き換えられ、
+    caller の frame の番地が callee の frame に分類される（Issue #281 review 5）。束縛しない引数は境界の置き換えで
+    caller の値になる（意味は同じ）。
+    """
+
+    if expr is None:
+        return False
+    stack = [expr]
+    seen = set()
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if node.expr_type not in (ExpressionType.CONSTANT, ExpressionType.UNARY_OP, ExpressionType.BINARY_OP):
+            return False
+        ref = getattr(node, "runtime_ref", None)
+        if ref is not None and type(ref) is not AddressValueRef:
+            return False
+        if getattr(node, "storage_info", None) is not None or getattr(node, "read_order_key", None) is not None:
+            return False
+        stack.extend(node.operands or ())
+    return True
+
+
 def import_callee_expression(
     expr: Optional[Expression],
     site: CallSite,
     timeline: CalleeTimeline,
     *,
     context_order: Optional[int] = None,
+    binding: Optional[CalleeBinding] = None,
 ) -> Optional[Expression]:
-    """callee の式を caller の時間軸へ移す。`context_order` は effect の値の文脈ならその effect の順序。"""
+    """callee の式を caller の値にする。`context_order` は effect の値の文脈ならその effect の順序。
+
+    `binding` を渡すと callee の parameter を caller の引数へ置き換える（production の境界はすべて渡す）。
+    渡さなければ parameter はそのまま（parameter を持たない展開・test 用）。
+    """
 
     if expr is None:
         return None
-    return _Importer(site, timeline, context_order).expression(expr)
+    return CalleeImporter(site, timeline, context_order=context_order, binding=binding).expression(expr)
 
 
 def import_callee_condition(
@@ -200,18 +312,47 @@ def import_callee_condition(
     timeline: CalleeTimeline,
     *,
     context_order: Optional[int] = None,
+    binding: Optional[CalleeBinding] = None,
 ) -> Optional[Condition]:
     if condition is None:
         return None
-    return _Importer(site, timeline, context_order).condition(condition)
+    return CalleeImporter(site, timeline, context_order=context_order, binding=binding).condition(condition)
 
 
-class _Importer:
-    def __init__(self, site: CallSite, timeline: CalleeTimeline, context_order: Optional[int]) -> None:
+class CalleeImporter:
+    """1 つの呼び出しの境界（`site`・`timeline`・`binding` が同じ）で、callee の式を caller の値にする。
+
+    同じ境界で多くの式を移す呼び出し側（bounded refinement の展開の組み合わせ）は、1 つを使い回して
+    共有の部分木の変換を 1 回にする。
+    """
+
+    def __init__(
+        self,
+        site: CallSite,
+        timeline: CalleeTimeline,
+        *,
+        context_order: Optional[int] = None,
+        binding: Optional[CalleeBinding] = None,
+    ) -> None:
         self.site = site
         self.timeline = timeline
         self.context_order = context_order
+        self.binding = binding
         self._memo: Dict[int, Expression] = {}
+        if binding is not None:
+            from scripts.function_tracer_pcode.analysis.effects.call_argument import (
+                _impl__lookup_parameter_replacement,
+                _impl__parameter_identity_keys_from_expression,
+            )
+            from scripts.function_tracer_pcode.analysis.effects.location import (
+                _impl__simplify_substituted_expression,
+            )
+
+            self._lookup_replacement = _impl__lookup_parameter_replacement
+            self._identity_keys = _impl__parameter_identity_keys_from_expression
+            self._simplify = _impl__simplify_substituted_expression
+            self._replacements = dict(binding.replacements)
+            self._lookup_parameters = list(binding.lookup_parameters)
 
     def condition(self, condition: Condition) -> Condition:
         imported = self.expression(condition.expression)
@@ -224,14 +365,41 @@ class _Importer:
         if cached is not None:
             return cached
         result = self._import(expr)
+        if self.binding is not None:
+            # 置き換えと同じ後処理（`substitute_expression` は置き換えた node と辿った node を簡約する）
+            result = self._simplify(result, self._lookup_parameters)
         self._memo[id(expr)] = result
         return result
+
+    def _parameter(self, expr: Expression) -> Optional[Expression]:
+        """callee の parameter を指す node なら caller の値。置き換えが無ければ拒否。parameter でなければ None。"""
+
+        binding = self.binding
+        if binding is None:
+            return None
+        replacement = self._lookup_replacement(expr, self._replacements, self._lookup_parameters)
+        if replacement is not None:
+            # caller の値なので、境界の規則（callee の時点・位置の主張）を当てない
+            return replacement
+        if binding.parameter_keys and self._identity_keys(expr, self._lookup_parameters) & binding.parameter_keys:
+            raise CallBoundaryRefused(
+                REFUSED_CALLEE_PARAMETER_UNBOUND, expr_type=expr.expr_type.name, ref_type=type(getattr(expr, "runtime_ref", None)).__name__
+            )
+        return None
 
     def _import(self, expr: Expression) -> Expression:
         if expr.expr_type == ExpressionType.MEMORY and expr.operands:
             return self._memory(expr)
-        # 値の node（MEMORY 以外）の ref を、子より先に決める（拒否なら子を辿る費用も要らない）
+        # 1. 値の node（MEMORY 以外）の ref を、置き換え・子より先に決める。post-state の読み出し・位置の
+        #    主張は parameter の key を持ち得る（`*param_1` の post-state は param_1 の基底）が、parameter の値
+        #    ではないので、置き換えてはいけない（拒否なら子を辿る費用も要らない）
         drop_ref = self._value_ref_is_callee_claim(expr)
+        # 2. callee の parameter を指す node は caller の値（置き換えが無ければ拒否）
+        replacement = self._parameter(expr)
+        if replacement is not None:
+            return replacement
+        # 3. callee の frame の記憶域（callee の stack で渡る parameter は 2 で caller の値になっている）
+        self._refuse_callee_frame_storage(expr)
         if expr.expr_type == ExpressionType.PHI and expr.value:
             branches = []
             changed = False
@@ -283,15 +451,10 @@ class _Importer:
                                           持ち、境界はその中を書き換えられない
         ================================  ===========================================================
 
-        `storage_info` が callee の stack を指す node も拒否（`_address_root_is_stack_frame` は caller の
-        stack と読む）。
+        `storage_info` が callee の frame を指す node（`StorageInfo.claims_frame`: stack / frame pointer、stack
+        空間）も拒否（`_address_root_is_stack_frame` は caller の frame と読む）。
         """
 
-        storage = getattr(expr, "storage_info", None)
-        if storage is not None and getattr(storage, "is_stack_pointer", False):
-            raise CallBoundaryRefused(
-                REFUSED_CALLEE_PLACE, expr_type=expr.expr_type.name, ref_type="storage_info"
-            )
         ref = getattr(expr, "runtime_ref", None)
         kind = type(ref)
         if ref is None or kind in CALLEE_VALUE_REFS_KEPT:
@@ -310,6 +473,16 @@ class _Importer:
         if kind is ObservedMemoryReadRef:
             raise CallBoundaryRefused(REFUSED_UNKNOWN_MEMORY_REF, expr_type=expr.expr_type.name, ref_type=kind.__name__)
         raise CallBoundaryRefused(REFUSED_CALLEE_SUMMARY_REF, expr_type=expr.expr_type.name, ref_type=kind.__name__)
+
+    def _refuse_callee_frame_storage(self, expr: Expression) -> None:
+        """callee の stack / frame pointer・stack 空間の記憶域（`StorageInfo.claims_frame`）を持つ node は拒否。"""
+
+        storage = getattr(expr, "storage_info", None)
+        claims_frame = getattr(storage, "claims_frame", None)
+        if callable(claims_frame) and claims_frame():
+            raise CallBoundaryRefused(
+                REFUSED_CALLEE_PLACE, expr_type=expr.expr_type.name, ref_type="storage_info"
+            )
 
     def _memory(self, expr: Expression) -> Expression:
         ref = getattr(expr, "runtime_ref", None)

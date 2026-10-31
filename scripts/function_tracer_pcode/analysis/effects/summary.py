@@ -157,7 +157,7 @@ from scripts.function_tracer_pcode.analysis.effects.call_argument_evidence impor
 from scripts.function_tracer_pcode.analysis.effects.call_paths import (  # noqa: F401
     _impl__compatible_call_block_paths as _compatible_call_block_paths,
     _impl__find_block_info_for_pcode_op as _find_block_info_for_pcode_op,
-    _impl__iter_path_ops_before_call as _iter_path_ops_before_call,
+    _impl__path_ops_before_call as _path_ops_before_call,
     _impl__pcode_op_ref_key_from_tracker as _pcode_op_ref_key_from_tracker,
     _impl__recover_unmodified_live_in_argument as _recover_unmodified_live_in_argument,
     _impl__resolve_multiequal_input_for_path as _resolve_multiequal_input_for_path,

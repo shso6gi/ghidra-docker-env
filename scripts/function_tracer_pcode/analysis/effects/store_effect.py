@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
 from scripts.function_tracer_pcode.core.operand_derivation import OperandDerivationRefused
 from scripts.function_tracer_pcode.analysis.program_points import op_program_key
+from scripts.function_tracer_pcode.core.program_order import op_key_from_legacy
 from scripts.function_tracer_pcode.analysis.effects.call_boundary import (
+    REFUSED_CALLEE_EFFECT_ORDER,
+    CalleeBinding,
     CallBoundaryRefused,
     CallSite,
     CalleeTimeline,
@@ -38,7 +41,6 @@ from scripts.function_tracer_pcode.analysis.effects._shared import (
 from scripts.function_tracer_pcode.analysis.effects import call_argument_abi as _abi
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _block_has_path_incomplete_effects,
-    _build_parameter_replacements,
     _call_argument_evidence_storage_key,
     _call_argument_recovery_status,
     _call_arguments_may_expose_parameter_memory,
@@ -90,8 +92,6 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     canonicalize_location,
     is_call_effect_summary_allowed,
     locations_match,
-    substitute_condition,
-    substitute_expression,
     substitute_location,
     subtract_implied_conditions,
 )
@@ -721,7 +721,41 @@ def _impl_summarize_store_effects(
                             )
                             continue
 
+                        # Issue #281 review 5: callee の書き込みは呼び出しの間に callee の順に起きる。caller の key は
+                        # 呼び出しの op の key の中の slot（`core.program_order.call_effect_key`）。すべてを呼び出しの
+                        # key にすると、同じ位置への 2 つの書き込み（`*p = 5; *p = 9`）の前後が消える
+                        callee_timeline = CalleeTimeline.from_effect_summary(callee_summary)
+                        callee_effect_slots = callee_timeline.effect_slots()
+                        if callee_effect_slots is None or call_site.effect_key(1) is None:
+                            has_unsupported_call = True
+                            unsupported_call_sites.append(
+                                _unsupported_call_effect_ref(
+                                    op,
+                                    target_ref=target_ref,
+                                    target_expr=target_expr,
+                                    arguments=variant_args,
+                                    path_conditions=active_conditions,
+                                    reason=REFUSED_CALLEE_EFFECT_ORDER,
+                                )
+                            )
+                            continue
                         for callee_effect_index, effect in enumerate(callee_summary.effects):
+                            caller_effect_order_key = call_site.effect_key(
+                                callee_effect_slots.get(effect.order_key)
+                            )
+                            if caller_effect_order_key is None:
+                                has_unsupported_call = True
+                                unsupported_call_sites.append(
+                                    _unsupported_call_effect_ref(
+                                        op,
+                                        target_ref=target_ref,
+                                        target_expr=target_expr,
+                                        arguments=variant_args,
+                                        path_conditions=active_conditions,
+                                        reason=REFUSED_CALLEE_EFFECT_ORDER,
+                                    )
+                                )
+                                continue
                             substitution_args = _choose_effect_substitution_args(
                                 effect.location,
                                 callee_summary.parameter_refs,
@@ -753,34 +787,31 @@ def _impl_summarize_store_effects(
                                         f"args={summarize_expressions(substitution_args)}"
                                     )
                                 continue
-                            substitutions = _build_parameter_replacements(
+                            binding = CalleeBinding.for_arguments(
                                 callee_summary.parameter_refs,
                                 substitution_args,
+                                lookup_parameters=parameters,
                             )
                             try:
                                 # Issue #281: effect の値の memory 読み出しは callee の時間軸の上にある（値は
-                                # その effect の書き込みの前に読まれる）。caller の呼び出し位置へ移してから
-                                # 引数へ置き換える（`call_boundary`）
-                                callee_timeline = CalleeTimeline.from_effect_summary(callee_summary)
-                                imported_value = import_callee_expression(
+                                # その effect の書き込みの前に読まれる）。境界が caller の呼び出し位置へ移し、
+                                # 同じ走査で callee の parameter を引数へ置き換える（`call_boundary`）
+                                substituted_value = import_callee_expression(
                                     effect.value,
                                     call_site,
                                     callee_timeline,
                                     context_order=effect.order_key,
+                                    binding=binding,
                                 )
-                                imported_conditions = [
+                                substituted_conditions = [
                                     import_callee_condition(
                                         cond,
                                         call_site,
                                         callee_timeline,
                                         context_order=effect.order_key,
+                                        binding=binding,
                                     )
                                     for cond in effect.conditions
-                                ]
-                                substituted_value = substitute_expression(imported_value, substitutions, parameters)
-                                substituted_conditions = [
-                                    substitute_condition(cond, substitutions, parameters)
-                                    for cond in imported_conditions
                                 ]
                             except OperandDerivationRefused as refusal:
                                 # Issue #281: 引数へ置き換えた派生が ref を保てない、または読み出しを caller の
@@ -833,7 +864,7 @@ def _impl_summarize_store_effects(
                                     location=substituted_location,
                                     value=substituted_value,
                                     conditions=merged_conditions,
-                                    order_key=op_order_key,
+                                    order_key=caller_effect_order_key,
                                     provenance=StoreEffectProvenance(
                                         source_kind="call_derived",
                                         producer_pcode_op_ref=_pcode_ref_for_op(op),
@@ -1019,7 +1050,7 @@ def _effect_order_key(tracer, op, *, block_index: Optional[int] = None) -> Optio
 
     program_order = _tracer_program_order(tracer)
     if program_order is _LEGACY_ORDER:
-        return _try_get_order_key(op)
+        return op_key_from_legacy(_try_get_order_key(op))
     return op_program_key(program_order, op, block_index=block_index)
 
 

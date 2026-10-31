@@ -28,10 +28,11 @@ High P-code op の varnode 解決だけである。varnode を 1 つも読まな
 得られる解析結果が束縛に依存しない**ことだけを使う。
 
 **返す object**: 再利用時は束縛ゼロ entry をそのまま返さず、要求された
-``analysis_scope_key`` を持つ複製（view）を返す。scope key は cache の目印であると
-同時に ``_analysis_is_fully_argument_specialized()`` の入力でもあるため、束縛ゼロの
-key のまま下流へ渡すと呼び出し側の展開経路が別分岐に入ってしまう。view を返せば
+``analysis_scope_key`` を持つ複製（view）を返す。scope key は cache の目印なので、
+束縛ゼロの key のまま返すと要求した scope の cache entry と食い違う。view を返せば
 下流から見た解析結果は従来と同一で、省けるのは decompile と解析そのものだけになる。
+（呼び出し側は束縛の有無に関係なく、境界 ``call_boundary`` で callee の parameter を
+引数へ置き換える: Issue #281 review 5。）
 """
 
 from __future__ import annotations

@@ -1140,7 +1140,6 @@ class ReturnAnalyzer:
     def dispose(self):
         return self._program_access.dispose()
     # session helpers (continued)
-    _analysis_is_fully_argument_specialized = _svc_analyze_function._impl__analysis_is_fully_argument_specialized
     _analysis_needs_wrapper_recovery = _svc_analyze_function._impl__analysis_needs_wrapper_recovery
     _analysis_scope_key = _svc_lifecycle._impl__analysis_scope_key
     def _attempt_disassemble_at(self, addr):

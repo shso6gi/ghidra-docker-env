@@ -13,7 +13,8 @@ memory の読み出し（`read_order_key` / `ObservedMemoryReadRef.order_key`）
 違った（#285）。番地の順は、分岐が前へ飛ぶ配置（後ろの番地の block が先に実行される）では実行順と食い違う。
 
 **key の規則**: 基本 block の graph の強連結成分を縮めた DAG の位相順位（`rank`）と、block の中の位置
-（`getOrder()`）を組にした整数 `(rank << 32) | position`。
+（`getOrder()`）を組にした整数 `(rank << 48) | (position << 16)`。下位 16 bit（slot）は op の key では 0 で、
+呼び出しの op の中で起きる callee の書き込みに使う（`call_effect_key`）。
 
 * 非巡回の部分では線形拡大になる: 同じ block の中は位置の順、別の block は、到達できるなら rank が小さい。
   分岐の別の腕どうし（どちらの実行にも両方は現れない）は任意の順になるが、consumer は書き込みの経路条件で
@@ -26,6 +27,13 @@ memory の読み出し（`read_order_key` / `ObservedMemoryReadRef.order_key`）
 key は同じ関数の中だけで比べられる。関数をまたぐ移送（callee の読み出しを caller の呼び出し位置へ）は
 `analysis.effects.call_boundary` が持ち、caller の key を付け直す。
 
+**呼び出しの中の書き込み（slot）**: 呼び出しの op の key を `c` とすると、callee の書き込みは呼び出しの間に、
+callee の順に起きる。caller の key では `c < c + 1 < … < c + n < 次の op の key` になるよう、callee の書き込みの
+key の順位 `i`（1 から。同じ key は同じ順位）を slot にして `c + i` とする（`call_effect_key`）。呼び出しの位置の
+読み出し（key `c`）は callee の書き込みより前、呼び出しの後の op は後。入れ子の呼び出しも、callee の中で
+すでに slot つきの key を持つので、順位を付け直すだけで順序が保たれる。修正前は callee の書き込みがすべて `c`
+になり、同じ位置への 2 つの書き込み（`*p = 5; *p = 9`）の前後を consumer が区別できなかった（review 5）。
+
 Ghidra の API には触らない（block の graph は呼び出し側が渡す: `analysis.program_points`）。
 """
 
@@ -34,15 +42,19 @@ from __future__ import annotations
 import heapq
 from typing import Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
+#: 呼び出しの中の callee の書き込みの slot の幅。op の key の下位 bit は 0
+CALL_EFFECT_SLOT_BITS = 16
+CALL_EFFECT_SLOT_LIMIT = 1 << CALL_EFFECT_SLOT_BITS
 #: block の中の位置の幅。`getOrder()` はこれ未満でなければならない（超えたら key を出さない）
 _POSITION_BITS = 32
 _POSITION_LIMIT = 1 << _POSITION_BITS
+_RANK_SHIFT = _POSITION_BITS + CALL_EFFECT_SLOT_BITS
 
 
 class ProgramOrder:
     """1 つの関数の基本 block の graph から作った、program point の順序。"""
 
-    __slots__ = ("_rank", "_cyclic_ranks", "_cyclic_blocks")
+    __slots__ = ("_rank", "_cyclic_ranks", "_cyclic_blocks", "_entry_block", "_block_by_rank", "_dominators")
 
     def __init__(self, successors: Mapping[int, Sequence[int]]) -> None:
         blocks = sorted({int(block) for block in successors} | {int(s) for out in successors.values() for s in out})
@@ -65,6 +77,17 @@ class ProgramOrder:
         self._cyclic_blocks: FrozenSet[int] = frozenset(
             block for block in blocks if component_of[block] in cyclic_components
         )
+        self._block_by_rank: Dict[int, int] = {
+            ranks[number]: members[0] for number, members in enumerate(components) if len(members) == 1
+        }
+        targets = {target for out in edges.values() for target in out}
+        sources = [block for block in blocks if block not in targets]
+        self._entry_block: Optional[int] = (
+            sources[0] if len(sources) == 1 and sources[0] not in self._cyclic_blocks else None
+        )
+        self._dominators: Dict[int, FrozenSet[int]] = (
+            _dominator_sets(blocks, edges, self._entry_block) if self._entry_block is not None else {}
+        )
 
     def key(self, block_index: Optional[int], position: Optional[int]) -> Optional[int]:
         """block `block_index` の位置 `position` の key。分からなければ None（consumer に推測させない）。"""
@@ -74,7 +97,7 @@ class ProgramOrder:
         rank = self._rank.get(int(block_index))
         if rank is None or not 0 <= int(position) < _POSITION_LIMIT:
             return None
-        return (rank << _POSITION_BITS) | int(position)
+        return (rank << _RANK_SHIFT) | (int(position) << CALL_EFFECT_SLOT_BITS)
 
     def block_in_cycle(self, block_index: int) -> bool:
         return int(block_index) in self._cyclic_blocks
@@ -82,7 +105,7 @@ class ProgramOrder:
     def in_cycle(self, key: Optional[int]) -> bool:
         """key の point が巡回する成分の中にあるか（その中どうしの前後関係を key は表さない）。"""
 
-        return key is not None and key >= 0 and (key >> _POSITION_BITS) in self._cyclic_ranks
+        return key is not None and key >= 0 and (key >> _RANK_SHIFT) in self._cyclic_ranks
 
     def may_precede(self, first: Optional[int], second: Optional[int]) -> bool:
         """ある実行で `first` の point が `second` の point より前に実行され得るか（key が無ければ True）。
@@ -94,11 +117,106 @@ class ProgramOrder:
             return True
         if first < second:
             return True
-        return self.in_cycle(first) and (first >> _POSITION_BITS) == (second >> _POSITION_BITS)
+        return self.in_cycle(first) and (first >> _RANK_SHIFT) == (second >> _RANK_SHIFT)
 
     @property
     def has_cycle(self) -> bool:
         return bool(self._cyclic_blocks)
+
+    @property
+    def entry_block(self) -> Optional[int]:
+        """入る辺の無いただ 1 つの block（loop の外）。どの実行でも最初に 1 回だけ実行される。
+
+        入る辺の無い block が複数あれば（到達できない block がある）None。
+        """
+
+        return self._entry_block
+
+    def block_of(self, key: Optional[int]) -> Optional[int]:
+        """key の point の block（その rank の成分の block が 1 つのときだけ）。"""
+
+        if key is None or key < 0:
+            return None
+        return self._block_by_rank.get(key >> _RANK_SHIFT)
+
+    def dominates(self, first: Optional[int], second: Optional[int]) -> bool:
+        """入口から `second` の point へのどの経路も、その前に `first` の point を通るか。
+
+        同じ block なら block の中の位置の順（同じ回の実行の中で前）。別の block なら `first` の block が
+        `second` の block を支配する（支配集合: `_dominator_sets`）。入口が 1 つに決まらない、または point の
+        block が分からない（複数の block からなる loop の成分の中）なら False（保守的）。
+        """
+
+        if first is None or second is None:
+            return False
+        first_block = self.block_of(first)
+        second_block = self.block_of(second)
+        if first_block is None or second_block is None or not self._dominators:
+            return False
+        if first_block == second_block:
+            return first < second
+        return first_block in self._dominators.get(second_block, frozenset())
+
+
+def call_effect_key(call_key: Optional[int], slot: int) -> Optional[int]:
+    """呼び出しの op の key `call_key` の中で、`slot` 番目（1 から）に起きる callee の書き込みの key。
+
+    `call_key` が op の key でない（slot の bit が 0 でない・負）か、slot が幅に収まらなければ None
+    （consumer に推測させない。呼び出し側は effect を分からない呼び出しにする）。
+    """
+
+    if call_key is None:
+        return None
+    key = int(call_key)
+    if key < 0 or key & (CALL_EFFECT_SLOT_LIMIT - 1):
+        return None
+    if not 1 <= int(slot) < CALL_EFFECT_SLOT_LIMIT:
+        return None
+    return key + int(slot)
+
+
+def op_key_from_legacy(legacy_key: Optional[int]) -> Optional[int]:
+    """CFG を持たない test double の旧来の key（`(番地 << 8) | getOrder()`）を、slot を空けた op の key にする。"""
+
+    if legacy_key is None or int(legacy_key) < 0:
+        return None
+    return int(legacy_key) << CALL_EFFECT_SLOT_BITS
+
+
+def _dominator_sets(
+    blocks: Sequence[int],
+    edges: Mapping[int, Tuple[int, ...]],
+    entry: int,
+) -> Dict[int, FrozenSet[int]]:
+    """入口 `entry` からの支配集合（反復のデータフロー）。入口から到達できない block は含めない。"""
+
+    predecessors: Dict[int, List[int]] = {block: [] for block in blocks}
+    for block, targets in edges.items():
+        for target in targets:
+            predecessors[target].append(block)
+    reachable = {entry}
+    stack = [entry]
+    while stack:
+        for target in edges[stack.pop()]:
+            if target not in reachable:
+                reachable.add(target)
+                stack.append(target)
+    ordered = [block for block in blocks if block in reachable]
+    everything = frozenset(ordered)
+    dominators: Dict[int, FrozenSet[int]] = {block: everything for block in ordered}
+    dominators[entry] = frozenset({entry})
+    changed = True
+    while changed:
+        changed = False
+        for block in ordered:
+            if block == entry:
+                continue
+            incoming = [dominators[pred] for pred in predecessors[block] if pred in reachable]
+            new = frozenset({block}) | (frozenset.intersection(*incoming) if incoming else frozenset())
+            if new != dominators[block]:
+                dominators[block] = new
+                changed = True
+    return dominators
 
 
 def _strongly_connected_components(

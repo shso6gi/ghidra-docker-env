@@ -36,21 +36,18 @@ from scripts.function_tracer_pcode.analysis.condition import (
     ConditionNormalizer,
 )
 from scripts.function_tracer_pcode.analysis.effects.call_boundary import (
+    CalleeBinding,
+    CalleeImporter,
     CallSite,
     CalleeTimeline,
-    import_callee_condition,
-    import_callee_expression,
 )
 from scripts.function_tracer_pcode.analysis.effects.summary import (
-    _build_parameter_replacements,
     _call_arguments_width_safe_for_callee_analysis,
     _coerce_argument_to_callee_parameter,
     _coerce_storage_info,
     _enumerate_constant_expression_branches,
     _resolve_parameter_descriptor,
     _storage_infos_match,
-    substitute_condition,
-    substitute_expression,
 )
 from scripts.function_tracer_pcode.analysis.returns.summary_returns import (
     _return_region_summary_proof_id_from_evidence,
@@ -656,41 +653,34 @@ class BoundedCallRefiner:
             pending_evidence.clear()
 
         for _target_ref, target_conditions, callee_analysis in candidates:
-            already_specialized = self._analysis_is_fully_argument_specialized(callee_analysis)
-            if already_specialized:
-                aligned_arguments = []
-                replacements = {}
-            else:
-                aligned_arguments = self._align_deferred_arguments_to_callee(
-                    deferred,
-                    caller_analysis.parameters,
-                    callee_analysis.parameters,
+            aligned_arguments = self._align_deferred_arguments_to_callee(
+                deferred,
+                caller_analysis.parameters,
+                callee_analysis.parameters,
+            )
+            if len(aligned_arguments) < len(callee_analysis.parameters):
+                had_alignment_failure = True
+                self._debug(
+                    f"Skipped deferred call '{deferred.deferred_call_ref.display_name()}': expected "
+                    f"{len(callee_analysis.parameters)} args, got {len(aligned_arguments)}"
                 )
-                if len(aligned_arguments) < len(callee_analysis.parameters):
-                    had_alignment_failure = True
-                    self._debug(
-                        f"Skipped deferred call '{deferred.deferred_call_ref.display_name()}': expected "
-                        f"{len(callee_analysis.parameters)} args, got {len(aligned_arguments)}"
-                    )
-                    continue
-                if not _call_arguments_width_safe_for_callee_analysis(
-                    callee_analysis,
-                    aligned_arguments,
-                ):
-                    had_alignment_failure = True
-                    self._debug(
-                        f"Skipped deferred call '{deferred.deferred_call_ref.display_name()}': "
-                        "partial-width argument is used as a full-width callee value"
-                    )
-                    continue
-
-                replacements = _build_parameter_replacements(
-                    callee_analysis.parameters,
-                    aligned_arguments,
+                continue
+            if not _call_arguments_width_safe_for_callee_analysis(
+                callee_analysis,
+                aligned_arguments,
+            ):
+                had_alignment_failure = True
+                self._debug(
+                    f"Skipped deferred call '{deferred.deferred_call_ref.display_name()}': "
+                    "partial-width argument is used as a full-width callee value"
                 )
-            # Issue #281: callee の式の memory 読み出しは callee の時間軸の上にある。caller の呼び出し位置へ
-            # 移してから（callee の parameter の言葉のまま）引数へ置き換える。移せなければ
-            # `CallBoundaryRefused` で、`_expand_deferred_call` が呼び出しの展開をまるごとやめる。
+                continue
+            # Issue #281: callee の式は callee の時間軸・callee の parameter の上にある。境界（`call_boundary`）が
+            # caller の呼び出し位置へ移し、同じ走査で parameter を引数へ置き換える。移せない読み出し・置き換えの
+            # 無い parameter は `CallBoundaryRefused` で、`_expand_deferred_call` が呼び出しの展開をまるごとやめる。
+            # callee の解析に束縛されているのは定数だけ（`is_context_free_value`）なので、束縛済みの callee も
+            # 同じく置き換える（以前は「特殊化済み」なら置き換えを飛ばし、引数の一部だけを束縛した callee の
+            # parameter が残り得た: review 5）。
             # 以前はここで callee の post-state の読み出しを、置き換えた callee の effect と caller の parameter で
             # lowering していた。callee の effect の後の状態は caller の言葉で表せない（`call_boundary`）ので、
             # その読み出しは境界で拒否され、lowering は行わない
@@ -702,35 +692,44 @@ class BoundedCallRefiner:
                 getattr(callee_analysis, "effect_summary", None),
                 callee_analysis.parameters,
             )
+            importer = CalleeImporter(
+                site,
+                timeline,
+                binding=CalleeBinding.for_arguments(callee_analysis.parameters, aligned_arguments),
+            )
             candidate_result_count = 0
 
             for ret in callee_analysis.returns:
-                substituted_value = substitute_expression(
-                    import_callee_expression(ret.value, site, timeline),
-                    replacements,
-                    callee_analysis.parameters,
-                )
-                substituted_conditions = [
-                    substitute_condition(
-                        import_callee_condition(cond, site, timeline),
-                        replacements,
-                        callee_analysis.parameters,
-                    )
-                    for cond in ret.conditions
-                ]
-
+                # 入れ子の deferred call は callee の文脈で展開する（その引数は callee の parameter・時間軸の式）。
+                # 展開の結果をまるごと境界で caller の値にする。以前は先に caller の引数へ置き換えてから入れ子を
+                # 展開していて、入れ子の結果（callee の parameter・callee の時間軸の読み出し）が境界を通らずに
+                # caller へ入っていた（review 5）
                 condition_sets = self._expand_conditions(
-                    substituted_conditions,
+                    ret.conditions,
                     callee_analysis,
                     fuel,
                     trail,
                 )
-                value_states = self._expand_expression(
-                    substituted_value,
-                    callee_analysis,
-                    fuel,
-                    trail,
-                )
+                value_states = [
+                    ExpressionExpansion(
+                        importer.expression(value_expr),
+                        [importer.condition(cond) for cond in extra_conditions],
+                        nested_value_callees,
+                    )
+                    for value_expr, extra_conditions, nested_value_callees in self._expand_expression(
+                        ret.value,
+                        callee_analysis,
+                        fuel,
+                        trail,
+                    )
+                ]
+                condition_sets = [
+                    ConditionExpansion(
+                        [importer.condition(cond) for cond in conds],
+                        nested_condition_callees,
+                    )
+                    for conds, nested_condition_callees in condition_sets
+                ]
 
                 for conds, nested_condition_callees in (
                     condition_sets or [ConditionExpansion([], frozenset())]
@@ -825,22 +824,6 @@ class BoundedCallRefiner:
             add_candidate(deferred.target_ref, [])
 
         return candidates
-
-    def _analysis_is_fully_argument_specialized(
-        self,
-        analysis: Optional[FunctionReturnAnalysis],
-    ) -> bool:
-        if analysis is None:
-            return False
-        parameter_count = len(getattr(analysis, "parameters", ()) or ())
-        if parameter_count <= 0:
-            return False
-        scope_key = getattr(analysis, "analysis_scope_key", None)
-        if not isinstance(scope_key, tuple) or len(scope_key) < 4:
-            return False
-        bound_by_index = scope_key[2] if isinstance(scope_key[2], tuple) else ()
-        bound_by_storage = scope_key[3] if isinstance(scope_key[3], tuple) else ()
-        return max(len(bound_by_index), len(bound_by_storage)) >= parameter_count
 
     def _align_deferred_arguments_to_callee(
         self,

@@ -637,23 +637,6 @@ def _impl__analysis_needs_wrapper_recovery(
     return analysis.has_unknown_return() or analysis.has_unresolved_return_value()
 
 
-def _impl__analysis_is_fully_argument_specialized(
-    self,
-    analysis: Optional[FunctionReturnAnalysis],
-) -> bool:
-    if analysis is None:
-        return False
-    parameter_count = len(getattr(analysis, "parameters", ()) or ())
-    if parameter_count <= 0:
-        return False
-    scope_key = getattr(analysis, "analysis_scope_key", None)
-    if not isinstance(scope_key, tuple) or len(scope_key) < 4:
-        return False
-    bound_by_index = scope_key[2] if isinstance(scope_key[2], tuple) else ()
-    bound_by_storage = scope_key[3] if isinstance(scope_key[3], tuple) else ()
-    return bool(bound_by_index or bound_by_storage)
-
-
 def _impl_refresh_structural_recurrence_summary(
     self,
     analysis: Optional[FunctionReturnAnalysis],

@@ -7,8 +7,8 @@ frame の上にある。caller の consumer はそれを caller の effect と�
 `*p = 2`）。境界は、callee の書き込みが読み出しより前に無いと言えるときだけ、読み出しを caller の呼び出し位置の
 読み出しにし、言えなければ `CallBoundaryRefused`（呼び出し側が展開をまるごとやめる）。
 
-ここでの順序の数は caller / callee それぞれの中で比べられる小さな値にしてある（production の読み出しと effect の
-順序の単位の違いは別 Issue。境界は effect どうしの順序しか比べない）。
+ここでの順序の数は caller / callee それぞれの中で比べられる小さな値にしてある（production の key は
+`core.program_order` の CFG の順序。実際の key での前後は `test_issue281_boundary_state_and_order.py`）。
 """
 
 from types import SimpleNamespace
@@ -296,28 +296,25 @@ def _specializer():
     return SimpleNamespace(_rewrite_deferred_runtime_refs_in_expression=lambda expr, mapping: expr)
 
 
-def test_an_already_specialized_callee_is_moved_to_the_call_site_without_substitution():
-    """引数で特殊化済み（置き換えが空・operand が変わらない）の callee も、読み出しの順序は caller の呼び出し位置にする。"""
+def test_a_callee_is_moved_to_the_call_site_and_its_parameter_is_replaced_in_one_pass():
+    """境界は読み出しを caller の呼び出し位置へ移し、同じ走査で callee の parameter を引数へ置き換える。"""
 
     analysis = _analysis_with(_callee_read())
     specialized = call_recovery._impl__specialize_call_analysis(
         _specializer(),
         analysis,
-        [],
+        [_caller_pointer()],
         CallSite(3),
-        substitute_parameters=False,
     )
     value = specialized.returns[0].value
     assert value.read_order_key == 3
-    assert value.operands[0].name == "param_1"
+    assert value.operands[0].name == "p"
 
 
-def test_an_already_specialized_callee_that_writes_before_the_read_is_refused():
+def test_a_callee_that_writes_before_the_read_is_refused():
     analysis = _analysis_with(_callee_read(), _callee_effect(order=1))
     with pytest.raises(CallBoundaryRefused):
-        call_recovery._impl__specialize_call_analysis(
-            _specializer(), analysis, [], CallSite(3), substitute_parameters=False
-        )
+        call_recovery._impl__specialize_call_analysis(_specializer(), analysis, [_caller_pointer()], CallSite(3))
 
 
 def test_the_call_expansion_is_abandoned_when_the_boundary_refuses():
@@ -330,13 +327,14 @@ def test_the_call_expansion_is_abandoned_when_the_boundary_refuses():
         _coerce_runtime_target_ref=lambda target: target_ref,
         _target_active_key=lambda ref: None,
         _invoke_get_or_analyze_call_target=lambda *a, **k: analysis,
-        _analysis_is_fully_argument_specialized=lambda a: True,
         _debug_print=messages.append,
     )
     owner._specialize_call_analysis = lambda *a, **k: call_recovery._impl__specialize_call_analysis(
         _specializer(), *a, **k
     )
-    result = call_recovery._impl__resolve_call_expansions(owner, "callee", [], set(), call_site=CallSite(3))
+    result = call_recovery._impl__resolve_call_expansions(
+        owner, "callee", [_caller_pointer()], set(), call_site=CallSite(3)
+    )
     assert result is None
     assert any(REFUSED_CALLEE_WRITE_MAY_PRECEDE_READ in message for message in messages)
 

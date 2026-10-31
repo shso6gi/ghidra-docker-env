@@ -90,6 +90,18 @@ class StorageInfo:
             if not self.is_frame_pointer and normalized_base in {"rbp", "ebp", "bp", "fp", "s8", "x29"}:
                 self.is_frame_pointer = True
 
+    def claims_frame(self) -> bool:
+        """この記憶域が関数の stack frame を指すか（stack / frame pointer の register、または stack 空間）。
+
+        frame は関数ごとに別の場所なので、別の関数の式に付いたままの frame の記憶域を自分の frame と
+        読んではいけない（Issue #281: 関数をまたぐ境界 `analysis.effects.call_boundary` が拒否する）。
+        effect 要約の分類（`_address_root_is_stack_frame`）と境界は、この 1 つの判定を使う。
+        """
+
+        if self.is_stack_pointer or self.is_frame_pointer:
+            return True
+        return not self.is_register and str(self.space_name or "") == "stack"
+
     def _space_identity(self) -> int:
         return storage_space_identity(self)
 

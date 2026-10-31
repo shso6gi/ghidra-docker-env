@@ -12,13 +12,36 @@ effect）、呼び出しの位置（callee の読み出しを移す先）で **�
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+import sys
+from typing import Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.program_order import ProgramOrder
 
+_PYTHON_READ_ERRORS: Tuple[type, ...] = (AttributeError, TypeError, ValueError, RuntimeError)
+
+
+def _graph_read_errors() -> Tuple[type, ...]:
+    """graph を読むときに「読めない」とみなす例外。
+
+    Ghidra の `PcodeBlock.getOut(i)` は `outofthis.get(i).point` を返す。decode の途中で埋まらなかった辺は
+    `null` の要素のまま残るので、読めない辺は `None` ではなく Java の `NullPointerException` になる
+    （JPype の `JException`。Python の `RuntimeError` の派生ではない）。範囲外の添字も Java の例外になる。
+    どれも順序を保証できないので、key を出さない。
+    """
+
+    jpype = sys.modules.get("jpype")
+    java_exception = getattr(jpype, "JException", None) if jpype is not None else None
+    if isinstance(java_exception, type) and issubclass(java_exception, BaseException):
+        return _PYTHON_READ_ERRORS + (java_exception,)
+    return _PYTHON_READ_ERRORS
+
 
 def program_order_for_high_function(high_function) -> Optional[ProgramOrder]:
-    """`high_function` の基本 block の graph の順序。graph を読めなければ None（key を出さない）。"""
+    """`high_function` の基本 block の graph の順序。graph を読めなければ None（key を出さない）。
+
+    辺を 1 本でも読めなければ（例外・`None`・graph の外の block）、その辺を無視して順序を作ってはいけない:
+    無視した辺の先の block が前の block より先に並び得る（review 5）。
+    """
 
     get_blocks = getattr(high_function, "getBasicBlocks", None)
     if not callable(get_blocks):
@@ -37,14 +60,15 @@ def program_order_for_high_function(high_function) -> Optional[ProgramOrder]:
             for position in range(int(block.getOutSize())):
                 out_block = block.getOut(position)
                 if out_block is None:
-                    continue
+                    # API 上は起きない（読めない辺は例外になる）が、辺が分からないので順序を保証できない
+                    return None
                 out_index = index_by_hash.get(int(out_block.hashCode()))
                 if out_index is None:
                     # graph の外の block へ辺がある: 順序を保証できない
                     return None
                 outs.append(out_index)
             successors[int(block.getIndex())] = outs
-    except (AttributeError, TypeError, ValueError, RuntimeError):
+    except _graph_read_errors():
         return None
     if not successors:
         return None
@@ -58,7 +82,7 @@ def op_block_index(pcode_op) -> Optional[int]:
     try:
         parent = get_parent()
         return None if parent is None else int(parent.getIndex())
-    except (AttributeError, TypeError, ValueError, RuntimeError):
+    except _graph_read_errors():
         return None
 
 
@@ -71,7 +95,7 @@ def op_block_position(pcode_op) -> Optional[int]:
     try:
         seqnum = get_seqnum()
         return None if seqnum is None else int(seqnum.getOrder())
-    except (AttributeError, TypeError, ValueError, RuntimeError):
+    except _graph_read_errors():
         return None
 
 

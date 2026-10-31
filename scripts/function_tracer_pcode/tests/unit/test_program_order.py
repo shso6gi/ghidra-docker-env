@@ -7,7 +7,7 @@ key は関数の CFG の線形拡大（ある実行で a が b より前に実�
 
 import pytest
 
-from scripts.function_tracer_pcode.core.program_order import ProgramOrder
+from scripts.function_tracer_pcode.core.program_order import ProgramOrder, call_effect_key, op_key_from_legacy
 
 
 def test_the_key_orders_positions_within_a_block():
@@ -75,3 +75,48 @@ def test_may_precede_follows_the_key_outside_loops_and_is_true_inside_one_loop()
     # loop の後の op は loop の op より前にならない
     assert not order.may_precede(order.key(3, 0), order.key(1, 0))
     assert order.may_precede(None, order.key(1, 0))
+
+
+def test_callee_writes_get_slots_inside_the_call():
+    """呼び出しの op の key の中の slot: 呼び出しの位置より後、次の op より前（review 5-1）。"""
+
+    order = ProgramOrder({0: []})
+    call_key = order.key(0, 3)
+    assert call_key < call_effect_key(call_key, 1) < call_effect_key(call_key, 2) < order.key(0, 4)
+
+
+@pytest.mark.parametrize("call_key, slot", [(None, 1), (5, 1), (-65536, 1), (65536, 0), (65536, 1 << 16)])
+def test_a_slot_key_is_refused_when_it_cannot_be_placed(call_key, slot):
+    """op の key でない（slot の bit が立っている・負）、または slot が幅に収まらなければ None。"""
+
+    assert call_effect_key(call_key, slot) is None
+
+
+def test_legacy_keys_leave_room_for_slots():
+    assert op_key_from_legacy((0x1000 << 8) | 2) & 0xFFFF == 0
+    assert op_key_from_legacy(None) is None
+
+
+def test_the_entry_block_dominates_and_a_branch_arm_does_not():
+    order = ProgramOrder({0: [1, 2], 1: [3], 2: [3], 3: []})
+    assert order.entry_block == 0
+    assert order.dominates(order.key(0, 9), order.key(3, 0))
+    assert not order.dominates(order.key(1, 0), order.key(3, 0))
+    assert order.dominates(order.key(3, 0), order.key(3, 1))
+    assert not order.dominates(order.key(3, 1), order.key(3, 0))
+
+
+def test_a_block_on_every_path_dominates_a_later_block():
+    order = ProgramOrder({0: [2], 2: [1, 3], 1: [3], 3: []})
+    assert order.dominates(order.key(2, 0), order.key(3, 0))
+    assert not order.dominates(order.key(1, 0), order.key(3, 0))
+
+
+def test_no_dominance_inside_a_multi_block_loop_or_without_a_unique_entry():
+    looped = ProgramOrder({0: [1], 1: [2], 2: [1, 3], 3: []})
+    # 1 と 2 は 1 つの成分: key から block が分からない
+    assert not looped.dominates(looped.key(1, 0), looped.key(1, 3))
+    assert looped.dominates(looped.key(0, 0), looped.key(3, 0))
+    two_sources = ProgramOrder({0: [2], 1: [2], 2: []})
+    assert two_sources.entry_block is None
+    assert not two_sources.dominates(two_sources.key(0, 0), two_sources.key(2, 0))
