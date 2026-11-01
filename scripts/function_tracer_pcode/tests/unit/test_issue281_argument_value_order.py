@@ -131,7 +131,7 @@ def _recover(monkeypatch, successors, stores, load):
     monkeypatch.setattr(
         call_argument,
         "_stack_location_key",
-        lambda varnode, size=0: ("stack", varnode.offset) if varnode is slot else None,
+        lambda varnode, size=0: ("stack", varnode.offset, size or varnode.size) if varnode is slot else None,
     )
     recovered = []
     monkeypatch.setattr(

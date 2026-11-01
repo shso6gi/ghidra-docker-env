@@ -36,6 +36,15 @@ def _graph_read_errors() -> Tuple[type, ...]:
     return _PYTHON_READ_ERRORS
 
 
+def ghidra_read_errors() -> Tuple[type, ...]:
+    """Ghidra の object（varnode・address・block）を読むときに「読めない」とみなす例外（`_graph_read_errors` と同じ）。
+
+    broad except を置かずに、Python の読み出しの失敗と Java の例外（JPype の `JException`）だけを捕まえる。
+    """
+
+    return _graph_read_errors()
+
+
 def program_order_for_high_function(high_function) -> Optional[ProgramOrder]:
     """`high_function` の基本 block の graph の順序。graph を読めなければ None（key を出さない）。
 
