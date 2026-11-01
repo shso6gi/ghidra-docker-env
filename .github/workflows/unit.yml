@@ -18,7 +18,11 @@ jobs:
   unit-fast:
     name: unit-fast
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The suite takes ~20 min locally and did not finish in 30 min on a
+    # 2-core hosted runner (PR #283, run 41270241017: cancelled at 30m17s with
+    # no failing test reported). The limit is a hang guard, not a budget: the
+    # test selection is unchanged.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
