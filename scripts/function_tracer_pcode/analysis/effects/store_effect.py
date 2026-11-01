@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.core.program_order import op_key_from_legacy
 from scripts.function_tracer_pcode.analysis.effects.call_boundary import (
     REFUSED_CALLEE_EFFECT_ORDER,
     CalleeBinding,
+    program_is_big_endian,
     CallBoundaryRefused,
     CallSite,
     CalleeTimeline,
@@ -791,6 +792,8 @@ def _impl_summarize_store_effects(
                                 callee_summary.parameter_refs,
                                 substitution_args,
                                 simplify_parameters=parameters,
+                                # 直接の呼び出しの callee は caller と同じ program にある
+                                big_endian=program_is_big_endian(getattr(tracer, "program", None)),
                             )
                             try:
                                 # Issue #281: effect の値の memory 読み出しは callee の時間軸の上にある（値は

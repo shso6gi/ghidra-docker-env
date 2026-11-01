@@ -28,6 +28,7 @@ from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.core.structural import StructuralKey
 from scripts.function_tracer_pcode.analysis.effects.call_boundary import (
     CalleeBinding,
+    program_is_big_endian,
     is_context_free_value,
     CallSite,
     CalleeTimeline,
@@ -2008,7 +2009,11 @@ def _impl__specialize_local_target_expansions(
         for descriptor in getattr(tracer, "_parameter_descriptors", None) or []
     ]
     # parameter の無い code（descriptor が無い）でも境界は通す: 置き換えは空で、parameter を指す node は無い
-    binding = CalleeBinding.for_arguments(callee_params, list(args or []))
+    binding = CalleeBinding.for_arguments(
+        callee_params,
+        list(args or []),
+        big_endian=program_is_big_endian(getattr(tracer, "program", None)),
+    )
     return [
         item.__class__(
             value=import_callee_expression(item.value, site, timeline, binding=binding),
@@ -2318,7 +2323,11 @@ def _impl__specialize_call_analysis(
         getattr(analysis, "effect_summary", None),
         analysis.parameters,
     )
-    binding = CalleeBinding.for_arguments(analysis.parameters, args)
+    binding = CalleeBinding.for_arguments(
+        analysis.parameters,
+        args,
+        big_endian=getattr(analysis, "program_is_big_endian", None),
+    )
 
     def _specialize(expr: Optional[Expression]) -> Optional[Expression]:
         return import_callee_expression(expr, site, timeline, binding=binding)

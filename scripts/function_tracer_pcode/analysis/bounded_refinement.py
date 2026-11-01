@@ -43,7 +43,6 @@ from scripts.function_tracer_pcode.analysis.effects.call_boundary import (
 )
 from scripts.function_tracer_pcode.analysis.effects.summary import (
     _call_arguments_width_safe_for_callee_analysis,
-    _coerce_argument_to_callee_parameter,
     _coerce_storage_info,
     _enumerate_constant_expression_branches,
     _resolve_parameter_descriptor,
@@ -695,7 +694,11 @@ class BoundedCallRefiner:
             importer = CalleeImporter(
                 site,
                 timeline,
-                binding=CalleeBinding.for_arguments(callee_analysis.parameters, aligned_arguments),
+                binding=CalleeBinding.for_arguments(
+                    callee_analysis.parameters,
+                    aligned_arguments,
+                    big_endian=getattr(callee_analysis, "program_is_big_endian", None),
+                ),
             )
             candidate_result_count = 0
 
@@ -838,11 +841,10 @@ class BoundedCallRefiner:
         if self._deferred_arguments_are_pcode_callsite_ordered(deferred):
             if len(arguments) < len(callee_parameters):
                 return []
-            aligned: List[Expression] = []
-            for argument, callee_param in zip(arguments, callee_parameters):
-                coerced = _coerce_argument_to_callee_parameter(argument, callee_param)
-                aligned.append(coerced if coerced is not None else argument)
-            return aligned
+            # 幅は合わせない: parameter の幅への合わせと、引数が実際に決めている bit の数は境界の束縛
+            # （`CalleeBinding.for_arguments`）が決める。ここで SEXT / ZEXT すると、補った上位の bit を引数が
+            # 決めているように見せてしまう（Issue #281 review 7）
+            return list(arguments[: len(callee_parameters)])
 
         if len(arguments) == 1 and len(callee_parameters) == 1:
             return list(arguments)

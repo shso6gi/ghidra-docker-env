@@ -107,7 +107,8 @@ def test_substitution_refuses_a_stale_storage_claim():
 
 
 def test_substitution_without_operand_dependent_refs_keeps_fields_and_values():
-    argument = _caller_argument()
+    # 置き換えは同じ幅の値だけ（review 7: 幅の違う値は置き換えない）
+    argument = _caller_argument().clone_with(size=8)
     expr = Expression.intrinsic(
         "PTRADD", [_callee_param(0, size=8), _const(2, size=8), _const(4, size=8)], size=8, opcode=PTRADD_OPCODE,
     )

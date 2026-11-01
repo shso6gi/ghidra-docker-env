@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import IntEnum
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 import re
 from itertools import product
@@ -149,8 +151,10 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _expression_contains_parameter_identity,
     _memory_range_relation,
     _op_clobbers_argument_register,
+    _op_may_write_memory,
+    _op_write_relation,
+    _parameter_nodes_share_bits,
     _stack_location_key,
-    _stack_location_relation,
     _stack_varnode_storage_rank,
     substitute_expression,
 )
@@ -1454,40 +1458,6 @@ def _impl__recover_call_argument_candidate_from_op(
         )
         return candidate_expr, output_rank, semantic_rank
 
-    if (
-        not target_storage.is_register
-        and getattr(op, "getMnemonic", lambda: None)() == "STORE"
-        and getattr(op, "getNumInputs", lambda: 0)() >= 3
-    ):
-        try:
-            store_target = op.getInput(1)
-            store_value = op.getInput(2)
-        except ghidra_read_errors():
-            store_target = None
-            store_value = None
-        store_rank = _stack_varnode_storage_rank(
-            store_target,
-            target_storage,
-            size=getattr(store_value, "getSize", lambda: 0)() if store_value is not None else 0,
-        )
-        if store_rank == 1:
-            # 記憶域の一部だけを書く store: 呼び出しの時点の値は分からない（review 6）
-            return None, 1, 0
-        if store_rank == 3:
-            if store_value is not None:
-                candidate_expr = _resolve_call_argument_expression(store_value, tracer, caller_parameters)
-                reduced = _reduce_expression_under_conditions(
-                    candidate_expr,
-                    list(current_conditions or []),
-                )
-                candidate_expr = reduced if reduced is not None else candidate_expr
-                semantic_rank = _call_argument_semantic_rank(
-                    candidate_expr,
-                    caller_parameters,
-                    callee_param,
-                )
-                return candidate_expr, 3, semantic_rank
-
     return None
 
 
@@ -1503,22 +1473,25 @@ def _impl__select_best_storage_candidate(
 ) -> Optional[Expression]:
     """呼び出しの時点で `target_storage` が持つ値（1 つの経路の上で、呼び出しより前の最後の書き込みの値）。
 
-    `ops` は経路の呼び出しより前の op を実行順に並べたもの（`_path_ops_before_call`）。呼び出しの時点の値は、
-    記憶域に触れる最後の書き込みで決まる。その書き込みが記憶域の一部だけ（rank が完全一致の 3 未満。stack の
-    範囲が一部だけ重なる書き込みを含む）なら値は分からない（None）。最後の書き込みの後の呼び出しが引数の
-    register を壊す（`_op_clobbers_argument_register`）ときも値は分からない（review 6）。
+    `ops` は経路の呼び出しより前の op を実行順に並べたもの（`_path_ops_before_call`）。各 op が記憶域に
+    何をするかは `_op_write_relation` が決める（唯一の owner）。呼び出しの時点の値は、重ならないと
+    分かっている op（`DISJOINT`）を除いた最後の op で決まる: 記憶域をちょうど書く（`SAME`）ならその値、
+    一部だけ重なる（`OVERLAP`）・重なりを否定できない（`UNKNOWN`: 前の呼び出し、書き込み先の分からない
+    STORE）なら値は分からない（None。review 6 / 7）。
 
     以前は「引数らしさ」（`_call_argument_semantic_rank`）と rank の高い候補を、後の書き込みより優先して
     いた。後の書き込みが記憶域を上書きしていると、呼び出しで渡らない値を引数にしてしまう。また同じ rank の
-    候補の前後を番地の順で決めていた（Issue #285 / #281 review 5）。
+    候補の前後を番地の順で決めていた（Issue #285 / #281 review 5）。書き込み先の分からない STORE は
+    「重ならない」と扱っていた（review 7）。
     """
 
     last_candidate = None
-    last_rank = 0
     for op in ops:
-        if _op_clobbers_argument_register(op, target_storage, tracer):
-            # 前の呼び出しは引数の register（caller-saved）を壊す。値は分からない（review 6）
-            last_candidate, last_rank = None, 0
+        relation = _op_write_relation(op, target_storage, tracer)
+        if relation is MemoryRelation.DISJOINT:
+            continue
+        last_candidate = None
+        if relation is not MemoryRelation.SAME:
             continue
         candidate = _recover_call_argument_candidate_from_op(
             op,
@@ -1529,11 +1502,8 @@ def _impl__select_best_storage_candidate(
             path_blocks=path_blocks,
             current_conditions=current_conditions,
         )
-        if candidate is None:
-            continue
-        last_candidate, last_rank, _semantic_rank = candidate
-    if last_candidate is None or last_rank < 3:
-        return None
+        if candidate is not None and candidate[1] == 3:
+            last_candidate = candidate[0]
     return last_candidate
 
 def _impl__recover_call_argument_from_storage(
@@ -1904,51 +1874,67 @@ def _impl__path_writes_storage(
     target_storage: StorageInfo,
     tracer,
 ) -> bool:
-    """経路の op のどれかが記憶域の一部でも書くか（部分的に重なる書き込みも書き込み: review 6）。"""
+    """経路の op のどれかが記憶域に書き得るか（重ならないと分かっている op 以外: `_op_write_relation`）。"""
 
-    for op in ops or []:
-        if _op_clobbers_argument_register(op, target_storage, tracer):
-            return True
-        output = getattr(op, "getOutput", lambda: None)()
-        if output is not None and _varnode_storage_match_rank(output, target_storage, tracer) > 0:
-            return True
-        if (
-            not target_storage.is_register
-            and getattr(op, "getMnemonic", lambda: None)() == "STORE"
-            and getattr(op, "getNumInputs", lambda: 0)() >= 3
-        ):
-            try:
-                store_target = op.getInput(1)
-                store_size = op.getInput(2).getSize()
-            except ghidra_read_errors():
-                store_target = None
-                store_size = 0
-            if _stack_varnode_storage_rank(store_target, target_storage, size=store_size) > 0:
-                return True
-    return False
+    return any(_op_write_relation(op, target_storage, tracer) is not MemoryRelation.DISJOINT for op in ops or [])
 
 
-#: 呼び出しの op。引数の register は caller-saved なので、呼び出しの後の値は呼び出しの出力でなければ分からない
+#: 呼び出しの op。引数の register は caller-saved で、呼び出しは memory にも書き得る
 _CALL_MNEMONICS = frozenset({"CALL", "CALLIND", "CALLOTHER"})
 
 
-def _impl__op_clobbers_argument_register(op, target_storage: StorageInfo, tracer) -> bool:
-    """`op` が呼び出しで、register の記憶域の値を（出力として同じ記憶域を丸ごと書く以外の形で）壊すか。
+class MemoryRelation(IntEnum):
+    """op の書き込み（または範囲）と記憶域の関係。値は `_storage_match_rank` の rank と同じ並び
+    （0 = 触れない、3 = ちょうど同じ、それ以外 = 触れ得るが値は決まらない）。
 
-    引数を渡す register は caller-saved で、前の呼び出しの後の値は分からない。callee の parameter の
-    記憶域はいつも引数の register なので、呼び出しの出力（戻り値の register）がその記憶域を丸ごと書くとき
-    だけ値が分かる（`_recover_call_argument_candidate_from_op` が出力の値を候補にする）。以前は出力しか
-    見ておらず、前の呼び出しの後でも caller の parameter の値（live-in）や呼び出しの前の書き込みの値が
-    残っていると読み得た（Issue #281 review 6）。stack の記憶域は対象外（caller の frame は、番地が渡れば
-    decompiler が INDIRECT の出力として表す）。
+    `DISJOINT` は **重ならないと証明できた** ときだけ（同じ空間で範囲が離れている、別の空間の varnode、
+    書き込みの無い op）。重なりを否定できないとき（幅・場所が分からない）は `UNKNOWN` で、`OVERLAP`
+    （一部だけ重なると分かっている）と同じく値は分からないと扱う。
     """
+
+    DISJOINT = 0
+    OVERLAP = 1
+    UNKNOWN = 2
+    SAME = 3
+
+
+def _impl__op_write_relation(op, target_storage: StorageInfo, tracer) -> MemoryRelation:
+    """`op` を実行すると `target_storage` の値がどうなるか。**呼び出しの前の記憶域の書き込みの唯一の owner**
+    （引数の選択 `_select_best_storage_candidate` と live-in の判定 `_path_writes_storage`）。
+
+    * 呼び出し（`_CALL_MNEMONICS`）: register の記憶域は、出力が記憶域を丸ごと書けばその値（`SAME`）、
+      それ以外は caller-saved なので壊れる（`UNKNOWN`。review 6）。memory の記憶域は、caller の frame の
+      番地が渡っていれば書き得るので `UNKNOWN`（stack の load の回復と同じ扱い。review 7）。
+    * STORE: 書き込み先は入力 1 の **値**（pointer）が指す番地で、この解析は pointer の値を stack の範囲に
+      直さない（入力 1 の varnode が stack にあっても、それは pointer を置いた場所で、書き込み先ではない）。
+      memory の記憶域とは `UNKNOWN`。register の空間は STORE の書き込み先にならない（p-code の register は
+      番地で指せない）ので `DISJOINT`。以前は書き込み先の分からない STORE を「重ならない」と読み、上書き前の
+      値を引数・live-in にしていた（review 7）。
+    * それ以外: 出力の varnode と記憶域の関係（`_varnode_storage_match_rank`。出力の無い op は書かない）。
+    """
+
+    mnemonic = getattr(op, "getMnemonic", lambda: None)()
+    output = getattr(op, "getOutput", lambda: None)()
+    is_register = bool(getattr(target_storage, "is_register", False))
+    if mnemonic in _CALL_MNEMONICS:
+        if is_register and output is not None and _varnode_storage_match_rank(output, target_storage, tracer) == 3:
+            return MemoryRelation.SAME
+        return MemoryRelation.UNKNOWN
+    if mnemonic == "STORE":
+        return MemoryRelation.DISJOINT if is_register else MemoryRelation.UNKNOWN
+    if output is None:
+        return MemoryRelation.DISJOINT
+    return MemoryRelation(_varnode_storage_match_rank(output, target_storage, tracer))
+
+
+def _impl__op_clobbers_argument_register(op, target_storage: StorageInfo, tracer) -> bool:
+    """`op` が呼び出しで、register の記憶域の値を壊すか（`_op_write_relation` が `UNKNOWN`）。"""
 
     if not getattr(target_storage, "is_register", False):
         return False
     if getattr(op, "getMnemonic", lambda: None)() not in _CALL_MNEMONICS:
         return False
-    output = getattr(op, "getOutput", lambda: None)()
-    return output is None or _varnode_storage_match_rank(output, target_storage, tracer) != 3
+    return _op_write_relation(op, target_storage, tracer) is MemoryRelation.UNKNOWN
 
 
 def _impl__varnode_matches_storage(varnode, target_storage: StorageInfo, tracer) -> bool:
@@ -1969,43 +1955,56 @@ def _impl__stack_varnode_matches_storage(varnode, target_storage: StorageInfo) -
 
 
 def _impl__stack_varnode_storage_rank(varnode, target_storage: StorageInfo, size: Optional[int] = None) -> int:
-    """memory の varnode（`size` は書く幅。省略すれば varnode の幅）と記憶域の関係: 3 = 同じ範囲、1 = 一部だけ
-    重なる、0 = 重ならない・比べられない（`_memory_range_relation`）。"""
+    """memory の varnode（`size` は書く幅。省略すれば varnode の幅）と記憶域の関係（`MemoryRelation`）。
+
+    別の空間の varnode は重ならない（`DISJOINT`）。空間・番地が読めない、記憶域の空間が分からないときは、
+    重なりを否定できないので `UNKNOWN`（以前は 0 = 重ならないとしていた。review 7）。
+    """
 
     if varnode is None:
-        return 0
+        return MemoryRelation.DISJOINT
     try:
         addr = varnode.getAddress()
         space = addr.getAddressSpace()
         if space is None or target_storage.space_id is None:
-            return 0
+            return MemoryRelation.UNKNOWN
         if int(space.getSpaceID()) != int(target_storage.space_id):
-            return 0
+            return MemoryRelation.DISJOINT
         width = int(size if size else varnode.getSize())
         return _memory_range_relation(int(varnode.getOffset()), width, int(target_storage.offset), int(target_storage.size))
     except ghidra_read_errors():
-        return 0
+        return MemoryRelation.UNKNOWN
 
 
-def _impl__memory_range_relation(left_offset: int, left_size: int, right_offset: int, right_size: int) -> int:
-    """同じ空間の 2 つの byte 範囲の関係: 3 = 同じ範囲、1 = 一部だけ重なる、0 = 重ならない。
+def _impl__memory_range_relation(left_offset: int, left_size: int, right_offset: int, right_size: int) -> MemoryRelation:
+    """同じ空間の 2 つの byte 範囲の関係（`MemoryRelation`）。
 
-    幅が分からない（0 以下）範囲は、重なりを否定できないので一部だけ重なる（1）とする。以前は完全一致だけを
-    見ていて、8 byte の値の 4 byte を上書きした書き込みを「触れていない」と読み、上書き前の値を引数・load の
-    値にしていた（Issue #281 review 6）。
+    幅が分からない（0 以下）範囲は、重なりを否定できないので `UNKNOWN`。以前は完全一致だけを見ていて、
+    8 byte の値の 4 byte を上書きした書き込みを「触れていない」と読み、上書き前の値を引数・load の値にしていた
+    （Issue #281 review 6）。
     """
 
     if left_size <= 0 or right_size <= 0:
-        return 1
+        return MemoryRelation.UNKNOWN
     if left_offset == right_offset and left_size == right_size:
-        return 3
+        return MemoryRelation.SAME
     if left_offset < right_offset + right_size and right_offset < left_offset + left_size:
-        return 1
-    return 0
+        return MemoryRelation.OVERLAP
+    return MemoryRelation.DISJOINT
 
 
 def _impl__storage_infos_match(left: StorageInfo, right: StorageInfo) -> bool:
-    return _storage_match_rank(left, right) > 0
+    """2 つの記憶域が同じ場所か（同一性。書き込みの判定の「触れ得る」とは別）。
+
+    register は同じ bit（rank 2 以上: 同じ bit の範囲、または同じ register の identity）、memory は同じ範囲
+    （`SAME`）だけ。一部だけ重なる・重なりを否定できない memory は同じ場所ではない（review 6 で memory の rank を
+    範囲の関係にしたとき、ここが一部の重なりも同じ場所と読むようになっていた。review 7）。
+    """
+
+    rank = _storage_match_rank(left, right)
+    if left.is_register and right.is_register:
+        return rank >= 2
+    return rank == MemoryRelation.SAME
 
 
 def _impl__storage_match_rank(left: StorageInfo, right: StorageInfo) -> int:
@@ -2025,8 +2024,10 @@ def _impl__storage_match_rank(left: StorageInfo, right: StorageInfo) -> int:
                 return 1
             return 0
         return 2 if left.register_identity_key() == right.register_identity_key() else 0
+    if left.space_id is None or right.space_id is None:
+        return MemoryRelation.UNKNOWN
     if left.space_id != right.space_id:
-        return 0
+        return MemoryRelation.DISJOINT
     return _memory_range_relation(int(left.offset), int(left.size), int(right.offset), int(right.size))
 
 
@@ -2401,6 +2402,47 @@ def _impl__coerce_argument_to_callee_parameter(
     return widened
 
 
+def _explicit_bit_width(expr: Optional[Expression]) -> int:
+    """式の幅（bit）。明示された `size` と、幅の無い PHI の枝の幅（最小）だけで数え、推測しない
+    （`get_bit_width` は幅の無い parameter・変数に 32 を返す）。分からなければ 0。"""
+
+    if expr is None:
+        return 0
+    size = int(getattr(expr, "size", 0) or 0)
+    if size > 0:
+        return size * 8
+    if expr.expr_type == ExpressionType.PHI and expr.value:
+        widths = [_explicit_bit_width(value) for _condition, value in expr.value]
+        return min(widths) if widths and min(widths) > 0 else 0
+    return 0
+
+
+def _impl__bind_argument_to_callee_parameter(
+    arg: Optional[Expression],
+    callee_param: object,
+) -> Tuple[Optional[Expression], int]:
+    """caller の引数を callee の parameter の値にする: (値, 引数が実際に決めている下位の bit 数)。
+
+    値は `_coerce_argument_to_callee_parameter`（parameter の幅へ合わせる。狭い引数は SEXT / ZEXT するか、
+    型が分からなければそのまま）。決めている bit は、値の幅・引数の幅・`CallArgumentWidthEvidence` の
+    `source_bits`（部分的な幅の引数）の最小。引数より広い部分は caller が実際に渡す bit と限らないので数えない
+    （`CalleeBinding.resolve` がその bit を読む node の置き換えを拒否する。Issue #281 review 7）。
+    """
+
+    value = _coerce_argument_to_callee_parameter(arg, callee_param)
+    if value is None:
+        return None, 0
+    value_bits = _explicit_bit_width(value)
+    argument_bits = _explicit_bit_width(arg)
+    if argument_bits <= 0 or value_bits <= 0:
+        return value, 0
+    known_bits = min(value_bits, argument_bits)
+    evidence = _call_argument_width_evidence(arg)
+    if evidence is not None and evidence.is_partial():
+        known_bits = min(known_bits, max(0, int(evidence.source_bits or 0)))
+    return value, known_bits
+
+
 def _impl__build_parameter_replacements(
     callee_params: Sequence[object],
     args: Sequence[Expression],
@@ -2772,23 +2814,26 @@ def _impl__recover_parameter_from_stack_load(
     depth: int,
     seen: Set[int],
 ) -> Optional[Expression]:
-    """stack の load の値（load の時点の stack の範囲の値）を、その値を決めた書き込みの値から回復する。
+    """LOAD の値を、同じ pointer を通した STORE の値から回復する（store → load の受け渡し）。
 
-    load の時点の値を決める書き込みは、関数の CFG の順序で選ぶ（Issue #285 / #281 review 5。番地の順は
-    実行順と限らない）。load より前に実行され得る書き込みが **同じ範囲の** ちょうど 1 つで、それがどの実行でも
-    load より前に実行される（`dominates`）ときだけ、その値を使う。次のときは値が分からない（None。review 6）:
+    LOAD / STORE の入力 1 は pointer の **値** で、読み書きする番地はその値が指す場所。入力 1 の varnode が
+    stack にあっても、それは pointer を置いた場所（`_stack_location_key` の範囲）で、読み書きする番地では
+    ない（review 7。以前はその範囲を読み書きする番地とみなし、pointer の変数への COPY の入力 = pointer の
+    値を、pointer が指す先の値として返し得た）。この解析は pointer の値を番地に直さないので、次をすべて
+    満たすときだけ、STORE の値を LOAD の値とする:
 
-    * load の範囲の一部だけに重なる書き込みが load より前に実行され得る（8 byte の値の 4 byte を上書きした後の
-      読み出しは、元の値ではない）。
-    * 場所の分からない書き込み（stack の varnode でない STORE）・呼び出し（`_STACK_LOAD_UNKNOWN_WRITERS`）が、
-      選んだ書き込みと load の間に実行され得る（stack の番地が渡っていれば、その範囲を書き得る）。
-    * 選んだ書き込みが値を写す op（store・COPY）でない（`INT_ADD` の出力の値は入力 0 の値ではない）。
+    * 同じ場所に置いた pointer を通して、LOAD と同じ幅を書く STORE が、LOAD より前に実行され得るものの中で
+      ちょうど 1 つで、どの実行でも LOAD より前に実行される（`dominates`。順序は関数の CFG で決める:
+      Issue #285 / #281 review 5）。
+    * その STORE と LOAD の間に、memory に書き得る op（`_op_may_write_memory`: 呼び出し、ほかの STORE、
+      memory の空間の varnode を出力する op。pointer を置いた場所への書き込みは pointer を変える）が
+      実行され得ない（pointer の指す先は分からないので、どの memory の書き込みも重なりを否定できない）。
     """
 
     output = load_op.getOutput()
     load_size = output.getSize() if output is not None else 0
-    location = _stack_location_key(load_op.getInput(1), size=load_size)
-    if location is None:
+    pointer_slot = _stack_location_key(load_op.getInput(1))
+    if pointer_slot is None or load_size <= 0:
         return None
 
     get_program_order = getattr(tracer, "program_order", None)
@@ -2798,80 +2843,65 @@ def _impl__recover_parameter_from_stack_load(
     load_order = op_program_key(program_order, load_op)
     if load_order is None:
         return None
-    candidates = []
-    unknown_writers = []
+    stores = []
+    writers = []
     for op in tracer.get_all_pcode_ops():
         if op is load_op:
             continue
-        written = None
-        writes_slot = None
-        op_output = op.getOutput()
-        mnemonic = op.getMnemonic()
-        if op_output is not None:
-            written = _stack_location_key(op_output, size=op_output.getSize())
-            writes_slot = "output"
-        if mnemonic == "STORE" and op.getNumInputs() >= 3:
-            written = _stack_location_key(op.getInput(1), size=op.getInput(2).getSize())
-            writes_slot = "store"
-            if written is None:
-                unknown_writers.append(op)
-                continue
-        elif mnemonic in _STACK_LOAD_UNKNOWN_WRITERS:
-            unknown_writers.append(op)
-        if written is None:
-            continue
-        relation = _stack_location_relation(written, location)
-        if relation == 0:
-            continue
+        if (
+            op.getMnemonic() == "STORE"
+            and op.getNumInputs() >= 3
+            and _stack_location_key(op.getInput(1)) == pointer_slot
+            and op.getInput(2).getSize() == load_size
+        ):
+            stores.append(op)
+        elif _op_may_write_memory(op):
+            writers.append(op)
+    candidates = []
+    for op in stores:
         op_order = op_program_key(program_order, op)
         if op_order is None:
             return None
-        if not program_order.may_precede(op_order, load_order):
-            continue
-        if relation != 3:
-            return None
-        candidates.append((writes_slot, op, op_order))
-    if len(candidates) != 1 or not program_order.dominates(candidates[0][2], load_order):
+        if program_order.may_precede(op_order, load_order):
+            candidates.append((op, op_order))
+    if len(candidates) != 1 or not program_order.dominates(candidates[0][1], load_order):
         return None
-    kind, op, write_order = candidates[0]
-    for writer in unknown_writers:
+    store, store_order = candidates[0]
+    for writer in writers:
         writer_order = op_program_key(program_order, writer)
         if writer_order is None:
             return None
-        if program_order.may_precede(write_order, writer_order) and program_order.may_precede(writer_order, load_order):
+        if program_order.may_precede(store_order, writer_order) and program_order.may_precede(writer_order, load_order):
             return None
-
-    if kind == "output" and op.getMnemonic() == "COPY" and op.getNumInputs() >= 1:
-        return _recover_parameter_expression_from_varnode(
-            op.getInput(0),
-            tracer,
-            parameters,
-            depth=depth,
-            seen=seen,
-        )
-
-    if kind == "store" and op.getNumInputs() >= 3:
-        return _recover_parameter_expression_from_varnode(
-            op.getInput(2),
-            tracer,
-            parameters,
-            depth=depth,
-            seen=seen,
-        )
-
-    return None
+    return _recover_parameter_expression_from_varnode(
+        store.getInput(2),
+        tracer,
+        parameters,
+        depth=depth,
+        seen=seen,
+    )
 
 
-#: stack の load の回復で、場所の分からない書き込みとみなす op（`_recover_parameter_from_stack_load`）
-_STACK_LOAD_UNKNOWN_WRITERS = frozenset({"CALL", "CALLIND", "CALLOTHER"})
+#: memory の空間ではない（番地で指せない）varnode の空間
+_NON_MEMORY_SPACE_NAMES = frozenset({"register", "unique", "const"})
 
 
-def _impl__stack_location_relation(written, location) -> int:
-    """`_stack_location_key` の 2 つの範囲の関係（`_memory_range_relation`: 3 = 同じ、1 = 一部、0 = 重ならない）。"""
+def _impl__op_may_write_memory(op) -> bool:
+    """`op` が memory（番地で指せる場所）に書き得るか。呼び出し・STORE は書き得る。出力の varnode は、空間が
+    register / unique / const と読めたときだけ memory ではない（読めない空間は書き得るとみなす）。"""
 
-    if written is None or location is None or written[0] != location[0]:
-        return 0
-    return _memory_range_relation(int(written[1]), int(written[2]), int(location[1]), int(location[2]))
+    mnemonic = op.getMnemonic()
+    if mnemonic in _CALL_MNEMONICS or mnemonic == "STORE":
+        return True
+    output = op.getOutput()
+    if output is None:
+        return False
+    try:
+        space = output.getAddress().getAddressSpace()
+        name = space.getName() if space is not None else None
+    except ghidra_read_errors():
+        return True
+    return name not in _NON_MEMORY_SPACE_NAMES
 
 
 def _impl__expression_contains_parameter_identity(
@@ -2900,11 +2930,43 @@ def _impl__expression_contains_parameter_identity(
     )
 
 
+@dataclass(frozen=True)
+class ConditionParameterValue:
+    """条件 `source == value` から得た置き換え。`source` と同じ bit を表す node だけを `value` にする。
+
+    置き換えの表の key（index・記憶域・descriptor の key）は parameter の一部を表す node にも当たる
+    （`_resolve_parameter_descriptor` は記憶域が parameter に含まれる node を parameter に対応させる）。
+    「下位 32 bit == 1」から「64 bit 全体 == 1」を作らないよう、幅と記憶域が `source` と同じ node だけを
+    置き換える（Issue #281 review 7）。
+    """
+
+    source: Expression
+    value: Expression
+
+    def binds(self, node: Optional[Expression]) -> bool:
+        return _parameter_nodes_share_bits(node, self.source)
+
+
+def _impl__parameter_nodes_share_bits(node: Optional[Expression], source: Optional[Expression]) -> bool:
+    """2 つの node が同じ bit を表すと言えるか: 幅が同じ（分かっている）で、記憶域がどちらにも無いか同じ範囲。"""
+
+    if node is None or source is None:
+        return False
+    node_size = int(getattr(node, "size", 0) or 0)
+    if node_size <= 0 or node_size != int(getattr(source, "size", 0) or 0):
+        return False
+    node_storage = _coerce_storage_info(getattr(node, "storage_info", None))
+    source_storage = _coerce_storage_info(getattr(source, "storage_info", None))
+    if node_storage is None or source_storage is None:
+        return node_storage is None and source_storage is None
+    return _storage_match_rank(node_storage, source_storage) == 3
+
+
 def _impl__collect_parameter_replacements_from_conditions(
     conditions: Sequence[Condition],
     parameters: Sequence[Dict],
-) -> Dict[Tuple[object, ...], Expression]:
-    replacements: Dict[Tuple[object, ...], Expression] = {}
+) -> Dict[Tuple[object, ...], "ConditionParameterValue"]:
+    replacements: Dict[Tuple[object, ...], ConditionParameterValue] = {}
     for cond in conditions or []:
         if cond is None or cond.negated:
             continue
@@ -2921,11 +2983,11 @@ def _impl__collect_parameter_replacements_from_conditions(
         right_keys = _parameter_identity_keys_from_expression(right, parameters)
         if left_keys and not _expression_contains_parameter_identity(right, left_keys, parameters):
             for key in left_keys:
-                replacements[key] = right
+                replacements[key] = ConditionParameterValue(left, right)
             continue
         if right_keys and not _expression_contains_parameter_identity(left, right_keys, parameters):
             for key in right_keys:
-                replacements[key] = left
+                replacements[key] = ConditionParameterValue(right, left)
     return replacements
 
 
@@ -2956,14 +3018,27 @@ def _impl__apply_condition_parameter_replacements(
 
 def _impl__lookup_parameter_replacement(
     expr: Optional[Expression],
-    replacements: Dict[Tuple[object, ...], Expression],
+    replacements: Dict[Tuple[object, ...], object],
     parameters: Optional[Sequence[Dict]],
 ) -> Optional[Expression]:
+    """`expr` を置き換える値。key が当たっても、`expr` と置き換えの元が同じ bit を表さなければ置き換えない。
+
+    表の値は `ConditionParameterValue`（元の node を持つ）か、値そのもの（元の node が無い表。値と幅が同じ
+    node だけを置き換える）。以前は key が当たれば幅に関係なく置き換えていた（Issue #281 review 7）。
+    """
+
     if expr is None or not replacements or parameters is None:
         return None
     for key in _parameter_identity_keys_from_expression(expr, parameters):
         replacement = replacements.get(key)
-        if replacement is not None:
+        if replacement is None:
+            continue
+        if isinstance(replacement, ConditionParameterValue):
+            if replacement.binds(expr):
+                return replacement.value
+            continue
+        expr_size = int(getattr(expr, "size", 0) or 0)
+        if expr_size > 0 and expr_size == int(getattr(replacement, "size", 0) or 0):
             return replacement
     return None
 

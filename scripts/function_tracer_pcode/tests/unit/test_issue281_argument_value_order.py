@@ -53,6 +53,14 @@ def _candidates(monkeypatch, table):
         "_recover_call_argument_candidate_from_op",
         lambda op, *a, **k: table.get(id(op)),
     )
+    # 記憶域との関係（`_op_write_relation`）も同じ表の rank から作る（表に無い op は触れない）
+    monkeypatch.setattr(
+        call_argument,
+        "_op_write_relation",
+        lambda op, *a, **k: call_argument.MemoryRelation(table[id(op)][1])
+        if id(op) in table
+        else call_argument.MemoryRelation.DISJOINT,
+    )
 
 
 def _select(ops):

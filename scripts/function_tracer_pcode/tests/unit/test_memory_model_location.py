@@ -817,8 +817,11 @@ def test_summarize_store_effects_substitutes_stack_pointer_relative_out_paramete
 
     assert len(summary.effects) == 1
     assert summary.effects[0].location == _loc("__locbase__stackframe", -0x1C, 4)
-    assert summary.effects[0].value.expr_type.name == "PARAMETER"
-    assert summary.effects[0].value.name == "param_1"
+    # callee の 4 byte の node は 8 byte の parameter `value` の下位 4 byte: 引数 param_1（8 byte）の下位 4 byte
+    # （review 7。以前は 8 byte の param_1 を丸ごと入れていた）
+    value = summary.effects[0].value
+    assert value.expr_type.name == "BINARY_OP" and value.operator == "SUBPIECE" and value.size == 4
+    assert value.operands[0].name == "param_1" and value.operands[1].value == 0
 
 def test_summarize_store_effects_keeps_pointer_actual_to_address_sized_scalar_missing_summary_unsupported():
     class FakeVarnode:

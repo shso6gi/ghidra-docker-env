@@ -308,7 +308,7 @@ def test_the_caller_descriptors_do_not_decide_the_callee_parameter():
         ((-20, 8), (-16, 8), 1),
         ((-8, 4), (-16, 8), 0),
         ((-24, 8), (-16, 8), 0),
-        ((-16, 0), (-16, 8), 1),
+        ((-16, 0), (-16, 8), 2),
     ],
 )
 def test_memory_range_relation(left, right, relation):
