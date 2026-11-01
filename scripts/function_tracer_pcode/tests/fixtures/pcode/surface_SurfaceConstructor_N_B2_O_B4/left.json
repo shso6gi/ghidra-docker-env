@@ -1,6 +1,6 @@
 {
  "header": {
-  "analysis_source_digest": "5f702f454556fdb844b238511ee4f65d4c5feb8cd1580f2c60a96a702f0d4a6e",
+  "analysis_source_digest": "fefeb18ed2e245e13f4c961da639b05f035a72b5370c506728f7d94a0141da46",
   "binary": {
    "binary_id": "B2",
    "eqbench_relative_path": "raytrace/surface/Neq/source/newV-arm64-clang-O1",
@@ -15,9 +15,9 @@
   "fixture_id": "surface_SurfaceConstructor_N_B2_O_B4",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-10-17T10:03:15+00:00",
+  "recorded_at_utc": "2026-10-31T23:40:30+00:00",
   "recorder_version": "2",
-  "recording_commit": "de2bd2b6a3fac944d3227f03ad0aa795e894d6f8",
+  "recording_commit": "7fc64edee3afeb275836bd217d3e574adff01b8d",
   "recording_dirty": false,
   "recording_mode": {
    "connector": "production",
@@ -12385,7 +12385,7 @@
     },
     "call:getStorage()": {
      "v": {
-      "id": "o525",
+      "id": "o527",
       "kind": "ref"
      }
     },
@@ -12479,7 +12479,7 @@
     },
     "call:getStorage()": {
      "v": {
-      "id": "o526",
+      "id": "o528",
       "kind": "ref"
      }
     },
@@ -12983,6 +12983,12 @@
         "id": "o524",
         "kind": "ref"
        }
+      },
+      {
+       "v": {
+        "id": "o526",
+        "kind": "ref"
+       }
       }
      ]
     },
@@ -13009,6 +13015,12 @@
       {
        "v": {
         "id": "o523",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o525",
         "kind": "ref"
        }
       }
@@ -31852,11 +31864,89 @@
    }
   },
   "o525": {
+   "eq_group": 34,
+   "kind": "ghidra.program.model.data.PointerDataType",
+   "members": {
+    "attr:getDataType": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getDataTypeManager": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getLength": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getName": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:isEquivalent": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getDataType()": {
+     "v": {
+      "id": "o43",
+      "kind": "ref"
+     }
+    },
+    "call:getDataTypeManager()": {
+     "v": {
+      "id": "o310",
+      "kind": "ref"
+     }
+    },
+    "call:getLength()": {
+     "v": {
+      "kind": "int",
+      "value": 8
+     }
+    },
+    "call:getName()": {
+     "v": {
+      "kind": "str",
+      "value": "undefined4 *"
+     }
+    },
+    "call:isEquivalent(ref:eq34)": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    }
+   }
+  },
+  "o526": {
+   "eq_group": 271,
+   "kind": "ghidra.program.model.data.PointerDataType",
+   "members": {
+    "attr:isEquivalent": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:isEquivalent(ref:eq47)": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
+  },
+  "o527": {
    "eq_group": 459,
    "kind": "ghidra.program.model.listing.VariableStorage",
    "members": {}
   },
-  "o526": {
+  "o528": {
    "eq_group": 460,
    "kind": "ghidra.program.model.listing.VariableStorage",
    "members": {}
