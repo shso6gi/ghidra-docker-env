@@ -163,6 +163,25 @@ def test_the_extended_bits_of_a_narrow_argument_are_not_the_argument():
         _import(high, binding)
 
 
+@pytest.mark.parametrize("big_endian, low, high", [(False, A0_FIRST, A0_SECOND), (True, A0_SECOND, A0_FIRST)])
+def test_without_parameter_storage_only_the_low_end_of_the_register_with_the_value_width_binds(big_endian, low, high):
+    """effect 要約の束縛は parameter の記憶域を持たない（`LocationBaseRef` だけ）。register の下位の端にある、値と
+    同じ幅の node だけを値とする（実 binary: testCollision4 の w0 / x1 / w2）。それ以外は位置が決まらないので拒否する。"""
+
+    from scripts.function_tracer_pcode.core import LocationBaseRef
+
+    refs = [LocationBaseRef.parameter("param_1", index=0)]
+    binding = CalleeBinding.for_arguments(refs, [Expression.constant(0x2_0000_0001, size=4)], big_endian=big_endian)
+    assert _import(_node(low, 4), binding) is binding.parameters[0].value
+    with pytest.raises(CallBoundaryRefused):
+        _import(_node(high, 4), binding)
+    with pytest.raises(CallBoundaryRefused):
+        _import(_node(A0, 8), binding)
+    unknown_order = CalleeBinding.for_arguments(refs, [Expression.constant(1, size=4)])
+    with pytest.raises(CallBoundaryRefused):
+        _import(_node(low, 4), unknown_order)
+
+
 def test_a_partial_width_argument_binds_only_its_source_bits():
     evidence = CallArgumentWidthEvidence(source_bits=32, target_bits=64)
     partial = Expression.parameter("x", index=0, size=8).clone_with(call_argument_width_evidence=evidence)

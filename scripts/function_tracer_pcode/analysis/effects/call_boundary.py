@@ -389,7 +389,7 @@ class CalleeBinding:
             # 記憶域の無い `PARAMETER` は parameter そのもの（一部は `SUBPIECE` で表される）: 値の LSB から始まる
             return 0
         if parameter_storage is None:
-            return None
+            return self._register_low_end(node, node_storage, parameter)
         node_range = _storage_byte_range(node_storage)
         parameter_range = _storage_byte_range(parameter_storage)
         if node_range is None or parameter_range is None:
@@ -404,6 +404,26 @@ class CalleeBinding:
         if self.big_endian:
             return ((parameter_low + parameter_size) - (node_low + node_size)) * 8
         return (node_low - parameter_low) * 8
+
+    def _register_low_end(self, node: Expression, node_storage, parameter: CalleeParameter) -> Optional[int]:
+        """parameter の記憶域が分からない（effect 要約の `LocationBaseRef` だけの束縛）ときの node の位置。
+
+        register で渡る parameter の値は register の下位から始まる（ABI）。node が register の下位の端
+        （byte order で直した significance の位置が 0）にあり、幅が値と同じときだけ、値そのもの（位置 0）とする。
+        幅が違う（register の組で渡る値の一部かもしれない）・下位の端でない・byte order が分からないなら None。
+        """
+
+        if not node_storage.is_register or self.big_endian is None:
+            return None
+        if _expression_bits(node) != _expression_bits(parameter.value):
+            return None
+        node_range = _storage_byte_range(node_storage)
+        base_size = int(getattr(node_storage, "base_register_size_bits", 0) or 0)
+        if node_range is None or base_size <= 0 or base_size % 8:
+            return None
+        node_low, node_size = node_range
+        significance = (base_size // 8 - (node_low + node_size)) if self.big_endian else node_low
+        return 0 if significance == 0 else None
 
     def _parameter_of(self, node: Expression) -> CalleeParameter:
         from scripts.function_tracer_pcode.analysis.effects.call_argument import (
