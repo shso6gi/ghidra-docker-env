@@ -130,12 +130,19 @@ def test_a_node_with_the_parameter_storage_and_width_is_the_argument_itself():
     assert _import(_node(A0, 8), binding) is binding.parameters[0].value
 
 
-def test_a_storage_less_node_narrower_than_the_argument_is_its_low_bits():
-    """記憶域の無い `PARAMETER` は parameter そのもの: 4 byte の node は 8 byte の引数の下位 4 byte。"""
+def test_a_storage_less_node_narrower_than_the_parameter_is_refused():
+    """記憶域の無い `PARAMETER` は parameter の値そのもの（幅は parameter の幅）。8 byte の parameter の 4 byte の
+    node は、どの 4 byte かを言っていないので拒否する（review 8。review 7 は下位 4 byte と読んでいた: 0x200000001 の
+    上位を表す node なら 2 のところを 1 にし得た）。一部は `SUBPIECE(parameter, 位置)` か記憶域で表す。
+    """
 
     binding = CalleeBinding.for_arguments([_descriptor()], [WIDE])
-    imported = _import(Expression.parameter("param_1", index=0, size=4), binding)
-    assert imported.operator == "SUBPIECE" and _evaluate(imported) == 1
+    with pytest.raises(CallBoundaryRefused) as refused:
+        _import(Expression.parameter("param_1", index=0, size=4), binding)
+    assert refused.value.reason == REFUSED_CALLEE_PARAMETER_BITS
+    piece = Expression.binary_op("SUBPIECE", Expression.parameter("param_1", index=0, size=8), Expression.constant(4, size=8))
+    piece.size = 4
+    assert _evaluate(_import(piece, binding)) == 1
 
 
 def test_the_extended_bits_of_a_narrow_argument_are_not_the_argument():

@@ -48,7 +48,6 @@ _METHOD_MODULES = {
     '_op_clobbers_argument_register': 'call_argument',
     '_op_may_write_memory': 'call_argument',
     '_op_write_relation': 'call_argument',
-    '_parameter_nodes_share_bits': 'call_argument',
     '_recover_abi_call_argument_evidence': 'call_argument_abi',
     '_recover_uncovered_call_argument_evidence': 'store_effect',
     '_resolve_abi_call_arguments': 'call_argument_abi',

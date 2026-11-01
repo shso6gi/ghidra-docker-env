@@ -1088,7 +1088,12 @@ def _impl__resolve_location_base_with_offset(
     expr: Expression,
     parameters: Sequence[Dict],
 ) -> Optional[Tuple[LocationBaseRef, int]]:
-    param = _resolve_parameter_descriptor(expr, parameters)
+    # 位置の基底になる parameter は、parameter の入口の値の全体を表す node だけ（`parameter_entry`。review 8）。
+    # 以前は descriptor が引ければ基底にしていた: ref で後の時点・別の場所を主張する VARIABLE や、parameter の
+    # 一部の bit（記憶域が parameter に含まれるだけの node）も parameter の番地と読まれ得た
+    from scripts.function_tracer_pcode.analysis.effects.parameter_entry import whole_parameter_descriptor
+
+    param = whole_parameter_descriptor(expr, parameters)
     if param is not None:
         return _parameter_base_ref(
             name=param.get("name"),

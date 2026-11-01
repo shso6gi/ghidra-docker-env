@@ -120,15 +120,19 @@ def test_substitution_without_operand_dependent_refs_keeps_fields_and_values():
     assert rewritten.operands[0] is not expr.operands[0]
 
 
-def test_a_node_whose_claim_is_replaced_as_a_whole_is_not_refused():
-    """主張している parameter 自身が置き換えの対象なら、node ごと caller の値になる（派生しない）。"""
+def test_a_composite_node_claiming_a_parameter_base_is_not_the_parameter():
+    """parameter の基底を主張する複合式（`param & 0xFF`）は parameter の入口の値ではない: node ごと引数に置き換えない。
+
+    review 8: 以前は identity key（ref の基底）が当たれば node ごと置き換え、`param & 0xFF` が引数そのものに
+    なっていた。operand を置き換えると ref が operand と食い違うので、派生は拒否する（呼び出し側が置き換えをやめる）。
+    """
 
     argument = _caller_argument()
     claimed = Expression.binary_op("INT_AND", _callee_param(0), _const(0xFF)).clone_with(
         runtime_ref=LocationBaseRef.parameter("param_1", index=0)
     )
-    rewritten = substitute_expression(claimed, _replacements(argument), CALLEE_PARAMETERS)
-    assert rewritten.runtime_ref is not claimed.runtime_ref
+    with pytest.raises(OperandDerivationRefused):
+        substitute_expression(claimed, _replacements(argument), CALLEE_PARAMETERS)
 
 
 def test_same_context_replacement_keeps_the_last_correct_expression_on_refusal():

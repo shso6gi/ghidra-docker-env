@@ -342,11 +342,38 @@ def _impl__extract_positive_param_equality_pair(
     if not is_positive:
         return None
 
-    left_key = _parameter_like_identity(expr.operands[0])
-    right_key = _parameter_like_identity(expr.operands[1])
+    left, right = _strip_common_injective_wrappers(expr.operands[0], expr.operands[1])
+    left_key = _parameter_like_identity(left)
+    right_key = _parameter_like_identity(right)
     if left_key is None or right_key is None:
         return None
     return frozenset((left_key, right_key))
+
+
+#: 幅を保つ・広げる単射の演算（`f(a) == f(b)` なら `a == b`）
+_INJECTIVE_UNARY_OPERATORS = frozenset({"INT_ZEXT", "INT_SEXT", "INT_2COMP", "INT_NEGATE"})
+
+
+def _strip_common_injective_wrappers(left: Optional[Expression], right: Optional[Expression]):
+    """両辺に **同じ** 単射の演算（同じ演算子・同じ入出力の幅）が付いていれば、そろえて外す（review 8）。
+
+    片側だけの演算は外さない: `ZEXT(a) == b` は a と b の等しさではなく、`-a == b` も a == b ではない。
+    """
+
+    while (
+        left is not None
+        and right is not None
+        and left.expr_type == ExpressionType.UNARY_OP
+        and right.expr_type == ExpressionType.UNARY_OP
+        and left.operator == right.operator
+        and left.operator in _INJECTIVE_UNARY_OPERATORS
+        and left.operands
+        and right.operands
+        and int(left.size or 0) == int(right.size or 0)
+        and int(left.operands[0].size or 0) == int(right.operands[0].size or 0)
+    ):
+        left, right = left.operands[0], right.operands[0]
+    return left, right
 
 
 def _impl__flatten_param_addition(

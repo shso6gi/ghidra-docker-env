@@ -100,6 +100,15 @@ from scripts.function_tracer_pcode.core import (
 )
 from scripts.function_tracer_pcode.core.call_target import CallTargetRef
 from scripts.function_tracer_pcode.core.operand_derivation import OperandDerivationRefused
+from scripts.function_tracer_pcode.analysis.effects.parameter_entry import (
+    EntryClaim,
+    bit_offset_in_parameter,
+    entry_claim,
+    expression_bits,
+    parameter_piece,
+    ref_has_owner,
+    same_parameter,
+)
 from scripts.function_tracer_pcode.core.program_order import call_effect_key
 from scripts.function_tracer_pcode.core.runtime_refs import (
     AbiArgumentSlotRef,
@@ -248,14 +257,18 @@ class CalleeParameter:
     storage: Optional[object]
     value: Optional[Expression]
     known_bits: int = 0
+    #: parameter の幅（descriptor の幅、無ければ記憶域の幅。分からなければ 0）。記憶域の無い node が parameter の
+    #: 値そのものか（幅が同じか）を比べる相手で、`value` の幅とは限らない（部分的な幅の引数は広げない）
+    bits: int = 0
 
 
 @dataclass(frozen=True)
 class CalleeBinding:
     """callee の parameter → caller の引数。**callee の式の node と callee の parameter の対応の唯一の owner**。
 
-    境界は parameter の置き換えも同じ走査で行う（Issue #281 review 5）。node が callee の parameter の
-    **入口の値** を表すと言えるのは、次をすべて満たすときだけ（`resolve`。review 6）:
+    境界は parameter の置き換えも同じ走査で行う（Issue #281 review 5）。node の主張（入口の値か・所有者・bit）は
+    `parameter_entry` が読む（review 8: 条件 `x == v` による置き換え・引数の正規化と同じ owner）。node が callee の
+    parameter の **入口の値** を表すと言えるのは、次をすべて満たすときだけ（`resolve`。review 6）:
 
     * 所有者: node は `PARAMETER` で、ref が無いか、callee の parameter の `LocationBaseRef`（`kind=parameter`）。
       ref に所有者（program・関数の入口）があれば、callee の parameter の所有者と一致する
@@ -266,13 +279,15 @@ class CalleeBinding:
       記憶域や index が parameter と同じでも入口の値ではないので、置き換えない（記憶域の主張は境界が拒否する）。
     * 値: index が callee の parameter のただ 1 つに決まり、node に記憶域があれば parameter の記憶域に
       含まれる（`_storage_matches_parameter`）。食い違えば拒否する。
-    * bit の範囲（review 7）: node が表す bit が、parameter の値のどの bit かを決め（`_node_bits_in_parameter`）、
-      その範囲が caller の引数の決めている bit（`CalleeParameter.known_bits`）に収まるときだけ、その範囲の値
-      （範囲が値と同じなら値そのもの、狭ければ `SUBPIECE`）に置き換える。範囲を決められない（記憶域の無い node の
-      幅が値と違う、register の一部の位置に byte order が要るのに分からない、幅が分からない）か、引数の決めて
-      いない bit を含むなら拒否する（`callee_parameter_bits_unknown`）。以前は値を node の幅に関係なく丸ごと
-      入れていた: 64 bit の引数 0x100000001 の下位 32 bit を表す node（値は 1）が 64 bit の値に化け、
-      「下位 32 bit == 1」が「64 bit 全体 == 1」に変わり得た。
+    * bit の範囲（review 7）: node が表す bit が、parameter の値のどの bit かを決め
+      （`parameter_entry.bit_offset_in_parameter`）、その範囲が caller の引数の決めている bit
+      （`CalleeParameter.known_bits`）に収まるときだけ、その範囲の値（範囲が値と同じなら値そのもの、狭ければ
+      `SUBPIECE`）に置き換える。範囲を決められない（記憶域の無い node の幅が parameter の幅と違う、register の
+      一部の位置に byte order が要るのに分からない、幅が分からない）か、引数の決めていない bit を含むなら拒否する
+      （`callee_parameter_bits_unknown`）。以前は値を node の幅に関係なく丸ごと入れていた: 64 bit の引数
+      0x100000001 の下位 32 bit を表す node（値は 1）が 64 bit の値に化け、「下位 32 bit == 1」が「64 bit 全体
+      == 1」に変わり得た。記憶域の無い狭い node は review 7 が下位の bit と読んでいたが、node はどの bit かを
+      言っていない（review 8）。
 
     以前は node の identity key（所有者の無い index・記憶域・**caller の** descriptor で引いた key）の
     どれか 1 つが置き換えの表に当たれば置き換えていた: 所有者の違う同じ index の parameter、同じ register に
@@ -320,7 +335,18 @@ class CalleeBinding:
             value, known_bits = None, 0
             if position < len(arguments):
                 value, known_bits = bind_argument_to_callee_parameter(arguments[position], param)
-            entries.append(CalleeParameter(index=index, ref=ref, storage=storage, value=value, known_bits=known_bits))
+            entries.append(
+                CalleeParameter(
+                    index=index,
+                    ref=ref,
+                    storage=storage,
+                    value=value,
+                    known_bits=known_bits,
+                    bits=_declared_parameter_bits(
+                        param, storage, arguments[position] if position < len(arguments) else None
+                    ),
+                )
+            )
         return cls(
             parameters=tuple(entries),
             simplify_parameters=tuple(params if simplify_parameters is None else simplify_parameters),
@@ -332,7 +358,8 @@ class CalleeBinding:
 
         `piece` = (byte の位置, byte 数) は node の一部（`SUBPIECE(node, 位置)`）だけを読むとき: その範囲の bit
         だけが引数の決めている bit に収まればよい（引数より広い parameter の下位だけを読む callee。以前の
-        `_call_arguments_width_safe_for_callee_analysis` が許していた形）。
+        `_call_arguments_width_safe_for_callee_analysis` が許していた形）。node の主張（所有者・時点・bit）は
+        `parameter_entry` が読む（review 8: 条件による置き換えと同じ規則）。
         """
 
         if node.expr_type is not ExpressionType.PARAMETER:
@@ -342,159 +369,93 @@ class CalleeBinding:
             raise CallBoundaryRefused(
                 REFUSED_CALLEE_PARAMETER_UNBOUND, expr_type=node.expr_type.name, ref_type=type(node.runtime_ref).__name__
             )
-        low_bit = self._node_bits_in_parameter(node, parameter)
-        read_bits = _expression_bits(node)
+        value_bits = expression_bits(parameter.value)
+        read_bits = expression_bits(node)
+        low_bit = bit_offset_in_parameter(
+            coerce_storage(getattr(node, "storage_info", None)),
+            read_bits,
+            coerce_storage(parameter.storage),
+            parameter.bits or value_bits,
+            self.big_endian,
+        )
         if low_bit is not None and piece is not None:
             piece_offset, piece_size = piece
             if piece_offset < 0 or piece_size <= 0 or (piece_offset + piece_size) * 8 > read_bits:
                 low_bit = None
             else:
                 low_bit, read_bits = low_bit + piece_offset * 8, piece_size * 8
-        value_bits = _expression_bits(parameter.value)
-        if low_bit is None or read_bits <= 0 or low_bit + read_bits > min(parameter.known_bits, value_bits):
+        extracted = None
+        if low_bit is not None and read_bits > 0 and low_bit + read_bits <= min(parameter.known_bits, value_bits):
+            extracted = parameter_piece(parameter.value, low_bit, read_bits)
+        if extracted is None:
             raise CallBoundaryRefused(
                 REFUSED_CALLEE_PARAMETER_BITS, expr_type=node.expr_type.name, ref_type=type(node.runtime_ref).__name__
             )
-        if low_bit == 0 and read_bits == value_bits:
-            return parameter.value
-        if low_bit % 8 or read_bits % 8:
-            raise CallBoundaryRefused(
-                REFUSED_CALLEE_PARAMETER_BITS, expr_type=node.expr_type.name, ref_type=type(node.runtime_ref).__name__
-            )
-        extracted = Expression.binary_op(
-            "SUBPIECE",
-            parameter.value,
-            Expression.constant(low_bit // 8, size=max(1, int(parameter.value.size or 0))),
-        )
-        extracted.size = read_bits // 8
         return extracted
-
-    def _node_bits_in_parameter(self, node: Expression, parameter: CalleeParameter) -> Optional[int]:
-        """node が表す bit の、parameter の値の中での最下位の位置（値の LSB を 0 とする）。決められなければ None。
-
-        parameter の値は parameter の記憶域の下位（significance の低い側）にある。node の記憶域が parameter の
-        記憶域と同じ範囲なら位置は 0。register の一部（`_storage_matches_parameter` が含まれることを確かめた範囲）
-        なら、番地の順の位置（`bit_offset_in_base`）を byte order で significance の位置へ直す（big endian では
-        番地の小さい側が上位）。記憶域の無い node は parameter そのもの（位置 0）。幅が値より広ければ、読む bit が
-        引数の決めている bit を超えるので `resolve` が拒否する。
-        """
-
-        from scripts.function_tracer_pcode.analysis.effects.call_argument import (
-            _impl__coerce_storage_info as coerce_storage_info,
-        )
-
-        node_storage = coerce_storage_info(getattr(node, "storage_info", None))
-        parameter_storage = coerce_storage_info(parameter.storage)
-        if node_storage is None:
-            # 記憶域の無い `PARAMETER` は parameter そのもの（一部は `SUBPIECE` で表される）: 値の LSB から始まる
-            return 0
-        if parameter_storage is None:
-            return self._register_low_end(node, node_storage, parameter)
-        node_range = _storage_byte_range(node_storage)
-        parameter_range = _storage_byte_range(parameter_storage)
-        if node_range is None or parameter_range is None:
-            return None
-        if node_range == parameter_range:
-            return 0
-        if not (node_storage.is_register and parameter_storage.is_register) or self.big_endian is None:
-            return None
-        (node_low, node_size), (parameter_low, parameter_size) = node_range, parameter_range
-        if node_low < parameter_low or node_low + node_size > parameter_low + parameter_size:
-            return None
-        if self.big_endian:
-            return ((parameter_low + parameter_size) - (node_low + node_size)) * 8
-        return (node_low - parameter_low) * 8
-
-    def _register_low_end(self, node: Expression, node_storage, parameter: CalleeParameter) -> Optional[int]:
-        """parameter の記憶域が分からない（effect 要約の `LocationBaseRef` だけの束縛）ときの node の位置。
-
-        register で渡る parameter の値は register の下位から始まる（ABI）。node が register の下位の端
-        （byte order で直した significance の位置が 0）にあり、幅が値と同じときだけ、値そのもの（位置 0）とする。
-        幅が違う（register の組で渡る値の一部かもしれない）・下位の端でない・byte order が分からないなら None。
-        """
-
-        if not node_storage.is_register or self.big_endian is None:
-            return None
-        if _expression_bits(node) != _expression_bits(parameter.value):
-            return None
-        node_range = _storage_byte_range(node_storage)
-        base_size = int(getattr(node_storage, "base_register_size_bits", 0) or 0)
-        if node_range is None or base_size <= 0 or base_size % 8:
-            return None
-        node_low, node_size = node_range
-        significance = (base_size // 8 - (node_low + node_size)) if self.big_endian else node_low
-        return 0 if significance == 0 else None
 
     def _parameter_of(self, node: Expression) -> CalleeParameter:
         from scripts.function_tracer_pcode.analysis.effects.call_argument import (
-            _impl__coerce_storage_info as coerce_storage_info,
-            _impl__normalize_parameter_index as normalize_parameter_index,
             _impl__storage_matches_parameter as storage_matches_parameter,
         )
-        from scripts.function_tracer_pcode.analysis.effects.location import (
-            _impl__callee_location_base_matches_ref as location_base_matches_ref,
-        )
 
-        ref = node.runtime_ref
-        ref_type = type(ref).__name__
-        if type(ref) is PostStateValueRef:
-            # 境界が落とす主張（「callee の出口の状態の値と等しい」）。値そのものは node が表す
-            ref = None
-        if ref is not None and not (type(ref) is LocationBaseRef and ref.is_parameter()):
-            raise CallBoundaryRefused(REFUSED_CALLEE_PARAMETER_IDENTITY, expr_type="PARAMETER", ref_type=ref_type)
-        if ref is not None:
-            index = normalize_parameter_index(ref.parameter_index)
-            candidates = [
-                parameter
-                for parameter in self.parameters
-                if parameter.index is not None
-                and parameter.index == index
-                and parameter.ref is not None
-                and location_base_matches_ref(ref, parameter.ref)
-            ]
-            if not candidates and (ref.owner_program_id is not None or ref.owner_entry_offset is not None):
-                raise CallBoundaryRefused(REFUSED_CALLEE_FOREIGN_PARAMETER, expr_type="PARAMETER", ref_type=ref_type)
-        else:
-            index = normalize_parameter_index(getattr(node, "value", None))
-            candidates = [
-                parameter for parameter in self.parameters if parameter.index is not None and parameter.index == index
-            ]
+        ref_type = type(node.runtime_ref).__name__
+        claim = entry_claim(node)
+        if claim is None:
+            # `PARAMETER` だが入口の値を主張しない（時点・位置の ref を持つ、index が分からない）
+            ref = node.runtime_ref
+            if ref is not None and type(ref) is not PostStateValueRef and not (
+                type(ref) is LocationBaseRef and ref.is_parameter()
+            ):
+                raise CallBoundaryRefused(REFUSED_CALLEE_PARAMETER_IDENTITY, expr_type="PARAMETER", ref_type=ref_type)
+            raise CallBoundaryRefused(REFUSED_CALLEE_PARAMETER_UNBOUND, expr_type="PARAMETER", ref_type=ref_type)
+        candidates = [
+            parameter
+            for parameter in self.parameters
+            if parameter.index is not None
+            and same_parameter(claim, EntryClaim(parameter.index, parameter.ref, parameter.storage, 0))
+            and (claim.ref is None or parameter.ref is not None)
+        ]
+        if not candidates and ref_has_owner(claim.ref):
+            raise CallBoundaryRefused(REFUSED_CALLEE_FOREIGN_PARAMETER, expr_type="PARAMETER", ref_type=ref_type)
         if len(candidates) != 1:
             # callee の parameter のどれでもない（loop の placeholder・index の分からない parameter など）か、決まらない
             raise CallBoundaryRefused(REFUSED_CALLEE_PARAMETER_UNBOUND, expr_type="PARAMETER", ref_type=ref_type)
         parameter = candidates[0]
-        node_storage = coerce_storage_info(getattr(node, "storage_info", None))
-        parameter_storage = coerce_storage_info(parameter.storage)
+        parameter_storage = coerce_storage(parameter.storage)
         if (
-            node_storage is not None
+            claim.storage is not None
             and parameter_storage is not None
-            and not storage_matches_parameter(node_storage, parameter_storage)
+            and not storage_matches_parameter(claim.storage, parameter_storage)
         ):
             raise CallBoundaryRefused(REFUSED_CALLEE_PARAMETER_IDENTITY, expr_type="PARAMETER", ref_type="storage_info")
         return parameter
 
 
-def _expression_bits(expr: Optional[Expression]) -> int:
+def _declared_parameter_bits(param, storage, argument: Optional[Expression]) -> int:
+    """parameter の幅の bit 数。分からなければ 0。
+
+    descriptor の `size`、無ければ記憶域の幅、無ければ引数の `CallArgumentWidthEvidence.target_bits`（caller が
+    呼び出しで渡す記憶域の幅: effect 要約の `LocationBaseRef` だけの parameter は幅を持たない）。
+    """
+
     try:
-        return max(0, int(getattr(expr, "size", 0) or 0)) * 8
+        size = int(param.get("size") or 0) if isinstance(param, dict) else 0
+        if size <= 0 and storage is not None:
+            size = int(getattr(storage, "size", 0) or 0)
+        if size > 0:
+            return size * 8
+        evidence = getattr(argument, "call_argument_width_evidence", None)
+        return max(0, int(getattr(evidence, "target_bits", 0) or 0))
     except (TypeError, ValueError):
         return 0
 
 
-def _storage_byte_range(storage) -> Optional[Tuple[int, int]]:
-    """記憶域の (番地の順の byte の位置, byte 数)。register は基底の register の中の位置。分からなければ None。"""
+def coerce_storage(storage):
+    from scripts.function_tracer_pcode.analysis.effects.call_argument import (
+        _impl__coerce_storage_info as coerce_storage_info,
+    )
 
-    try:
-        if storage.is_register:
-            bit_offset = int(getattr(storage, "bit_offset_in_base", 0) or 0)
-            size_bits = int(getattr(storage, "size_bits", 0) or 0) or int(storage.size or 0) * 8
-            if bit_offset % 8 or size_bits <= 0 or size_bits % 8:
-                return None
-            return bit_offset // 8, size_bits // 8
-        size = int(storage.size or 0)
-        return (int(storage.offset), size) if size > 0 else None
-    except (TypeError, ValueError, AttributeError):
-        return None
+    return coerce_storage_info(storage)
 
 
 def program_is_big_endian(program) -> Optional[bool]:

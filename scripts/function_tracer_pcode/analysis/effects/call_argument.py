@@ -9,6 +9,14 @@ import re
 from itertools import product
 from scripts.function_tracer_pcode.core.operand_derivation import OperandDerivationRefused
 from scripts.function_tracer_pcode.analysis.program_points import ghidra_read_errors, op_program_key
+from scripts.function_tracer_pcode.analysis.effects.parameter_entry import (
+    bit_offset_in_parameter,
+    entry_claim,
+    expression_bits,
+    parameter_piece,
+    same_entry_bits,
+    whole_parameter_descriptor,
+)
 from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     CanonicalLocation,
@@ -153,7 +161,6 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _op_clobbers_argument_register,
     _op_may_write_memory,
     _op_write_relation,
-    _parameter_nodes_share_bits,
     _stack_location_key,
     _stack_varnode_storage_rank,
     substitute_expression,
@@ -1518,6 +1525,12 @@ def _impl__recover_call_argument_from_storage(
     target_storage = _coerce_storage_info(callee_param.get("storage"))
     if target_storage is None:
         return None
+    if not target_storage.is_register:
+        # callee の stack で渡る parameter の記憶域は **callee の frame**（callee の入口の stack pointer からの
+        # offset）の場所で、caller の op の stack の varnode（caller の frame の offset）・caller の parameter の
+        # 記憶域（caller の入口からの offset）とは別の frame にある。呼び出しの位置の stack pointer との差を
+        # この解析は持たないので、同じ offset を同じ場所と読めない（review 8: 記憶域の所有者）。値は分からない
+        return None
 
     compatible_paths = _compatible_call_block_paths(
         call_op,
@@ -1942,12 +1955,33 @@ def _impl__varnode_matches_storage(varnode, target_storage: StorageInfo, tracer)
 
 
 def _impl__varnode_storage_match_rank(varnode, target_storage: StorageInfo, tracer) -> int:
+    """varnode と記憶域の関係（`MemoryRelation` の値）。
+
+    varnode の記憶域を作れないとき、register の記憶域とは、varnode の空間が register でないと読めたときだけ
+    `DISJOINT`（unique / const / memory の空間は register と重ならない）。空間が register か、読めなければ
+    `UNKNOWN`。以前は記憶域を作れない varnode を register と重ならないとし、その書き込みの前の値を引数・
+    live-in に使い得た（review 8）。
+    """
+
     varnode_storage = tracer._get_storage_info_from_varnode(varnode)
     if varnode_storage is not None:
         return _storage_match_rank(varnode_storage, target_storage)
     if target_storage.is_register:
-        return 0
+        is_register_space = _varnode_in_register_space(varnode)
+        return MemoryRelation.DISJOINT if is_register_space is False else MemoryRelation.UNKNOWN
     return _stack_varnode_storage_rank(varnode, target_storage)
+
+
+def _varnode_in_register_space(varnode) -> Optional[bool]:
+    """varnode の空間が register か。読めなければ None。"""
+
+    if varnode is None:
+        return None
+    try:
+        space = varnode.getAddress().getAddressSpace()
+        return None if space is None else bool(space.isRegisterSpace())
+    except ghidra_read_errors():
+        return None
 
 
 def _impl__stack_varnode_matches_storage(varnode, target_storage: StorageInfo) -> bool:
@@ -1966,9 +2000,17 @@ def _impl__stack_varnode_storage_rank(varnode, target_storage: StorageInfo, size
     try:
         addr = varnode.getAddress()
         space = addr.getAddressSpace()
-        if space is None or target_storage.space_id is None:
+        if space is None:
             return MemoryRelation.UNKNOWN
-        if int(space.getSpaceID()) != int(target_storage.space_id):
+        # 空間は名前で比べる（`_storage_spaces_equal`: descriptor の記憶域の `space_id` は名前からの合成値で、
+        # Ghidra の値と比べられない。review 8）
+        same_space = _storage_spaces_equal(
+            StorageInfo(space_name=str(space.getName() or ""), space_id=int(space.getSpaceID())),
+            target_storage,
+        )
+        if same_space is None:
+            return MemoryRelation.UNKNOWN
+        if not same_space:
             return MemoryRelation.DISJOINT
         width = int(size if size else varnode.getSize())
         return _memory_range_relation(int(varnode.getOffset()), width, int(target_storage.offset), int(target_storage.size))
@@ -2003,32 +2045,67 @@ def _impl__storage_infos_match(left: StorageInfo, right: StorageInfo) -> bool:
 
     rank = _storage_match_rank(left, right)
     if left.is_register and right.is_register:
-        return rank >= 2
+        if rank == MemoryRelation.SAME:
+            return True
+        # rank 2 は「同じ register の identity」と「分からない」（`MemoryRelation.UNKNOWN`）の両方の値なので、
+        # identity そのものを比べる（分からないを同じ場所と読まない: review 8）
+        left_key = left.register_identity_key()
+        return left_key is not None and left_key == right.register_identity_key()
     return rank == MemoryRelation.SAME
 
 
 def _impl__storage_match_rank(left: StorageInfo, right: StorageInfo) -> int:
+    """2 つの記憶域の関係（`MemoryRelation` の値）。`DISJOINT` は重ならないと分かったときだけ（review 8）。
+
+    * register と memory: 別の空間なので `DISJOINT`。
+    * register どうし: 同じ基底の register なら bit の範囲で決める。基底が違うと言えるのは、両方に Ghidra の
+      register の名前があるとき（基底の register どうしは重ならない）だけ。名前の無い側（`getRegister` が
+      register を返さなかった番地の範囲）は、どの register と重なるか分からないので `UNKNOWN`。以前は
+      `DISJOINT` と読み、その範囲への書き込みを見落として古い値を引数にし得た。
+    * memory どうし: 空間は名前で比べる（`_storage_spaces_equal`）。`space_id` は Ghidra の値（varnode から
+      作った記憶域）と名前からの合成値（descriptor から作った記憶域）が混ざり、同じ空間でも食い違う。
+    """
+
     if left.is_register or right.is_register:
         if not (left.is_register and right.is_register):
-            return 0
+            return MemoryRelation.DISJOINT
         if left.shares_base_register_with(right):
             if (
                 left.bit_offset_in_base == right.bit_offset_in_base
                 and left.size_bits == right.size_bits
                 and left.size == right.size
             ):
-                return 3
+                return MemoryRelation.SAME
             if left.register_identity_key() == right.register_identity_key():
                 return 2
             if left.bit_range_overlaps_with(right):
-                return 1
-            return 0
-        return 2 if left.register_identity_key() == right.register_identity_key() else 0
-    if left.space_id is None or right.space_id is None:
+                return MemoryRelation.OVERLAP
+            return MemoryRelation.DISJOINT
+        if not (_register_is_named(left) and _register_is_named(right)):
+            return MemoryRelation.UNKNOWN
+        return 2 if left.register_identity_key() == right.register_identity_key() else MemoryRelation.DISJOINT
+    same_space = _storage_spaces_equal(left, right)
+    if same_space is None:
         return MemoryRelation.UNKNOWN
-    if left.space_id != right.space_id:
+    if not same_space:
         return MemoryRelation.DISJOINT
     return _memory_range_relation(int(left.offset), int(left.size), int(right.offset), int(right.size))
+
+
+def _register_is_named(storage: StorageInfo) -> bool:
+    return bool(storage.register_name or storage.base_register_name)
+
+
+def _storage_spaces_equal(left: StorageInfo, right: StorageInfo) -> Optional[bool]:
+    """2 つの記憶域が同じ空間か。名前が両方にあれば名前、無ければ `space_id`、どちらも無ければ None。"""
+
+    left_name = str(left.space_name or "").strip().lower()
+    right_name = str(right.space_name or "").strip().lower()
+    if left_name and right_name:
+        return left_name == right_name
+    if left.space_id is not None and right.space_id is not None and not (left_name or right_name):
+        return int(left.space_id) == int(right.space_id)
+    return None
 
 
 def _impl__normalize_call_argument_expression(
@@ -2039,15 +2116,14 @@ def _impl__normalize_call_argument_expression(
     if expr is None:
         return expr
 
-    descriptor = _resolve_parameter_descriptor(expr, parameters)
-    if descriptor is not None:
-        return _parameter_expression_from_descriptor(descriptor, size=expr.size or None) or expr
-
-    if expr.expr_type not in (ExpressionType.PARAMETER, ExpressionType.VARIABLE, ExpressionType.UNKNOWN):
+    # parameter の入口の値の全体を表す node だけを、descriptor の形（名前・所有者・記憶域）の同じ値にする
+    # （`parameter_entry.whole_parameter_descriptor`。review 8）。以前は
+    # descriptor が引ければ式の種類に関係なく parameter にしていた: 引数 `*p`（位置の基底が p の MEMORY）、
+    # parameter と同じ register にある後の時点の値（VARIABLE）が p の入口の値に化け得た
+    descriptor = whole_parameter_descriptor(expr, parameters)
+    if descriptor is None:
         return expr
-    if getattr(expr, "operands", None):
-        return expr
-    return expr
+    return _parameter_expression_from_descriptor(descriptor) or expr
 
 
 def _impl__expression_maps_to_parameter(expr: Optional[Expression], parameters: Sequence[Dict]) -> bool:
@@ -2635,6 +2711,16 @@ def _impl__resolve_parameter_descriptor(
 
 
 def _impl__parameter_expression_from_descriptor(param: Dict, size: Optional[int] = None) -> Optional[Expression]:
+    """descriptor の parameter の入口の値（`parameter_entry` の不変条件: 幅は parameter の幅、記憶域は parameter の
+    記憶域）。
+
+    `size` が parameter の幅と違うときは、**宣言の値が記憶域の significance の低い側にある**（ABI）と分かっている
+    呼び出し側（live-in の引数）だけが渡す: parameter の下位 `size` byte（`SUBPIECE(parameter, 0)`）。parameter より
+    広い `size` は、parameter の外の bit を含むので None。以前は parameter の記憶域全体を持つ `size` 幅の node を
+    作っていた: node の bit の位置が記憶域と食い違い、varnode の一部（上位 32 bit）が下位 32 bit と読まれた
+    （review 8。varnode からの回復は `_parameter_bits_from_storage` で位置を決める）。
+    """
+
     name = param.get("name")
     if not name:
         return None
@@ -2643,11 +2729,11 @@ def _impl__parameter_expression_from_descriptor(param: Dict, size: Optional[int]
     except Exception:
         param_index = -1
     try:
-        param_size = int(size or param.get("size", 8))
+        param_size = int(param.get("size", 8) or 8)
     except Exception:
         param_size = 8
     param_size = max(1, param_size)
-    return Expression.parameter(
+    whole = Expression.parameter(
         name,
         param_index,
         param.get("data_type"),
@@ -2661,6 +2747,36 @@ def _impl__parameter_expression_from_descriptor(param: Dict, size: Optional[int]
             owner_entry_offset=param.get("owner_entry_offset"),
         ),
     )
+    if not size or int(size) == param_size:
+        return whole
+    return parameter_piece(whole, 0, int(size) * 8)
+
+
+def _parameter_bits_from_storage(
+    param: Dict,
+    storage: Optional[StorageInfo],
+    size: int,
+    big_endian: Optional[bool],
+) -> Optional[Expression]:
+    """記憶域 `storage`（幅 `size` byte）にある、descriptor の parameter の入口の値の bit（review 8）。
+
+    記憶域が parameter の記憶域と同じ範囲なら parameter そのもの、register の一部なら byte order で決めた位置の
+    `SUBPIECE`。位置を決められない（記憶域が無く幅が違う、byte order が分からない、parameter の外）なら None。
+    """
+
+    whole = _parameter_expression_from_descriptor(param)
+    if whole is None or not size:
+        return None
+    low_bit = bit_offset_in_parameter(
+        storage,
+        int(size) * 8,
+        _coerce_storage_info(param.get("storage")),
+        expression_bits(whole),
+        big_endian,
+    )
+    if low_bit is None:
+        return None
+    return parameter_piece(whole, low_bit, int(size) * 8)
 
 
 def _impl__recover_parameter_expression_from_varnode(
@@ -2764,6 +2880,10 @@ def _impl__parameter_expression_from_varnode(varnode, tracer, parameters: Sequen
         def_op = None
 
     storage_info = tracer._get_storage_info_from_varnode(varnode)
+    # varnode が parameter の記憶域の一部なら、その位置の bit（`_parameter_bits_from_storage`。review 8）
+    from scripts.function_tracer_pcode.analysis.effects.call_boundary import program_is_big_endian
+
+    big_endian = program_is_big_endian(getattr(tracer, "program", None))
 
     # Defined varnodes can reuse a parameter-like HighSymbol after register allocation.
     # Recovering passthrough parameters is handled by the recursive caller, so avoid
@@ -2794,7 +2914,7 @@ def _impl__parameter_expression_from_varnode(varnode, tracer, parameters: Sequen
                 storage_info=storage_info,
             )
             if descriptor is not None:
-                return _parameter_expression_from_descriptor(descriptor, size=varnode.getSize())
+                return _parameter_bits_from_storage(descriptor, storage_info, varnode.getSize(), big_endian)
 
     probe = Expression.variable(
         getattr(high_var, "getName", lambda: None)() or f"var_{id(varnode):x}",
@@ -2804,7 +2924,7 @@ def _impl__parameter_expression_from_varnode(varnode, tracer, parameters: Sequen
     descriptor = _resolve_parameter_descriptor(probe, parameters)
     if descriptor is None:
         return None
-    return _parameter_expression_from_descriptor(descriptor, size=varnode.getSize())
+    return _parameter_bits_from_storage(descriptor, storage_info, varnode.getSize(), big_endian)
 
 
 def _impl__recover_parameter_from_stack_load(
@@ -2932,34 +3052,28 @@ def _impl__expression_contains_parameter_identity(
 
 @dataclass(frozen=True)
 class ConditionParameterValue:
-    """条件 `source == value` から得た置き換え。`source` と同じ bit を表す node だけを `value` にする。
+    """条件 `source == value` から得た置き換え。`source` と同じ値を表す node だけを `value` にする。
 
-    置き換えの表の key（index・記憶域・descriptor の key）は parameter の一部を表す node にも当たる
-    （`_resolve_parameter_descriptor` は記憶域が parameter に含まれる node を parameter に対応させる）。
-    「下位 32 bit == 1」から「64 bit 全体 == 1」を作らないよう、幅と記憶域が `source` と同じ node だけを
-    置き換える（Issue #281 review 7）。
+    `source` は parameter の入口の値を表す node（`parameter_entry.entry_claim`）で、置き換える node も、同じ
+    関数の同じ parameter の入口の値の同じ bit を表す node だけ（`parameter_entry.same_entry_bits`）。
+    以前は置き換えの表を node の identity key（所有者の無い index・記憶域・位置の基底・descriptor）で引いていた:
+    `p == 0x1000` の下で `MEM[p]`（位置の基底が p）・p の出口の状態・所有者の違う同じ index の parameter が
+    0x1000 に化け、逆に `MEM[p] == 5` から p を 5 にし得た（Issue #281 review 8。review 7 は幅と記憶域だけを
+    揃えていた）。
     """
 
     source: Expression
     value: Expression
 
     def binds(self, node: Optional[Expression]) -> bool:
-        return _parameter_nodes_share_bits(node, self.source)
+        return same_entry_bits(node, self.source)
 
 
-def _impl__parameter_nodes_share_bits(node: Optional[Expression], source: Optional[Expression]) -> bool:
-    """2 つの node が同じ bit を表すと言えるか: 幅が同じ（分かっている）で、記憶域がどちらにも無いか同じ範囲。"""
+def _condition_replacement_key(node: Optional[Expression]) -> Optional[Tuple[object, ...]]:
+    """置き換えの表の key（入口の値を主張する node の parameter の index）。主張しない node は引かない。"""
 
-    if node is None or source is None:
-        return False
-    node_size = int(getattr(node, "size", 0) or 0)
-    if node_size <= 0 or node_size != int(getattr(source, "size", 0) or 0):
-        return False
-    node_storage = _coerce_storage_info(getattr(node, "storage_info", None))
-    source_storage = _coerce_storage_info(getattr(source, "storage_info", None))
-    if node_storage is None or source_storage is None:
-        return node_storage is None and source_storage is None
-    return _storage_match_rank(node_storage, source_storage) == 3
+    claim = entry_claim(node)
+    return None if claim is None else ("entry_parameter", claim.index)
 
 
 def _impl__collect_parameter_replacements_from_conditions(
@@ -2979,15 +3093,17 @@ def _impl__collect_parameter_replacements_from_conditions(
         ):
             continue
         left, right = expr.operands
-        left_keys = _parameter_identity_keys_from_expression(left, parameters)
-        right_keys = _parameter_identity_keys_from_expression(right, parameters)
-        if left_keys and not _expression_contains_parameter_identity(right, left_keys, parameters):
-            for key in left_keys:
-                replacements[key] = ConditionParameterValue(left, right)
-            continue
-        if right_keys and not _expression_contains_parameter_identity(left, right_keys, parameters):
-            for key in right_keys:
-                replacements[key] = ConditionParameterValue(right, left)
+        for source, value in ((left, right), (right, left)):
+            key = _condition_replacement_key(source)
+            if key is None:
+                continue
+            # 値が source を含むなら置き換えが止まらない（含むかの判定は identity key の上近似: 含み得るなら使わない）
+            if _expression_contains_parameter_identity(
+                value, _parameter_identity_keys_from_expression(source, parameters), parameters
+            ):
+                continue
+            replacements[key] = ConditionParameterValue(source, value)
+            break
     return replacements
 
 
@@ -3021,51 +3137,49 @@ def _impl__lookup_parameter_replacement(
     replacements: Dict[Tuple[object, ...], object],
     parameters: Optional[Sequence[Dict]],
 ) -> Optional[Expression]:
-    """`expr` を置き換える値。key が当たっても、`expr` と置き換えの元が同じ bit を表さなければ置き換えない。
+    """`expr` を置き換える値。parameter の入口の値を主張する node だけを引き（`_condition_replacement_key`）、
+    `expr` と置き換えの元が同じ parameter の同じ bit を表さなければ置き換えない（`parameter_entry`）。
 
     表の値は `ConditionParameterValue`（元の node を持つ）か、値そのもの（元の node が無い表。値と幅が同じ
-    node だけを置き換える）。以前は key が当たれば幅に関係なく置き換えていた（Issue #281 review 7）。
+    node だけを置き換える）。以前は node の identity key で引き、key が当たれば置き換えていた（Issue #281
+    review 7 / 8）。
     """
 
     if expr is None or not replacements or parameters is None:
         return None
-    for key in _parameter_identity_keys_from_expression(expr, parameters):
-        replacement = replacements.get(key)
-        if replacement is None:
+    key = _condition_replacement_key(expr)
+    if key is None:
+        return None
+    replacement = replacements.get(key)
+    if isinstance(replacement, ConditionParameterValue):
+        return replacement.value if replacement.binds(expr) else None
+    # 元の node を持たない表（`_build_parameter_replacements` の identity key の表。production は関数をまたぐ
+    # 置き換えを `CalleeBinding` で行い、この表を使わない）: 入口の値を主張する node の、値と同じ幅のものだけ
+    expr_size = int(getattr(expr, "size", 0) or 0)
+    for identity_key in _parameter_identity_keys_from_expression(expr, parameters):
+        value = replacements.get(identity_key)
+        if value is None or isinstance(value, ConditionParameterValue):
             continue
-        if isinstance(replacement, ConditionParameterValue):
-            if replacement.binds(expr):
-                return replacement.value
-            continue
-        expr_size = int(getattr(expr, "size", 0) or 0)
-        if expr_size > 0 and expr_size == int(getattr(replacement, "size", 0) or 0):
-            return replacement
+        if expr_size > 0 and expr_size == int(getattr(value, "size", 0) or 0):
+            return value
     return None
 
 
 def _impl__parameter_like_identity(expr: Optional[Expression]) -> Optional[Tuple[object, ...]]:
-    current = expr
-    while (
-        current is not None
-        and current.expr_type == ExpressionType.UNARY_OP
-        and current.operator in {"INT_ZEXT", "INT_SEXT", "INT_2COMP"}
-        and current.operands
-    ):
-        current = current.operands[0]
+    """`expr` が parameter の入口の値（`parameter_entry.entry_claim`）なら、その parameter の key（位置の基底の key
+    と同じ形: `_parameter_identity_key_from_base_ref`）。それ以外は None。
 
-    if current is None:
+    以前は ZEXT / SEXT / 2 の補数を外し、位置の基底が parameter の読み出し（`MEM[p]`・p の出口の状態）も p と
+    読んでいた: `-p == q` や `*p == q` から「p と q は同じ」とし、`*p` と `*q` を同じ場所と扱い得た（review 8）。
+    両辺に同じ単射の演算が付いた形は、呼び出し側（`_extract_positive_param_equality_pair`）がそろえて外す。
+    """
+
+    claim = entry_claim(expr)
+    if claim is None:
         return None
-    if current.expr_type == ExpressionType.PARAMETER:
-        param_index = _normalize_parameter_index(getattr(current, "value", None))
-        if param_index is not None:
-            return ("parameter", param_index)
-    runtime_ref = getattr(current, "runtime_ref", None)
-    if isinstance(runtime_ref, LocationBaseRef):
-        return _parameter_identity_key_from_base_ref(runtime_ref)
-    if isinstance(runtime_ref, (CanonicalLocation, PostStateReadRef)):
-        location_ref = runtime_ref.location if isinstance(runtime_ref, PostStateReadRef) else runtime_ref
-        return _parameter_identity_key_from_base_ref(location_ref.base_ref)
-    return None
+    if claim.ref is not None:
+        return _parameter_identity_key_from_base_ref(claim.ref)
+    return ("parameter", claim.index)
 
 
 def _impl__resolve_parameter_name(expr: Expression, parameters: Sequence[Dict]) -> Optional[str]:
