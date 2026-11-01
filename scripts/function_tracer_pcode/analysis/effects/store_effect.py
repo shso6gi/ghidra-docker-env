@@ -790,7 +790,7 @@ def _impl_summarize_store_effects(
                             binding = CalleeBinding.for_arguments(
                                 callee_summary.parameter_refs,
                                 substitution_args,
-                                lookup_parameters=parameters,
+                                simplify_parameters=parameters,
                             )
                             try:
                                 # Issue #281: effect の値の memory 読み出しは callee の時間軸の上にある（値は
