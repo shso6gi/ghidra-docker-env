@@ -1924,6 +1924,11 @@ def _impl__op_write_relation(op, target_storage: StorageInfo, tracer) -> MemoryR
       番地で指せない）ので `DISJOINT`。以前は書き込み先の分からない STORE を「重ならない」と読み、上書き前の
       値を引数・live-in にしていた（review 7）。
     * それ以外: 出力の varnode と記憶域の関係（`_varnode_storage_match_rank`。出力の無い op は書かない）。
+      出力の記憶域を作れない・空間を比べられないなら `UNKNOWN`（review 8）。
+
+    production の呼び出し側は register の記憶域だけを渡す: callee の stack で渡る parameter の記憶域は callee の
+    frame の場所で、caller の op と比べられない（`_recover_call_argument_from_storage` が値を回復しない。review 8）。
+    memory の記憶域の規則は stack の load の回復（`_op_may_write_memory`）と揃えたまま保つ。
     """
 
     mnemonic = getattr(op, "getMnemonic", lambda: None)()
