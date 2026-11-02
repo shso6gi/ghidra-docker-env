@@ -1,6 +1,6 @@
 {
  "header": {
-  "analysis_source_digest": "fefeb18ed2e245e13f4c961da639b05f035a72b5370c506728f7d94a0141da46",
+  "analysis_source_digest": "0123a37708f39e106805d8f78585afa1cdbb5188a614cbc1a7959b6134d5a8a9",
   "binary": {
    "binary_id": "B2",
    "eqbench_relative_path": "airy/MAX/Neq/source/newV-arm64-clang-O1",
@@ -15,9 +15,9 @@
   "fixture_id": "max_snippet_N_B2_O_B4",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-10-31T23:44:23+00:00",
+  "recorded_at_utc": "2026-11-02T06:44:47+00:00",
   "recorder_version": "2",
-  "recording_commit": "7fc64edee3afeb275836bd217d3e574adff01b8d",
+  "recording_commit": "0d97acc641742e2f62b83b17269c5d9c75c614d3",
   "recording_dirty": false,
   "recording_mode": {
    "connector": "production",
@@ -107,7 +107,7 @@
     },
     "call:getAddressFactory()": {
      "v": {
-      "id": "o263",
+      "id": "o159",
       "kind": "ref"
      }
     },
@@ -151,25 +151,25 @@
       },
       {
        "v": {
-        "id": "o198",
+        "id": "o212",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o262",
+        "id": "o276",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o282",
+        "id": "o294",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o283",
+        "id": "o295",
         "kind": "ref"
        }
       }
@@ -189,13 +189,13 @@
     },
     "call:getListing()": {
      "v": {
-      "id": "o202",
+      "id": "o216",
       "kind": "ref"
      }
     },
     "call:getMemory()": {
      "v": {
-      "id": "o265",
+      "id": "o158",
       "kind": "ref"
      }
     },
@@ -207,13 +207,13 @@
     },
     "call:getReferenceManager()": {
      "v": {
-      "id": "o267",
+      "id": "o279",
       "kind": "ref"
      }
     },
     "call:getRegister(ref:eq29,int:16)": {
      "v": {
-      "id": "o277",
+      "id": "o289",
       "kind": "ref"
      }
     },
@@ -236,7 +236,7 @@
     },
     "call:getSymbolTable()": {
      "v": {
-      "id": "o266",
+      "id": "o278",
       "kind": "ref"
      }
     },
@@ -285,49 +285,49 @@
      "seq": [
       {
        "v": {
-        "id": "o264",
+        "id": "o277",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o273",
+        "id": "o285",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o278",
+        "id": "o290",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o284",
+        "id": "o296",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o295",
+        "id": "o307",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o304",
+        "id": "o316",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o320",
+        "id": "o332",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o329",
+        "id": "o341",
         "kind": "ref"
        }
       }
@@ -1717,7 +1717,7 @@
     },
     "call:getStorage()": {
      "v": {
-      "id": "o363",
+      "id": "o375",
       "kind": "ref"
      }
     },
@@ -1776,7 +1776,7 @@
     },
     "call:getDataType()": {
      "v": {
-      "id": "o364",
+      "id": "o376",
       "kind": "ref"
      }
     },
@@ -1800,7 +1800,7 @@
     },
     "call:getStorage()": {
      "v": {
-      "id": "o365",
+      "id": "o377",
       "kind": "ref"
      }
     },
@@ -1994,80 +1994,8 @@
       "kind": "method"
      }
     },
-    "call:getPointer(ref:eq304)": {
+    "call:getPointer(ref:eq315)": {
      "seq": [
-      {
-       "v": {
-        "id": "o345",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o346",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o347",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o348",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o349",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o350",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o351",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o352",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o353",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o354",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o355",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o356",
-        "kind": "ref"
-       }
-      },
       {
        "v": {
         "id": "o357",
@@ -2101,6 +2029,78 @@
       {
        "v": {
         "id": "o362",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o363",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o364",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o365",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o366",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o367",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o368",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o369",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o370",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o371",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o372",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o373",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o374",
         "kind": "ref"
        }
       }
@@ -3590,69 +3590,45 @@
   },
   "o158": {
    "eq_group": 130,
-   "kind": "[Lghidra.program.model.pcode.JumpTable;",
+   "kind": "ghidra.program.database.mem.MemoryMapDB",
    "members": {
-    "call:__bool__()": {
+    "attr:getBlock": {
      "v": {
-      "kind": "bool",
-      "value": false
+      "kind": "method"
+     }
+    },
+    "attr:getBlocks": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getBlock(ref:eq246)": {
+     "v": {
+      "kind": "none"
+     }
+    },
+    "call:getBlocks()": {
+     "v": {
+      "id": "o160",
+      "kind": "ref"
      }
     }
    }
   },
   "o159": {
    "eq_group": 131,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "kind": "ghidra.program.database.ProgramAddressFactory",
    "members": {
-    "attr:hasNext": {
+    "attr:getDefaultAddressSpace": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
+    "call:getDefaultAddressSpace()": {
      "v": {
-      "kind": "method"
+      "id": "o10",
+      "kind": "ref"
      }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
@@ -3686,469 +3662,259 @@
   },
   "o160": {
    "eq_group": 132,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "kind": "[Lghidra.program.model.mem.MemoryBlock;",
    "members": {
     "attr:hasNext": {
      "v": {
-      "kind": "method"
+      "kind": "absent"
      }
     },
-    "attr:next": {
+    "call:__iter__()": {
      "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "v": {
-      "id": "o50",
-      "kind": "ref"
+      "items": [
+       {
+        "id": "o161",
+        "kind": "ref"
+       },
+       {
+        "id": "o162",
+        "kind": "ref"
+       },
+       {
+        "id": "o163",
+        "kind": "ref"
+       },
+       {
+        "id": "o164",
+        "kind": "ref"
+       },
+       {
+        "id": "o165",
+        "kind": "ref"
+       },
+       {
+        "id": "o166",
+        "kind": "ref"
+       },
+       {
+        "id": "o167",
+        "kind": "ref"
+       },
+       {
+        "id": "o168",
+        "kind": "ref"
+       }
+      ],
+      "kind": "list"
      }
     }
    }
   },
   "o161": {
    "eq_group": 133,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "kind": "ghidra.program.database.mem.MemoryBlockDB",
    "members": {
-    "attr:hasNext": {
+    "attr:getEnd": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
+    "attr:getStart": {
      "v": {
       "kind": "method"
      }
     },
-    "call:hasNext()": {
+    "attr:isOverlay": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getEnd()": {
+     "v": {
+      "id": "o169",
+      "kind": "ref"
+     }
+    },
+    "call:getStart()": {
+     "v": {
+      "id": "o5",
+      "kind": "ref"
+     }
+    },
+    "call:isOverlay()": {
      "v": {
       "kind": "bool",
-      "value": true
+      "value": false
      }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
   "o162": {
    "eq_group": 134,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "kind": "ghidra.program.database.mem.MemoryBlockDB",
    "members": {
-    "attr:hasNext": {
+    "attr:getEnd": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
+    "attr:getStart": {
      "v": {
       "kind": "method"
      }
     },
-    "call:hasNext()": {
+    "attr:isOverlay": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getEnd()": {
+     "v": {
+      "id": "o171",
+      "kind": "ref"
+     }
+    },
+    "call:getStart()": {
+     "v": {
+      "id": "o170",
+      "kind": "ref"
+     }
+    },
+    "call:isOverlay()": {
      "v": {
       "kind": "bool",
-      "value": true
+      "value": false
      }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
   "o163": {
    "eq_group": 135,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "kind": "ghidra.program.database.mem.MemoryBlockDB",
    "members": {
-    "attr:hasNext": {
+    "attr:isOverlay": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
+    "call:isOverlay()": {
      "v": {
       "kind": "bool",
       "value": true
      }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
   "o164": {
    "eq_group": 136,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "kind": "ghidra.program.database.mem.MemoryBlockDB",
    "members": {
-    "attr:hasNext": {
+    "attr:isOverlay": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
+    "call:isOverlay()": {
      "v": {
       "kind": "bool",
       "value": true
      }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
   "o165": {
    "eq_group": 137,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "kind": "ghidra.program.database.mem.MemoryBlockDB",
    "members": {
-    "attr:hasNext": {
+    "attr:isOverlay": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
+    "call:isOverlay()": {
      "v": {
       "kind": "bool",
       "value": true
      }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
   "o166": {
    "eq_group": 138,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "kind": "ghidra.program.database.mem.MemoryBlockDB",
    "members": {
-    "attr:hasNext": {
+    "attr:isOverlay": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
+    "call:isOverlay()": {
      "v": {
       "kind": "bool",
       "value": true
      }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o53",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
   "o167": {
    "eq_group": 139,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "kind": "ghidra.program.database.mem.MemoryBlockDB",
    "members": {
-    "attr:hasNext": {
+    "attr:isOverlay": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
+    "call:isOverlay()": {
      "v": {
       "kind": "bool",
       "value": true
      }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
   "o168": {
    "eq_group": 140,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "kind": "ghidra.program.database.mem.MemoryBlockDB",
    "members": {
-    "attr:hasNext": {
+    "attr:isOverlay": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
+    "call:isOverlay()": {
      "v": {
       "kind": "bool",
       "value": true
-     }
-    },
-    "call:next()": {
-     "v": {
-      "id": "o91",
-      "kind": "ref"
      }
     }
    }
   },
   "o169": {
-   "eq_group": 141,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "eq_group": 13,
+   "kind": "ghidra.program.model.address.GenericAddress",
    "members": {
-    "attr:hasNext": {
+    "attr:getAddressSpace": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
+    "attr:getOffset": {
      "v": {
       "kind": "method"
      }
     },
-    "call:hasNext()": {
+    "call:getAddressSpace()": {
      "v": {
-      "kind": "bool",
-      "value": true
+      "id": "o10",
+      "kind": "ref"
      }
     },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
+    "call:getOffset()": {
+     "v": {
+      "kind": "int",
+      "value": 1048591
+     }
     }
    }
   },
@@ -4171,145 +3937,64 @@
    }
   },
   "o170": {
-   "eq_group": 142,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "eq_group": 141,
+   "kind": "ghidra.program.model.address.GenericAddress",
    "members": {
-    "attr:hasNext": {
+    "attr:getAddressSpace": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
+    "attr:getOffset": {
      "v": {
       "kind": "method"
      }
     },
-    "call:hasNext()": {
+    "call:getAddressSpace()": {
      "v": {
-      "kind": "bool",
-      "value": true
+      "id": "o10",
+      "kind": "ref"
      }
     },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      }
-     ]
+    "call:getOffset()": {
+     "v": {
+      "kind": "int",
+      "value": 1048592
+     }
     }
    }
   },
   "o171": {
-   "eq_group": 143,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "eq_group": 142,
+   "kind": "ghidra.program.model.address.GenericAddress",
    "members": {
-    "attr:hasNext": {
+    "attr:getOffset": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
+    "call:getOffset()": {
      "v": {
-      "kind": "method"
+      "kind": "int",
+      "value": 1048631
      }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
   "o172": {
-   "eq_group": 144,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "eq_group": 143,
+   "kind": "[Lghidra.program.model.pcode.JumpTable;",
    "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
+    "call:__bool__()": {
      "v": {
       "kind": "bool",
-      "value": true
+      "value": false
      }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
   "o173": {
-   "eq_group": 145,
+   "eq_group": 144,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -4365,7 +4050,7 @@
    }
   },
   "o174": {
-   "eq_group": 146,
+   "eq_group": 145,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -4385,37 +4070,15 @@
      }
     },
     "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      }
-     ]
+     "v": {
+      "id": "o50",
+      "kind": "ref"
+     }
     }
    }
   },
   "o175": {
-   "eq_group": 147,
+   "eq_group": 146,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -4471,7 +4134,7 @@
    }
   },
   "o176": {
-   "eq_group": 148,
+   "eq_group": 147,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -4491,15 +4154,25 @@
      }
     },
     "call:next()": {
-     "v": {
-      "id": "o50",
-      "kind": "ref"
-     }
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
   "o177": {
-   "eq_group": 149,
+   "eq_group": 148,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -4555,7 +4228,7 @@
    }
   },
   "o178": {
-   "eq_group": 150,
+   "eq_group": 149,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -4587,13 +4260,19 @@
         "id": "o51",
         "kind": "ref"
        }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
       }
      ]
     }
    }
   },
   "o179": {
-   "eq_group": 151,
+   "eq_group": 150,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -4666,7 +4345,7 @@
    }
   },
   "o180": {
-   "eq_group": 152,
+   "eq_group": 151,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -4704,13 +4383,19 @@
         "id": "o52",
         "kind": "ref"
        }
+      },
+      {
+       "v": {
+        "id": "o53",
+        "kind": "ref"
+       }
       }
      ]
     }
    }
   },
   "o181": {
-   "eq_group": 153,
+   "eq_group": 152,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -4766,7 +4451,7 @@
    }
   },
   "o182": {
-   "eq_group": 154,
+   "eq_group": 153,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -4786,37 +4471,15 @@
      }
     },
     "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o53",
-        "kind": "ref"
-       }
-      }
-     ]
+     "v": {
+      "id": "o91",
+      "kind": "ref"
+     }
     }
    }
   },
   "o183": {
-   "eq_group": 155,
+   "eq_group": 154,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -4872,7 +4535,7 @@
    }
   },
   "o184": {
-   "eq_group": 156,
+   "eq_group": 155,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -4892,15 +4555,25 @@
      }
     },
     "call:next()": {
-     "v": {
-      "id": "o85",
-      "kind": "ref"
-     }
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
   "o185": {
-   "eq_group": 157,
+   "eq_group": 156,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -4956,7 +4629,7 @@
    }
   },
   "o186": {
-   "eq_group": 158,
+   "eq_group": 157,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -4976,15 +4649,31 @@
      }
     },
     "call:next()": {
-     "v": {
-      "id": "o91",
-      "kind": "ref"
-     }
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
   "o187": {
-   "eq_group": 159,
+   "eq_group": 158,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -5040,7 +4729,7 @@
    }
   },
   "o188": {
-   "eq_group": 160,
+   "eq_group": 159,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -5072,13 +4761,25 @@
         "id": "o92",
         "kind": "ref"
        }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
       }
      ]
     }
    }
   },
   "o189": {
-   "eq_group": 161,
+   "eq_group": 160,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -5173,7 +4874,7 @@
    }
   },
   "o190": {
-   "eq_group": 162,
+   "eq_group": 161,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -5193,31 +4894,15 @@
      }
     },
     "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      }
-     ]
+     "v": {
+      "id": "o50",
+      "kind": "ref"
+     }
     }
    }
   },
   "o191": {
-   "eq_group": 163,
+   "eq_group": 162,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -5273,7 +4958,7 @@
    }
   },
   "o192": {
-   "eq_group": 164,
+   "eq_group": 163,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -5296,25 +4981,13 @@
      "seq": [
       {
        "v": {
-        "id": "o91",
+        "id": "o50",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
+        "id": "o51",
         "kind": "ref"
        }
       }
@@ -5323,7 +4996,7 @@
    }
   },
   "o193": {
-   "eq_group": 165,
+   "eq_group": 164,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -5379,6 +5052,50 @@
    }
   },
   "o194": {
+   "eq_group": 165,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o195": {
    "eq_group": 166,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
@@ -5434,7 +5151,7 @@
     }
    }
   },
-  "o195": {
+  "o196": {
    "eq_group": 167,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
@@ -5449,38 +5166,10 @@
      }
     },
     "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
     },
     "call:next()": {
      "seq": [
@@ -5512,7 +5201,7 @@
     }
    }
   },
-  "o196": {
+  "o197": {
    "eq_group": 168,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
@@ -5527,82 +5216,10 @@
      }
     },
     "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
      "v": {
-      "id": "o85",
-      "kind": "ref"
+      "kind": "bool",
+      "value": true
      }
-    }
-   }
-  },
-  "o197": {
-   "eq_group": 169,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
     },
     "call:next()": {
      "seq": [
@@ -5641,29 +5258,29 @@
    }
   },
   "o198": {
-   "eq_group": 5,
-   "kind": "ghidra.program.model.address.GenericAddress",
+   "eq_group": 169,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
-    "attr:getAddressSpace": {
+    "attr:hasNext": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:getOffset": {
+    "attr:next": {
      "v": {
       "kind": "method"
      }
     },
-    "call:getAddressSpace()": {
+    "call:hasNext()": {
      "v": {
-      "id": "o10",
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "v": {
+      "id": "o85",
       "kind": "ref"
-     }
-    },
-    "call:getOffset()": {
-     "v": {
-      "kind": "int",
-      "value": 1048576
      }
     }
    }
@@ -5683,62 +5300,40 @@
      }
     },
     "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
     },
     "call:next()": {
      "seq": [
       {
        "v": {
-        "id": "o50",
+        "id": "o91",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o51",
+        "id": "o92",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o52",
+        "id": "o93",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o53",
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
         "kind": "ref"
        }
       }
@@ -5795,6 +5390,536 @@
      }
     },
     "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "v": {
+      "id": "o91",
+      "kind": "ref"
+     }
+    }
+   }
+  },
+  "o201": {
+   "eq_group": 172,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o202": {
+   "eq_group": 173,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o203": {
+   "eq_group": 174,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o204": {
+   "eq_group": 175,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o205": {
+   "eq_group": 176,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o206": {
+   "eq_group": 177,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o207": {
+   "eq_group": 178,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o208": {
+   "eq_group": 179,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o209": {
+   "eq_group": 180,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o53",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o21": {
+   "eq_group": 18,
+   "kind": "[Lghidra.program.model.pcode.Varnode;",
+   "members": {
+    "call:__iter__()": {
+     "v": {
+      "items": [],
+      "kind": "list"
+     }
+    }
+   }
+  },
+  "o210": {
+   "eq_group": 181,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
      "seq": [
       {
        "v": {
@@ -5818,8 +5943,8 @@
     }
    }
   },
-  "o201": {
-   "eq_group": 172,
+  "o211": {
+   "eq_group": 182,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -5908,8 +6033,242 @@
     }
    }
   },
-  "o202": {
-   "eq_group": 173,
+  "o212": {
+   "eq_group": 5,
+   "kind": "ghidra.program.model.address.GenericAddress",
+   "members": {
+    "attr:getAddressSpace": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getOffset": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getAddressSpace()": {
+     "v": {
+      "id": "o10",
+      "kind": "ref"
+     }
+    },
+    "call:getOffset()": {
+     "v": {
+      "kind": "int",
+      "value": 1048576
+     }
+    }
+   }
+  },
+  "o213": {
+   "eq_group": 183,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o53",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o214": {
+   "eq_group": 184,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "v": {
+      "id": "o85",
+      "kind": "ref"
+     }
+    }
+   }
+  },
+  "o215": {
+   "eq_group": 185,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o216": {
+   "eq_group": 186,
    "kind": "ghidra.program.database.ListingDB",
    "members": {
     "attr:getDataAt": {
@@ -5927,26 +6286,26 @@
       "kind": "method"
      }
     },
-    "call:getDataAt(ref:eq234)": {
+    "call:getDataAt(ref:eq246)": {
      "v": {
       "kind": "none"
      }
     },
-    "call:getDataContaining(ref:eq234)": {
+    "call:getDataContaining(ref:eq246)": {
      "v": {
       "kind": "none"
      }
     },
     "call:getInstructions(ref:eq10,bool:true)": {
      "v": {
-      "id": "o203",
+      "id": "o217",
       "kind": "ref"
      }
     }
    }
   },
-  "o203": {
-   "eq_group": 174,
+  "o217": {
+   "eq_group": 187,
    "kind": "ghidra.program.database.code.InstructionRecordIterator",
    "members": {
     "attr:hasNext": {
@@ -5997,25 +6356,25 @@
      "seq": [
       {
        "v": {
-        "id": "o204",
+        "id": "o218",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o205",
+        "id": "o219",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o206",
+        "id": "o220",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o207",
+        "id": "o221",
         "kind": "ref"
        }
       }
@@ -6023,329 +6382,39 @@
     }
    }
   },
-  "o204": {
-   "eq_group": 175,
-   "kind": "ghidra.program.database.code.InstructionDB",
-   "members": {
-    "attr:getPcode": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getPcode()": {
-     "v": {
-      "id": "o208",
-      "kind": "ref"
-     }
-    }
-   }
-  },
-  "o205": {
-   "eq_group": 176,
-   "kind": "ghidra.program.database.code.InstructionDB",
-   "members": {
-    "attr:getPcode": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getPcode()": {
-     "v": {
-      "id": "o213",
-      "kind": "ref"
-     }
-    }
-   }
-  },
-  "o206": {
-   "eq_group": 177,
-   "kind": "ghidra.program.database.code.InstructionDB",
-   "members": {}
-  },
-  "o207": {
-   "eq_group": 178,
-   "kind": "ghidra.program.database.code.InstructionDB",
-   "members": {}
-  },
-  "o208": {
-   "eq_group": 179,
-   "kind": "[Lghidra.program.model.pcode.PcodeOp;",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "absent"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "absent"
-     }
-    },
-    "call:__iter__()": {
-     "v": {
-      "items": [
-       {
-        "id": "o209",
-        "kind": "ref"
-       },
-       {
-        "id": "o210",
-        "kind": "ref"
-       },
-       {
-        "id": "o211",
-        "kind": "ref"
-       },
-       {
-        "id": "o212",
-        "kind": "ref"
-       }
-      ],
-      "kind": "list"
-     }
-    }
-   }
-  },
-  "o209": {
-   "eq_group": 180,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
-   "members": {
-    "attr:getMnemonic": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getMnemonic()": {
-     "v": {
-      "kind": "str",
-      "value": "COPY"
-     }
-    }
-   }
-  },
-  "o21": {
-   "eq_group": 18,
-   "kind": "[Lghidra.program.model.pcode.Varnode;",
-   "members": {
-    "call:__iter__()": {
-     "v": {
-      "items": [],
-      "kind": "list"
-     }
-    }
-   }
-  },
-  "o210": {
-   "eq_group": 181,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
-   "members": {
-    "attr:getMnemonic": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getMnemonic()": {
-     "v": {
-      "kind": "str",
-      "value": "COPY"
-     }
-    }
-   }
-  },
-  "o211": {
-   "eq_group": 182,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
-   "members": {
-    "attr:getMnemonic": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getMnemonic()": {
-     "v": {
-      "kind": "str",
-      "value": "COPY"
-     }
-    }
-   }
-  },
-  "o212": {
-   "eq_group": 183,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
-   "members": {
-    "attr:getMnemonic": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getMnemonic()": {
-     "v": {
-      "kind": "str",
-      "value": "COPY"
-     }
-    }
-   }
-  },
-  "o213": {
-   "eq_group": 184,
-   "kind": "[Lghidra.program.model.pcode.PcodeOp;",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "absent"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "absent"
-     }
-    },
-    "call:__iter__()": {
-     "v": {
-      "items": [
-       {
-        "id": "o214",
-        "kind": "ref"
-       },
-       {
-        "id": "o215",
-        "kind": "ref"
-       },
-       {
-        "id": "o216",
-        "kind": "ref"
-       },
-       {
-        "id": "o217",
-        "kind": "ref"
-       },
-       {
-        "id": "o218",
-        "kind": "ref"
-       },
-       {
-        "id": "o219",
-        "kind": "ref"
-       },
-       {
-        "id": "o220",
-        "kind": "ref"
-       },
-       {
-        "id": "o221",
-        "kind": "ref"
-       },
-       {
-        "id": "o222",
-        "kind": "ref"
-       },
-       {
-        "id": "o223",
-        "kind": "ref"
-       },
-       {
-        "id": "o224",
-        "kind": "ref"
-       },
-       {
-        "id": "o225",
-        "kind": "ref"
-       }
-      ],
-      "kind": "list"
-     }
-    }
-   }
-  },
-  "o214": {
-   "eq_group": 185,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
-   "members": {
-    "attr:getMnemonic": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getMnemonic()": {
-     "v": {
-      "kind": "str",
-      "value": "COPY"
-     }
-    }
-   }
-  },
-  "o215": {
-   "eq_group": 186,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
-   "members": {
-    "attr:getMnemonic": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getMnemonic()": {
-     "v": {
-      "kind": "str",
-      "value": "COPY"
-     }
-    }
-   }
-  },
-  "o216": {
-   "eq_group": 187,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
-   "members": {
-    "attr:getMnemonic": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getMnemonic()": {
-     "v": {
-      "kind": "str",
-      "value": "COPY"
-     }
-    }
-   }
-  },
-  "o217": {
-   "eq_group": 188,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
-   "members": {
-    "attr:getMnemonic": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getMnemonic()": {
-     "v": {
-      "kind": "str",
-      "value": "COPY"
-     }
-    }
-   }
-  },
   "o218": {
-   "eq_group": 189,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
+   "eq_group": 188,
+   "kind": "ghidra.program.database.code.InstructionDB",
    "members": {
-    "attr:getMnemonic": {
+    "attr:getPcode": {
      "v": {
       "kind": "method"
      }
     },
-    "call:getMnemonic()": {
+    "call:getPcode()": {
      "v": {
-      "kind": "str",
-      "value": "FLOAT_NAN"
+      "id": "o222",
+      "kind": "ref"
      }
     }
    }
   },
   "o219": {
-   "eq_group": 190,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
-   "members": {}
+   "eq_group": 189,
+   "kind": "ghidra.program.database.code.InstructionDB",
+   "members": {
+    "attr:getPcode": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getPcode()": {
+     "v": {
+      "id": "o227",
+      "kind": "ref"
+     }
+    }
+   }
   },
   "o22": {
    "eq_group": 19,
@@ -6420,210 +6489,224 @@
    }
   },
   "o220": {
-   "eq_group": 191,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
+   "eq_group": 190,
+   "kind": "ghidra.program.database.code.InstructionDB",
    "members": {}
   },
   "o221": {
-   "eq_group": 192,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
+   "eq_group": 191,
+   "kind": "ghidra.program.database.code.InstructionDB",
    "members": {}
   },
   "o222": {
-   "eq_group": 193,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
-   "members": {}
-  },
-  "o223": {
-   "eq_group": 194,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
-   "members": {}
-  },
-  "o224": {
-   "eq_group": 195,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
-   "members": {}
-  },
-  "o225": {
-   "eq_group": 196,
-   "kind": "ghidra.program.model.pcode.PcodeOp",
-   "members": {}
-  },
-  "o226": {
-   "eq_group": 197,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "eq_group": 192,
+   "kind": "[Lghidra.program.model.pcode.PcodeOp;",
    "members": {
     "attr:hasNext": {
      "v": {
-      "kind": "method"
+      "kind": "absent"
      }
     },
     "attr:next": {
      "v": {
+      "kind": "absent"
+     }
+    },
+    "call:__iter__()": {
+     "v": {
+      "items": [
+       {
+        "id": "o223",
+        "kind": "ref"
+       },
+       {
+        "id": "o224",
+        "kind": "ref"
+       },
+       {
+        "id": "o225",
+        "kind": "ref"
+       },
+       {
+        "id": "o226",
+        "kind": "ref"
+       }
+      ],
+      "kind": "list"
+     }
+    }
+   }
+  },
+  "o223": {
+   "eq_group": 193,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
+   "members": {
+    "attr:getMnemonic": {
+     "v": {
       "kind": "method"
      }
     },
-    "call:hasNext()": {
+    "call:getMnemonic()": {
      "v": {
-      "kind": "bool",
-      "value": true
+      "kind": "str",
+      "value": "COPY"
+     }
+    }
+   }
+  },
+  "o224": {
+   "eq_group": 194,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
+   "members": {
+    "attr:getMnemonic": {
+     "v": {
+      "kind": "method"
      }
     },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
+    "call:getMnemonic()": {
+     "v": {
+      "kind": "str",
+      "value": "COPY"
+     }
+    }
+   }
+  },
+  "o225": {
+   "eq_group": 195,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
+   "members": {
+    "attr:getMnemonic": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getMnemonic()": {
+     "v": {
+      "kind": "str",
+      "value": "COPY"
+     }
+    }
+   }
+  },
+  "o226": {
+   "eq_group": 196,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
+   "members": {
+    "attr:getMnemonic": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getMnemonic()": {
+     "v": {
+      "kind": "str",
+      "value": "COPY"
+     }
     }
    }
   },
   "o227": {
-   "eq_group": 198,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "eq_group": 197,
+   "kind": "[Lghidra.program.model.pcode.PcodeOp;",
    "members": {
     "attr:hasNext": {
      "v": {
-      "kind": "method"
+      "kind": "absent"
      }
     },
     "attr:next": {
      "v": {
-      "kind": "method"
+      "kind": "absent"
      }
     },
-    "call:hasNext()": {
+    "call:__iter__()": {
      "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "v": {
-      "id": "o50",
-      "kind": "ref"
+      "items": [
+       {
+        "id": "o228",
+        "kind": "ref"
+       },
+       {
+        "id": "o229",
+        "kind": "ref"
+       },
+       {
+        "id": "o230",
+        "kind": "ref"
+       },
+       {
+        "id": "o231",
+        "kind": "ref"
+       },
+       {
+        "id": "o232",
+        "kind": "ref"
+       },
+       {
+        "id": "o233",
+        "kind": "ref"
+       },
+       {
+        "id": "o234",
+        "kind": "ref"
+       },
+       {
+        "id": "o235",
+        "kind": "ref"
+       },
+       {
+        "id": "o236",
+        "kind": "ref"
+       },
+       {
+        "id": "o237",
+        "kind": "ref"
+       },
+       {
+        "id": "o238",
+        "kind": "ref"
+       },
+       {
+        "id": "o239",
+        "kind": "ref"
+       }
+      ],
+      "kind": "list"
      }
     }
    }
   },
   "o228": {
-   "eq_group": 199,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "eq_group": 198,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
    "members": {
-    "attr:hasNext": {
+    "attr:getMnemonic": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
+    "call:getMnemonic()": {
      "v": {
-      "kind": "method"
+      "kind": "str",
+      "value": "COPY"
      }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
   "o229": {
-   "eq_group": 200,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "eq_group": 199,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
    "members": {
-    "attr:hasNext": {
+    "attr:getMnemonic": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
+    "call:getMnemonic()": {
      "v": {
-      "kind": "method"
+      "kind": "str",
+      "value": "COPY"
      }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
@@ -6678,13 +6761,13 @@
      "seq": [
       {
        "v": {
-        "id": "o158",
+        "id": "o172",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o290",
+        "id": "o302",
         "kind": "ref"
        }
       }
@@ -6699,488 +6782,90 @@
    }
   },
   "o230": {
-   "eq_group": 201,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "eq_group": 200,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
    "members": {
-    "attr:hasNext": {
+    "attr:getMnemonic": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
+    "call:getMnemonic()": {
      "v": {
-      "kind": "method"
+      "kind": "str",
+      "value": "COPY"
      }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
   "o231": {
-   "eq_group": 202,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "eq_group": 201,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
    "members": {
-    "attr:hasNext": {
+    "attr:getMnemonic": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
+    "call:getMnemonic()": {
      "v": {
-      "kind": "method"
+      "kind": "str",
+      "value": "COPY"
      }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
   "o232": {
-   "eq_group": 203,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "eq_group": 202,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
    "members": {
-    "attr:hasNext": {
+    "attr:getMnemonic": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:next": {
+    "call:getMnemonic()": {
      "v": {
-      "kind": "method"
+      "kind": "str",
+      "value": "FLOAT_NAN"
      }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
     }
    }
   },
   "o233": {
-   "eq_group": 204,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o53",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
+   "eq_group": 203,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
+   "members": {}
   },
   "o234": {
-   "eq_group": 205,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
+   "eq_group": 204,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
+   "members": {}
   },
   "o235": {
-   "eq_group": 206,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "v": {
-      "id": "o91",
-      "kind": "ref"
-     }
-    }
-   }
+   "eq_group": 205,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
+   "members": {}
   },
   "o236": {
-   "eq_group": 207,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
+   "eq_group": 206,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
+   "members": {}
   },
   "o237": {
-   "eq_group": 208,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
+   "eq_group": 207,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
+   "members": {}
   },
   "o238": {
-   "eq_group": 209,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
+   "eq_group": 208,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
+   "members": {}
   },
   "o239": {
-   "eq_group": 210,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
+   "eq_group": 209,
+   "kind": "ghidra.program.model.pcode.PcodeOp",
+   "members": {}
   },
   "o24": {
    "eq_group": 21,
@@ -7256,7 +6941,7 @@
    }
   },
   "o240": {
-   "eq_group": 211,
+   "eq_group": 210,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -7312,7 +6997,7 @@
    }
   },
   "o241": {
-   "eq_group": 212,
+   "eq_group": 211,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -7332,37 +7017,15 @@
      }
     },
     "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      }
-     ]
+     "v": {
+      "id": "o50",
+      "kind": "ref"
+     }
     }
    }
   },
   "o242": {
-   "eq_group": 213,
+   "eq_group": 212,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -7418,7 +7081,7 @@
    }
   },
   "o243": {
-   "eq_group": 214,
+   "eq_group": 213,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -7438,15 +7101,25 @@
      }
     },
     "call:next()": {
-     "v": {
-      "id": "o50",
-      "kind": "ref"
-     }
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
   "o244": {
-   "eq_group": 215,
+   "eq_group": 214,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -7502,7 +7175,7 @@
    }
   },
   "o245": {
-   "eq_group": 216,
+   "eq_group": 215,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -7534,13 +7207,19 @@
         "id": "o51",
         "kind": "ref"
        }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
       }
      ]
     }
    }
   },
   "o246": {
-   "eq_group": 217,
+   "eq_group": 216,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -7596,7 +7275,7 @@
    }
   },
   "o247": {
-   "eq_group": 218,
+   "eq_group": 217,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -7634,13 +7313,19 @@
         "id": "o52",
         "kind": "ref"
        }
+      },
+      {
+       "v": {
+        "id": "o53",
+        "kind": "ref"
+       }
       }
      ]
     }
    }
   },
   "o248": {
-   "eq_group": 219,
+   "eq_group": 218,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -7696,7 +7381,7 @@
    }
   },
   "o249": {
-   "eq_group": 220,
+   "eq_group": 219,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -7716,32 +7401,10 @@
      }
     },
     "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o53",
-        "kind": "ref"
-       }
-      }
-     ]
+     "v": {
+      "id": "o91",
+      "kind": "ref"
+     }
     }
    }
   },
@@ -7808,7 +7471,7 @@
     },
     "call:getDataType()": {
      "v": {
-      "id": "o344",
+      "id": "o356",
       "kind": "ref"
      }
     },
@@ -7839,7 +7502,7 @@
    }
   },
   "o250": {
-   "eq_group": 221,
+   "eq_group": 220,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -7895,7 +7558,7 @@
    }
   },
   "o251": {
-   "eq_group": 222,
+   "eq_group": 221,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -7915,15 +7578,25 @@
      }
     },
     "call:next()": {
-     "v": {
-      "id": "o85",
-      "kind": "ref"
-     }
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
   "o252": {
-   "eq_group": 223,
+   "eq_group": 222,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -7979,7 +7652,7 @@
    }
   },
   "o253": {
-   "eq_group": 224,
+   "eq_group": 223,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -7999,15 +7672,31 @@
      }
     },
     "call:next()": {
-     "v": {
-      "id": "o91",
-      "kind": "ref"
-     }
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
   "o254": {
-   "eq_group": 225,
+   "eq_group": 224,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -8063,7 +7752,7 @@
    }
   },
   "o255": {
-   "eq_group": 226,
+   "eq_group": 225,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -8095,13 +7784,25 @@
         "id": "o92",
         "kind": "ref"
        }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
       }
      ]
     }
    }
   },
   "o256": {
-   "eq_group": 227,
+   "eq_group": 226,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -8157,7 +7858,7 @@
    }
   },
   "o257": {
-   "eq_group": 228,
+   "eq_group": 227,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -8177,31 +7878,15 @@
      }
     },
     "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      }
-     ]
+     "v": {
+      "id": "o50",
+      "kind": "ref"
+     }
     }
    }
   },
   "o258": {
-   "eq_group": 229,
+   "eq_group": 228,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -8257,7 +7942,7 @@
    }
   },
   "o259": {
-   "eq_group": 230,
+   "eq_group": 229,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -8280,25 +7965,13 @@
      "seq": [
       {
        "v": {
-        "id": "o91",
+        "id": "o50",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
+        "id": "o51",
         "kind": "ref"
        }
       }
@@ -8334,7 +8007,7 @@
    }
   },
   "o260": {
-   "eq_group": 231,
+   "eq_group": 230,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -8390,6 +8063,50 @@
    }
   },
   "o261": {
+   "eq_group": 231,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o262": {
    "eq_group": 232,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
@@ -8434,195 +8151,27 @@
         "id": "o94",
         "kind": "ref"
        }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
       }
      ]
-    }
-   }
-  },
-  "o262": {
-   "eq_group": 5,
-   "kind": "ghidra.program.model.address.GenericAddress",
-   "members": {
-    "attr:getAddressSpace": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getOffset": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getAddressSpace()": {
-     "v": {
-      "id": "o10",
-      "kind": "ref"
-     }
-    },
-    "call:getOffset()": {
-     "v": {
-      "kind": "int",
-      "value": 1048576
-     }
     }
    }
   },
   "o263": {
    "eq_group": 233,
-   "kind": "ghidra.program.database.ProgramAddressFactory",
-   "members": {
-    "attr:getDefaultAddressSpace": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getDefaultAddressSpace()": {
-     "v": {
-      "id": "o10",
-      "kind": "ref"
-     }
-    }
-   }
-  },
-  "o264": {
-   "eq_group": 234,
-   "kind": "ghidra.program.model.address.GenericAddress",
-   "members": {}
-  },
-  "o265": {
-   "eq_group": 235,
-   "kind": "ghidra.program.database.mem.MemoryMapDB",
-   "members": {
-    "attr:getBlock": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getBlock(ref:eq234)": {
-     "v": {
-      "kind": "none"
-     }
-    }
-   }
-  },
-  "o266": {
-   "eq_group": 236,
-   "kind": "ghidra.program.database.symbol.SymbolManager",
-   "members": {
-    "attr:getPrimarySymbol": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getPrimarySymbol(ref:eq234)": {
-     "v": {
-      "kind": "none"
-     }
-    }
-   }
-  },
-  "o267": {
-   "eq_group": 237,
-   "kind": "ghidra.program.database.references.ReferenceDBManager",
-   "members": {
-    "attr:getReferencesFrom": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getReferencesTo": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getReferencesFrom(ref:eq234)": {
-     "v": {
-      "id": "o268",
-      "kind": "ref"
-     }
-    },
-    "call:getReferencesTo(ref:eq234)": {
-     "seq": [
-      {
-       "v": {
-        "id": "o269",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o274",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o279",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o285",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o296",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o305",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o321",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o330",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
-  },
-  "o268": {
-   "eq_group": 238,
-   "kind": "[Lghidra.program.model.symbol.Reference;",
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
      "v": {
-      "kind": "absent"
+      "kind": "method"
      }
     },
-    "call:__iter__()": {
-     "v": {
-      "items": [],
-      "kind": "list"
-     }
-    },
-    "call:__len__()": {
-     "v": {
-      "kind": "int",
-      "value": 0
-     }
-    }
-   }
-  },
-  "o269": {
-   "eq_group": 239,
-   "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
-   "members": {
-    "attr:hasNext": {
+    "attr:next": {
      "v": {
       "kind": "method"
      }
@@ -8630,8 +8179,298 @@
     "call:hasNext()": {
      "v": {
       "kind": "bool",
-      "value": false
+      "value": true
      }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o53",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o264": {
+   "eq_group": 234,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o265": {
+   "eq_group": 235,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "v": {
+      "id": "o85",
+      "kind": "ref"
+     }
+    }
+   }
+  },
+  "o266": {
+   "eq_group": 236,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o267": {
+   "eq_group": 237,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "v": {
+      "id": "o91",
+      "kind": "ref"
+     }
+    }
+   }
+  },
+  "o268": {
+   "eq_group": 238,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o269": {
+   "eq_group": 239,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
@@ -8745,10 +8584,38 @@
      }
     },
     "call:next()": {
-     "v": {
-      "id": "o91",
-      "kind": "ref"
-     }
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
@@ -8773,10 +8640,26 @@
      }
     },
     "call:next()": {
-     "v": {
-      "id": "o91",
-      "kind": "ref"
-     }
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
@@ -8801,23 +8684,51 @@
      }
     },
     "call:next()": {
-     "v": {
-      "id": "o91",
-      "kind": "ref"
-     }
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
   "o273": {
-   "eq_group": 234,
-   "kind": "ghidra.program.model.address.GenericAddress",
-   "members": {}
-  },
-  "o274": {
    "eq_group": 243,
-   "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
      "v": {
       "kind": "method"
      }
@@ -8825,13 +8736,97 @@
     "call:hasNext()": {
      "v": {
       "kind": "bool",
-      "value": false
+      "value": true
      }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o274": {
+   "eq_group": 244,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
   "o275": {
-   "eq_group": 244,
+   "eq_group": 245,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -8881,7 +8876,267 @@
    }
   },
   "o276": {
-   "eq_group": 245,
+   "eq_group": 5,
+   "kind": "ghidra.program.model.address.GenericAddress",
+   "members": {
+    "attr:getAddressSpace": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getOffset": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getAddressSpace()": {
+     "v": {
+      "id": "o10",
+      "kind": "ref"
+     }
+    },
+    "call:getOffset()": {
+     "v": {
+      "kind": "int",
+      "value": 1048576
+     }
+    }
+   }
+  },
+  "o277": {
+   "eq_group": 246,
+   "kind": "ghidra.program.model.address.GenericAddress",
+   "members": {}
+  },
+  "o278": {
+   "eq_group": 247,
+   "kind": "ghidra.program.database.symbol.SymbolManager",
+   "members": {
+    "attr:getPrimarySymbol": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getPrimarySymbol(ref:eq246)": {
+     "v": {
+      "kind": "none"
+     }
+    }
+   }
+  },
+  "o279": {
+   "eq_group": 248,
+   "kind": "ghidra.program.database.references.ReferenceDBManager",
+   "members": {
+    "attr:getReferencesFrom": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getReferencesTo": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getReferencesFrom(ref:eq246)": {
+     "v": {
+      "id": "o280",
+      "kind": "ref"
+     }
+    },
+    "call:getReferencesTo(ref:eq246)": {
+     "seq": [
+      {
+       "v": {
+        "id": "o281",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o286",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o291",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o297",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o308",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o317",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o333",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o342",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o28": {
+   "eq_group": 25,
+   "kind": "ghidra.program.model.data.DoubleDataType",
+   "members": {
+    "attr:getBaseDataType": {
+     "v": {
+      "kind": "absent"
+     }
+    },
+    "attr:getDataType": {
+     "v": {
+      "kind": "absent"
+     }
+    },
+    "attr:getDataTypeManager": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getDataTypePath": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getLength": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getName": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:isPointer": {
+     "v": {
+      "kind": "absent"
+     }
+    },
+    "attr:isSigned": {
+     "v": {
+      "kind": "absent"
+     }
+    },
+    "attr:isUndefined": {
+     "v": {
+      "kind": "absent"
+     }
+    },
+    "call:__bool__()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:__str__()": {
+     "v": {
+      "kind": "str",
+      "value": "double"
+     }
+    },
+    "call:getDataTypeManager()": {
+     "v": {
+      "id": "o130",
+      "kind": "ref"
+     }
+    },
+    "call:getDataTypePath()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o354",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o355",
+        "kind": "ref"
+       }
+      }
+     ]
+    },
+    "call:getLength()": {
+     "v": {
+      "kind": "int",
+      "value": 8
+     }
+    },
+    "call:getName()": {
+     "v": {
+      "kind": "str",
+      "value": "double"
+     }
+    }
+   }
+  },
+  "o280": {
+   "eq_group": 249,
+   "kind": "[Lghidra.program.model.symbol.Reference;",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "absent"
+     }
+    },
+    "call:__iter__()": {
+     "v": {
+      "items": [],
+      "kind": "list"
+     }
+    },
+    "call:__len__()": {
+     "v": {
+      "kind": "int",
+      "value": 0
+     }
+    }
+   }
+  },
+  "o281": {
+   "eq_group": 250,
+   "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
+  },
+  "o282": {
+   "eq_group": 251,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -8908,8 +9163,164 @@
     }
    }
   },
-  "o277": {
+  "o283": {
+   "eq_group": 252,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "v": {
+      "id": "o91",
+      "kind": "ref"
+     }
+    }
+   }
+  },
+  "o284": {
+   "eq_group": 253,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "v": {
+      "id": "o91",
+      "kind": "ref"
+     }
+    }
+   }
+  },
+  "o285": {
    "eq_group": 246,
+   "kind": "ghidra.program.model.address.GenericAddress",
+   "members": {}
+  },
+  "o286": {
+   "eq_group": 254,
+   "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
+  },
+  "o287": {
+   "eq_group": 255,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o288": {
+   "eq_group": 256,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "v": {
+      "id": "o91",
+      "kind": "ref"
+     }
+    }
+   }
+  },
+  "o289": {
+   "eq_group": 257,
    "kind": "ghidra.program.model.lang.Register",
    "members": {
     "attr:getBaseRegister": {
@@ -8986,399 +9397,6 @@
     }
    }
   },
-  "o278": {
-   "eq_group": 234,
-   "kind": "ghidra.program.model.address.GenericAddress",
-   "members": {}
-  },
-  "o279": {
-   "eq_group": 247,
-   "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": false
-     }
-    }
-   }
-  },
-  "o28": {
-   "eq_group": 25,
-   "kind": "ghidra.program.model.data.DoubleDataType",
-   "members": {
-    "attr:getBaseDataType": {
-     "v": {
-      "kind": "absent"
-     }
-    },
-    "attr:getDataType": {
-     "v": {
-      "kind": "absent"
-     }
-    },
-    "attr:getDataTypeManager": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getDataTypePath": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getLength": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getName": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:isPointer": {
-     "v": {
-      "kind": "absent"
-     }
-    },
-    "attr:isSigned": {
-     "v": {
-      "kind": "absent"
-     }
-    },
-    "attr:isUndefined": {
-     "v": {
-      "kind": "absent"
-     }
-    },
-    "call:__bool__()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:__str__()": {
-     "v": {
-      "kind": "str",
-      "value": "double"
-     }
-    },
-    "call:getDataTypeManager()": {
-     "v": {
-      "id": "o130",
-      "kind": "ref"
-     }
-    },
-    "call:getDataTypePath()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o342",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o343",
-        "kind": "ref"
-       }
-      }
-     ]
-    },
-    "call:getLength()": {
-     "v": {
-      "kind": "int",
-      "value": 8
-     }
-    },
-    "call:getName()": {
-     "v": {
-      "kind": "str",
-      "value": "double"
-     }
-    }
-   }
-  },
-  "o280": {
-   "eq_group": 248,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "v": {
-      "id": "o91",
-      "kind": "ref"
-     }
-    }
-   }
-  },
-  "o281": {
-   "eq_group": 249,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "v": {
-      "id": "o91",
-      "kind": "ref"
-     }
-    }
-   }
-  },
-  "o282": {
-   "eq_group": 5,
-   "kind": "ghidra.program.model.address.GenericAddress",
-   "members": {
-    "attr:getAddressSpace": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getOffset": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getAddressSpace()": {
-     "v": {
-      "id": "o10",
-      "kind": "ref"
-     }
-    },
-    "call:getOffset()": {
-     "v": {
-      "kind": "int",
-      "value": 1048576
-     }
-    }
-   }
-  },
-  "o283": {
-   "eq_group": 5,
-   "kind": "ghidra.program.model.address.GenericAddress",
-   "members": {
-    "attr:getAddressSpace": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getOffset": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getAddressSpace()": {
-     "v": {
-      "id": "o10",
-      "kind": "ref"
-     }
-    },
-    "call:getOffset()": {
-     "v": {
-      "kind": "int",
-      "value": 1048576
-     }
-    }
-   }
-  },
-  "o284": {
-   "eq_group": 234,
-   "kind": "ghidra.program.model.address.GenericAddress",
-   "members": {}
-  },
-  "o285": {
-   "eq_group": 250,
-   "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": false
-     }
-    }
-   }
-  },
-  "o286": {
-   "eq_group": 251,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "v": {
-      "id": "o91",
-      "kind": "ref"
-     }
-    }
-   }
-  },
-  "o287": {
-   "eq_group": 252,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "v": {
-      "id": "o91",
-      "kind": "ref"
-     }
-    }
-   }
-  },
-  "o288": {
-   "eq_group": 253,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "v": {
-      "id": "o91",
-      "kind": "ref"
-     }
-    }
-   }
-  },
-  "o289": {
-   "eq_group": 254,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
-  },
   "o29": {
    "eq_group": 26,
    "kind": "ghidra.program.model.listing.VariableStorage",
@@ -9407,308 +9425,12 @@
    }
   },
   "o290": {
-   "eq_group": 255,
-   "kind": "[Lghidra.program.model.pcode.JumpTable;",
-   "members": {
-    "call:__bool__()": {
-     "v": {
-      "kind": "bool",
-      "value": false
-     }
-    }
-   }
-  },
-  "o291": {
-   "eq_group": 256,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o53",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
-  },
-  "o292": {
-   "eq_group": 257,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
-     "v": {
-      "id": "o85",
-      "kind": "ref"
-     }
-    }
-   }
-  },
-  "o293": {
-   "eq_group": 258,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
-  },
-  "o294": {
-   "eq_group": 259,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o53",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
-  },
-  "o295": {
-   "eq_group": 234,
+   "eq_group": 246,
    "kind": "ghidra.program.model.address.GenericAddress",
    "members": {}
   },
-  "o296": {
-   "eq_group": 260,
+  "o291": {
+   "eq_group": 258,
    "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
    "members": {
     "attr:hasNext": {
@@ -9724,8 +9446,8 @@
     }
    }
   },
-  "o297": {
-   "eq_group": 261,
+  "o292": {
+   "eq_group": 259,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -9739,25 +9461,121 @@
      }
     },
     "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
     },
     "call:next()": {
      "v": {
-      "id": "o85",
+      "id": "o91",
       "kind": "ref"
+     }
+    }
+   }
+  },
+  "o293": {
+   "eq_group": 260,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "v": {
+      "id": "o91",
+      "kind": "ref"
+     }
+    }
+   }
+  },
+  "o294": {
+   "eq_group": 5,
+   "kind": "ghidra.program.model.address.GenericAddress",
+   "members": {
+    "attr:getAddressSpace": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getOffset": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getAddressSpace()": {
+     "v": {
+      "id": "o10",
+      "kind": "ref"
+     }
+    },
+    "call:getOffset()": {
+     "v": {
+      "kind": "int",
+      "value": 1048576
+     }
+    }
+   }
+  },
+  "o295": {
+   "eq_group": 5,
+   "kind": "ghidra.program.model.address.GenericAddress",
+   "members": {
+    "attr:getAddressSpace": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getOffset": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getAddressSpace()": {
+     "v": {
+      "id": "o10",
+      "kind": "ref"
+     }
+    },
+    "call:getOffset()": {
+     "v": {
+      "kind": "int",
+      "value": 1048576
+     }
+    }
+   }
+  },
+  "o296": {
+   "eq_group": 246,
+   "kind": "ghidra.program.model.address.GenericAddress",
+   "members": {}
+  },
+  "o297": {
+   "eq_group": 261,
+   "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": false
      }
     }
    }
@@ -9777,66 +9595,16 @@
      }
     },
     "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
     },
     "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o53",
-        "kind": "ref"
-       }
-      }
-     ]
+     "v": {
+      "id": "o91",
+      "kind": "ref"
+     }
     }
    }
   },
@@ -9855,66 +9623,16 @@
      }
     },
     "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
     },
     "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o53",
-        "kind": "ref"
-       }
-      }
-     ]
+     "v": {
+      "id": "o91",
+      "kind": "ref"
+     }
     }
    }
   },
@@ -9967,66 +9685,16 @@
      }
     },
     "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
     },
     "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o53",
-        "kind": "ref"
-       }
-      }
-     ]
+     "v": {
+      "id": "o91",
+      "kind": "ref"
+     }
     }
    }
   },
@@ -10045,82 +9713,10 @@
      }
     },
     "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
      "v": {
-      "id": "o85",
-      "kind": "ref"
+      "kind": "bool",
+      "value": true
      }
-    }
-   }
-  },
-  "o302": {
-   "eq_group": 266,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
     },
     "call:next()": {
      "seq": [
@@ -10155,6 +9751,18 @@
        }
       }
      ]
+    }
+   }
+  },
+  "o302": {
+   "eq_group": 266,
+   "kind": "[Lghidra.program.model.pcode.JumpTable;",
+   "members": {
+    "call:__bool__()": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
     }
    }
   },
@@ -10237,183 +9845,45 @@
    }
   },
   "o304": {
-   "eq_group": 234,
-   "kind": "ghidra.program.model.address.GenericAddress",
-   "members": {}
+   "eq_group": 268,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "v": {
+      "id": "o85",
+      "kind": "ref"
+     }
+    }
+   }
   },
   "o305": {
-   "eq_group": 268,
-   "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": false
-     }
-    }
-   }
-  },
-  "o306": {
    "eq_group": 269,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
-     "v": {
-      "id": "o85",
-      "kind": "ref"
-     }
-    }
-   }
-  },
-  "o307": {
-   "eq_group": 270,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o53",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
-  },
-  "o308": {
-   "eq_group": 271,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
-     "v": {
-      "id": "o85",
-      "kind": "ref"
-     }
-    }
-   }
-  },
-  "o309": {
-   "eq_group": 272,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -10499,6 +9969,144 @@
        }
       }
      ]
+    }
+   }
+  },
+  "o306": {
+   "eq_group": 270,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o53",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o307": {
+   "eq_group": 246,
+   "kind": "ghidra.program.model.address.GenericAddress",
+   "members": {}
+  },
+  "o308": {
+   "eq_group": 271,
+   "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
+  },
+  "o309": {
+   "eq_group": 272,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "v": {
+      "id": "o85",
+      "kind": "ref"
+     }
     }
    }
   },
@@ -10611,10 +10219,38 @@
      }
     },
     "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
     },
     "call:next()": {
      "seq": [
@@ -10749,16 +10385,56 @@
       {
        "v": {
         "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
         "value": false
        }
       }
      ]
     },
     "call:next()": {
-     "v": {
-      "id": "o85",
-      "kind": "ref"
-     }
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o53",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
@@ -10933,96 +10609,6 @@
       {
        "v": {
         "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
-  },
-  "o316": {
-   "eq_group": 279,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
         "value": false
        }
       }
@@ -11058,7 +10644,29 @@
     }
    }
   },
+  "o316": {
+   "eq_group": 246,
+   "kind": "ghidra.program.model.address.GenericAddress",
+   "members": {}
+  },
   "o317": {
+   "eq_group": 279,
+   "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
+  },
+  "o318": {
    "eq_group": 280,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
@@ -11096,98 +10704,8 @@
     }
    }
   },
-  "o318": {
-   "eq_group": 281,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o91",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o92",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o93",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o94",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o95",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
-  },
   "o319": {
-   "eq_group": 282,
+   "eq_group": 281,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -11293,29 +10811,7 @@
    }
   },
   "o320": {
-   "eq_group": 234,
-   "kind": "ghidra.program.model.address.GenericAddress",
-   "members": {}
-  },
-  "o321": {
-   "eq_group": 283,
-   "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": false
-     }
-    }
-   }
-  },
-  "o322": {
-   "eq_group": 284,
+   "eq_group": 282,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -11349,6 +10845,146 @@
       "id": "o85",
       "kind": "ref"
      }
+    }
+   }
+  },
+  "o321": {
+   "eq_group": 283,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o322": {
+   "eq_group": 284,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": true
+     }
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o53",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
@@ -11455,139 +11091,21 @@
       {
        "v": {
         "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
         "value": false
        }
       }
      ]
     },
     "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o53",
-        "kind": "ref"
-       }
-      }
-     ]
+     "v": {
+      "id": "o85",
+      "kind": "ref"
+     }
     }
    }
   },
   "o325": {
    "eq_group": 287,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o53",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
-  },
-  "o326": {
-   "eq_group": 288,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -11621,6 +11139,96 @@
       "id": "o85",
       "kind": "ref"
      }
+    }
+   }
+  },
+  "o326": {
+   "eq_group": 288,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
@@ -11793,9 +11401,42 @@
    }
   },
   "o329": {
-   "eq_group": 234,
-   "kind": "ghidra.program.model.address.GenericAddress",
-   "members": {}
+   "eq_group": 291,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "v": {
+      "id": "o85",
+      "kind": "ref"
+     }
+    }
+   }
   },
   "o33": {
    "eq_group": 30,
@@ -11837,178 +11478,7 @@
    }
   },
   "o330": {
-   "eq_group": 291,
-   "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": false
-     }
-    }
-   }
-  },
-  "o331": {
    "eq_group": 292,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
-     "v": {
-      "id": "o85",
-      "kind": "ref"
-     }
-    }
-   }
-  },
-  "o332": {
-   "eq_group": 293,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
-     "seq": [
-      {
-       "v": {
-        "id": "o50",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o51",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o52",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o53",
-        "kind": "ref"
-       }
-      }
-     ]
-    }
-   }
-  },
-  "o333": {
-   "eq_group": 294,
-   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
-   "members": {
-    "attr:hasNext": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:next": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:hasNext()": {
-     "seq": [
-      {
-       "v": {
-        "kind": "bool",
-        "value": true
-       }
-      },
-      {
-       "v": {
-        "kind": "bool",
-        "value": false
-       }
-      }
-     ]
-    },
-    "call:next()": {
-     "v": {
-      "id": "o85",
-      "kind": "ref"
-     }
-    }
-   }
-  },
-  "o334": {
-   "eq_group": 295,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -12097,6 +11567,144 @@
     }
    }
   },
+  "o331": {
+   "eq_group": 293,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o53",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o332": {
+   "eq_group": 246,
+   "kind": "ghidra.program.model.address.GenericAddress",
+   "members": {}
+  },
+  "o333": {
+   "eq_group": 294,
+   "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
+  },
+  "o334": {
+   "eq_group": 295,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "v": {
+      "id": "o85",
+      "kind": "ref"
+     }
+    }
+   }
+  },
   "o335": {
    "eq_group": 296,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
@@ -12112,10 +11720,38 @@
      }
     },
     "call:hasNext()": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
     },
     "call:next()": {
      "seq": [
@@ -12250,16 +11886,56 @@
       {
        "v": {
         "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
         "value": false
        }
       }
      ]
     },
     "call:next()": {
-     "v": {
-      "id": "o85",
-      "kind": "ref"
-     }
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o53",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
@@ -12523,6 +12199,260 @@
       {
        "v": {
         "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o53",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o341": {
+   "eq_group": 246,
+   "kind": "ghidra.program.model.address.GenericAddress",
+   "members": {}
+  },
+  "o342": {
+   "eq_group": 302,
+   "kind": "ghidra.program.database.references.EmptyMemReferenceIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
+  },
+  "o343": {
+   "eq_group": 303,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "v": {
+      "id": "o85",
+      "kind": "ref"
+     }
+    }
+   }
+  },
+  "o344": {
+   "eq_group": 304,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o53",
+        "kind": "ref"
+       }
+      }
+     ]
+    }
+   }
+  },
+  "o345": {
+   "eq_group": 305,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "v": {
+      "id": "o85",
+      "kind": "ref"
+     }
+    }
+   }
+  },
+  "o346": {
+   "eq_group": 306,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
+   "members": {
+    "attr:hasNext": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
         "value": true
        }
       },
@@ -12570,8 +12500,8 @@
     }
    }
   },
-  "o341": {
-   "eq_group": 302,
+  "o347": {
+   "eq_group": 307,
    "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
     "attr:hasNext": {
@@ -12591,123 +12521,147 @@
      }
     },
     "call:next()": {
-     "v": {
-      "id": "o50",
-      "kind": "ref"
-     }
-    }
-   }
-  },
-  "o342": {
-   "eq_group": 303,
-   "kind": "ghidra.program.model.data.DataTypePath",
-   "members": {
-    "call:__str__()": {
-     "v": {
-      "kind": "str",
-      "value": "/double"
-     }
-    }
-   }
-  },
-  "o343": {
-   "eq_group": 303,
-   "kind": "ghidra.program.model.data.DataTypePath",
-   "members": {
-    "call:__str__()": {
-     "v": {
-      "kind": "str",
-      "value": "/double"
-     }
-    }
-   }
-  },
-  "o344": {
-   "eq_group": 304,
-   "kind": "ghidra.program.model.data.Undefined1DataType",
-   "members": {}
-  },
-  "o345": {
-   "eq_group": 305,
-   "kind": "ghidra.program.model.data.PointerDataType",
-   "members": {
-    "attr:isEquivalent": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:isEquivalent(ref:eq22)": {
-     "v": {
-      "kind": "bool",
-      "value": false
-     }
-    }
-   }
-  },
-  "o346": {
-   "eq_group": 305,
-   "kind": "ghidra.program.model.data.PointerDataType",
-   "members": {
-    "attr:isEquivalent": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:isEquivalent(ref:eq22)": {
-     "v": {
-      "kind": "bool",
-      "value": false
-     }
-    }
-   }
-  },
-  "o347": {
-   "eq_group": 305,
-   "kind": "ghidra.program.model.data.PointerDataType",
-   "members": {
-    "attr:isEquivalent": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:isEquivalent(ref:eq22)": {
-     "v": {
-      "kind": "bool",
-      "value": false
-     }
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o53",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
   "o348": {
-   "eq_group": 305,
-   "kind": "ghidra.program.model.data.PointerDataType",
+   "eq_group": 308,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
-    "attr:isEquivalent": {
+    "attr:hasNext": {
      "v": {
       "kind": "method"
      }
     },
-    "call:isEquivalent(ref:eq22)": {
+    "attr:next": {
      "v": {
-      "kind": "bool",
-      "value": false
+      "kind": "method"
      }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o50",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o51",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o52",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o53",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
   "o349": {
-   "eq_group": 305,
-   "kind": "ghidra.program.model.data.PointerDataType",
+   "eq_group": 309,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
-    "attr:isEquivalent": {
+    "attr:hasNext": {
      "v": {
       "kind": "method"
      }
     },
-    "call:isEquivalent(ref:eq22)": {
+    "attr:next": {
      "v": {
-      "kind": "bool",
-      "value": false
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "v": {
+      "id": "o85",
+      "kind": "ref"
      }
     }
    }
@@ -12740,126 +12694,282 @@
    }
   },
   "o350": {
-   "eq_group": 305,
-   "kind": "ghidra.program.model.data.PointerDataType",
+   "eq_group": 310,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
-    "attr:isEquivalent": {
+    "attr:hasNext": {
      "v": {
       "kind": "method"
      }
     },
-    "call:isEquivalent(ref:eq22)": {
+    "attr:next": {
      "v": {
-      "kind": "bool",
-      "value": false
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "v": {
+      "id": "o85",
+      "kind": "ref"
      }
     }
    }
   },
   "o351": {
-   "eq_group": 305,
-   "kind": "ghidra.program.model.data.PointerDataType",
+   "eq_group": 311,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
-    "attr:isEquivalent": {
+    "attr:hasNext": {
      "v": {
       "kind": "method"
      }
     },
-    "call:isEquivalent(ref:eq22)": {
+    "attr:next": {
      "v": {
-      "kind": "bool",
-      "value": false
+      "kind": "method"
      }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
   "o352": {
-   "eq_group": 305,
-   "kind": "ghidra.program.model.data.PointerDataType",
+   "eq_group": 312,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
-    "attr:isEquivalent": {
+    "attr:hasNext": {
      "v": {
       "kind": "method"
      }
     },
-    "call:isEquivalent(ref:eq22)": {
+    "attr:next": {
      "v": {
-      "kind": "bool",
-      "value": false
+      "kind": "method"
      }
+    },
+    "call:hasNext()": {
+     "seq": [
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": true
+       }
+      },
+      {
+       "v": {
+        "kind": "bool",
+        "value": false
+       }
+      }
+     ]
+    },
+    "call:next()": {
+     "seq": [
+      {
+       "v": {
+        "id": "o91",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o92",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o93",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o94",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o95",
+        "kind": "ref"
+       }
+      }
+     ]
     }
    }
   },
   "o353": {
-   "eq_group": 305,
-   "kind": "ghidra.program.model.data.PointerDataType",
+   "eq_group": 313,
+   "kind": "ghidra.program.model.pcode.ListLinked$LinkedIterator",
    "members": {
-    "attr:isEquivalent": {
+    "attr:hasNext": {
      "v": {
       "kind": "method"
      }
     },
-    "call:isEquivalent(ref:eq22)": {
+    "attr:next": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:hasNext()": {
      "v": {
       "kind": "bool",
-      "value": false
+      "value": true
+     }
+    },
+    "call:next()": {
+     "v": {
+      "id": "o50",
+      "kind": "ref"
      }
     }
    }
   },
   "o354": {
-   "eq_group": 305,
-   "kind": "ghidra.program.model.data.PointerDataType",
+   "eq_group": 314,
+   "kind": "ghidra.program.model.data.DataTypePath",
    "members": {
-    "attr:isEquivalent": {
+    "call:__str__()": {
      "v": {
-      "kind": "method"
-     }
-    },
-    "call:isEquivalent(ref:eq22)": {
-     "v": {
-      "kind": "bool",
-      "value": false
+      "kind": "str",
+      "value": "/double"
      }
     }
    }
   },
   "o355": {
-   "eq_group": 305,
-   "kind": "ghidra.program.model.data.PointerDataType",
+   "eq_group": 314,
+   "kind": "ghidra.program.model.data.DataTypePath",
    "members": {
-    "attr:isEquivalent": {
+    "call:__str__()": {
      "v": {
-      "kind": "method"
-     }
-    },
-    "call:isEquivalent(ref:eq22)": {
-     "v": {
-      "kind": "bool",
-      "value": false
+      "kind": "str",
+      "value": "/double"
      }
     }
    }
   },
   "o356": {
-   "eq_group": 305,
-   "kind": "ghidra.program.model.data.PointerDataType",
-   "members": {
-    "attr:isEquivalent": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:isEquivalent(ref:eq22)": {
-     "v": {
-      "kind": "bool",
-      "value": false
-     }
-    }
-   }
+   "eq_group": 315,
+   "kind": "ghidra.program.model.data.Undefined1DataType",
+   "members": {}
   },
   "o357": {
-   "eq_group": 305,
+   "eq_group": 316,
    "kind": "ghidra.program.model.data.PointerDataType",
    "members": {
     "attr:isEquivalent": {
@@ -12876,7 +12986,7 @@
    }
   },
   "o358": {
-   "eq_group": 305,
+   "eq_group": 316,
    "kind": "ghidra.program.model.data.PointerDataType",
    "members": {
     "attr:isEquivalent": {
@@ -12893,7 +13003,7 @@
    }
   },
   "o359": {
-   "eq_group": 305,
+   "eq_group": 316,
    "kind": "ghidra.program.model.data.PointerDataType",
    "members": {
     "attr:isEquivalent": {
@@ -12927,7 +13037,7 @@
    }
   },
   "o360": {
-   "eq_group": 305,
+   "eq_group": 316,
    "kind": "ghidra.program.model.data.PointerDataType",
    "members": {
     "attr:isEquivalent": {
@@ -12944,7 +13054,7 @@
    }
   },
   "o361": {
-   "eq_group": 305,
+   "eq_group": 316,
    "kind": "ghidra.program.model.data.PointerDataType",
    "members": {
     "attr:isEquivalent": {
@@ -12961,7 +13071,7 @@
    }
   },
   "o362": {
-   "eq_group": 305,
+   "eq_group": 316,
    "kind": "ghidra.program.model.data.PointerDataType",
    "members": {
     "attr:isEquivalent": {
@@ -12978,97 +13088,123 @@
    }
   },
   "o363": {
-   "eq_group": 26,
-   "kind": "ghidra.program.model.listing.VariableStorage",
+   "eq_group": 316,
+   "kind": "ghidra.program.model.data.PointerDataType",
    "members": {
-    "attr:getVarnodes": {
+    "attr:isEquivalent": {
      "v": {
       "kind": "method"
      }
     },
-    "call:getVarnodes()": {
+    "call:isEquivalent(ref:eq22)": {
      "v": {
-      "id": "o367",
-      "kind": "ref"
+      "kind": "bool",
+      "value": false
      }
     }
    }
   },
   "o364": {
-   "eq_group": 22,
-   "kind": "ghidra.program.model.data.ArrayDataType",
+   "eq_group": 316,
+   "kind": "ghidra.program.model.data.PointerDataType",
    "members": {
-    "attr:getDataType": {
+    "attr:isEquivalent": {
      "v": {
       "kind": "method"
      }
     },
-    "attr:getDataTypeManager": {
+    "call:isEquivalent(ref:eq22)": {
      "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getLength": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getName": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getPathName": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getDataType()": {
-     "v": {
-      "id": "o366",
-      "kind": "ref"
-     }
-    },
-    "call:getDataTypeManager()": {
-     "v": {
-      "id": "o130",
-      "kind": "ref"
-     }
-    },
-    "call:getLength()": {
-     "v": {
-      "kind": "int",
-      "value": 16
-     }
-    },
-    "call:getName()": {
-     "v": {
-      "kind": "str",
-      "value": "undefined1[16]"
-     }
-    },
-    "call:getPathName()": {
-     "v": {
-      "kind": "str",
-      "value": "/undefined1[16]"
+      "kind": "bool",
+      "value": false
      }
     }
    }
   },
   "o365": {
-   "eq_group": 306,
-   "kind": "ghidra.program.model.listing.VariableStorage",
-   "members": {}
+   "eq_group": 316,
+   "kind": "ghidra.program.model.data.PointerDataType",
+   "members": {
+    "attr:isEquivalent": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:isEquivalent(ref:eq22)": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
   },
   "o366": {
-   "eq_group": 304,
-   "kind": "ghidra.program.model.data.Undefined1DataType",
-   "members": {}
+   "eq_group": 316,
+   "kind": "ghidra.program.model.data.PointerDataType",
+   "members": {
+    "attr:isEquivalent": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:isEquivalent(ref:eq22)": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
   },
   "o367": {
-   "eq_group": 307,
-   "kind": "[Lghidra.program.model.pcode.Varnode;",
-   "members": {}
+   "eq_group": 316,
+   "kind": "ghidra.program.model.data.PointerDataType",
+   "members": {
+    "attr:isEquivalent": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:isEquivalent(ref:eq22)": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
+  },
+  "o368": {
+   "eq_group": 316,
+   "kind": "ghidra.program.model.data.PointerDataType",
+   "members": {
+    "attr:isEquivalent": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:isEquivalent(ref:eq22)": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
+  },
+  "o369": {
+   "eq_group": 316,
+   "kind": "ghidra.program.model.data.PointerDataType",
+   "members": {
+    "attr:isEquivalent": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:isEquivalent(ref:eq22)": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
   },
   "o37": {
    "eq_group": 34,
@@ -13163,6 +13299,184 @@
      }
     }
    }
+  },
+  "o370": {
+   "eq_group": 316,
+   "kind": "ghidra.program.model.data.PointerDataType",
+   "members": {
+    "attr:isEquivalent": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:isEquivalent(ref:eq22)": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
+  },
+  "o371": {
+   "eq_group": 316,
+   "kind": "ghidra.program.model.data.PointerDataType",
+   "members": {
+    "attr:isEquivalent": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:isEquivalent(ref:eq22)": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
+  },
+  "o372": {
+   "eq_group": 316,
+   "kind": "ghidra.program.model.data.PointerDataType",
+   "members": {
+    "attr:isEquivalent": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:isEquivalent(ref:eq22)": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
+  },
+  "o373": {
+   "eq_group": 316,
+   "kind": "ghidra.program.model.data.PointerDataType",
+   "members": {
+    "attr:isEquivalent": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:isEquivalent(ref:eq22)": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
+  },
+  "o374": {
+   "eq_group": 316,
+   "kind": "ghidra.program.model.data.PointerDataType",
+   "members": {
+    "attr:isEquivalent": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:isEquivalent(ref:eq22)": {
+     "v": {
+      "kind": "bool",
+      "value": false
+     }
+    }
+   }
+  },
+  "o375": {
+   "eq_group": 26,
+   "kind": "ghidra.program.model.listing.VariableStorage",
+   "members": {
+    "attr:getVarnodes": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getVarnodes()": {
+     "v": {
+      "id": "o379",
+      "kind": "ref"
+     }
+    }
+   }
+  },
+  "o376": {
+   "eq_group": 22,
+   "kind": "ghidra.program.model.data.ArrayDataType",
+   "members": {
+    "attr:getDataType": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getDataTypeManager": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getLength": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getName": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "attr:getPathName": {
+     "v": {
+      "kind": "method"
+     }
+    },
+    "call:getDataType()": {
+     "v": {
+      "id": "o378",
+      "kind": "ref"
+     }
+    },
+    "call:getDataTypeManager()": {
+     "v": {
+      "id": "o130",
+      "kind": "ref"
+     }
+    },
+    "call:getLength()": {
+     "v": {
+      "kind": "int",
+      "value": 16
+     }
+    },
+    "call:getName()": {
+     "v": {
+      "kind": "str",
+      "value": "undefined1[16]"
+     }
+    },
+    "call:getPathName()": {
+     "v": {
+      "kind": "str",
+      "value": "/undefined1[16]"
+     }
+    }
+   }
+  },
+  "o377": {
+   "eq_group": 317,
+   "kind": "ghidra.program.model.listing.VariableStorage",
+   "members": {}
+  },
+  "o378": {
+   "eq_group": 315,
+   "kind": "ghidra.program.model.data.Undefined1DataType",
+   "members": {}
+  },
+  "o379": {
+   "eq_group": 318,
+   "kind": "[Lghidra.program.model.pcode.Varnode;",
+   "members": {}
   },
   "o38": {
    "eq_group": 35,
@@ -13620,25 +13934,7 @@
       },
       {
        "v": {
-        "id": "o160",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o162",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o164",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o166",
+        "id": "o174",
         "kind": "ref"
        }
       },
@@ -13662,43 +13958,43 @@
       },
       {
        "v": {
-        "id": "o182",
+        "id": "o190",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o195",
+        "id": "o192",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o199",
+        "id": "o194",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o227",
+        "id": "o196",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o229",
+        "id": "o209",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o231",
+        "id": "o213",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o233",
+        "id": "o241",
         "kind": "ref"
        }
       },
@@ -13722,37 +14018,25 @@
       },
       {
        "v": {
-        "id": "o249",
+        "id": "o257",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o291",
+        "id": "o259",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o294",
+        "id": "o261",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o298",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o299",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o300",
+        "id": "o263",
         "kind": "ref"
        }
       },
@@ -13764,7 +14048,7 @@
       },
       {
        "v": {
-        "id": "o307",
+        "id": "o306",
         "kind": "ref"
        }
       },
@@ -13782,7 +14066,13 @@
       },
       {
        "v": {
-        "id": "o316",
+        "id": "o312",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o315",
         "kind": "ref"
        }
       },
@@ -13794,19 +14084,13 @@
       },
       {
        "v": {
+        "id": "o322",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
         "id": "o323",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o324",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o325",
         "kind": "ref"
        }
       },
@@ -13818,7 +14102,7 @@
       },
       {
        "v": {
-        "id": "o332",
+        "id": "o331",
         "kind": "ref"
        }
       },
@@ -13836,7 +14120,37 @@
       },
       {
        "v": {
-        "id": "o341",
+        "id": "o337",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o340",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o344",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o347",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o348",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o353",
         "kind": "ref"
        }
       }
@@ -14017,61 +14331,37 @@
       },
       {
        "v": {
-        "id": "o184",
+        "id": "o198",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o196",
+        "id": "o210",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o200",
+        "id": "o214",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o251",
+        "id": "o265",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o292",
+        "id": "o304",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o297",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o301",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o306",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o308",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o312",
+        "id": "o309",
         "kind": "ref"
        }
       },
@@ -14083,43 +14373,67 @@
       },
       {
        "v": {
-        "id": "o317",
+        "id": "o318",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o322",
+        "id": "o320",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o326",
+        "id": "o324",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o331",
+        "id": "o325",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o333",
+        "id": "o329",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o337",
+        "id": "o334",
         "kind": "ref"
        }
       },
       {
        "v": {
         "id": "o338",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o343",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o345",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o349",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o350",
         "kind": "ref"
        }
       }
@@ -14318,73 +14632,7 @@
       },
       {
        "v": {
-        "id": "o159",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o161",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o163",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o165",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o167",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o168",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o169",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o170",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o171",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o172",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
         "id": "o173",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o174",
         "kind": "ref"
        }
       },
@@ -14414,7 +14662,19 @@
       },
       {
        "v": {
+        "id": "o182",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
         "id": "o183",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o184",
         "kind": "ref"
        }
       },
@@ -14450,19 +14710,7 @@
       },
       {
        "v": {
-        "id": "o190",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
         "id": "o191",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o192",
         "kind": "ref"
        }
       },
@@ -14474,7 +14722,7 @@
       },
       {
        "v": {
-        "id": "o194",
+        "id": "o195",
         "kind": "ref"
        }
       },
@@ -14486,79 +14734,79 @@
       },
       {
        "v": {
+        "id": "o199",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o200",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
         "id": "o201",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o226",
+        "id": "o202",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o228",
+        "id": "o203",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o230",
+        "id": "o204",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o232",
+        "id": "o205",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o234",
+        "id": "o206",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o235",
+        "id": "o207",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o236",
+        "id": "o208",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o237",
+        "id": "o211",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o238",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o239",
+        "id": "o215",
         "kind": "ref"
        }
       },
       {
        "v": {
         "id": "o240",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o241",
         "kind": "ref"
        }
       },
@@ -14588,7 +14836,19 @@
       },
       {
        "v": {
+        "id": "o249",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
         "id": "o250",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o251",
         "kind": "ref"
        }
       },
@@ -14624,19 +14884,7 @@
       },
       {
        "v": {
-        "id": "o257",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
         "id": "o258",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o259",
         "kind": "ref"
        }
       },
@@ -14648,7 +14896,37 @@
       },
       {
        "v": {
-        "id": "o261",
+        "id": "o262",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o264",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o266",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o267",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o268",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o269",
         "kind": "ref"
        }
       },
@@ -14672,31 +14950,37 @@
       },
       {
        "v": {
+        "id": "o273",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o274",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
         "id": "o275",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o276",
+        "id": "o282",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o280",
+        "id": "o283",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o281",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o286",
+        "id": "o284",
         "kind": "ref"
        }
       },
@@ -14714,7 +14998,7 @@
       },
       {
        "v": {
-        "id": "o289",
+        "id": "o292",
         "kind": "ref"
        }
       },
@@ -14726,13 +15010,31 @@
       },
       {
        "v": {
-        "id": "o302",
+        "id": "o298",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o309",
+        "id": "o299",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o300",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o301",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o305",
         "kind": "ref"
        }
       },
@@ -14744,13 +15046,13 @@
       },
       {
        "v": {
-        "id": "o315",
+        "id": "o321",
         "kind": "ref"
        }
       },
       {
        "v": {
-        "id": "o318",
+        "id": "o326",
         "kind": "ref"
        }
       },
@@ -14762,7 +15064,7 @@
       },
       {
        "v": {
-        "id": "o334",
+        "id": "o330",
         "kind": "ref"
        }
       },
@@ -14774,7 +15076,19 @@
       },
       {
        "v": {
-        "id": "o340",
+        "id": "o346",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o351",
+        "kind": "ref"
+       }
+      },
+      {
+       "v": {
+        "id": "o352",
         "kind": "ref"
        }
       }
