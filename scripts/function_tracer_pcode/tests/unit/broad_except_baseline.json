@@ -27,14 +27,11 @@
       "_impl__parameter_expression_from_descriptor": {"logged": 0, "unlogged": 2},
       "_impl__parameter_expression_from_varnode": {"logged": 0, "unlogged": 5},
       "_impl__parameter_semantic_size_bytes": {"logged": 0, "unlogged": 1},
-      "_impl__path_writes_storage": {"logged": 0, "unlogged": 1},
-      "_impl__recover_call_argument_candidate_from_op": {"logged": 0, "unlogged": 2},
       "_impl__resolve_call_argument_expression": {"logged": 0, "unlogged": 1},
       "_impl__select_explicit_call_arguments_by_dependency_tail": {"logged": 0, "unlogged": 1},
       "_impl__select_explicit_call_arguments_by_input_storage": {"logged": 0, "unlogged": 3},
       "_impl__select_explicit_call_arguments_by_storage_window": {"logged": 0, "unlogged": 3},
       "_impl__should_prefer_explicit_call_argument": {"logged": 0, "unlogged": 1},
-      "_impl__stack_varnode_matches_storage": {"logged": 0, "unlogged": 1},
       "_impl__storage_info_from_identity_key": {"logged": 0, "unlogged": 1}
     },
     "analysis.effects.call_argument_abi": {

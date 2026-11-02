@@ -1,4 +1,7 @@
 from scripts.function_tracer_pcode.tests.unit._memory_model_fixtures import *
+from types import SimpleNamespace
+
+import pytest
 
 def test_memory_resolver_concretizes_direct_readonly_pointer_slot():
     load_expr = Expression.memory(
@@ -687,7 +690,8 @@ def test_expression_expander_infers_stack_location_for_indirect_output_without_t
 
     assert location == _loc("__locbase__stackframe", -0x30, 4)
 
-def test_summarize_store_effects_substitutes_stack_pointer_relative_out_parameter_locations():
+@pytest.mark.parametrize("value_storage_kind", ["full_register", "low_register", "storage_less"])
+def test_summarize_store_effects_substitutes_stack_pointer_relative_out_parameter_locations(value_storage_kind):
     class FakeAddress:
         def __init__(self, offset):
             self._offset = offset
@@ -768,6 +772,9 @@ def test_summarize_store_effects_substitutes_stack_pointer_relative_out_paramete
     )
 
     class FakeTracer:
+        #: little endian（w0 は x0 の下位 4 byte）
+        program = SimpleNamespace(getLanguage=lambda: SimpleNamespace(isBigEndian=lambda: False))
+
         def __init__(self, op):
             self._op = op
 
@@ -787,6 +794,25 @@ def test_summarize_store_effects_substitutes_stack_pointer_relative_out_paramete
                 return Expression.binary_op("INT_ADD", sp, Expression.constant(-0x1C, 8))
             return Expression.constant(0x401100, 8)
 
+    # callee の 4 byte の node: x0 の下位 4 byte（little endian の w0）にある値か、記憶域の無い node
+    value_x0 = StorageInfo(**_reg_storage("x0", register_name="x0"))
+    value_w0 = StorageInfo(
+        is_register=True,
+        space_name="register",
+        register_name="w0",
+        base_register_name="x0",
+        size=4,
+        size_bits=32,
+        base_register_size=8,
+        base_register_size_bits=64,
+        bit_offset_in_base=0,
+    )
+    callee_value = {
+        "full_register": Expression.parameter("value", 0, size=8, storage_info=value_x0),
+        "low_register": Expression.parameter("value", 0, size=4, storage_info=value_w0),
+        "storage_less": Expression.parameter("value", 0, size=4),
+    }[value_storage_kind]
+
     call_op = FakeCallOp()
     summary = summarize_store_effects(
         [FakeBlockInfo(call_op)],
@@ -801,24 +827,31 @@ def test_summarize_store_effects_substitutes_stack_pointer_relative_out_paramete
             ],
             effects=[
                 StoreEffect(
-                    location=_loc("out", 0, 4),
-                    value=Expression.parameter("value", 0, size=4),
+                    location=_loc("out", 0, callee_value.size),
+                    value=callee_value,
                     conditions=[],
                     order_key=1,
                 )
             ],
         ),
         resolve_callee_parameters=lambda _target_ref: [
-            _param("value", size=8, is_signed=False, index=0),
+            _param("value", size=8, is_signed=False, index=0, storage=value_x0.to_dict()),
             _param("out", size=8, is_signed=False, index=1),
         ],
         debug=False,
     )
 
+    if value_storage_kind != "full_register":
+        # effect 要約の parameter は記憶域・幅を持たない（`LocationBaseRef` だけ）: 4 byte の node が 8 byte の引数の
+        # どの bit かを決められないので、呼び出しの effect は分からない。記憶域の無い node は review 7 が下位 4 byte と
+        # 読んでいた（review 8 で拒否）。x0 の下位の 4 byte の node は review 7 から拒否（幅が値と違う）
+        assert summary.effects == [] and summary.has_unsupported_call
+        return
     assert len(summary.effects) == 1
-    assert summary.effects[0].location == _loc("__locbase__stackframe", -0x1C, 4)
-    assert summary.effects[0].value.expr_type.name == "PARAMETER"
-    assert summary.effects[0].value.name == "param_1"
+    assert summary.effects[0].location == _loc("__locbase__stackframe", -0x1C, 8)
+    # x0 全体の node は引数 param_1 そのもの
+    value = summary.effects[0].value
+    assert value.expr_type.name == "PARAMETER" and value.name == "param_1" and value.size == 8
 
 def test_summarize_store_effects_keeps_pointer_actual_to_address_sized_scalar_missing_summary_unsupported():
     class FakeVarnode:

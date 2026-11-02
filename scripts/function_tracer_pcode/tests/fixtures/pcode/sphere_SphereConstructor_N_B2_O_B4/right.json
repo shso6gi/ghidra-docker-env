@@ -1,6 +1,6 @@
 {
  "header": {
-  "analysis_source_digest": "5f702f454556fdb844b238511ee4f65d4c5feb8cd1580f2c60a96a702f0d4a6e",
+  "analysis_source_digest": "fefeb18ed2e245e13f4c961da639b05f035a72b5370c506728f7d94a0141da46",
   "binary": {
    "binary_id": "B4",
    "eqbench_relative_path": "raytrace/sphere/Neq/source/oldV-arm64-clang-O3",
@@ -15,9 +15,9 @@
   "fixture_id": "sphere_SphereConstructor_N_B2_O_B4",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-10-17T10:08:04+00:00",
+  "recorded_at_utc": "2026-10-31T23:45:15+00:00",
   "recorder_version": "2",
-  "recording_commit": "de2bd2b6a3fac944d3227f03ad0aa795e894d6f8",
+  "recording_commit": "7fc64edee3afeb275836bd217d3e574adff01b8d",
   "recording_dirty": false,
   "recording_mode": {
    "connector": "production",
@@ -17613,7 +17613,7 @@
     },
     "call:getStorage()": {
      "v": {
-      "id": "o683",
+      "id": "o681",
       "kind": "ref"
      }
     },
@@ -17696,7 +17696,7 @@
     },
     "call:getStorage()": {
      "v": {
-      "id": "o684",
+      "id": "o682",
       "kind": "ref"
      }
     },
@@ -17779,7 +17779,7 @@
     },
     "call:getStorage()": {
      "v": {
-      "id": "o685",
+      "id": "o683",
       "kind": "ref"
      }
     },
@@ -17862,7 +17862,7 @@
     },
     "call:getStorage()": {
      "v": {
-      "id": "o686",
+      "id": "o684",
       "kind": "ref"
      }
     },
@@ -17945,7 +17945,7 @@
     },
     "call:getStorage()": {
      "v": {
-      "id": "o687",
+      "id": "o685",
       "kind": "ref"
      }
     },
@@ -18119,18 +18119,6 @@
       {
        "v": {
         "id": "o680",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o681",
-        "kind": "ref"
-       }
-      },
-      {
-       "v": {
-        "id": "o682",
         "kind": "ref"
        }
       }
@@ -59530,148 +59518,26 @@
    }
   },
   "o681": {
-   "eq_group": 34,
-   "kind": "ghidra.program.model.data.PointerDataType",
-   "members": {
-    "attr:getDataType": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getDataTypeManager": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getLength": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getName": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:isEquivalent": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getDataType()": {
-     "v": {
-      "id": "o399",
-      "kind": "ref"
-     }
-    },
-    "call:getDataTypeManager()": {
-     "v": {
-      "id": "o398",
-      "kind": "ref"
-     }
-    },
-    "call:getLength()": {
-     "v": {
-      "kind": "int",
-      "value": 8
-     }
-    },
-    "call:getName()": {
-     "v": {
-      "kind": "str",
-      "value": "undefined8 *"
-     }
-    },
-    "call:isEquivalent(ref:eq34)": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    }
-   }
-  },
-  "o682": {
-   "eq_group": 34,
-   "kind": "ghidra.program.model.data.PointerDataType",
-   "members": {
-    "attr:getDataType": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getDataTypeManager": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getLength": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:getName": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "attr:isEquivalent": {
-     "v": {
-      "kind": "method"
-     }
-    },
-    "call:getDataType()": {
-     "v": {
-      "id": "o399",
-      "kind": "ref"
-     }
-    },
-    "call:getDataTypeManager()": {
-     "v": {
-      "id": "o398",
-      "kind": "ref"
-     }
-    },
-    "call:getLength()": {
-     "v": {
-      "kind": "int",
-      "value": 8
-     }
-    },
-    "call:getName()": {
-     "v": {
-      "kind": "str",
-      "value": "undefined8 *"
-     }
-    },
-    "call:isEquivalent(ref:eq34)": {
-     "v": {
-      "kind": "bool",
-      "value": true
-     }
-    }
-   }
-  },
-  "o683": {
    "eq_group": 586,
    "kind": "ghidra.program.model.listing.VariableStorage",
    "members": {}
   },
-  "o684": {
+  "o682": {
    "eq_group": 587,
    "kind": "ghidra.program.model.listing.VariableStorage",
    "members": {}
   },
-  "o685": {
+  "o683": {
    "eq_group": 588,
    "kind": "ghidra.program.model.listing.VariableStorage",
    "members": {}
   },
-  "o686": {
+  "o684": {
    "eq_group": 589,
    "kind": "ghidra.program.model.listing.VariableStorage",
    "members": {}
   },
-  "o687": {
+  "o685": {
    "eq_group": 590,
    "kind": "ghidra.program.model.listing.VariableStorage",
    "members": {}

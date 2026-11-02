@@ -9,6 +9,7 @@ from scripts.function_tracer_pcode.authority import contracts
 from types import MappingProxyType
 
 import pytest
+from dataclasses import replace
 
 from scripts.function_tracer_pcode.authority.contracts import (
     VALIDATED_ONCE,
@@ -117,10 +118,11 @@ def test_validate_runs_once_per_sealed_object(monkeypatch):
     )
     from scripts.function_tracer_pcode.authority.lifecycle.stream import SealedEventStream
 
-    # seal() validates (and memoises) the object it returns; take a fresh
-    # object with the same content so the first validate() below is real work.
+    # seal() validates (and memoises) the object it returns and the event
+    # objects in it; take fresh objects with the same content so the first
+    # validate() below is real work.
     sealed = _seal_minimal_stream(recorder)
-    sealed = SealedEventStream(sealed.envelope, sealed.events)
+    sealed = SealedEventStream(sealed.envelope, tuple(replace(event) for event in sealed.events))
     assert not VALIDATED_ONCE.is_validated(sealed)
 
     calls = {"n": 0}
@@ -139,12 +141,49 @@ def test_validate_runs_once_per_sealed_object(monkeypatch):
     assert calls["n"] == first          # memoised: no re-digesting
     assert VALIDATED_ONCE.is_validated(sealed)
 
-    # A structurally equal but new stream object is validated on its own.
+    # A new stream object over the same (already verified) event objects checks
+    # its own chain, but does not re-digest those events (Issue #281 review 5:
+    # per-event memo, `_VerifiedEventRegistry`).
     other = SealedEventStream(sealed.envelope, sealed.events)
     assert other is not sealed and other == sealed
     calls["n"] = 0
     other.validate()
+    assert calls["n"] == 0
+    assert VALIDATED_ONCE.is_validated(other)
+
+    # New event objects (structurally equal) are digested on their own.
+    fresh = SealedEventStream(sealed.envelope, tuple(replace(event) for event in sealed.events))
+    calls["n"] = 0
+    fresh.validate()
     assert calls["n"] > 0
+
+
+def test_a_tampered_event_object_is_rejected_even_next_to_verified_ones():
+    """The per-event memo is keyed by object identity: a new event object whose
+    digest does not match is still rejected, even when an equal-looking event
+    was verified before."""
+
+    from scripts.function_tracer_pcode.authority.lifecycle.stream import (
+        EventRecorder,
+        EventStreamPrefixView,
+        SealedEventStream,
+    )
+
+    recorder = EventRecorder(
+        stream_id="stream-t",
+        result_occurrence_id="occ-t",
+        source_snapshot_fingerprint="fp-t",
+    )
+    sealed = _seal_minimal_stream(recorder)
+    sealed.validate()
+    event = sealed.events[0]
+    tampered = replace(event, authority_digest="f" * 64)
+    with pytest.raises(ValueError):
+        SealedEventStream(replace(sealed.envelope, authority_chain_digest="f" * 64), (tampered,)).validate()
+    with pytest.raises(ValueError):
+        EventStreamPrefixView.from_sealed_stream(
+            SealedEventStream(replace(sealed.envelope, authority_chain_digest="f" * 64), (tampered,))
+        )
 
 
 def _seal_minimal_stream(recorder):

@@ -1,4 +1,5 @@
 from scripts.function_tracer_pcode.tests.unit._memory_model_fixtures import *
+from types import SimpleNamespace
 
 def test_enumerate_call_argument_variants_dedup_does_not_require_to_string(monkeypatch):
     shared = Expression.parameter("param_1", index=0, size=4)
@@ -271,7 +272,11 @@ def test_recover_call_argument_from_storage_prefers_exact_register_match_for_poi
     assert recovered is not None
     assert recovered.to_string() == "(sp + (-48))"
 
-def test_recover_call_argument_from_storage_prefers_pointer_compatible_candidate_over_later_scalar_copy():
+def test_recover_call_argument_from_storage_takes_the_last_write_even_if_an_earlier_one_looks_like_a_pointer():
+    """呼び出しの時点の a2 は最後の書き込み（scalar の copy）の値。前の書き込みの方が「引数らしい」（callee が
+    pointer を期待し、値が局所の番地）でも、上書きされた値を引数にしてはいけない（Issue #281 review 5）。
+    修正前はこの test が前の書き込み `(sp + (-48))` を期待していた。"""
+
     class FakeAddress:
         def __init__(self, offset, space_name="register"):
             self._offset = offset
@@ -406,7 +411,8 @@ def test_recover_call_argument_from_storage_prefers_pointer_compatible_candidate
     )
 
     assert recovered is not None
-    assert recovered.to_string() == "(sp + (-48))"
+    assert recovered.to_string() != "(sp + (-48))"
+    assert "param_1" in recovered.to_string()
 
 def test_recover_call_argument_from_storage_refuses_no_tracker_global_scan():
     class FakeAddress:
@@ -785,6 +791,9 @@ def test_recover_call_argument_from_storage_marks_unknown_full_register_live_in_
             return [(path, []) for path in self._paths]
 
     class FakeTracer:
+        # a2_lo は番地が a2 の後ろ 4 byte: big endian（MIPS64）で下位 32 bit（Issue #281 review 9: 位置は byte order で決める）
+        program = SimpleNamespace(getLanguage=lambda: SimpleNamespace(isBigEndian=lambda: True))
+
         def get_all_pcode_ops(self):
             return []
 
@@ -1142,6 +1151,9 @@ def test_recover_call_argument_from_storage_accepts_semantic_width_fragment_live
             return [(path, []) for path in self._paths]
 
     class FakeTracer:
+        # a2_lo は番地が a2 の後ろ 4 byte: big endian（MIPS64）で下位 32 bit（Issue #281 review 9: 位置は byte order で決める）
+        program = SimpleNamespace(getLanguage=lambda: SimpleNamespace(isBigEndian=lambda: True))
+
         def _get_storage_info_from_varnode(self, _varnode):
             return None
 

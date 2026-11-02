@@ -194,6 +194,40 @@ def _canonical_bytes(value: Any) -> bytes:
     return bytes(out)
 
 
+class StructuralKeyNotOrderable(Exception):
+    """`structural_sort_key` が順序を与えられない値（canonical encoding の外の型）。
+
+    `TypeError` の派生にしないのは、「回復可能」な例外 tuple に吸収されて並べ替えを黙って
+    諦める（順序に依存した値が出る）のを防ぐため。
+    """
+
+
+def structural_sort_key(key: Any) -> bytes:
+    """構造 key（と、それを部分に持つ組み込みの値）を並べる順序の key（Issue #281）。
+
+    **構造 key を並べる・2 つの向きを決める consumer は、tuple の `<` ではなくこれを使う**。
+    tuple の `<` は同じ位置に `None` と `int` のような比べられない要素があると `TypeError` になり、
+    key の形（予算付き key・厳密な identity・`("none",)` 等）が条件ごとに違えば起きる（#281）。
+
+    契約:
+
+    * 値は canonical encoding（C-K7）の bytes。**単射**なので、key が型まで等しい ⇔ sort key が
+      等しい。構造 key の owner は位置ごとの型を揃えて作る（`_LabelReader` が整数・真偽・文字列を
+      写す）ので、構造 key どうしの `==` とも一致する
+    * bytes の辞書順なので、受け付ける値の全体で **全順序**。tuple の `<` の順序とは一致しない
+      （長さ前置）。順序そのものに意味は無く、決定的であることだけを約束する
+    * process をまたいで決定的。ただし識別不能 token・object identity token は process ごとに
+      乱数を持つので、それを含む key の相対順は process ごとに変わり得る（等しさは変わらない）
+    * 受け付けるのは exact type の None / bool / int / str / bytes / float / tuple / list の入れ子
+      だけ。それ以外は `StructuralKeyNotOrderable`
+    """
+
+    try:
+        return _canonical_bytes(key)
+    except _NotCanonical as exc:
+        raise StructuralKeyNotOrderable(f"structural key has no canonical order: {exc}") from exc
+
+
 class _ExactTailIntern:
     """record → 識別済み token の intern（C-K6）。**意味の owner**。
 

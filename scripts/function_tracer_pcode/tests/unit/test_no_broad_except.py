@@ -314,11 +314,13 @@ def test_baseline_is_a_frozen_snapshot_with_stable_totals():
     # plan v4 PR-A: loop の solver の取引を session の共通の取引の境界へ移した（-1 key / -1）
     # plan v4 PR-D: 書き換えの照合を値の identity にし、SMT の文字列の signature を撤去（-1 key / -1）
     # eval-prep PR-4: Phase 4-B（`checker/abi_retry.py`）を撤去（#184、-1 key / -1）
+    # Issue #281 review 6: 引数の記憶域の照合で varnode を読む broad except を Ghidra の読み出しの例外に狭めた
+    # （`call_argument` の 3 関数、-3 key / -4）
     assert baseline_totals(entries) == {
-        "keys": 582,
+        "keys": 579,
         "logged": 0,
-        "unlogged": 906,
-        "handlers": 906,
+        "unlogged": 902,
+        "handlers": 902,
     }
 
 

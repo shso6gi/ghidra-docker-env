@@ -612,7 +612,7 @@ def test_expression_expander_inlines_direct_call_results():
         def _trace_pcode_op(self, *_args, **_kwargs):
             raise AssertionError("recursive tracing fallback should not run")
 
-    def _resolve_call(target_ref, args):
+    def _resolve_call(target_ref, args, call_site=None):
         assert target_ref == CallTargetRef.from_name("callee")
         assert len(args) == 1
         return [
@@ -703,7 +703,7 @@ def test_expression_expander_truncates_wide_call_summary_to_call_output_size():
         def _trace_pcode_op(self, *_args, **_kwargs):
             raise AssertionError("recursive tracing fallback should not run")
 
-    def _resolve_call(target_ref, args):
+    def _resolve_call(target_ref, args, call_site=None):
         assert target_ref == CallTargetRef.from_name("callee")
         assert len(args) == 1
         return [
@@ -832,7 +832,7 @@ def test_expression_expander_refuses_callee_aligned_call_arguments_without_objec
 
     captured = {}
 
-    def _resolve_call(target_ref, args):
+    def _resolve_call(target_ref, args, call_site=None):
         captured["target"] = target_ref
         captured["args"] = list(args)
         return [ExpandedValue(Expression.constant(7, 4), [])]
@@ -1096,7 +1096,7 @@ def test_expression_expander_resolves_guarded_indirect_dispatch_from_readonly_ta
         "case_3": 1003,
     }
 
-    def _resolve_call(target_ref, args):
+    def _resolve_call(target_ref, args, call_site=None):
         assert args == []
         return [ExpandedValue(Expression.constant(return_values[target_ref.display_name()], 4), [])]
 
@@ -1258,7 +1258,7 @@ def test_expression_expander_does_not_record_formal_storage_args_for_deferred_ca
         _FakeTracer(),
         condition_tracker=None,
         debug=False,
-        call_resolver=lambda _target_ref, _args: None,
+        call_resolver=lambda _target_ref, _args, call_site=None: None,
         parameters=[
             {"name": "param_1", "index": 0, "size": 8, "storage": reg_a0},
             {"name": "param_2", "index": 1, "size": 4, "storage": reg_a1_lo},
@@ -1422,7 +1422,7 @@ def test_expression_expander_resolves_guarded_indirect_dispatch_with_wrapped_pic
         "case_3": 1003,
     }
 
-    def _resolve_call(target_ref, args):
+    def _resolve_call(target_ref, args, call_site=None):
         assert args == []
         return [ExpandedValue(Expression.constant(return_values[target_ref.display_name()], 8), [])]
 
@@ -1579,7 +1579,7 @@ def test_expression_expander_resolves_guarded_indirect_dispatch_to_raw_code_targ
         "ADDR_102558": 1003,
     }
 
-    def _resolve_call(target_ref, args):
+    def _resolve_call(target_ref, args, call_site=None):
         assert args == []
         return [ExpandedValue(Expression.constant(return_values[target_ref.display_name()], 8), [])]
 
@@ -1608,7 +1608,7 @@ def test_return_analyzer_dispatches_local_address_targets_before_normal_call_res
     analyzer = ReturnAnalyzer(program=None, debug=False)
     captured = []
 
-    def _fake_local(address_value, active_functions, current_function=None, args=None):
+    def _fake_local(address_value, active_functions, current_function=None, args=None, call_site=None):
         captured.append((address_value, active_functions, current_function, args))
         return ["ok"]
 
@@ -1666,7 +1666,15 @@ def test_return_analyzer_keeps_safe_call_summary_when_others_are_rejected():
     assert expanded[0].value.value == 11
 
 
-def test_return_analyzer_does_not_rebind_argument_specialized_call_analysis():
+def test_return_analyzer_does_not_expand_a_callee_with_more_parameters_than_arguments():
+    """Issue #281 review 5-2: 引数より parameter が多い callee は展開しない（scope に束縛があっても）。
+
+    修正前はこの test が「束縛が 1 つでもある解析は特殊化済み」として、置き換えを飛ばした展開を期待していた。
+    引数の無い parameter（`free_caller_b`）を指す式が caller の同じ番号の parameter として残り得る。callee の
+    解析へ束縛してよいのは定数だけなので（`is_context_free_value`）、caller の parameter が入った解析も
+    production では作られない。
+    """
+
     analyzer = ReturnAnalyzer(program=Mock(), debug=False)
     caller_a = _param_expr("caller_a", 1, size=4)
     caller_b = _param_expr("caller_b", 2, size=4)
@@ -1702,11 +1710,7 @@ def test_return_analyzer_does_not_rebind_argument_specialized_call_analysis():
             active_functions=set(),
         )
 
-    assert expanded is not None
-    assert len(expanded) == 1
-    assert expanded[0].value.operator == "INT_XOR"
-    assert expanded[0].value.operands[0].name == "caller_a"
-    assert expanded[0].value.operands[1].name == "caller_b"
+    assert expanded is None
 
 
 def test_return_analyzer_uses_current_function_when_containing_lookup_fails():
@@ -1729,8 +1733,9 @@ def test_return_analyzer_uses_current_function_when_containing_lookup_fails():
     analyzer.program.getAddressFactory.return_value.getDefaultAddressSpace.return_value.getAddress.return_value = addr_obj
     analyzer.program.getFunctionManager.return_value.getFunctionContaining.return_value = None
 
+    expanded = ExpandedValue(Expression.constant(7, size=4), [])
     with patch.object(analyzer, "_get_decompiler") as mock_get_decompiler, patch.object(
-        analyzer, "_expand_linear_code_target", return_value=["expanded"]
+        analyzer, "_expand_linear_code_target", return_value=[expanded]
     ):
         mock_results = Mock()
         mock_results.decompileCompleted.return_value = True
@@ -1745,7 +1750,8 @@ def test_return_analyzer_uses_current_function_when_containing_lookup_fails():
             current_function=current_function,
         )
 
-    assert resolved == ["expanded"]
+    # memory を読まない展開は、caller の時間軸へ移しても同じ値（Issue #281）
+    assert [item.value for item in resolved] == [expanded.value]
 
 
 def test_return_analyzer_disassembles_local_target_and_follows_unconditional_branch():

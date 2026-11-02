@@ -3,6 +3,19 @@
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
+from scripts.function_tracer_pcode.core.operand_derivation import OperandDerivationRefused
+from scripts.function_tracer_pcode.analysis.program_points import op_program_key
+from scripts.function_tracer_pcode.core.program_order import op_key_from_legacy
+from scripts.function_tracer_pcode.analysis.effects.call_boundary import (
+    REFUSED_CALLEE_EFFECT_ORDER,
+    CalleeBinding,
+    program_is_big_endian,
+    CallBoundaryRefused,
+    CallSite,
+    CalleeTimeline,
+    import_callee_condition,
+    import_callee_expression,
+)
 from scripts.function_tracer_pcode.core import (
     CallTargetRef,
     CanonicalLocation,
@@ -29,7 +42,6 @@ from scripts.function_tracer_pcode.analysis.effects._shared import (
 from scripts.function_tracer_pcode.analysis.effects import call_argument_abi as _abi
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _block_has_path_incomplete_effects,
-    _build_parameter_replacements,
     _call_argument_evidence_storage_key,
     _call_argument_recovery_status,
     _call_arguments_may_expose_parameter_memory,
@@ -81,8 +93,6 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     canonicalize_location,
     is_call_effect_summary_allowed,
     locations_match,
-    substitute_condition,
-    substitute_expression,
     substitute_location,
     subtract_implied_conditions,
 )
@@ -316,7 +326,10 @@ def _impl_summarize_store_effects(
 
         for op_ordinal, op in enumerate(block_info.pcode_ops):
             mnemonic = op.getMnemonic()
-            op_order_key = _try_get_order_key(op)
+            op_order_key = _effect_order_key(tracer, op, block_index=getattr(block_info, "index", None))
+            # caller の中の呼び出しの位置（callee の読み出しを caller の時間軸へ移す: Issue #281）。
+            # 書き込みと同じ key（`core.program_order`）なので、caller の読み出し・effect と比べられる
+            call_site = CallSite(op_order_key)
             if mnemonic in {"CALL", "CALLIND"} or (
                 mnemonic == "INDIRECT" and _op_output_is_memory(op)
             ):
@@ -619,6 +632,7 @@ def _impl_summarize_store_effects(
                                 return_expansions = direct_call_expander(
                                     target_ref,
                                     variant_args,
+                                    call_site=call_site,
                                 )
                             except Exception:
                                 return_expansions = None
@@ -708,7 +722,41 @@ def _impl_summarize_store_effects(
                             )
                             continue
 
+                        # Issue #281 review 5: callee の書き込みは呼び出しの間に callee の順に起きる。caller の key は
+                        # 呼び出しの op の key の中の slot（`core.program_order.call_effect_key`）。すべてを呼び出しの
+                        # key にすると、同じ位置への 2 つの書き込み（`*p = 5; *p = 9`）の前後が消える
+                        callee_timeline = CalleeTimeline.from_effect_summary(callee_summary)
+                        callee_effect_slots = callee_timeline.effect_slots()
+                        if callee_effect_slots is None or call_site.effect_key(1) is None:
+                            has_unsupported_call = True
+                            unsupported_call_sites.append(
+                                _unsupported_call_effect_ref(
+                                    op,
+                                    target_ref=target_ref,
+                                    target_expr=target_expr,
+                                    arguments=variant_args,
+                                    path_conditions=active_conditions,
+                                    reason=REFUSED_CALLEE_EFFECT_ORDER,
+                                )
+                            )
+                            continue
                         for callee_effect_index, effect in enumerate(callee_summary.effects):
+                            caller_effect_order_key = call_site.effect_key(
+                                callee_effect_slots.get(effect.order_key)
+                            )
+                            if caller_effect_order_key is None:
+                                has_unsupported_call = True
+                                unsupported_call_sites.append(
+                                    _unsupported_call_effect_ref(
+                                        op,
+                                        target_ref=target_ref,
+                                        target_expr=target_expr,
+                                        arguments=variant_args,
+                                        path_conditions=active_conditions,
+                                        reason=REFUSED_CALLEE_EFFECT_ORDER,
+                                    )
+                                )
+                                continue
                             substitution_args = _choose_effect_substitution_args(
                                 effect.location,
                                 callee_summary.parameter_refs,
@@ -740,19 +788,60 @@ def _impl_summarize_store_effects(
                                         f"args={summarize_expressions(substitution_args)}"
                                     )
                                 continue
-                            substitutions = _build_parameter_replacements(
+                            binding = CalleeBinding.for_arguments(
                                 callee_summary.parameter_refs,
                                 substitution_args,
+                                simplify_parameters=parameters,
+                                # 直接の呼び出しの callee は caller と同じ program にある
+                                big_endian=program_is_big_endian(getattr(tracer, "program", None)),
                             )
-                            substituted_value = substitute_expression(effect.value, substitutions, parameters)
+                            try:
+                                # Issue #281: effect の値の memory 読み出しは callee の時間軸の上にある（値は
+                                # その effect の書き込みの前に読まれる）。境界が caller の呼び出し位置へ移し、
+                                # 同じ走査で callee の parameter を引数へ置き換える（`call_boundary`）
+                                substituted_value = import_callee_expression(
+                                    effect.value,
+                                    call_site,
+                                    callee_timeline,
+                                    context_order=effect.order_key,
+                                    binding=binding,
+                                )
+                                substituted_conditions = [
+                                    import_callee_condition(
+                                        cond,
+                                        call_site,
+                                        callee_timeline,
+                                        context_order=effect.order_key,
+                                        binding=binding,
+                                    )
+                                    for cond in effect.conditions
+                                ]
+                            except OperandDerivationRefused as refusal:
+                                # Issue #281: 引数へ置き換えた派生が ref を保てない、または読み出しを caller の
+                                # 時間軸へ移せない。callee の元の値は caller の文脈では別の値なので使えない。
+                                # location が置き換えられないときと同じく、この呼び出しを effect の分からない
+                                # 呼び出しにする（summary は不完全になり、EQ / NOT_EQ の両方を止める:
+                                # `get_equivalence_blocking_unsafety_reasons` / `get_decisive_sat_unsafety_reasons`）
+                                has_unsupported_call = True
+                                unsupported_call_sites.append(
+                                    _unsupported_call_effect_ref(
+                                        op,
+                                        target_ref=target_ref,
+                                        target_expr=target_expr,
+                                        arguments=variant_args,
+                                        path_conditions=active_conditions,
+                                        reason=(
+                                            "substituted_effect_read_not_relocatable"
+                                            if isinstance(refusal, CallBoundaryRefused)
+                                            else "substituted_effect_value_derivation_refused"
+                                        ),
+                                    )
+                                )
+                                continue
                             substituted_value = _reduce_expression_under_conditions(
                                 substituted_value,
                                 active_conditions,
                             )
-                            substituted_conditions = [
-                                substitute_condition(cond, substitutions, parameters)
-                                for cond in effect.conditions
-                            ]
                             substituted_conditions = _reduce_conditions_under_context(
                                 substituted_conditions,
                                 active_conditions,
@@ -778,7 +867,7 @@ def _impl_summarize_store_effects(
                                     location=substituted_location,
                                     value=substituted_value,
                                     conditions=merged_conditions,
-                                    order_key=op_order_key,
+                                    order_key=caller_effect_order_key,
                                     provenance=StoreEffectProvenance(
                                         source_kind="call_derived",
                                         producer_pcode_op_ref=_pcode_ref_for_op(op),
@@ -835,7 +924,7 @@ def _impl_summarize_store_effects(
                 continue
             if store_kind == "global":
                 store_path_global_locations.append(location)
-            order_key = _try_get_order_key(right_op)
+            order_key = _effect_order_key(tracer, right_op)
             if order_key is None:
                 incomplete_reasons.add(_EFFECT_ORDER_UNAVAILABLE_REASON)
                 continue
@@ -896,6 +985,18 @@ def _impl_summarize_store_effects(
         # symbolic base address and need no gate.
         incomplete_reasons.add(_EFFECT_GLOBAL_READ_IDENTITY_REASON)
 
+    # Issue #281 / #285: effect の key は読み出しと同じ `core.program_order` の key。巡回する成分（loop）の
+    # 中の point どうしの前後は key で表せない（繰り返しの 2 回目は 1 回目の後ろの op の後に実行される）ので、
+    # loop の中の書き込みがあれば、読み出しが見る値も、最後の書き込みも決められない。両方の判定を止める
+    program_order = _tracer_program_order(tracer)
+    if program_order is not _LEGACY_ORDER and effects:
+        if program_order is None:
+            incomplete_reasons.add(_EFFECT_PROGRAM_ORDER_UNAVAILABLE_REASON)
+            has_unsupported_call = True
+        elif any(program_order.in_cycle(effect.order_key) for effect in effects):
+            incomplete_reasons.add(_EFFECT_ORDER_IN_CYCLE_REASON)
+            has_unsupported_call = True
+
     # Issue #20 PR-D: 効果レーンの経路列挙が届かなかった呼び出しサイトを、
     # object 由来の ABI 証拠だけで拾い直す。ここで作る行は「引数が観測できた
     # ことの証拠」であって、未検証の deferred 引数の昇格ではない。
@@ -926,6 +1027,35 @@ def _impl_summarize_store_effects(
         call_target_resolution_evidence=tuple(call_target_resolution_evidence),
         call_site_effect_summary_evidence=tuple(call_site_effect_summary_evidence),
     )
+
+#: loop の中の書き込み（Issue #281 / #285）
+_EFFECT_ORDER_IN_CYCLE_REASON = "effect_order_in_cycle"
+#: 関数の CFG から順序を作れなかった
+_EFFECT_PROGRAM_ORDER_UNAVAILABLE_REASON = "effect_program_order_unavailable"
+#: tracer が順序の API を持たない（CFG の無い test double）。旧来の番地の順の key を使う
+_LEGACY_ORDER = object()
+
+
+def _tracer_program_order(tracer):
+    program_order = getattr(tracer, "program_order", None)
+    if not callable(program_order):
+        return _LEGACY_ORDER
+    return program_order()
+
+
+def _effect_order_key(tracer, op, *, block_index: Optional[int] = None) -> Optional[int]:
+    """effect（STORE・呼び出し）の op の key。読み出しと同じ `core.program_order` の key（Issue #281 / #285）。
+
+    順序の API を持たない tracer（CFG の無い test double）だけ、旧来の `(番地 << 8) | getOrder()` を使う。
+    production の tracer（`PcodeTracer`）は必ず API を持ち、key が分からなければ None（呼び出し側が
+    `effect_order_unavailable` にする）。
+    """
+
+    program_order = _tracer_program_order(tracer)
+    if program_order is _LEGACY_ORDER:
+        return op_key_from_legacy(_try_get_order_key(op))
+    return op_program_key(program_order, op, block_index=block_index)
+
 
 def _impl__block_has_effect_sensitive_ops(block_info) -> bool:
     for op in getattr(block_info, "pcode_ops", []) or ():
@@ -1110,7 +1240,7 @@ def _impl__collect_ram_output_write_effects(
                 if debug:
                     print(f"[EffectSummary] unmodeled global exit state: {out}")
                 continue
-            order_key = _try_get_order_key(op)
+            order_key = _effect_order_key(tracer, op)
             if order_key is None:
                 reasons.add(_EFFECT_ORDER_UNAVAILABLE_REASON)
                 continue
@@ -1409,7 +1539,8 @@ def _impl__resolve_direct_call_value_effects(
         explicit_args,
     )
 
-    expanded = direct_call_expander(target_ref, args)
+    call_site = CallSite(_effect_order_key(tracer, def_op))
+    expanded = direct_call_expander(target_ref, args, call_site=call_site)
     if not expanded:
         return []
 

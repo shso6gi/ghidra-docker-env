@@ -10,7 +10,11 @@ from scripts.function_tracer_pcode.core import (
     StructuralKey,
     expression_key_status,
 )
-from scripts.function_tracer_pcode.core.structural import exact_structural_identity, identity_is_memoizable
+from scripts.function_tracer_pcode.core.structural import (
+    exact_structural_identity,
+    identity_is_memoizable,
+    structural_sort_key,
+)
 from scripts.function_tracer_pcode.analysis.condition.condition_cache import root_memo
 
 
@@ -55,7 +59,8 @@ class ConditionNormalizer:
         for cond in conditions or []:
             normalized = cls.normalize_for_contradiction(cond)
             canonical.append(normalized)
-        canonical.sort()
+        # 形の違う key（None と int が同じ位置に来る等）を tuple の `<` で比べない（#281）
+        canonical.sort(key=structural_sort_key)
         return tuple(canonical)
     
     @staticmethod
@@ -398,7 +403,7 @@ class ConditionNormalizer:
         # 両方変数または両方定数の場合、辞書順で小さい方を左に
         left_str = ConditionNormalizer._condition_expr_key(left_expr)
         right_str = ConditionNormalizer._condition_expr_key(right_expr)
-        return left_str > right_str
+        return structural_sort_key(left_str) > structural_sort_key(right_str)
 
     @classmethod
     def _remember_contradiction_key(

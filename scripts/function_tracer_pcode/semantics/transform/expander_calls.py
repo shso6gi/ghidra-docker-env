@@ -11,6 +11,7 @@ from scripts.function_tracer_pcode.core import (
     CallTargetRef,
 )
 from scripts.function_tracer_pcode.analysis.condition import ConditionSimplifier
+from scripts.function_tracer_pcode.analysis.effects.call_boundary import CallSite
 from scripts.function_tracer_pcode.analysis.effects.summary import (
     _reduce_expression_under_conditions,
     _resolve_call_target_ref,
@@ -225,7 +226,12 @@ class CallExpansionMixin:
 
                     if self.call_resolver is None:
                         continue
-                    resolved = self.call_resolver(target_ref, effective_args)
+                    # caller の中の呼び出しの位置（callee の読み出しを caller の時間軸へ移す: Issue #281）
+                    resolved = self.call_resolver(
+                        target_ref,
+                        effective_args,
+                        call_site=_call_site_for_op(self.tracer, pcode_op),
+                    )
                     if not resolved:
                         if self.debug:
                             self._debug_print(
@@ -498,3 +504,13 @@ class CallExpansionMixin:
                 depth,
             )
         return resolved
+
+
+def _call_site_for_op(tracer, pcode_op) -> CallSite:
+    """呼び出しの op の位置（tracer の program point の key: Issue #281 / #285）。
+
+    順序の API を持たない tracer（test double）では位置は不明（callee の読み出しを移せず、境界が拒否する）。
+    """
+
+    get_order_key = getattr(tracer, "_get_op_order_key", None)
+    return CallSite(get_order_key(pcode_op) if callable(get_order_key) else None)

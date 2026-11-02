@@ -94,6 +94,8 @@ def _impl__fixed_prefix_argument_window_has_evidence(
     selected: Sequence[Expression],
     format_index: int,
 ) -> bool:
+    from scripts.function_tracer_pcode.analysis.effects.call_boundary import program_is_big_endian
+
     param_storages = [
         _coerce_storage_info(callee_param.get("storage"))
         for callee_param in callee_parameters
@@ -106,6 +108,7 @@ def _impl__fixed_prefix_argument_window_has_evidence(
                 input_storages[:len(selected)],
                 selected,
                 param_storages,
+                big_endian=program_is_big_endian(getattr(tracer, "program", None)),
             )
         ):
             return True

@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import hashlib
+from typing import Any, Dict, Optional, Tuple
 
 from scripts.function_tracer_pcode.proof.formula.input_correspondence.gate import certify_owner_free_identity
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
+from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
 from scripts.function_tracer_pcode.core.semantic_freeze import publish
 from scripts.function_tracer_pcode.core.live_values import UndecidableComparison
 from scripts.function_tracer_pcode.core.structural import value_identity
@@ -337,15 +339,19 @@ def _build_rewrite_candidate(expr: Expression, settings: NormalizationSettings) 
     確定した意味として公開してから返す。
     """
 
-    pre_rewritten = _apply_solver_proven_candidate_rewrites(expr)
+    pre_rewritten = _apply_solver_proven_candidate_rewrites(expr, _ConstructionOrder())
     normalized = normalize_expression(
         pre_rewritten,
         NormalizationContext(settings=settings),
     )
-    return publish(_apply_solver_proven_candidate_rewrites(normalized))
+    return publish(_apply_solver_proven_candidate_rewrites(normalized, _ConstructionOrder()))
 
 
-def _apply_solver_proven_candidate_rewrites(expr: Expression) -> Expression:
+def _apply_solver_proven_candidate_rewrites(
+    expr: Expression,
+    order: Optional["_ConstructionOrder"] = None,
+) -> Expression:
+    order = order if order is not None else _ConstructionOrder()
     expr_type = getattr(expr, "expr_type", None)
     if expr_type != ExpressionType.BINARY_OP:
         return expr
@@ -354,8 +360,8 @@ def _apply_solver_proven_candidate_rewrites(expr: Expression) -> Expression:
     if len(operands) != 2:
         return expr
 
-    left = _apply_solver_proven_candidate_rewrites(operands[0])
-    right = _apply_solver_proven_candidate_rewrites(operands[1])
+    left = _apply_solver_proven_candidate_rewrites(operands[0], order)
+    right = _apply_solver_proven_candidate_rewrites(operands[1], order)
     operator = getattr(expr, "operator", None)
 
     rewritten = _maybe_rewrite_modulo_expansion(expr, operator, left, right)
@@ -371,7 +377,7 @@ def _apply_solver_proven_candidate_rewrites(expr: Expression) -> Expression:
         "INT_EQUAL",
         "INT_NOTEQUAL",
     }:
-        ordered = sorted([left, right], key=_exact_expr_key)
+        ordered = order.commutative_operands(left, right)
         if ordered[0] is not left or ordered[1] is not right:
             return Expression(
                 ExpressionType.BINARY_OP,
@@ -462,11 +468,15 @@ def _same_operand(left: Expression, right: Expression) -> bool:
 
 
 def _exact_expr_key(expr: Expression) -> str:
-    """描画した文字列（**並べる順と、書き換えが描画を変えたかの検出だけ**。一致の判定・identity に使わない）。
+    """描画した文字列（**公開済みの式の、書き換えが描画を変えたかの検出だけ**。一致の判定・identity に使わない）。
 
-    並べた結果は書き換えの候補で、`_prove_rewrite` が元の式との等しさを solver で証明する。描画を
-    変えない書き換えは元の式のまま使う。operand の一致は `_exprs_match`（値の identity）が決める
-    （#218 PR-D。名前は broad except の baseline の key なので変えない）。
+    書き換えが描画を変えたら `_prove_rewrite` が元の式との等しさを solver で証明し、変えていなければ元の式を
+    使う（どちらに外れても、証明の無い書き換えは使わない）。operand の一致は `_exprs_match`（値の identity）が
+    決める（#218 PR-D。名前は broad except の baseline の key なので変えない）。
+
+    入力は公開済みの候補と元の式（とその部分式）だけで、solver へ渡す描画（`to_smt`）とその出力予算の契約を
+    そのまま使う: 予算を超えれば限界として台帳に残る（その候補は solver へも渡せない）。組み立て途中の
+    未公開の node を並べる鍵は `_ConstructionOrder`（Issue #281）。
     """
 
     try:
@@ -476,6 +486,103 @@ def _exact_expr_key(expr: Expression) -> str:
         if callable(structural_key):
             return repr(structural_key(budget=256))
         return repr(expr)
+
+
+#: 描画を鍵にする部分木の大きさの上限（木の節点数）。これより大きい部分木は子の鍵から合成した digest を鍵にする
+_RENDERED_ORDER_KEY_MAX_NODES = 64
+
+
+class _ConstructionOrder:
+    """候補を組み立てている途中で、可換演算の 2 項を並べる順（Issue #281）。1 回の組み立てごとに作る。
+
+    並べる対象は `_apply_solver_proven_candidate_rewrites` が作り直した **未公開** の node を含むので、
+    公開を要求する `to_smt` は使えない（未公開の入力として内部バグになる。V281 で観測）。
+
+    鍵（全順序・process をまたいで決定的。等しい値の部分木は両側で同じ鍵になる）:
+
+    * 木の節点数が `_RENDERED_ORDER_KEY_MAX_NODES` 以下の部分木: `(0, 証拠用の描画)`。公開済みの入力では
+      `to_smt` と同じ文字列なので、典型的な大きさの式の並べる順は solver の描画の順のまま。
+    * それより大きい部分木: `(1, digest)`。digest は node の種類・演算子・名前・幅・opcode と子の鍵から
+      合成する（子の鍵は memo するので、各 node の鍵は 1 回だけ作る）。
+
+    描画の鍵だけにすると、各可換 node が部分木を描画し直すので、組み立ての費用は部分木の大きさの和
+    （深い鎖で節点数の 2 乗）になる（PR #283 の計測: 葉 200 の木で 1.2 秒、費用の 85% が鍵）。上の鍵は、
+    描画する部分木の大きさが上限で抑えられるので、費用は節点数 × 上限で抑えられる。
+
+    出力予算（`render_bytes`）はここへ当てない: 予算の owner は solver へ渡す描画だけで、それ以外へ渡すことは
+    禁じている（`test_architecture_boundaries` の 2 つの契約）。描画するのは上限以下の部分木だけ。予算は、
+    並べた候補を solver の描画へ通すところで掛かる（変化の検出の `_exact_expr_key` と `_prove_rewrite`）。
+
+    並べる順は候補の形だけを決め、正しさは決めない: 書き換えが描画を変えた候補は `_prove_rewrite` が
+    元の式との等しさを solver で証明する。
+    """
+
+    def __init__(self) -> None:
+        # memo は node を値に持ち、組み立ての間 node を生かしておく（解放された node の id を別の node が
+        # 再利用すると、古い鍵を引いてしまう）
+        self._sizes: Dict[int, Tuple[Expression, int]] = {}
+        self._keys: Dict[int, Tuple[Expression, Tuple[int, str]]] = {}
+
+    def commutative_operands(self, left: Expression, right: Expression) -> list:
+        """可換演算の 2 項を鍵の順に並べる（`sorted` と同じ安定な順: 等しければ元の順）。"""
+
+        return [right, left] if self.key(right) < self.key(left) else [left, right]
+
+    def key(self, expr: Expression) -> Tuple[int, str]:
+        cached = self._keys.get(id(expr))
+        if cached is not None:
+            return cached[1]
+        if self._tree_size(expr) <= _RENDERED_ORDER_KEY_MAX_NODES:
+            result = (0, render_expression_smt_evidence(expr, float_mode="fp"))
+        else:
+            result = (1, self._digest(expr))
+        self._keys[id(expr)] = (expr, result)
+        return result
+
+    def _children(self, expr: Expression) -> list:
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            children = []
+            for cond, value in expr.value:
+                if cond is not None:
+                    children.append(cond.expression)
+                children.append(value)
+            return children
+        return list(getattr(expr, "operands", None) or ())
+
+    def _tree_size(self, expr: Expression) -> int:
+        """木の節点数（上限 + 1 で打ち切る。共有された部分木は出現ごとに数える）。"""
+
+        cached = self._sizes.get(id(expr))
+        if cached is not None:
+            return cached[1]
+        total = 1
+        for child in self._children(expr):
+            total += self._tree_size(child)
+            if total > _RENDERED_ORDER_KEY_MAX_NODES:
+                total = _RENDERED_ORDER_KEY_MAX_NODES + 1
+                break
+        self._sizes[id(expr)] = (expr, total)
+        return total
+
+    def _digest(self, expr: Expression) -> str:
+        digest = hashlib.sha256()
+        negations = []
+        if expr.expr_type == ExpressionType.PHI and expr.value:
+            negations = [None if cond is None else bool(cond.negated) for cond, _value in expr.value]
+        head = (
+            expr.expr_type.name,
+            getattr(expr, "operator", None),
+            getattr(expr, "name", None),
+            getattr(expr, "size", None),
+            getattr(expr, "opcode", None),
+            negations,
+        )
+        digest.update(repr(head).encode("utf-8"))
+        for child in self._children(expr):
+            kind, text = self.key(child)
+            digest.update(b"\x00%d\x00" % kind)
+            digest.update(text.encode("utf-8"))
+        return digest.hexdigest()
 
 
 def _prove_rewrite(

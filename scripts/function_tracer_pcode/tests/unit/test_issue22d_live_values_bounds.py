@@ -270,17 +270,72 @@ def test_an_unverifiable_type_is_never_left_trusted():
     assert live_values.package_type(kind) is False  # 2 回目も（cache に信頼が残らない）
 
 
-def test_class_chains_are_checked_once_per_class():
-    """class の body は class ごとに 1 度だけ確かめる: 継承の鎖でも MRO × namespace を毎回辿らない。"""
+def _chain(length: int, members: int) -> list:
+    """`object` から始まる継承の鎖（class ごとに別の名前の属性を `members` 個）。"""
 
     kinds = [object]
-    for index in range(100):
-        body = {f"attr{member}": member for member in range(1_000)}
+    for index in range(length):
+        body = {f"c{index}_attr{member}": member for member in range(members)}
         kinds.append(type(f"Chain{index}", (kinds[-1],), body))
-    started = time.perf_counter()
-    for kind in kinds[1:]:
+    return kinds[1:]
+
+
+def _count_body_checks(monkeypatch) -> tuple:
+    """class の body を確かめた回数（`_trusted_class_body_uncached`）と、body の値を確かめた回数を class ごとに数える。"""
+
+    bodies: dict = {}
+    values: dict = {}
+    check_body = live_values._trusted_class_body_uncached
+    check_value = live_values._trusted_namespace_value
+
+    def counted_body(klass):
+        bodies[klass] = bodies.get(klass, 0) + 1
+        return check_body(klass)
+
+    def counted_value(name, value, **kwargs):
+        values[name] = values.get(name, 0) + 1
+        return check_value(name, value, **kwargs)
+
+    monkeypatch.setattr(live_values, "_trusted_class_body_uncached", counted_body)
+    monkeypatch.setattr(live_values, "_trusted_namespace_value", counted_value)
+    return bodies, values
+
+
+def test_class_chains_are_checked_once_per_class(monkeypatch):
+    """class の body は class ごとに 1 度だけ確かめる: 継承の鎖でも MRO × namespace を毎回辿らない。
+
+    回数で確かめる（Issue #288: 以前は 5 秒の wall-clock の上限で、hosted runner の速さで落ちた）。鎖の各 class を
+    順に判定すると、MRO の祖先の body も辿るが、どの class の body も 1 度だけ・body の各値も 1 度だけ確かめる。
+    """
+
+    kinds = _chain(100, 50)
+    bodies, values = _count_body_checks(monkeypatch)
+    for kind in kinds:
         live_values.package_type(kind)
-    assert time.perf_counter() - started < 5.0
+    assert {kind: bodies.get(kind, 0) for kind in kinds} == {kind: 1 for kind in kinds}
+    attribute_checks = {name: count for name, count in values.items() if "_attr" in name}
+    assert len(attribute_checks) == 100 * 50
+    assert set(attribute_checks.values()) == {1}
+
+
+def test_the_class_chain_count_fails_when_the_body_cache_is_bypassed(monkeypatch):
+    """逆条件: class の body の cache を引かない（毎回 MRO × namespace を辿る）と、上の数え方で回数が増える。"""
+
+    kinds = _chain(20, 5)
+    bodies, _values = _count_body_checks(monkeypatch)
+
+
+    class _NoCache:
+        def get(self, key, default=None):
+            return default
+
+        def record(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(live_values, "_TRUSTED_BODIES", _NoCache())
+    for kind in kinds:
+        live_values.package_type(kind)
+    assert max(bodies.get(kind, 0) for kind in kinds) > 1
 
 
 def test_non_str_namespaces_are_bounded_across_the_whole_mro():

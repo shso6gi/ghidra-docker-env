@@ -350,13 +350,27 @@ def test_bounded_call_refiner_rejects_incomplete_summary_completion_proof():
     ]
 
 
-def test_bounded_call_refiner_does_not_rebind_fully_specialized_callee_analysis():
-    caller_a = Expression.parameter("caller_a", index=1, data_type="int", size=4)
+def test_bounded_call_refiner_replaces_every_parameter_of_a_callee_bound_to_constants():
+    """Issue #281 review 5: callee の解析に束縛されるのは定数だけ（`is_context_free_value`）。束縛済みの callee も
+    境界で全 parameter を引数へ置き換える（束縛済みの parameter には同じ定数が入る）。
+
+    以前は caller の parameter をそのまま callee の解析へ束縛し、その解析を「特殊化済み」として置き換えを
+    飛ばしていた。置き換えると、callee の解析の中の caller の parameter（番号 1）が callee の parameter `y`
+    （番号 1）の置き換えに当たってしまうため。
+    """
+
     caller_b = Expression.parameter("caller_b", index=2, data_type="int", size=4)
+    target_ref = CallTargetRef.from_name("callee")
     deferred = DeferredCallInfo(
         placeholder_name="call_out_of_scope:callee#0",
-        target_ref=CallTargetRef.from_name("callee"),
-        arguments=[caller_a, caller_b],
+        target_ref=target_ref,
+        arguments=[_const(3), caller_b],
+        deferred_call_ref=DeferredCallRef(
+            caller_entry_offset=0x401000,
+            pcode_op_ref=PcodeOpRef(seq_order=4, mnemonic="CALL"),
+            target_ref=target_ref,
+            sequence=0,
+        ),
         sequence=0,
     )
     caller = create_mock_analysis(
@@ -378,7 +392,8 @@ def test_bounded_call_refiner_does_not_rebind_fully_specialized_callee_analysis(
         returns=[
             ReturnInfo(
                 address="0x2000",
-                value=Expression.binary_op("INT_XOR", caller_a, caller_b),
+                # x は定数 3 に束縛済み（解析の中で 3 になっている）。y は束縛されていない
+                value=Expression.binary_op("INT_XOR", _const(3), Expression.parameter("y", index=1, size=4)),
                 conditions=[],
             )
         ],
@@ -386,14 +401,12 @@ def test_bounded_call_refiner_does_not_rebind_fully_specialized_callee_analysis(
     callee.analysis_scope_key = (
         "analysis_scope",
         ("function", "callee"),
-        ((0, ("bound", "caller_a")), (1, ("bound", "caller_b"))),
+        ((0, ("bound", 3)),),
         (),
     )
 
     refiner = BoundedCallRefiner(
-        lambda target_ref, args=None: callee
-        if target_ref == CallTargetRef.from_name("callee") and list(args or []) == deferred.arguments
-        else None,
+        lambda target_ref, args=None: callee if target_ref == CallTargetRef.from_name("callee") else None,
         max_unroll=1,
         max_cases=8,
         debug=False,
@@ -402,7 +415,7 @@ def test_bounded_call_refiner_does_not_rebind_fully_specialized_callee_analysis(
     assert refiner.refine_analysis(caller) is True
     value = caller.returns[0].value
     assert value.operator == "INT_XOR"
-    assert value.operands[0].name == "caller_a"
+    assert value.operands[0].value == 3
     assert value.operands[1].name == "caller_b"
 
 
@@ -1534,7 +1547,17 @@ def test_bounded_call_refiner_lowers_substituted_symbolic_post_state_reads():
 
     changed = refiner.refine_analysis(caller)
 
-    assert changed is True
+    # Issue #281: callee の戻り値は callee の effect（順序 1, 2）の **後の** 状態の読み出し。caller の時間軸では
+    # 「呼び出しの位置の memory に callee の書き込みを適用した値」で、callee の effect を持ち込まないと caller の
+    # 言葉で表せない（`call_boundary`）。以前は置き換えた callee の effect を caller の parameter で読んで
+    # lowering していたが、callee の location（trace 基準）と caller の parameter を混ぜていた。境界で拒否し、
+    # 呼び出しの展開をまるごとやめる。callee の時間軸・location は caller の解析へ漏れない
+    assert changed is False
+    # 展開しない deferred call（UNKNOWN）のまま
+    assert all(ret.value.expr_type is ExpressionType.UNKNOWN for ret in caller.returns)
+    assert "bounded_call_refinement_operand_derivation_refused:callee_post_write_state_read:PostStateReadRef" in (
+        caller.analysis_notes
+    )
     assert all(
         not expression_contains_post_state_reads(ret.value)
         for ret in caller.returns

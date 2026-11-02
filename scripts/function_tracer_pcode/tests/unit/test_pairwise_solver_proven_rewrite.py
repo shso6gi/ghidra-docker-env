@@ -534,6 +534,120 @@ def test_build_rewrite_candidate_canonicalizes_commuted_add_for_solver():
     assert published(rewritten_canonical).to_smt() == published(rewritten_commuted).to_smt()
 
 
+def test_build_rewrite_candidate_reorders_nested_commuted_operands_without_internal_bug():
+    """Issue #281: 作り直した子（公開点の前）を鍵にしても内部バグを記録しない。
+
+    `_apply_solver_proven_candidate_rewrites` は可換な子を並べ替えて作り直し、親の並べ替えで
+    その子の鍵を取る。鍵を `to_smt`（公開済みの入力だけを受ける）で取ると、未公開の
+    BINARY_OP として内部バグが台帳に残り、broad except が例外を握り潰しても pair が ERROR になる。
+    """
+
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope, pending_pair_failure
+
+    param1 = _param("param_1")
+    param2 = _param("param_2")
+    seven = _const(7)
+    nested_commuted = Expression.binary_op(
+        "INT_ADD", Expression.binary_op("INT_ADD", param2, param1), seven
+    )
+    nested_canonical = Expression.binary_op(
+        "INT_ADD", seven, Expression.binary_op("INT_ADD", param1, param2)
+    )
+
+    with pair_failure_scope("issue-281-nested", "session"):
+        rewritten_commuted = _build_rewrite_candidate(nested_commuted, NormalizationSettings.safe())
+        rewritten_canonical = _build_rewrite_candidate(nested_canonical, NormalizationSettings.safe())
+        assert pending_pair_failure() is None
+
+    assert rewritten_commuted.is_published
+    assert rewritten_commuted.to_smt() == rewritten_canonical.to_smt()
+
+
+def _wide_sum(count: int) -> Expression:
+    expr = _param("param_1")
+    for index in range(count):
+        expr = Expression.binary_op("INT_ADD", expr, _const(index + 3))
+    return expr
+
+
+def test_construction_order_key_matches_the_solver_rendering_for_published_input():
+    """Issue #281: 典型的な大きさの部分木の鍵は、公開済みの入力では `to_smt` と同じ文字列（並べる順は従来どおり）。"""
+
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_solver_proven_rewrite import _ConstructionOrder
+
+    expr = published(Expression.binary_op("INT_ADD", _param("param_2"), _const(7)))
+    assert _ConstructionOrder().key(expr) == (0, expr.to_smt(float_mode="fp"))
+
+
+def test_construction_order_key_of_a_large_subtree_is_a_deterministic_digest_of_its_children():
+    """上限を超える部分木の鍵は子の鍵から合成した digest: 組み立てごとに同じ、等しい部分木は同じ鍵、違えば違う鍵。"""
+
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_solver_proven_rewrite import (
+        _RENDERED_ORDER_KEY_MAX_NODES,
+        _ConstructionOrder,
+    )
+
+    large = _wide_sum(_RENDERED_ORDER_KEY_MAX_NODES)
+    same = _wide_sum(_RENDERED_ORDER_KEY_MAX_NODES)
+    other = Expression.binary_op("INT_ADD", _wide_sum(_RENDERED_ORDER_KEY_MAX_NODES - 1), _const(999))
+
+    first, second = _ConstructionOrder(), _ConstructionOrder()
+    kind, digest = first.key(large)
+    assert kind == 1
+    assert second.key(large) == (kind, digest)
+    assert first.key(same) == (kind, digest)
+    assert first.key(other) != (kind, digest)
+    # 小さい部分木（描画の鍵）と大きい部分木（digest）の比べ方も全順序
+    assert first.key(_param("param_1")) < first.key(large)
+
+
+def test_construction_order_renders_each_subtree_at_most_once_and_only_up_to_the_limit(monkeypatch):
+    """深い鎖でも、描画するのは上限以下の部分木だけで、各部分木は 1 回だけ（組み立ての費用は節点数 × 上限）。"""
+
+    from scripts.function_tracer_pcode.proof.strategies import pairwise_solver_proven_rewrite as rewrite
+
+    rendered = []
+    original_render = rewrite.render_expression_smt_evidence
+
+    def counting_render(expr, **kwargs):
+        rendered.append(expr)
+        return original_render(expr, **kwargs)
+
+    monkeypatch.setattr(rewrite, "render_expression_smt_evidence", counting_render)
+    order = rewrite._ConstructionOrder()
+    chain = _wide_sum(300)
+    rewrite._apply_solver_proven_candidate_rewrites(chain, order)
+
+    assert len({id(expr) for expr in rendered}) == len(rendered)
+    assert all(order._tree_size(expr) <= rewrite._RENDERED_ORDER_KEY_MAX_NODES for expr in rendered)
+
+
+def test_change_detection_keeps_the_solver_render_budget_contract():
+    """公開済みの式の変化の検出は `to_smt`（予算を超えれば限界として台帳に残る。修正前と同じ契約）。"""
+
+    from scripts.function_tracer_pcode.core.budget_policy import BudgetPolicy, budget_policy_scope
+    from scripts.function_tracer_pcode.core.errors import pair_failure_scope, pending_pair_failure
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_solver_proven_rewrite import _exact_expr_key
+
+    wide = published(_wide_sum(64))
+    limit = len(wide.to_smt(float_mode="fp")) // 2
+    with pair_failure_scope("issue-281-change-budget", "session"), budget_policy_scope(BudgetPolicy(render_bytes=limit)):
+        _exact_expr_key(wide)
+        pending = pending_pair_failure()
+    assert pending is not None
+    assert "render_bytes" in repr(pending)
+
+
+def test_a_reorder_only_rewrite_is_detected_as_a_change_and_goes_to_the_proof():
+    """並べ替えだけの書き換えも描画が変わる（`changed`）ので `_prove_rewrite` の証明（receipt）を通る。"""
+
+    from scripts.function_tracer_pcode.proof.strategies import pairwise_solver_proven_rewrite as rewrite
+
+    original = published(Expression.binary_op("INT_ADD", _param("param_2"), _param("param_1")))
+    candidate = _build_rewrite_candidate(original, NormalizationSettings.safe())
+    assert rewrite._exact_expr_key(candidate) != rewrite._exact_expr_key(original)
+
+
 def test_build_rewrite_candidate_collapses_division_remainder_expansion():
     a = _param("param_1")
     b = _param("param_2")

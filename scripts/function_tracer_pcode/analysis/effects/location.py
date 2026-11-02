@@ -28,7 +28,6 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _callee_location_base_matches_ref,
     _canonicalize_address_expression,
     _canonicalize_expression_for_effect_value_identity,
-    _clone_expression_with_operands,
     _coerce_callee_parameter_refs,
     _coerce_storage_info,
     _collect_definite_active_effects,
@@ -596,7 +595,10 @@ def _impl_substitute_expression(
         new_operands = [substitute_expression(op, replacements, parameters) for op in expr.operands]
         if all(new is old for new, old in zip(new_operands, expr.operands)):
             return _simplify_substituted_expression(expr, parameters)
-        rebuilt = _clone_expression_with_operands(expr, new_operands)
+        # Issue #281: field と runtime ref の扱いは `derive_with_operands` が決める。ref を保てなければ
+        # `OperandDerivationRefused` が上がる。callee の元の node は caller の文脈では別の値なので、ここで
+        # 元の node に戻してはいけない: 境界（呼び出しの展開・effect の置き換え）が展開をまるごとやめる
+        rebuilt = expr.derive_with_operands(new_operands)
         return _simplify_substituted_expression(rebuilt, parameters)
 
     if expr.expr_type == ExpressionType.PHI and expr.value:
@@ -819,10 +821,8 @@ def _impl__address_root_is_stack_frame(expr: Optional[Expression]) -> bool:
     current = expr
     while current is not None and seen < 64:
         seen += 1
-        if _is_stack_frame_base_expression(current):
-            return True
         storage = _coerce_storage_info(getattr(current, "storage_info", None))
-        if storage is not None and not storage.is_register and storage.space_name == "stack":
+        if storage is not None and storage.claims_frame():
             return True
         expr_type = current.expr_type
         operands = list(getattr(current, "operands", None) or [])
@@ -1088,7 +1088,12 @@ def _impl__resolve_location_base_with_offset(
     expr: Expression,
     parameters: Sequence[Dict],
 ) -> Optional[Tuple[LocationBaseRef, int]]:
-    param = _resolve_parameter_descriptor(expr, parameters)
+    # 位置の基底になる parameter は、parameter の入口の値の全体を表す node だけ（`parameter_entry`。review 8）。
+    # 以前は descriptor が引ければ基底にしていた: ref で後の時点・別の場所を主張する VARIABLE や、parameter の
+    # 一部の bit（記憶域が parameter に含まれるだけの node）も parameter の番地と読まれ得た
+    from scripts.function_tracer_pcode.analysis.effects.parameter_entry import whole_parameter_descriptor
+
+    param = whole_parameter_descriptor(expr, parameters)
     if param is not None:
         return _parameter_base_ref(
             name=param.get("name"),

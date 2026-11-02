@@ -1,6 +1,6 @@
 {
  "header": {
-  "analysis_source_digest": "5f702f454556fdb844b238511ee4f65d4c5feb8cd1580f2c60a96a702f0d4a6e",
+  "analysis_source_digest": "fefeb18ed2e245e13f4c961da639b05f035a72b5370c506728f7d94a0141da46",
   "binary": {
    "binary_id": "B2",
    "eqbench_relative_path": "bess/SIGN/Neq/source/newV-arm64-clang-O1",
@@ -15,9 +15,9 @@
   "fixture_id": "sign_snippet_N_B2_O_B4",
   "ghidra_version": "12.0.1",
   "pyghidra_version": "3.0.2",
-  "recorded_at_utc": "2026-10-17T10:07:20+00:00",
+  "recorded_at_utc": "2026-10-31T23:44:33+00:00",
   "recorder_version": "2",
-  "recording_commit": "de2bd2b6a3fac944d3227f03ad0aa795e894d6f8",
+  "recording_commit": "7fc64edee3afeb275836bd217d3e574adff01b8d",
   "recording_dirty": false,
   "recording_mode": {
    "connector": "production",

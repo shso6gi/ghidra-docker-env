@@ -633,6 +633,10 @@ class DeferredCallInfo:
     abi_return_type_policy: Optional[str] = None
     call_site_multiplicity: Optional[int] = None
     call_model_candidate: Optional["CallModelCandidateRef"] = None
+    #: 呼び出しの op の program point の key（記録した関数の `core.program_order`。Issue #281 / #285）。
+    #: callee の読み出しをこの位置へ移す（`analysis.effects.call_boundary.CallSite.for_deferred_call`）。
+    #: 同じ関数の中だけで意味を持つ位置で、比べる面（`identity_key` / `match_evidence`）には入れない
+    call_site_order_key: Optional[int] = None
 
     _VALID_CALL_ARGUMENT_RECOVERY_STATUSES = {
         "complete",
@@ -657,6 +661,7 @@ class DeferredCallInfo:
         abi_return_type_policy: Optional[str] = None,
         call_site_multiplicity: Optional[int] = None,
         call_model_candidate: Optional["CallModelCandidateRef"] = None,
+        call_site_order_key: Optional[int] = None,
     ) -> None:
         if call_argument_recovery_status is None:
             call_argument_recovery_status = "inconclusive"
@@ -690,6 +695,7 @@ class DeferredCallInfo:
             call_model_candidate
         )
         self.match_evidence = self._build_match_evidence(match_evidence)
+        self.call_site_order_key = None if call_site_order_key is None else int(call_site_order_key)
 
     def clone(self) -> "DeferredCallInfo":
         """Return an independent semantic copy of this deferred call.
@@ -718,6 +724,7 @@ class DeferredCallInfo:
             abi_return_type_policy=self.abi_return_type_policy,
             call_site_multiplicity=self.call_site_multiplicity,
             call_model_candidate=self.call_model_candidate,
+            call_site_order_key=self.call_site_order_key,
         )
 
     @property

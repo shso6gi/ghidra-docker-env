@@ -189,7 +189,9 @@ def _impl_analyze_function(
         bound_parameter_values=normalized_bound_parameter_values,
         bound_parameter_storage_values=normalized_bound_parameter_storage_values,
     )
-    tracer.record_deferred_call = self._make_deferred_call_recorder(function)
+    tracer.record_deferred_call = self._make_deferred_call_recorder(
+        function, program_order=getattr(tracer, "program_order", None)
+    )
     condition_tracker = ConditionTracker(tracer)
     tracer.condition_tracker = condition_tracker
     from scripts.function_tracer_pcode.analysis.phi_resolver import PhiHandler
@@ -633,23 +635,6 @@ def _impl__analysis_needs_wrapper_recovery(
     if analysis is None or not analysis.returns:
         return False
     return analysis.has_unknown_return() or analysis.has_unresolved_return_value()
-
-
-def _impl__analysis_is_fully_argument_specialized(
-    self,
-    analysis: Optional[FunctionReturnAnalysis],
-) -> bool:
-    if analysis is None:
-        return False
-    parameter_count = len(getattr(analysis, "parameters", ()) or ())
-    if parameter_count <= 0:
-        return False
-    scope_key = getattr(analysis, "analysis_scope_key", None)
-    if not isinstance(scope_key, tuple) or len(scope_key) < 4:
-        return False
-    bound_by_index = scope_key[2] if isinstance(scope_key[2], tuple) else ()
-    bound_by_storage = scope_key[3] if isinstance(scope_key[3], tuple) else ()
-    return bool(bound_by_index or bound_by_storage)
 
 
 def _impl_refresh_structural_recurrence_summary(

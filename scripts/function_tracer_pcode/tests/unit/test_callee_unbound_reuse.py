@@ -389,8 +389,6 @@ def test_an_eligible_external_is_analyzed_once_for_different_bound_arguments():
         function, second_values, second_storage
     )
     assert first.analysis_scope_key != second.analysis_scope_key
-    assert analyzer._analysis_is_fully_argument_specialized(first) is True
-    assert analyzer._analysis_is_fully_argument_specialized(second) is True
 
 
 def test_the_reused_view_shares_no_mutable_state_with_the_unbound_entry():
