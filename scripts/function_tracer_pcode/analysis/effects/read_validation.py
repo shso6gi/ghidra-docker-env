@@ -78,9 +78,10 @@ def _read_order(node: Expression) -> Optional[int]:
 
 
 class _Checker:
-    def __init__(self, effects, parameters) -> None:
+    def __init__(self, effects, parameters, frame_locality=None) -> None:
         self.effects = list(effects)
         self.parameters = list(parameters or ())
+        self.frame_locality = frame_locality
         self.findings: List[Tuple[str, ...]] = []
         self.checked = 0
 
@@ -105,7 +106,9 @@ class _Checker:
             if _effect_is_contradicted(path_conditions, effect):
                 continue
             conditions = list(path_conditions) + list(getattr(effect, "conditions", None) or ())
-            relation = location_relation(location, getattr(effect, "location", None), conditions)
+            relation = location_relation(
+                location, getattr(effect, "location", None), conditions, frame_locality=self.frame_locality
+            )
             if relation is not MemoryRelation.DISJOINT:
                 self.findings.append(
                     (
@@ -166,6 +169,7 @@ def _memo_inputs(analysis) -> Tuple[object, ...]:
         effect_summary,
         getattr(effect_summary, "effects", None),
         getattr(effect_summary, "frame_local_effects", None),
+        getattr(effect_summary, "frame_locality", None),
         getattr(analysis, "parameters", None),
         *_sequence(getattr(effect_summary, "effects", None)),
         *_sequence(getattr(effect_summary, "frame_local_effects", None)),
@@ -205,14 +209,15 @@ def _unresolved_memory_read_aliases(analysis) -> List[Tuple[str, ...]]:
     if not effects:
         return []
     parameters = _sequence(getattr(analysis, "parameters", None))
-    checker = _Checker(effects, parameters)
+    checker = _Checker(effects, parameters, getattr(effect_summary, "frame_locality", None))
     try:
+        # lowering は本番と同じ形（観測する store だけ: `effect_integration`）。frame の store との関係は検査が見る
         for ret in _sequence(getattr(analysis, "returns", None)):
             conditions = list(getattr(ret, "conditions", None) or ())
-            checker.walk(_lowered(ret.value, conditions, effects, parameters), conditions, None)
+            checker.walk(_lowered(ret.value, conditions, observed_effects, parameters), conditions, None)
             for cond in conditions:
                 checker.walk(
-                    _lowered(getattr(cond, "expression", None), conditions, effects, parameters),
+                    _lowered(getattr(cond, "expression", None), conditions, observed_effects, parameters),
                     conditions,
                     None,
                 )

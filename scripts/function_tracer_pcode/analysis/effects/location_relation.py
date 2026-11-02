@@ -8,8 +8,10 @@
   `DISJOINT` 以外を「読み出しの値が store に依存し得る」と読む。以前は `locations_match`（must-alias だけ）が
   False を返した組（別の parameter、重なる別の offset、幅の違う store）を「別の場所」と読み、may-alias の
   store を無視して入口の memory を読んでいた（偽 EQ の形）。
-* `frame_local_range(location)`: store を観測から外してよい（関数の frame の中で、呼び出しの後に死ぬ）範囲。
-  entry SP を起点とする定数 offset で、範囲が entry SP より下（`hi <= 0`）のときだけ。
+* `frame_local_range(location)`: store を観測から外す**候補**の範囲（entry SP を起点とする定数 offset で、範囲が
+  entry SP より下 `hi <= 0`）。entry SP より下というだけでは局所にしない（AC 9）: 局所と認めるのは関数ごとの証拠
+  `frame_locality.FrameLocality`（frame の番地が外へ出ない・呼び出しが frame を読まない）がそろったときだけで、
+  その判定は `store_effect` が持つ。
 
 parameter の判定（位置の基底が parameter か、2 つの parameter が条件の下で等しいか）は自分で決めない:
 前者は `_resolve_location_base_with_offset`（= `parameter_entry.whole_parameter_descriptor`）が作った基底を
@@ -19,8 +21,11 @@ parameter の判定（位置の基底が parameter か、2 つの parameter が�
 
 * D-S: caller の生きた object は entry SP より下に無い。parameter の pointer と、入口で caller から届く値
   （global の番地）は、この関数の frame（entry SP より下）を指さない。
-* frame の番地を関数が外へ出した後の alias は、memory から読んだ pointer を基底に持つ位置（deref の step）
-  との関係を `UNKNOWN` にすることで扱う。
+* D-S だけでは frame と parameter・global を DISJOINT にしない（AC 9）。frame の番地が外へ出ない証拠
+  （`FrameLocality.proven`）が渡され、経路の条件に frame の番地が値として現れない（`p == sp - 16` の下では
+  入口の pointer が frame の slot と同じ番地になる経路がある）ときだけ。それ以外は `UNKNOWN`。
+* memory から読んだ pointer を基底に持つ位置（deref の step）は、frame の番地が外へ出た後の値かもしれないので
+  `UNKNOWN`。
 """
 
 from __future__ import annotations
@@ -106,12 +111,24 @@ def _same_base(left: CanonicalLocation, right: CanonicalLocation, conditions: Se
     return frozenset((left_key, right_key)) in _collect_param_equalities(list(conditions or ()))
 
 
+def _frame_is_proven_local(frame_locality, conditions: Sequence[Condition]) -> bool:
+    from scripts.function_tracer_pcode.analysis.effects.frame_locality import conditions_mention_frame_address
+
+    if frame_locality is None or not bool(getattr(frame_locality, "proven", False)):
+        return False
+    return not conditions_mention_frame_address(conditions)
+
+
 def location_relation(
     left: Optional[CanonicalLocation],
     right: Optional[CanonicalLocation],
     conditions: Sequence[Condition] = (),
+    *,
+    frame_locality=None,
 ) -> MemoryRelation:
-    """2 つの位置の関係。`conditions` は両方のアクセスが起きる経路の条件（parameter の等しさだけを読む）。"""
+    """2 つの位置の関係。`conditions` は両方のアクセスが起きる経路の条件（parameter の等しさと、frame の番地が
+    値として現れるかを読む）。`frame_locality` はその関数の `FrameLocality`（無ければ frame と parameter・global
+    の関係を決めない）。"""
 
     if left is None or right is None:
         return MemoryRelation.UNKNOWN
@@ -124,7 +141,11 @@ def location_relation(
         # D-S: 入口の値（parameter・global の番地）を起点とする位置は、この関数の frame を指さない。
         # memory から読んだ pointer（deref の step）は frame の番地が外へ出た後の値かもしれない
         other = right if left_frame is not None else left
-        if not _has_deref(other) and (other.base_ref.is_parameter() or other.base_ref.is_global()):
+        if (
+            _frame_is_proven_local(frame_locality, conditions)
+            and not _has_deref(other)
+            and (other.base_ref.is_parameter() or other.base_ref.is_global())
+        ):
             return MemoryRelation.DISJOINT
         return MemoryRelation.UNKNOWN
 
