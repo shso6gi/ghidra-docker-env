@@ -433,6 +433,7 @@ def _impl_rewrite_loads_from_effects(
             read_order_key=expr.read_order_key,
             runtime_location=synthetic_location,
             runtime_ref=getattr(expr, "runtime_ref", None),
+            parameters=parameters,
         )
         if location is None:
             return candidate
@@ -781,6 +782,7 @@ def _impl_rewrite_observed_loads_from_effects(
                 read_order_key=expr.read_order_key,
                 runtime_location=_expression_location_ref(expr),
                 runtime_ref=getattr(expr, "runtime_ref", None),
+                parameters=parameters,
             )
 
         max_order_key = _expression_observed_order_key(current)
@@ -882,6 +884,7 @@ def _impl_promote_observed_loads_to_post_state_reads(
                 runtime_location=_expression_location_ref(expr),
                 runtime_snapshot=_expression_post_state_snapshot_ref(expr) or shared_snapshot,
                 runtime_ref=getattr(expr, "runtime_ref", None),
+                parameters=parameters,
             )
         if _address_context:
             return current
@@ -1448,6 +1451,7 @@ def _impl_promote_effect_subexpressions_to_post_state_reads(
                 read_order_key=expr.read_order_key,
                 runtime_location=_expression_location_ref(expr),
                 runtime_ref=getattr(expr, "runtime_ref", None),
+                parameters=parameters,
             )
         if _address_context:
             return rebuilt_memory
@@ -1556,6 +1560,7 @@ def _impl_collapse_equivalent_post_state_subexpressions(
                 read_order_key=expr.read_order_key,
                 runtime_location=_expression_location_ref(expr),
                 runtime_ref=getattr(expr, "runtime_ref", None),
+                parameters=parameters,
             )
         if _address_context:
             return rebuilt_memory
@@ -2072,6 +2077,7 @@ def _impl__rewrite_definite_post_state_subexpressions(
                 read_order_key=expr.read_order_key,
                 runtime_location=_expression_location_ref(expr),
                 runtime_ref=getattr(expr, "runtime_ref", None),
+                parameters=parameters,
             )
 
         if not rewrite_memory_leaf:
@@ -2226,6 +2232,7 @@ def _impl__rewrite_expression_with_replayed_state(
             read_order_key=expr.read_order_key,
             runtime_location=synthetic_location,
             runtime_ref=getattr(expr, "runtime_ref", None),
+            parameters=parameters,
         )
         location = canonicalize_location(current.operands[0], parameters, size=expr.size)
         if location is None:
