@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Sequence, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core.json_encoding import as_list, each, inline, materialize, source_converter
 from scripts.function_tracer_pcode.core.live_values import (
@@ -31,9 +31,6 @@ from scripts.function_tracer_pcode.analysis.effects._api import (
     _try_get_order_key,
 )
 from scripts.function_tracer_pcode.core.live_values import package_instance
-
-if TYPE_CHECKING:
-    from scripts.function_tracer_pcode.analysis.effects.frame_locality import FrameLocality
 
 _UNKNOWN_EFFECT_ORDER_KEY = -1
 
@@ -616,12 +613,10 @@ class EffectSummary:
     call_target_resolution_evidence: Tuple[CallTargetResolutionEvidence, ...] = ()
     call_site_effect_summary_evidence: Tuple[CallSiteEffectSummaryEvidence, ...] = ()
     function_control_effect_profile: Optional[FunctionControlEffectProfile] = None
-    # Issue #282 (I3 / I11): 観測から外した frame の中の store（`frame_local_range`）。比べる面には入れないが、
-    # 同じ関数の中の読み出しが先行する store に依存しないことの検査（`read_validation`）は見る。値は持たない
+    # Issue #282 (I3 / I11 / AC 9): entry SP より下の定数の範囲への store（`frame_local_range`）。局所と証明できない
+    # ので、これがあれば `effect_store_location_unmodeled` が EQ と NOT_EQ を止める。比べる面には入れないが、同じ
+    # 関数の中の読み出しが先行する store に依存しないことの検査（`read_validation`）は見る。値は持たない
     frame_local_effects: Tuple[StoreEffect, ...] = ()
-    # Issue #282 AC 9: frame の store を局所と認めた証拠（`frame_locality.collect_frame_locality`）。frame の store が
-    # 無ければ調べないので None。`location_relation` は証拠が無ければ frame と parameter・global を DISJOINT にしない
-    frame_locality: Optional["FrameLocality"] = None
 
     def __post_init__(self) -> None:
         self.incomplete_reasons = tuple(dict.fromkeys(self.incomplete_reasons or ()))

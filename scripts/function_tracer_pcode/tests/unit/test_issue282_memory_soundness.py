@@ -5,8 +5,9 @@
   描かない。読み出しの幅は狭めない。
 * 観測（I9）: store の比較面は番地を量化した 1 byte の観測（書き込みの順・alias・部分重なりを構成から扱う）。
 * 読み出し（I3）: 先行し得る store と重ならないと証明できない入口の memory の読み出しは EQ と NOT_EQ を止める。
-* frame（I11 / AC 9）: 観測から外すのは entry SP より下の定数の範囲で、frame の番地が外へ出ず、呼び出しが frame を
-  読まないと示せたときだけ。frame と parameter・global の DISJOINT も同じ証拠を要る。
+* frame（I11 / AC 9）: entry SP より下の store を局所としない（確保された frame の範囲も、入口の pointer・global の
+  番地との alias も示せない）。そうした store は `effect_store_location_unmodeled` で EQ と NOT_EQ を止め、frame と
+  parameter・global の関係は `UNKNOWN`。frame の位置どうしの関係（定数の範囲）は決める。
 * 具体化（Q1 / I7）: image の値は init・read-only・block の中・再配置の条件を満たすときだけ。
 * 出自（不変条件 3）: image の番地の定数は畳み込まない。
 * SAT（I6）: 側ごとの状態に依存する反例は `memory_state_unrealized`（replay で解除されない）。
@@ -35,7 +36,6 @@ from scripts.function_tracer_pcode.core.runtime_refs import (
 )
 from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.analysis.effects.models import EffectSummary, StoreEffect
-from scripts.function_tracer_pcode.analysis.effects.frame_locality import FrameLocality
 from scripts.function_tracer_pcode.analysis.effects.location_relation import frame_local_range, location_relation
 from scripts.function_tracer_pcode.analysis.effects.summary import build_void_effect_summary_expr
 from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
@@ -44,7 +44,6 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import bui
 P = LocationBaseRef.parameter("p", index=0)
 Q = LocationBaseRef.parameter("q", index=1)
 PARAMS = [_param("p", size=8, index=0), _param("q", size=8, index=1)]
-PROVEN = FrameLocality(proven=True)
 
 
 def _p(name="p", index=0):
@@ -282,11 +281,30 @@ def test_location_relation_proves_only_disjoint_or_same():
     # offset は 64 bit の剰余（`p + 0xffff…fe` は `p - 2`）。符号なしのまま比べると重なりを見落とす
     assert location_relation(loc(P, (1 << 64) - 2, 4), loc(P, 0, 4)) is MemoryRelation.OVERLAP
     assert location_relation(None, loc(Q, 0, 4)) is MemoryRelation.UNKNOWN
+
+
+
+def test_frame_locations_are_related_to_outside_locations_only_as_unknown():
+    """負例: frame の slot と、入口の pointer・global を起点とする位置は、条件に比較が無くても DISJOINT にしない（AC 9）。
+
+    修正前は D-S（と、frame の番地が外へ出ない証拠）だけで DISJOINT にしていた。"""
+
+    loc = lambda base, off, size: CanonicalLocation(base_ref=base, offset=off, size=size)  # noqa: E731
     frame = LocationBaseRef.stack_frame()
-    # frame と parameter は、frame が局所である証拠があるときだけ DISJOINT（AC 9。証拠の無い D-S だけでは決めない）
-    assert location_relation(loc(frame, -16, 8), loc(P, 0, 8)) is MemoryRelation.UNKNOWN
-    assert location_relation(loc(frame, -16, 8), loc(P, 0, 8), frame_locality=PROVEN) is MemoryRelation.DISJOINT
-    assert location_relation(loc(frame, 8, 8), loc(P, 0, 8), frame_locality=PROVEN) is MemoryRelation.UNKNOWN
+    image = LocationBaseRef.global_object("table", 8, space_name="ram")
+    for outside in (loc(P, 0, 8), loc(image, 0, 8)):
+        assert location_relation(loc(frame, -16, 8), outside) is MemoryRelation.UNKNOWN
+        assert location_relation(outside, loc(frame, -0x100000, 8)) is MemoryRelation.UNKNOWN
+    assert location_relation(loc(frame, 8, 8), loc(P, 0, 8)) is MemoryRelation.UNKNOWN
+
+
+def test_frame_locations_are_related_to_each_other_by_their_constant_ranges():
+    """正例: 同じ frame の slot どうしは同じ基底なので、定数の範囲で SAME / DISJOINT / OVERLAP を決める。"""
+
+    loc = lambda off, size: CanonicalLocation(base_ref=LocationBaseRef.stack_frame(), offset=off, size=size)  # noqa: E731
+    assert location_relation(loc(-16, 8), loc(-16, 8)) is MemoryRelation.SAME
+    assert location_relation(loc(-16, 8), loc(-32, 8)) is MemoryRelation.DISJOINT
+    assert location_relation(loc(-16, 8), loc(-12, 4)) is MemoryRelation.OVERLAP
 
 
 def test_n28_read_after_a_may_alias_store_blocks_both_verdicts():
@@ -459,18 +477,22 @@ def _frame_store():
     return _FrameOp("STORE", ["space", "slot", "one"], order=1)
 
 
-def test_frame_store_without_escape_or_call_stays_local():
-    """正例: frame の番地が外へ出ず、呼び出しも無い関数の frame の store は局所（不要な UNKNOWN にしない）。"""
+def _frame_summary_and_reads(ops, values, read):
+    """`ops` の関数の effect 要約（本番の producer）と、関数の出口で `read` を返す解析。"""
 
-    summary = _summarize_frame([_frame_store(), _FrameOp("RETURN", ["ret", "slot_value"], order=2)], _frame_values())
-    assert summary.frame_locality is not None and summary.frame_locality.proven
-    assert len(summary.frame_local_effects) == 1
-    assert "effect_store_location_unmodeled" not in summary.incomplete_reasons
+    summary = _summarize_frame(ops, values)
+    analysis = _analysis("f", read)
+    analysis.effect_summary = summary
+    return summary, analysis
 
 
 @pytest.mark.parametrize(
     "ops",
     [
+        # 呼び出しも frame の番地の流出も無い関数の、entry SP の 16 byte 下への store（`p` との比較も無い）
+        pytest.param([_FrameOp("RETURN", ["ret", "slot_value"], order=2)], id="no_call_no_escape"),
+        # 同じ関数が後で `*p` へ書く（`p == sp - 16` なら frame の store を上書きする・される）
+        pytest.param([_FrameOp("STORE", ["space", "p", "one"], order=2)], id="store_through_p_after"),
         # frame の番地を callee へ渡す
         pytest.param([_FrameOp("CALL", ["target", "slot"], order=2)], id="address_passed_to_callee"),
         # 引数の無い呼び出しも stack で渡す引数の領域を読み得る
@@ -481,60 +503,68 @@ def test_frame_store_without_escape_or_call_stays_local():
         pytest.param([_FrameOp("RETURN", ["ret", "slot"], order=2)], id="address_returned"),
     ],
 )
-def test_frame_store_with_an_observable_frame_is_not_dropped(ops):
-    """負例（b）: entry SP より下の store でも、frame の番地が外へ出るか callee が frame を読み得るなら局所にしない。
+def test_frame_store_is_not_proven_local(ops):
+    """負例（b）: entry SP より下の store は、呼び出しも番地の流出も無くても局所にしない（AC 9）。
 
-    修正前は entry SP より下の定数の範囲というだけで観測から外し、EQ を止めなかった。"""
+    store が確保された frame の中にあることも、入口の pointer・global の番地がその番地と等しくなり得ないことも
+    high P-code からは示せないので、位置を証明できない store として EQ と NOT_EQ を止める。修正前は entry SP より
+    下の定数の範囲で、呼び出しと番地の流出が無ければ観測から外し、EQ を止めなかった。"""
 
     summary = _summarize_frame([_frame_store(), *ops], _frame_values())
-    assert summary.frame_local_effects == ()
     assert "effect_store_location_unmodeled" in summary.incomplete_reasons
-    assert summary.frame_locality is not None and not summary.frame_locality.proven
+    analysis = _analysis("f", Expression.constant(0, 4))
+    analysis.effect_summary = summary
+    assert "effect_store_location_unmodeled" in analysis.get_equivalence_blocking_unsafety_reasons()
+    assert "effect_store_location_unmodeled" in analysis.get_decisive_sat_unsafety_reasons()
 
 
-def test_frame_address_compared_in_a_branch_is_an_escape():
-    sp = _register("sp", sp=True)
-    compare = Expression.binary_op("INT_EQUAL", _p(), _plus(sp, -16))
+def test_frame_store_far_below_entry_sp_is_not_proven_local():
+    """負例: entry SP より大きく下（1 MiB）の store は、確保された frame の外（global の番地にも届き得る）。"""
+
+    far = _plus(_register("sp", sp=True), -0x100000)
     summary = _summarize_frame(
-        [_frame_store(), _FrameOp("CBRANCH", ["dest", "cmp"], order=2)], _frame_values(cmp=compare)
+        [_FrameOp("STORE", ["space", "far", "one"], order=1), _FrameOp("RETURN", ["ret"], order=2)],
+        _frame_values(far=far),
     )
-    assert summary.frame_local_effects == ()
     assert "effect_store_location_unmodeled" in summary.incomplete_reasons
 
 
-def _frame_read_analysis(frame_locality, conditions):
-    frame = LocationBaseRef.stack_frame()
+def test_read_through_parameter_after_a_frame_store_is_not_disjoint():
+    """負例（a）: 呼び出しも番地の流出も無い関数で、frame の slot へ書いた後に `*p` を読む（`p` と frame の番地を比べる
+    条件は無い）。`p == sp - 16` の実行では読み出しが store の値を返すので、入口の値で描けない。
+
+    修正前は frame が局所と示せたとして frame と parameter を DISJOINT にし、読み出しを止めなかった。"""
+
     read = _mem(_p(), 8)
-    read.read_order_key = 10
-    analysis = _analysis("f", read, conditions=conditions)
-    analysis.effect_summary = EffectSummary(
-        parameter_names=["p", "q"],
-        effects=[],
-        frame_local_effects=(
-            StoreEffect(location=CanonicalLocation(base_ref=frame, offset=-16, size=8), value=None, conditions=[], order_key=5),
-        ),
-        frame_locality=frame_locality,
+    summary, analysis = _frame_summary_and_reads(
+        [_frame_store(), _FrameOp("RETURN", ["ret", "p_value"], order=2)], _frame_values(p_value=read), read
     )
-    return analysis
+    assert summary.frame_local_effects
+    assert analysis.has_unresolved_memory_read_aliases()
+    assert "memory_read_alias_unresolved" in analysis.get_equivalence_blocking_unsafety_reasons()
+    assert "memory_read_alias_unresolved" in analysis.get_decisive_sat_unsafety_reasons()
 
 
-def test_read_through_parameter_equal_to_a_frame_slot_is_not_disjoint():
-    """負例（a）: frame の slot への store の後、`p == sp - 16` の経路で `*p` を読む。入口の値で描くと store を無視する。
+def test_read_of_another_frame_slot_after_a_frame_store_is_disjoint():
+    """正例: frame の別の slot の読み出しは、frame の store と同じ基底の定数の範囲で離れている（検査は止めない）。"""
 
-    修正前は D-S だけで frame と parameter を DISJOINT にし、読み出しを止めなかった。"""
-
-    sp = _register("sp", sp=True)
-    condition = Condition(Expression.binary_op("INT_EQUAL", _p(), _plus(sp, -16)), False)
-    for frame_locality in (None, PROVEN):
-        analysis = _frame_read_analysis(frame_locality, [condition])
-        assert analysis.has_unresolved_memory_read_aliases()
-        assert "memory_read_alias_unresolved" in analysis.get_equivalence_blocking_unsafety_reasons()
+    read = _mem(_plus(_register("sp", sp=True), -32), 8)
+    summary, analysis = _frame_summary_and_reads(
+        [_frame_store(), _FrameOp("RETURN", ["ret", "other"], order=2)], _frame_values(other=read), read
+    )
+    assert summary.frame_local_effects
+    assert not analysis.has_unresolved_memory_read_aliases()
 
 
-def test_read_through_parameter_after_a_proven_local_frame_store_is_disjoint():
-    """正例: 局所と示せた frame の store の後の `*p` は、その store に依存しない。"""
+def test_function_without_frame_stores_is_not_blocked_by_the_frame_rule():
+    """正例: frame へ書かない関数（`*p` への store だけ）は、frame の規則で止めない（不要な UNKNOWN にしない）。"""
 
-    assert not _frame_read_analysis(PROVEN, []).has_unresolved_memory_read_aliases()
+    summary = _summarize_frame(
+        [_FrameOp("STORE", ["space", "p", "one"], order=1), _FrameOp("RETURN", ["ret"], order=2)], _frame_values()
+    )
+    assert summary.frame_local_effects == ()
+    assert "effect_store_location_unmodeled" not in summary.incomplete_reasons
+    assert len(summary.effects) == 1
 
 
 # ---------------------------------------------------------------------------

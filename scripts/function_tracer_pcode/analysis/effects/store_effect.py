@@ -40,7 +40,6 @@ from scripts.function_tracer_pcode.analysis.effects._shared import (
     _EFFECT_GLOBAL_READ_IDENTITY_REASON,
 )
 from scripts.function_tracer_pcode.analysis.effects import call_argument_abi as _abi
-from scripts.function_tracer_pcode.analysis.effects.frame_locality import collect_frame_locality
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _block_has_path_incomplete_effects,
     _call_argument_evidence_storage_key,
@@ -1038,16 +1037,11 @@ def _impl_summarize_store_effects(
     if any(effect.location.base_ref.is_global() for effect in effects):
         # Issue #282 (I1): 左右の global の object が同じである根拠（identity の証拠）が無い
         incomplete_reasons.add(EFFECT_GLOBAL_STORE_IDENTITY_REASON)
-    frame_locality = None
     if frame_local_effects:
-        # entry SP より下というだけでは局所にしない（Issue #282 AC 9）: frame の番地が外へ出ず、呼び出しが frame を
-        # 読まないことを示せたときだけ観測から外す。示せなければ位置の分からない store として EQ を止める
-        frame_locality = collect_frame_locality(block_infos, tracer)
-        if not frame_locality.proven:
-            incomplete_reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
-            if debug:
-                print(f"[EffectSummary] frame stores are not proven local: {frame_locality.reasons}")
-            frame_local_effects = []
+        # entry SP より下というだけでは局所にしない（Issue #282 AC 9）: store が確保された frame の中にあることも、
+        # 入口の pointer・global の番地がその番地に等しくなり得ないことも示せないので、位置を証明できない store
+        # として EQ と NOT_EQ を止める（`frame_local_effects` は同じ側の読み出しの検査のために残す）
+        incomplete_reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
     synthetic_expr = build_void_effect_summary_expr(
         effects,
         parameters,
@@ -1070,7 +1064,6 @@ def _impl_summarize_store_effects(
         call_target_resolution_evidence=tuple(call_target_resolution_evidence),
         call_site_effect_summary_evidence=tuple(call_site_effect_summary_evidence),
         frame_local_effects=tuple(frame_local_effects),
-        frame_locality=frame_locality,
     )
 
 #: loop の中の書き込み（Issue #281 / #285）
