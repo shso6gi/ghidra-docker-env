@@ -8,6 +8,7 @@ from scripts.function_tracer_pcode.analysis.effects._shared import (
     CallArgumentWidthEvidence,
     ConditionSimplifier,
 )
+from scripts.function_tracer_pcode.analysis.effects.parameter_entry import entry_value_in_storage
 from scripts.function_tracer_pcode.analysis.effects._api import (
     _coerce_storage_info,
     _find_block_info_for_pcode_op,
@@ -194,6 +195,15 @@ def _impl__recover_unmodified_live_in_argument(
     caller_parameters: Sequence[Dict],
     callee_param: Dict,
 ) -> Optional[Expression]:
+    """経路で書かれない引数の記憶域 `target_storage` にある、caller の parameter の入口の値（live-in の引数）。
+
+    引数は callee の parameter の値（記憶域の significance の低い側、宣言の幅）。caller の parameter のどの bit が
+    そこにあるかは `parameter_entry.entry_value_in_storage` が byte order で決める（review 9）。以前は記憶域の包含
+    だけで descriptor を選び、parameter を丸ごと（幅が違えば下位の bit を）返していた: 64 bit の parameter の
+    上位 32 bit を受ける呼び出しに下位 32 bit が渡り、parameter が引数の記憶域の上位にあるときも部分的な幅の
+    引数として渡っていた。
+    """
+
     if _path_writes_storage(ops, target_storage, tracer):
         return None
     declared_target_size = _parameter_declared_semantic_size_bytes(callee_param)
@@ -215,18 +225,31 @@ def _impl__recover_unmodified_live_in_argument(
     except Exception:
         target_size = source_size
     source_size = source_size if source_size > 0 else target_size
-    expr = _parameter_expression_from_descriptor(descriptor, size=source_size or None)
-    if expr is None:
+    whole = _parameter_expression_from_descriptor(descriptor)
+    if whole is None:
         return None
-    if target_size > source_size:
+    from scripts.function_tracer_pcode.analysis.effects.call_boundary import program_is_big_endian
+
+    source_storage = _coerce_storage_info(descriptor.get("storage"))
+    entry = entry_value_in_storage(
+        whole,
+        source_storage,
+        int(source_size) * 8,
+        target_storage,
+        int(target_size) * 8,
+        program_is_big_endian(getattr(tracer, "program", None)),
+    )
+    if entry is None:
+        return None
+    expr, determined_bits = entry
+    if determined_bits < int(target_size) * 8:
         if declared_target_size is not None:
             return None
-        source_storage = _coerce_storage_info(descriptor.get("storage"))
         expr = expr.clone_with(
             call_argument_width_evidence=CallArgumentWidthEvidence(
-                source_bits=max(1, int(source_size or 0)) * 8,
+                source_bits=determined_bits,
                 target_bits=max(
-                    max(1, int(target_size or 0)) * 8,
+                    int(target_size) * 8,
                     int(getattr(target_storage, "size_bits", 0) or 0),
                 ),
                 source_storage_key=_storage_identity_key(source_storage),

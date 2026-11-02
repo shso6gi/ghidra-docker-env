@@ -434,14 +434,6 @@ def test_the_recovered_upper_half_reaches_the_callee_as_its_upper_bits():
     assert _evaluate(imported, WIDE) == 2
 
 
-def test_a_declared_narrower_live_in_value_is_the_low_bits_of_the_parameter():
-    """live-in の引数は宣言の幅の値（ABI: 記憶域の下位にある）: parameter の下位 `size` byte。"""
-
-    narrowed = call_argument._impl__parameter_expression_from_descriptor(PARAMETERS[0], size=4)
-    assert narrowed.operator == "SUBPIECE" and _evaluate(narrowed, WIDE) == 1
-    assert call_argument._impl__parameter_expression_from_descriptor(PARAMETERS[0], size=16) is None
-
-
 # ---------------------------------------------------------------------------
 # 3. 記憶域への書き込み: 重ならないのは証明できたときだけ
 # ---------------------------------------------------------------------------

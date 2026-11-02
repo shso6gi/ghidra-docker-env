@@ -15,6 +15,7 @@ from scripts.function_tracer_pcode.analysis.effects.parameter_entry import (
     expression_bits,
     parameter_piece,
     same_entry_bits,
+    significance_low_offset,
     whole_parameter_descriptor,
 )
 from scripts.function_tracer_pcode.core import (
@@ -718,6 +719,8 @@ def _impl__select_aligned_explicit_call_arguments(
 ) -> Optional[List[Expression]]:
     explicit = list(explicit_args)
     if len(explicit) <= len(callee_parameters):
+        if not _positional_call_inputs_carry_parameter_values(call_op, tracer, callee_parameters, explicit):
+            return None
         return explicit
 
     if len(callee_parameters) == 1 and explicit:
@@ -965,6 +968,7 @@ def _impl__select_explicit_call_arguments_by_input_storage(
         except Exception:
             input_storages.append(None)
 
+    big_endian = _program_big_endian(tracer)
     selected: List[Expression] = []
     used_indexes: Set[int] = set()
     for callee_param in callee_parameters:
@@ -975,7 +979,7 @@ def _impl__select_explicit_call_arguments_by_input_storage(
             index for index, input_storage in enumerate(input_storages)
             if index not in used_indexes
             and input_storage is not None
-            and _storage_matches_parameter(input_storage, param_storage)
+            and _call_input_carries_parameter_value(input_storage, param_storage, big_endian)
         ]
         if len(matches) != 1:
             return None
@@ -1029,6 +1033,7 @@ def _impl__select_explicit_call_arguments_by_storage_window(
         input_storages,
         explicit_args,
         param_storages,
+        big_endian=_program_big_endian(tracer),
     )
 
     if len(matching_windows) != 1:
@@ -1041,6 +1046,9 @@ def _impl__matching_explicit_call_argument_storage_windows(
     input_storages: Sequence[Optional[StorageInfo]],
     explicit_args: Sequence[Expression],
     param_storages: Sequence[Optional[StorageInfo]],
+    *,
+    big_endian: Optional[bool] = None,
+    value_position: bool = True,
 ) -> List[int]:
     callee_count = len(param_storages or ())
     if callee_count <= 0 or len(input_storages) != len(explicit_args):
@@ -1051,6 +1059,8 @@ def _impl__matching_explicit_call_argument_storage_windows(
             input_storages[start:start + callee_count],
             explicit_args[start:start + callee_count],
             param_storages,
+            big_endian=big_endian,
+            value_position=value_position,
         ):
             matching_windows.append(start)
     return matching_windows
@@ -1060,7 +1070,16 @@ def _impl__explicit_call_argument_window_matches_storage(
     input_storages: Sequence[Optional[StorageInfo]],
     explicit_args: Sequence[Expression],
     param_storages: Sequence[Optional[StorageInfo]],
+    *,
+    big_endian: Optional[bool] = None,
+    value_position: bool = True,
 ) -> bool:
+    """窓の呼び出しの入力が、それぞれ callee の parameter の記憶域にあるか。
+
+    `value_position` なら入力が parameter の値を運んでいる（記憶域の significance の低い端にある:
+    `_call_input_carries_parameter_value`）ことまで要る。引数として選ぶ判定はこちら。窓が複数あるかの
+    判定（あいまいなら選ばない: `_has_ambiguous_storage_windows`）は位置を問わない包含で数える（review 9）。
+    """
     if len(input_storages) != len(param_storages):
         return False
     for input_storage, explicit_arg, param_storage in zip(
@@ -1074,7 +1093,68 @@ def _impl__explicit_call_argument_window_matches_storage(
             continue
         if input_storage is None:
             return False
-        if not _storage_matches_parameter(input_storage, param_storage):
+        if value_position:
+            if not _call_input_carries_parameter_value(input_storage, param_storage, big_endian):
+                return False
+        elif not _storage_matches_parameter(input_storage, param_storage):
+            return False
+    return True
+
+
+def _program_big_endian(tracer) -> Optional[bool]:
+    from scripts.function_tracer_pcode.analysis.effects.call_boundary import program_is_big_endian
+
+    return program_is_big_endian(getattr(tracer, "program", None))
+
+
+def _call_input_carries_parameter_value(
+    input_storage: Optional[StorageInfo],
+    param_storage: Optional[StorageInfo],
+    big_endian: Optional[bool],
+) -> bool:
+    """呼び出しの入力（記憶域 `input_storage` の値）が、callee の parameter の値を運んでいるか（review 9）。
+
+    引数は callee の parameter の値として束縛される（`CalleeBinding`: 引数の下位の bit が parameter の記憶域の
+    significance の低い側）。入力が parameter の記憶域に含まれ（`_storage_matches_parameter`）、しかも
+    significance の低い端が parameter の低い端と同じ（`parameter_entry.significance_low_offset` が 0）とき
+    だけ真。以前は包含だけを見ていた: parameter の記憶域の上位 32 bit にある入力が、parameter の下位 32 bit の
+    値として束縛され得た。位置を決められない（byte order が分からない register の一部）なら偽。
+    """
+
+    if input_storage is None or param_storage is None:
+        return False
+    if not _storage_matches_parameter(input_storage, param_storage):
+        return False
+    return significance_low_offset(input_storage, param_storage, big_endian) == 0
+
+
+def _positional_call_inputs_carry_parameter_values(
+    call_op,
+    tracer,
+    callee_parameters: Sequence[Dict],
+    explicit_args: Sequence[Expression],
+) -> bool:
+    """位置で対応させる呼び出しの入力が、同じ register の別の bit を parameter の値として渡していないか（review 9）。
+
+    入力と parameter の記憶域が同じ基底の register にあるときだけ、入力が parameter の値を運んでいる
+    （`_call_input_carries_parameter_value`）ことを要る。別の記憶域（定数・memory・別の register）の入力は、
+    decompiler が呼び出しの引数として並べた値で、記憶域から位置を言えないので従来どおり位置で対応させる。
+    入力の記憶域を読めないときも従来どおり。
+    """
+
+    input_storages = _call_input_storages_for_explicit_args(call_op, tracer, explicit_args)
+    if input_storages is None:
+        return True
+    big_endian = _program_big_endian(tracer)
+    for input_storage, callee_param in zip(input_storages, callee_parameters):
+        param_storage = _coerce_storage_info((callee_param or {}).get("storage"))
+        if input_storage is None or param_storage is None:
+            continue
+        if not (input_storage.is_register and param_storage.is_register):
+            continue
+        if not input_storage.shares_base_register_with(param_storage):
+            continue
+        if significance_low_offset(input_storage, param_storage, big_endian) != 0:
             return False
     return True
 
@@ -1135,6 +1215,7 @@ def _impl__select_explicit_call_arguments_by_dependency_tail(
         selected_tail_storages,
         selected_tail,
         param_storages,
+        big_endian=_program_big_endian(tracer),
     ):
         return None
 
@@ -1213,6 +1294,7 @@ def _impl__has_ambiguous_storage_windows(
                 input_storages,
                 explicit_args,
                 param_storages,
+                value_position=False,
             )
         )
         > 1
@@ -2715,15 +2797,13 @@ def _impl__resolve_parameter_descriptor(
     )
 
 
-def _impl__parameter_expression_from_descriptor(param: Dict, size: Optional[int] = None) -> Optional[Expression]:
+def _impl__parameter_expression_from_descriptor(param: Dict) -> Optional[Expression]:
     """descriptor の parameter の入口の値（`parameter_entry` の不変条件: 幅は parameter の幅、記憶域は parameter の
     記憶域）。
 
-    `size` が parameter の幅と違うときは、**宣言の値が記憶域の significance の低い側にある**（ABI）と分かっている
-    呼び出し側（live-in の引数）だけが渡す: parameter の下位 `size` byte（`SUBPIECE(parameter, 0)`）。parameter より
-    広い `size` は、parameter の外の bit を含むので None。以前は parameter の記憶域全体を持つ `size` 幅の node を
-    作っていた: node の bit の位置が記憶域と食い違い、varnode の一部（上位 32 bit）が下位 32 bit と読まれた
-    （review 8。varnode からの回復は `_parameter_bits_from_storage` で位置を決める）。
+    parameter の一部（別の記憶域・別の幅の値）は作らない: 位置は記憶域と byte order で決まる
+    （`_parameter_bits_from_storage`・`parameter_entry.entry_value_in_storage`）。review 8 で足した `size`
+    （幅だけで下位の bit を取る）は、記憶域の上位にある値にも下位の bit を渡していたので撤去した（review 9）。
     """
 
     name = param.get("name")
@@ -2738,7 +2818,7 @@ def _impl__parameter_expression_from_descriptor(param: Dict, size: Optional[int]
     except Exception:
         param_size = 8
     param_size = max(1, param_size)
-    whole = Expression.parameter(
+    return Expression.parameter(
         name,
         param_index,
         param.get("data_type"),
@@ -2752,9 +2832,6 @@ def _impl__parameter_expression_from_descriptor(param: Dict, size: Optional[int]
             owner_entry_offset=param.get("owner_entry_offset"),
         ),
     )
-    if not size or int(size) == param_size:
-        return whole
-    return parameter_piece(whole, 0, int(size) * 8)
 
 
 def _parameter_bits_from_storage(

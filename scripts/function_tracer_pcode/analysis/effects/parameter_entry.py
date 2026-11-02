@@ -200,7 +200,8 @@ def bit_offset_in_parameter(
     * 記憶域の無い node は parameter の値そのもの: 幅が値と同じときだけ位置 0。幅が違えば、どの bit かを
       node が言っていないので決めない（以前は下位の bit と読んでいた: review 8）。
     * parameter の記憶域が分からない: `_register_low_end`。
-    * node の記憶域が parameter の記憶域と同じ範囲なら位置 0。register の一部（parameter の記憶域に含まれる
+    * node の記憶域が parameter の記憶域と同じ範囲（同じ基底の register・同じ空間。以前は範囲の数だけを比べ、
+      別の register の同じ位置も位置 0 にしていた: review 9）なら位置 0。register の一部（parameter の記憶域に含まれる
       範囲）なら、番地の順の位置を byte order で significance の位置へ直す（big endian では番地の小さい側が上位）。
     """
 
@@ -212,7 +213,7 @@ def bit_offset_in_parameter(
     parameter_range = storage_byte_range(parameter_storage)
     if node_range is None or parameter_range is None:
         return None
-    if node_range == parameter_range:
+    if node_range == parameter_range and _same_location(node_storage, parameter_storage):
         return 0
     if not (node_storage.is_register and parameter_storage.is_register) or big_endian is None:
         return None
@@ -224,6 +225,97 @@ def bit_offset_in_parameter(
     if big_endian:
         return ((parameter_low + parameter_size) - (node_low + node_size)) * 8
     return (node_low - parameter_low) * 8
+
+
+def significance_low_offset(storage, reference, big_endian: Optional[bool]) -> Optional[int]:
+    """記憶域 `storage` の significance の低い端が、記憶域 `reference` の低い端から何 bit 上にあるか（負もあり得る）。
+
+    範囲が同じなら 0（byte order は要らない）。違えば、同じ基底の register どうしで byte order が分かるときだけ
+    決める（big endian では番地の大きい側が下位）。memory・別の register・byte order が分からないなら None。
+    `StorageInfo.bit_offset_in_base` は番地の順の位置で significance の位置ではないので、ここを通して直す
+    （review 9）。
+    """
+
+    if storage is None or reference is None:
+        return None
+    storage_range = storage_byte_range(storage)
+    reference_range = storage_byte_range(reference)
+    if storage_range is None or reference_range is None or not _same_location(storage, reference):
+        return None
+    if storage_range == reference_range:
+        return 0
+    if not (storage.is_register and reference.is_register) or big_endian is None:
+        return None
+    (low, size), (reference_low, reference_size) = storage_range, reference_range
+    if big_endian:
+        return ((reference_low + reference_size) - (low + size)) * 8
+    return (low - reference_low) * 8
+
+
+def _same_location(storage, reference) -> bool:
+    """`storage_byte_range` の位置を比べてよい組か（同じ基底の register、または同じ空間の memory）。
+
+    基底の分からない register は、番地と幅がちょうど同じ（同じ register）ときだけ。
+    """
+
+    if storage.is_register and reference.is_register:
+        if storage.shares_base_register_with(reference):
+            return True
+        return (
+            getattr(storage, "space_id", None) == getattr(reference, "space_id", None)
+            and int(getattr(storage, "offset", -1)) == int(getattr(reference, "offset", -2))
+            and int(getattr(storage, "size", 0) or 0) == int(getattr(reference, "size", 0) or 0)
+        )
+    if storage.is_register or reference.is_register:
+        return False
+    return getattr(storage, "space_id", None) == getattr(reference, "space_id", None)
+
+
+def entry_value_in_storage(
+    whole: Expression,
+    parameter_storage,
+    known_bits: int,
+    storage,
+    bits: int,
+    big_endian: Optional[bool],
+) -> Optional[Tuple[Expression, int]]:
+    """記憶域 `storage` の significance の低い側 `bits` bit に、parameter の入口の値が何を置いているか（review 9）。
+
+    **parameter の入口の値を「別の記憶域の値」として読む producer の唯一の owner**（live-in の引数の回復）。
+    parameter は記憶域 `parameter_storage` の低い側 `known_bits` bit（宣言の値。ABI）を決めている。戻り値は
+    (式, 式が決めている `storage` の低い側の bit 数):
+
+    * 要る範囲が parameter の決めている範囲に収まる: その位置の値（`parameter_piece`）。位置 0 なら parameter の
+      決めている範囲そのもの（要る幅より広くてよい。引数の正規化が下位を取る）。
+    * 要る範囲の低い端が parameter の低い端と同じで、parameter が狭い: parameter の値（決めている bit は
+      `known_bits`。残りは呼び出し側が `CallArgumentWidthEvidence` で部分的な幅と記録する）。
+    * それ以外（parameter が要る範囲の上位にしかない・範囲の外・位置を決められない）: None。
+
+    以前の live-in の回復は、記憶域の包含だけで descriptor を選んで parameter を丸ごと返し、幅が違えば下位の
+    bit を取っていた: 64 bit の parameter の上位 32 bit が要る呼び出しに下位 32 bit が渡った
+    （`0x0000000200000001` の上位の 2 が 1 になる）。
+    """
+
+    whole_bits = expression_bits(whole)
+    known_bits = min(int(known_bits or 0), whole_bits)
+    if known_bits <= 0 or bits <= 0:
+        return None
+    parameter_range = storage_byte_range(parameter_storage) if parameter_storage is not None else None
+    storage_range = storage_byte_range(storage) if storage is not None else None
+    if parameter_range is None or storage_range is None:
+        return None
+    if known_bits > parameter_range[1] * 8 or bits > storage_range[1] * 8:
+        return None
+    offset = significance_low_offset(storage, parameter_storage, big_endian)
+    if offset is None or offset < 0:
+        return None
+    if offset == 0:
+        extracted = parameter_piece(whole, 0, known_bits)
+        return None if extracted is None else (extracted, min(bits, known_bits))
+    if offset + bits > known_bits:
+        return None
+    extracted = parameter_piece(whole, offset, bits)
+    return None if extracted is None else (extracted, bits)
 
 
 def _register_low_end(node_storage, node_bits: int, parameter_bits: int, big_endian: Optional[bool]) -> Optional[int]:

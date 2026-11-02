@@ -1,4 +1,5 @@
 from scripts.function_tracer_pcode.tests.unit._memory_model_fixtures import *
+from types import SimpleNamespace
 
 def test_enumerate_call_argument_variants_dedup_does_not_require_to_string(monkeypatch):
     shared = Expression.parameter("param_1", index=0, size=4)
@@ -790,6 +791,9 @@ def test_recover_call_argument_from_storage_marks_unknown_full_register_live_in_
             return [(path, []) for path in self._paths]
 
     class FakeTracer:
+        # a2_lo は番地が a2 の後ろ 4 byte: big endian（MIPS64）で下位 32 bit（Issue #281 review 9: 位置は byte order で決める）
+        program = SimpleNamespace(getLanguage=lambda: SimpleNamespace(isBigEndian=lambda: True))
+
         def get_all_pcode_ops(self):
             return []
 
@@ -1147,6 +1151,9 @@ def test_recover_call_argument_from_storage_accepts_semantic_width_fragment_live
             return [(path, []) for path in self._paths]
 
     class FakeTracer:
+        # a2_lo は番地が a2 の後ろ 4 byte: big endian（MIPS64）で下位 32 bit（Issue #281 review 9: 位置は byte order で決める）
+        program = SimpleNamespace(getLanguage=lambda: SimpleNamespace(isBigEndian=lambda: True))
+
         def _get_storage_info_from_varnode(self, _varnode):
             return None
 

@@ -228,58 +228,70 @@ class ParameterStorageMixin:
         expr: Expression,
         source_storage: Optional[StorageInfo],
         target_storage: Optional[StorageInfo],
-        *,
-        is_signed: bool,
-    ) -> Expression:
-        if source_storage is None or target_storage is None:
-            cloned = self._clone_expression(expr)
-            return cloned if cloned is not None else Expression.unknown("coerce_missing_storage")
+    ) -> Optional[Expression]:
+        """記憶域 `source_storage` の値 `expr` から、記憶域 `target_storage` の値を作る。決められなければ None。
 
+        値は `source_storage` の significance の低い側にある（値が記憶域より狭ければ下位だけ）。位置は
+        `parameter_entry.bit_offset_in_parameter`（byte order で significance の位置へ直す）が決める
+        （review 9）: 範囲が同じで幅も同じなら値そのもの、`target_storage` が `source_storage` の一部で値の
+        決めている bit に収まるならその位置の `SUBPIECE`。それ以外は None。
+
+        以前は、番地の順の位置（`bit_offset_in_base` の差）を `SUBPIECE` の位置にしていた（big endian の
+        MIPS64 では上位と下位が入れ替わる）。範囲が同じなら値の幅に関係なく `target_storage` の幅を付けていた
+        （狭い値が記憶域の幅の値になる）。`target_storage` が広ければ `INT_SEXT` / `INT_ZEXT` で上位の bit を
+        作っていたが、register の上位の bit は値が決めていない（AArch64 では不定、MIPS64 では符号の型に関係
+        なく符号拡張）。
+        """
+
+        from scripts.function_tracer_pcode.analysis.effects.call_boundary import program_is_big_endian
+        from scripts.function_tracer_pcode.analysis.effects.parameter_entry import (
+            bit_offset_in_parameter,
+            parameter_piece,
+        )
+
+        if expr is None or source_storage is None or target_storage is None:
+            return None
         source_bits = int(getattr(source_storage, "size_bits", 0) or 0)
         target_bits = int(getattr(target_storage, "size_bits", 0) or 0)
         if source_bits <= 0 or target_bits <= 0:
-            cloned = self._clone_expression(expr)
-            return cloned if cloned is not None else Expression.unknown("coerce_missing_bits")
-
+            return None
         cloned = self._clone_expression(expr)
         if cloned is None:
-            return Expression.unknown("coerce_missing_expr")
-
-        source_low = int(getattr(source_storage, "bit_offset_in_base", 0) or 0)
-        target_low = int(getattr(target_storage, "bit_offset_in_base", 0) or 0)
-
-        if source_bits == target_bits and source_low == target_low:
-            cloned.size = max(1, target_bits // 8)
+            return None
+        low_bit = bit_offset_in_parameter(
+            target_storage,
+            target_bits,
+            source_storage,
+            source_bits,
+            program_is_big_endian(getattr(self, "program", None)),
+        )
+        if low_bit is None:
+            return None
+        extracted = parameter_piece(cloned, low_bit, target_bits)
+        if extracted is None:
+            return None
+        if extracted is cloned:
             cloned.storage_info = target_storage
             return cloned
-
-        if self._storage_contains(source_storage, target_storage):
-            byte_offset = max(0, (target_low - source_low) // 8)
-            offset_expr = Expression.constant(byte_offset, size=max(1, cloned.size or 1))
-            narrowed = Expression.binary_op("SUBPIECE", cloned, offset_expr)
-            narrowed.size = max(1, target_bits // 8)
-            narrowed.storage_info = target_storage
-            return narrowed
-
-        if self._storage_contains(target_storage, source_storage):
-            op = "INT_SEXT" if is_signed else "INT_ZEXT"
-            widened = Expression.unary_op(op, cloned)
-            widened.size = max(1, target_bits // 8)
-            widened.storage_info = target_storage
-            return widened
-
-        cloned.size = max(1, target_bits // 8)
-        cloned.storage_info = target_storage
-        return cloned
+        extracted.storage_info = target_storage
+        return extracted
 
     def _coerce_bound_argument_to_parameter(
         self,
         expr: Expression,
         descriptor: ParameterStorageDescriptor,
-    ) -> Expression:
+    ) -> Optional[Expression]:
+        """束縛した引数を callee の parameter の幅にする。引数が parameter より狭ければ None（束縛しない）。
+
+        広い引数は下位の bit が parameter の値（ABI: 引数の正規化 `_coerce_argument_to_callee_parameter` と
+        同じ約束）。狭い引数の上位の bit は caller が決めていない（`CalleeBinding` の `known_bits`）: 以前は
+        `INT_SEXT` / `INT_ZEXT` で作っていた（review 9）。束縛しない parameter は境界の置き換えで caller の
+        値になり、決めていない bit を読む node は拒否される。
+        """
+
         cloned = self._clone_expression(expr)
         if cloned is None:
-            return Expression.unknown("bound_arg_missing")
+            return None
 
         target_bits = max(1, int(descriptor.size_bytes) * 8)
         source_bits = max(1, int(getattr(cloned, "size", 0) or 0) * 8)
@@ -296,10 +308,7 @@ class ParameterStorageMixin:
             narrowed.size = max(1, target_bits // 8)
             return narrowed
 
-        op = "INT_SEXT" if descriptor.is_signed else "INT_ZEXT"
-        widened = Expression.unary_op(op, cloned)
-        widened.size = max(1, target_bits // 8)
-        return widened
+        return None
 
     def _resolve_storage_backed_parameter_expression(
         self,
@@ -346,6 +355,11 @@ class ParameterStorageMixin:
         storage_key = self._storage_identity_key(best_descriptor.storage_info)
         if source_expr is None and storage_key is not None:
             source_expr = self._bound_parameter_storage_values.get(storage_key)
+        if source_expr is not None:
+            source_expr = self._coerce_bound_argument_to_parameter(
+                source_expr,
+                best_descriptor,
+            )
         if source_expr is None:
             source_expr = Expression.parameter(
                 best_descriptor.name,
@@ -360,18 +374,14 @@ class ParameterStorageMixin:
                     storage_info=best_descriptor.storage_info,
                 ),
             )
-        else:
-            source_expr = self._coerce_bound_argument_to_parameter(
-                source_expr,
-                best_descriptor,
-            )
 
         resolved = self._coerce_expression_width(
             source_expr,
             best_descriptor.storage_info,
             storage_info,
-            is_signed=best_descriptor.is_signed,
         )
+        if resolved is None:
+            return None
         resolved.runtime_ref = self._make_parameter_or_storage_location_ref(
             best_descriptor.name,
             index=best_descriptor.index,
@@ -427,6 +437,31 @@ class ParameterStorageMixin:
             )
 
         resolved = self._coerce_bound_argument_to_parameter(source_expr, descriptor)
+        if resolved is None:
+            return None
+        if storage_info is not None or int(size_bytes or 0) * 8 != int(resolved.size or 0) * 8:
+            # varnode（記憶域 `storage_info`・幅 `size_bytes`）の bit は、parameter の値のその位置の bit
+            # （review 9）。以前は parameter の幅の値に varnode の記憶域を付けていた: parameter の register の
+            # 一部の varnode が、parameter の値全体を表す node になった。位置を決められなければ束縛しない
+            # （`tracer` が varnode の幅の `PARAMETER` を作る）
+            from scripts.function_tracer_pcode.analysis.effects.call_boundary import program_is_big_endian
+            from scripts.function_tracer_pcode.analysis.effects.parameter_entry import (
+                bit_offset_in_parameter,
+                parameter_piece,
+            )
+
+            value_bits = int(resolved.size or 0) * 8
+            low_bit = bit_offset_in_parameter(
+                storage_info,
+                int(size_bytes or 0) * 8,
+                descriptor.storage_info,
+                value_bits,
+                program_is_big_endian(getattr(self, "program", None)),
+            )
+            piece = None if low_bit is None else parameter_piece(resolved, low_bit, int(size_bytes or 0) * 8)
+            if piece is None:
+                return None
+            resolved = piece
         resolved.storage_info = storage_info
         resolved.runtime_ref = self._make_parameter_or_storage_location_ref(
             name,

@@ -137,7 +137,10 @@ def test_tracer_storage_backed_parameter_fallback_returns_parameter_object():
     assert resolved.runtime_ref.parameter_index == 1
 
 
-def test_tracer_storage_backed_parameter_fallback_coerces_bound_arguments_object_centrically():
+def test_tracer_storage_backed_parameter_fallback_does_not_extend_a_narrower_parameter():
+    """a0 全体の読み出しは 32 bit の parameter（a0_lo）の値の外の bit を含む: 以前は束縛値を
+    `INT_SEXT(SUBPIECE(...))` にして上位の bit を作っていた（Issue #281 review 9）。"""
+
     caller_arg = Expression.parameter("caller_arg", index=7, size=8)
     tracer = PcodeTracer(
         Mock(),
@@ -175,12 +178,7 @@ def test_tracer_storage_backed_parameter_fallback_coerces_bound_arguments_object
         )
     )
 
-    assert resolved is not None
-    assert resolved.operator == "INT_SEXT"
-    narrowed = resolved.operands[0]
-    assert narrowed.operator == "SUBPIECE"
-    assert narrowed.operands[0].name == "caller_arg"
-    assert resolved.runtime_ref.parameter_index == 0
+    assert resolved is None
 
 
 def test_tracer_parameter_symbol_uses_bound_argument_by_object_index():
