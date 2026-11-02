@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from scripts.function_tracer_pcode.core.address_provenance import carries_image_address
+
+
 from typing import Any, Callable, List, Mapping, Optional, Sequence, Set, Tuple
 from scripts.function_tracer_pcode.core.expression import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.structural import expression_key_safe, unidentified_identity
@@ -161,6 +164,10 @@ class ExpressionCaseService:
             return None
         evaluated = eval_constant_raw(expr)
         if evaluated is None:
+            return expr
+        if carries_image_address(expr):
+            # Issue #282: image の番地の出自を持つ定数（単独の定数も）は素の数値にしない。部分木がすべて定数のとき
+            # （畳み込めるとき）だけ調べる
             return expr
         raw_value, bits = evaluated
         template = fallback_expr or expr

@@ -86,23 +86,10 @@ class AddressRefMixin:
         return Expression.memory(address_expr, size)
 
     def _read_program_memory_value(self, address_value: int, size_bytes: int) -> Optional[int]:
-        """Unsigned integer at ``address_value`` from the program image, or None."""
-        if address_value < 0 or size_bytes <= 0:
-            return None
-        try:
-            memory = self.program.getMemory()
-            default_space = self.program.getAddressFactory().getDefaultAddressSpace()
-            address = default_space.getAddress(address_value)
-            if address is None:
-                return None
-            raw = [int(memory.getByte(address.add(offset))) & 0xFF for offset in range(size_bytes)]
-            ordered = raw if self.program.getLanguage().isBigEndian() else list(reversed(raw))
-            value = 0
-            for byte in ordered:
-                value = (value << 8) | byte
-            return value
-        except Exception:
-            return None
+        """Unsigned integer at ``address_value`` from the program image, or None (Issue #282, Q1)."""
+        from scripts.function_tracer_pcode.analysis.program_image import DATA_VALUE, read_image_value
+
+        return read_image_value(self.program, address_value, size_bytes, purpose=DATA_VALUE)
 
     def _make_address_runtime_ref(
         self,

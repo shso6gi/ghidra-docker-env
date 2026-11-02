@@ -18,6 +18,7 @@ from scripts.function_tracer_pcode.core import (
     PostStateSnapshotRef,
     PostStateValueRef,
 )
+from scripts.function_tracer_pcode.analysis.effects.location_relation import frame_local_range
 from scripts.function_tracer_pcode.analysis.effects._shared import (
     ConditionSimplifier,
     StoreEffect,
@@ -872,10 +873,13 @@ def _impl_classify_store_address(
         if base_ref.is_global():
             return "global", location
         if base_ref.is_stack_frame():
-            return "stack_frame", location
+            # 観測から外してよいのは entry SP より下の定数の範囲だけ（Issue #282, I11: `frame_local_range`）。
+            # entry SP より上（caller の frame・stack で渡る引数）や index を含む番地は観測し得る
+            if frame_local_range(location) is not None:
+                return "stack_frame", location
+            return "unresolved", None
         return "unresolved", None
-    if _address_root_is_stack_frame(addr_expr):
-        return "stack_frame", None
+    # 位置を作れない frame の番地（`sp + index`、PHI の根）は範囲を示せないので外さない（Issue #282）
     return "unresolved", None
 
 

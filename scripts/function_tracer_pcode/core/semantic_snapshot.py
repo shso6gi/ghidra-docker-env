@@ -158,6 +158,10 @@ class SemanticSnapshot:
         return self.runtime.address_object_identity
 
     @property
+    def address_in_image(self) -> bool:
+        return self.runtime.address_in_image
+
+    @property
     def storage_identity_unfixable(self) -> bool:
         """storage の key はあったが値として固定できなかった（identity は None）。"""
 

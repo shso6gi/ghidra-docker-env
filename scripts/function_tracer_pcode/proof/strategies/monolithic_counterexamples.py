@@ -111,12 +111,12 @@ class CounterexampleDecisivenessMixin:
         replace1 = build_symbol_replacer(
             base_ctx["params1"],
             base_ctx.get("extra_vars1", []),
-            float_mode="fp",
+            float_mode="fp", side=1
         )
         replace2 = build_symbol_replacer(
             base_ctx["params2"],
             base_ctx.get("extra_vars2", []),
-            float_mode="fp",
+            float_mode="fp", side=2
         )
         if not self._bind_original_canonical_return_width_replay_observations(
             decision_context,

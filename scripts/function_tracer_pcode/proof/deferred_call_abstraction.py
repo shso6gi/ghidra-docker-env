@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import itertools
+
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -578,6 +580,15 @@ def _call_target_runtime_display_name(runtime_ref) -> Optional[str]:
     return None
 
 
+_SIDE_STATE_TOKENS = itertools.count()
+
+
+def _object_token(expr) -> int:
+    """他のどの key とも一致しない値（左右の key を一致させない）。`id()` は object の死後に再利用されるので使わない。"""
+
+    return next(_SIDE_STATE_TOKENS)
+
+
 def _object_centric_expression_key(
     expr: Optional[Expression],
     *,
@@ -585,6 +596,19 @@ def _object_centric_expression_key(
 ) -> Tuple[object, ...]:
     if expr is None:
         return ("none",)
+
+    from scripts.function_tracer_pcode.proof.formula.memory_state import query_reads_side_state
+
+    named_call_target = (
+        for_call_target
+        and expr.expr_type == ExpressionType.CONSTANT
+        and bool(_call_target_runtime_display_name(getattr(expr, "runtime_ref", None)))
+    )
+    if not named_call_target and query_reads_side_state((expr,)):
+        # Issue #282 (I1): 側ごとの memory・image の番地・出口の状態を読む引数は、左右で同じ構造でも同じ値とは
+        # 言えない。この node だけの key にして、左右の呼び出しを同じ要約の記号にまとめない（呼び出し先は、
+        # 名前の付いた関数の番地だけを名前で対応させる）
+        return ("side_state_uncorresponded", _object_token(expr))
 
     if expr.expr_type == ExpressionType.PARAMETER:
         index = expr.value if isinstance(expr.value, int) else -1

@@ -231,12 +231,19 @@ def _match_right_value(
     return None
 
 
+def _carries_image_address(expr) -> bool:
+    from scripts.function_tracer_pcode.core.address_provenance import carries_image_address
+
+    return carries_image_address(expr)
+
+
 def _minus_const(expr: Expression, amount: int) -> Expression:
     """``expr - amount`` folded into an existing constant offset when possible."""
 
     for operator in ("INT_ADD",):
         parts = _binop(expr, operator)
-        if parts is not None and _is_const(parts[1]):
+        if parts is not None and _is_const(parts[1]) and not _carries_image_address(parts[1]):
+            # Issue #282: image の番地の出自を持つ定数は素の数値に作り直さない
             base, const = parts
             folded = Expression.constant(int(const.value) - amount, const.size or 8)
             if int(folded.value) == 0:

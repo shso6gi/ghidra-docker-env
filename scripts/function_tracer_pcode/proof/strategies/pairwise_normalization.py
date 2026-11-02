@@ -100,8 +100,18 @@ def try_normalization_equivalence(
         or norm_settings.enable_abs_normalization
         or norm_settings.enable_division_normalization
     ):
-        facts1 = extract_sign_facts_fn(case1.conditions, debug=strategy.debug)
-        facts2 = extract_sign_facts_fn(case2.conditions, debug=strategy.debug)
+        # 左右の事実を 1 つにまとめて両側の値に当てる。側ごとの memory・image の番地・出口の状態についての
+        # 事実は、他方の側の同じ形の値については成り立たない（Issue #282, I1）ので使わない
+        from scripts.function_tracer_pcode.proof.formula.memory_state import query_reads_side_state
+
+        facts1 = extract_sign_facts_fn(
+            [cond for cond in case1.conditions if not query_reads_side_state((cond,))],
+            debug=strategy.debug,
+        )
+        facts2 = extract_sign_facts_fn(
+            [cond for cond in case2.conditions if not query_reads_side_state((cond,))],
+            debug=strategy.debug,
+        )
         combined_facts.merge(facts1)
         combined_facts.merge(facts2)
 

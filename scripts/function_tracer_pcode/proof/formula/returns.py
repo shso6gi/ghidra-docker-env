@@ -530,6 +530,8 @@ def build_return_definition(
     analysis: FunctionReturnAnalysis,
     return_var_name: str,
     param_infos: List[ParameterInfo],
+    *,
+    side: Optional[int] = None,
 ) -> List[str]:
     """return 値の定義式を構築する。"""
     lines: List[str] = []
@@ -548,7 +550,7 @@ def build_return_definition(
         if callable(comparison_type_obj_getter)
         else getattr(analysis, "return_type_obj", None)
     )
-    symbol_name_mapping = build_symbol_name_mapping(param_infos)
+    symbol_name_mapping = build_symbol_name_mapping(param_infos, side=side)
 
     return_defs: List[Dict[str, object]] = []
     seen_defs = set()

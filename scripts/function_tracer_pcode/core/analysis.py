@@ -1372,6 +1372,9 @@ class FunctionReturnAnalysis:
     comparison_surface: Optional[ComparisonSurface] = None
     analysis_scope_key: Optional[Tuple[Any, ...]] = None
     program_is_big_endian: Optional[bool] = None
+    # Issue #282: 側の program の image の範囲（ram の空間の overlay でない block の `[lo, hi)`）。反例の番地が
+    # どちらの image にも入らないことの制約（実現の条件）に使う。読めなければ None（実現を示せない）
+    program_image_ranges: Optional[Tuple[Tuple[int, int], ...]] = None
     completed_recovery_proof_ids: Tuple[Tuple[Any, ...], ...] = ()
     completed_recovery_proof_evidence: Tuple[Dict[str, Any], ...] = ()
     binary_id: Optional[str] = None
@@ -1789,6 +1792,8 @@ class FunctionReturnAnalysis:
             )
         if self.program_is_big_endian is not None:
             yield "program_is_big_endian", live_values.as_bool(self.program_is_big_endian)
+        if self.program_image_ranges is not None:
+            yield "program_image_ranges", self.program_image_ranges
 
         if live_values.as_bool(self.signedness_result):
             yield "signedness", self.signedness_result
@@ -2005,6 +2010,14 @@ class FunctionReturnAnalysis:
                 return True
         return False
 
+    def has_unresolved_memory_read_aliases(self) -> bool:
+        """SMT に入る入口の memory の読み出しのうち、先行し得る store との関係（重ならない）を証明できないものが
+        あるか（Issue #282, I3）。判定は `analysis.effects.read_validation` が持つ。EQ と NOT_EQ の両方を止める。"""
+
+        from scripts.function_tracer_pcode.analysis.effects.summary import unresolved_memory_read_aliases
+
+        return bool(unresolved_memory_read_aliases(self))
+
     def has_effect_sensitive_raw_memory_reads(self) -> bool:
         """store effect と同じ object location を読む raw MEM が return/guard に残っているか。"""
         for ret in self.returns:
@@ -2211,6 +2224,8 @@ class FunctionReturnAnalysis:
             reasons.append("symbolic_post_state_reads")
         if self.has_effect_sensitive_raw_memory_reads():
             reasons.append("effect_sensitive_raw_memory_reads")
+        if self.has_unresolved_memory_read_aliases():
+            reasons.append("memory_read_alias_unresolved")
         if self.has_overlapping_unconditional_returns():
             reasons.append("overlapping_unconditional_returns")
         if self.incomplete_control_flow and not self.recovered_from_decompiler:
@@ -2274,6 +2289,10 @@ class FunctionReturnAnalysis:
         # 比較対象に入っていない。coverage 証明を経由しない経路でも塞ぐ。
         if self.has_expansion_budget_truncation():
             reasons.append(EXPANSION_CASE_BUDGET_EXCEEDED_REASON)
+        # Issue #282 (I3): 先行し得る store と重なり得る入口の memory の読み出しは、入口の値で描くと store を
+        # 無視した値になる（偽 EQ の形）
+        if self.has_unresolved_memory_read_aliases():
+            reasons.append("memory_read_alias_unresolved")
         effect_summary = getattr(self, "effect_summary", None)
         if effect_summary is not None:
             if getattr(effect_summary, "has_unsupported_call", False):

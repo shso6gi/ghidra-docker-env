@@ -3,7 +3,7 @@
 
 import hashlib
 import re
-from typing import List, Dict, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core.parameter_domain import parameter_descriptor_bits, parameter_descriptor_index
 from scripts.function_tracer_pcode.core import (
@@ -233,6 +233,11 @@ def _normalize_mask_literal_widths_for_smt(left, right):
 def _narrow_constant_for_guard_smt(expr, target_bits: int):
     if not _expr_is_constant(expr) or target_bits <= 0:
         return expr
+    from scripts.function_tracer_pcode.core.address_provenance import carries_image_address
+
+    if carries_image_address(expr):
+        # Issue #282: image の番地の出自を持つ定数は素の数値に作り直さない（側ごとの記号で描く）
+        return expr
     current_bits = _expr_bit_width(expr)
     if current_bits <= 0 or current_bits <= target_bits:
         return expr
@@ -359,6 +364,23 @@ class CallFormulaUnsupported(ValueError):
     """
 
 
+def _side_tag_at(sides: Optional[Sequence[int]], index: int) -> Optional[str]:
+    """宣言を集める解析の列の `index` 番目の側（`sides` が無ければ側の無い宣言）。"""
+
+    from scripts.function_tracer_pcode.core.render_smt.sides import SIDE_TAGS
+
+    if not sides:
+        return None
+    return SIDE_TAGS[int(sides[index])]
+
+
+from scripts.function_tracer_pcode.core.render_smt.sides import (  # noqa: E402
+    mapping_side_tag,
+    memory_array_name,
+    side_qualified_name,
+)
+
+
 class FormulaBuilder:
     """2つの関数解析結果からSMT式を構築"""
     
@@ -462,7 +484,7 @@ class FormulaBuilder:
             lines.append(f"; Return value for {analysis1.function_name}")
             lines.append("; " + "-" * 40)
             return_var1 = f"return{func1_suffix}"
-            return_def1 = self._build_return_definition(render_analysis1, return_var1, all_vars1)
+            return_def1 = self._build_return_definition(render_analysis1, return_var1, all_vars1, side=1)
             lines.extend(return_def1)
             lines.append("")
         
@@ -471,7 +493,7 @@ class FormulaBuilder:
             lines.append(f"; Return value for {analysis2.function_name}")
             lines.append("; " + "-" * 40)
             return_var2 = f"return{func2_suffix}"
-            return_def2 = self._build_return_definition(render_analysis2, return_var2, all_vars2)
+            return_def2 = self._build_return_definition(render_analysis2, return_var2, all_vars2, side=2)
             lines.extend(return_def2)
             lines.append("")
         
@@ -684,9 +706,11 @@ class FormulaBuilder:
             render_declaration_analysis2,
         )
 
-        mem_widths = self._collect_memory_widths(*declaration_analyses)
-        if mem_widths:
-            lines.extend(self._build_memory_declarations(mem_widths))
+        # Issue #282 (I1 / I2): pre-state の memory は側ごとの配列（左右の対応を証明できない部分の上近似）
+        declaration_sides = (1, 2, 1, 2)
+        memory_arrays = self._collect_side_memory_arrays(declaration_analyses, declaration_sides)
+        if memory_arrays:
+            lines.extend(self._build_memory_declarations(memory_arrays))
 
         lines.extend(self._build_param_declarations(analysis1.function_name, params1))
 
@@ -704,16 +728,25 @@ class FormulaBuilder:
 
         runtime_unknown_decls = self._collect_runtime_unknown_declarations(
             *declaration_analyses,
+            sides=declaration_sides,
         )
         if runtime_unknown_decls:
             lines.extend(self._build_runtime_unknown_declarations(runtime_unknown_decls))
 
-        global_objects = self._collect_global_address_identities(*declaration_analyses)
-        if global_objects:
-            lines.extend(self._build_global_address_constraints(global_objects))
+        for side in (1, 2):
+            global_objects = self._collect_global_address_identities(
+                *(
+                    analysis
+                    for analysis, analysis_side in zip(declaration_analyses, declaration_sides)
+                    if analysis_side == side
+                )
+            )
+            if global_objects:
+                lines.extend(self._build_global_address_constraints(global_objects, side=side))
 
         intrinsic_decls = self._collect_intrinsic_smt_declarations(
             *declaration_analyses,
+            sides=declaration_sides,
         )
         if intrinsic_decls:
             lines.extend(self._build_intrinsic_smt_declarations(intrinsic_decls))
@@ -916,8 +949,8 @@ class FormulaBuilder:
         """UB除外制約セクションを構築"""
         lines = []
 
-        symbol_replace_fn1 = build_symbol_replacer(params1, extra_vars1)
-        symbol_replace_fn2 = build_symbol_replacer(params2, extra_vars2)
+        symbol_replace_fn1 = build_symbol_replacer(params1, extra_vars1, side=1)
+        symbol_replace_fn2 = build_symbol_replacer(params2, extra_vars2, side=2)
         
         ub1_constraints = self.ub_constraint_builder.build_constraints(
             analysis1,
@@ -1033,19 +1066,35 @@ class FormulaBuilder:
         lines.append("")
         return lines
 
-    def _build_memory_declarations(self, mem_widths: List[int]) -> List[str]:
-        """共有メモリ配列の宣言を構築する。"""
+    def _build_memory_declarations(self, memory_arrays: List[Tuple[int, str]]) -> List[str]:
+        """側ごとの pre-state の memory の配列の宣言（Issue #282）。"""
+        from scripts.function_tracer_pcode.core.render_smt.sides import memory_array_declaration
+
         lines: List[str] = []
         lines.append("; " + "-" * 40)
-        lines.append("; Shared memory arrays")
-        lines.append("; Memory loads are modeled as array selects by bit width")
+        lines.append("; Per-side pre-state memory arrays (Issue #282)")
+        lines.append("; Each side reads its own program state; no cell is shared between the sides")
         lines.append("; " + "-" * 40)
-        for bits in mem_widths:
-            lines.append(
-                f"(declare-const mem{bits} (Array (_ BitVec 64) (_ BitVec {bits})))"
-            )
+        for bits, tag in memory_arrays:
+            lines.append(memory_array_declaration(bits, tag))
         lines.append("")
         return lines
+
+    def _collect_side_memory_arrays(
+        self,
+        analyses: Sequence[Optional[FunctionReturnAnalysis]],
+        sides: Sequence[int],
+    ) -> List[Tuple[int, str]]:
+        """描く読み出しの (幅, 側) の組。幅は読み出しの node の幅（byte の倍数。I4）。"""
+        from scripts.function_tracer_pcode.core.render_smt.sides import SIDE_TAGS
+
+        arrays = set()
+        for analysis, side in zip(analyses, sides):
+            if analysis is None:
+                continue
+            for bits in collect_memory_bit_widths_from_analysis(analysis):
+                arrays.add((int(bits), SIDE_TAGS[int(side)]))
+        return sorted(arrays)
 
     def _collect_memory_widths(
         self,
@@ -1111,6 +1160,8 @@ class FormulaBuilder:
     def _build_global_address_constraints(
         self,
         identities: List[Tuple[str, int]],
+        *,
+        side: Optional[int] = None,
     ) -> List[str]:
         """Constraints on the shared base addresses of named global objects.
 
@@ -1123,9 +1174,13 @@ class FormulaBuilder:
         lines: List[str] = []
         lines.append("; " + "-" * 40)
         lines.append("; Named global objects (Issue #104)")
-        lines.append("; Shared symbolic base addresses: same source object on both sides")
+        lines.append("; Per-side symbolic base addresses (Issue #282: no identity evidence across sides)")
         lines.append("; " + "-" * 40)
-        symbols = [(global_address_symbol_name((name, size, 0)), int(size), name) for name, size in identities]
+        tag = _side_tag_at((side,), 0) if side is not None else None
+        symbols = [
+            (side_qualified_name(global_address_symbol_name((name, size, 0)), tag), int(size), name)
+            for name, size in identities
+        ]
         for symbol, size, name in symbols:
             lines.append(f"; {symbol}: {name} ({size} bytes)")
             lines.append(f"(assert (not (= {symbol} (_ bv0 {bits}))))")
@@ -1199,10 +1254,10 @@ class FormulaBuilder:
     ) -> List[str]:
         axioms: List[str] = []
         seen = set()
-        for analysis, param_infos in analysis_param_infos:
+        for side, (analysis, param_infos) in enumerate(analysis_param_infos, start=1):
             if analysis is None:
                 continue
-            symbol_name_mapping = build_symbol_name_mapping(param_infos)
+            symbol_name_mapping = build_symbol_name_mapping(param_infos, side=side)
             for expr, case_guards in self._iter_analysis_expressions_with_guards(analysis):
                 for axiom in self._readonly_reduction_witness_axioms_for_expr(
                     expr,
@@ -1322,6 +1377,7 @@ class FormulaBuilder:
                 result_bits=result_bits,
                 result_size=result_size,
                 constant_bias=int(getattr(reduction_ref, "constant_bias", 0) or 0),
+                memory_tag=mapping_side_tag(symbol_name_mapping),
             )
             if value_smt is None:
                 continue
@@ -1593,6 +1649,7 @@ class FormulaBuilder:
         result_bits: int,
         result_size: int,
         constant_bias: int,
+        memory_tag: Optional[str] = None,
     ) -> Optional[str]:
         result_bits = max(1, int(result_bits))
         total = None
@@ -1606,7 +1663,8 @@ class FormulaBuilder:
             address_smt = base_addr_smt
             if byte_offset:
                 address_smt = f"(bvadd {base_addr_smt} {self._bv_literal(byte_offset, 64)})"
-            load_smt = f"(select mem{access_bits} {address_smt})"
+            # 公理はその側の配列の上に置く（Issue #282: 配列名は `core.render_smt.sides` の 1 つの規則）
+            load_smt = f"(select {memory_array_name(access_bits, memory_tag)} {address_smt})"
             load_smt = self._coerce_smt_bitvec_width(load_smt, access_bits, result_bits)
             total = load_smt if total is None else f"(bvadd {total} {load_smt})"
         if total is None:
@@ -1636,12 +1694,14 @@ class FormulaBuilder:
     def _collect_runtime_unknown_declarations(
         self,
         *analyses: FunctionReturnAnalysis,
+        sides: Optional[Sequence[int]] = None,
     ) -> List[Tuple[str, int]]:
         declarations: List[Tuple[str, int]] = []
         seen = set()
+        current_tag: List[Optional[str]] = [None]
 
         def extend_from_expression(expr) -> None:
-            for decl in collect_unknown_smt_declarations(expr):
+            for decl in collect_unknown_smt_declarations(expr, current_tag[0]):
                 if decl in seen:
                     continue
                 seen.add(decl)
@@ -1651,9 +1711,10 @@ class FormulaBuilder:
             for condition in conditions or []:
                 extend_from_expression(getattr(condition, "expression", None))
 
-        for analysis in analyses:
+        for index, analysis in enumerate(analyses):
             if analysis is None:
                 continue
+            current_tag[0] = _side_tag_at(sides, index)
             for ret in getattr(analysis, "returns", []) or []:
                 extend_from_expression(getattr(ret, "value", None))
                 extend_from_conditions(getattr(ret, "conditions", None))
@@ -1741,12 +1802,14 @@ class FormulaBuilder:
     def _collect_intrinsic_smt_declarations(
         self,
         *analyses: FunctionReturnAnalysis,
+        sides: Optional[Sequence[int]] = None,
     ) -> List[str]:
         declarations: List[str] = []
         seen = set()
+        current_tag: List[Optional[str]] = [None]
 
         def extend_from_expression(expr) -> None:
-            for decl in collect_intrinsic_smt_declarations(expr):
+            for decl in collect_intrinsic_smt_declarations(expr, current_tag[0]):
                 if decl in seen:
                     continue
                 seen.add(decl)
@@ -1756,9 +1819,10 @@ class FormulaBuilder:
             for condition in conditions or []:
                 extend_from_expression(getattr(condition, "expression", None))
 
-        for analysis in analyses:
+        for index, analysis in enumerate(analyses):
             if analysis is None:
                 continue
+            current_tag[0] = _side_tag_at(sides, index)
             for ret in getattr(analysis, "returns", []) or []:
                 extend_from_expression(getattr(ret, "value", None))
                 extend_from_conditions(getattr(ret, "conditions", None))
@@ -1985,14 +2049,16 @@ class FormulaBuilder:
         self,
         analysis: FunctionReturnAnalysis,
         return_var_name: str,
-        param_infos: List[ParameterInfo]
+        param_infos: List[ParameterInfo],
+        *,
+        side: Optional[int] = None,
     ) -> List[str]:
         """
         return値の定義を構築
         
         全てのreturn定義の条件を反映したite式を生成
         """
-        return build_return_definition(analysis, return_var_name, param_infos)
+        return build_return_definition(analysis, return_var_name, param_infos, side=side)
     
     def _build_ite_expression(self, return_defs: List[dict], return_size: int) -> str:
         """
@@ -2046,6 +2112,10 @@ class FormulaBuilder:
 
         return {
             'header_lines': context.header_lines,
+            # Issue #282: query が読む側ごとの memory の配列（閉じた式の即時合格を止める判定に使う）
+            'side_memory_arrays': tuple(
+                self._collect_side_memory_arrays((analysis1, analysis2), (1, 2))
+            ),
             'params1': context.params1,
             'params2': context.params2,
             'extra_vars1': context.extra_vars1,

@@ -1,3 +1,4 @@
+import pytest
 # -*- coding: utf-8 -*-
 """Method-B loop-summary regression fixtures.
 
@@ -74,6 +75,16 @@ from scripts.function_tracer_pcode.tests.unit._publication import raw_function_a
 
 #: 最終 relation が ``param_1 == sext64(low32(param_1))`` を含意した、という合成入力。
 _ENTAILED_SIGN32_PARAM0 = RewriteAssumption(0, 64, 32, ExtensionKind.SIGN)
+
+#: Issue #282 PR-282-A: 左右の memory を側ごとの配列にし、memory を読む値の構造の同一視を gate が拒否する。
+#: 左右の read-only の表・pointer の指す先が同じ内容であることは、同じ object である根拠（E 領域・image の identity）と
+#: D-M1 による共有（PR-282-P）が無いと示せないので、これらの EQ は PR-282-A では証明しない（精度の低下）。
+#: PR-282-P で回復したら strict xfail が失敗するので、この印を外す
+_PR282_MEMORY_SHARING_DEFERRED = pytest.mark.xfail(
+    strict=True,
+    reason="#282 PR-282-A: per-side memory; sharing (E region / D-M1) is PR-282-P",
+)
+
 
 def _base_param() -> Expression:
     return Expression.parameter("base", index=0, data_type="int *", size=8)
@@ -1366,6 +1377,7 @@ def _shared_input_base_context() -> dict:
     }
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_ptr_sum_window_branch_fixture_uses_method_b_for_n_1_2_3_and_ge_4():
     full = _readonly_sum(_readonly_summary(start=0, guard_constraints=("0 < count",)))
     tail = _readonly_sum(
@@ -1435,6 +1447,7 @@ def test_loop_shape_mismatch_unreachable_under_shared_inputs_is_not_unknown():
     strategy.solver_runner.run_sequential.assert_called()
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_summary_guard_delta_is_closed_by_exact_return_partition():
     count_expr = _count_param()
     exact_count4 = _sum_expr(
@@ -1511,6 +1524,7 @@ def test_summary_guard_delta_is_closed_by_exact_return_partition():
     strategy.solver_runner.run_sequential.assert_called()
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_summary_guard_delta_uses_proof_backed_term_contract_without_exact_partition():
     count_expr = _count_param()
     tail_proof = ReductionAccumulatorProof(
@@ -1576,6 +1590,7 @@ def test_summary_guard_delta_uses_proof_backed_term_contract_without_exact_parti
     strategy.solver_runner.run_sequential.assert_called()
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_exact_prefix_return_matches_readonly_reduction_accumulator_proof():
     count_expr = _count_param()
     proof = ReductionAccumulatorProof(
@@ -1689,6 +1704,7 @@ def test_exact_prefix_return_matches_storage_backed_count_identity():
     assert _pairwise_strategy()._exact_value_matches_readonly_reduction_proof(exact_case, summary_case)
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_exact_prefix_return_matches_loop_summary_without_accumulator_proof():
     exact = _sum_expr(
         _load_term_expr(0),
@@ -1864,6 +1880,7 @@ def test_exact_prefix_return_matches_wide_abi_summary_count_by_active_parameter_
     strategy.solver_runner.run_sequential.assert_called()
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_exact_prefix_return_matches_seed_term_count_readonly_reduction_proof():
     count_expr = _count_param()
     proof = ReductionAccumulatorProof(
@@ -1907,6 +1924,7 @@ def test_exact_prefix_return_matches_seed_term_count_readonly_reduction_proof():
     strategy.solver_runner.run_sequential.assert_called()
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_exact_tail_entry_return_matches_materialized_readonly_reduction_proof():
     count_expr = _count_param()
     proof = ReductionAccumulatorProof(
@@ -1947,6 +1965,7 @@ def test_exact_tail_entry_return_matches_materialized_readonly_reduction_proof()
     strategy.solver_runner.run_sequential.assert_called()
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_affine_exact_tail_entry_condition_matches_non_prefix_readonly_reduction_proof():
     count_expr = _count_param()
     proof = ReductionAccumulatorProof(
@@ -2042,6 +2061,7 @@ def test_ptradd_guarded_exact_wrong_tail_matches_seeded_readonly_summary():
     strategy.solver_runner.run_sequential.assert_called()
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_vectorized_readonly_proof_with_prefix_witnesses_matches_scalar_summary():
     count_expr = _count_param()
     vectorized_proof = ReductionAccumulatorProof(
@@ -2112,6 +2132,7 @@ def test_vectorized_readonly_proof_with_prefix_witnesses_matches_scalar_summary(
     strategy.solver_runner.run_sequential.assert_called()
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_proof_backed_scalar_and_vectorized_readonly_summaries_compare_equivalent():
     count_expr = _count_param()
     scalar_proof = ReductionAccumulatorProof(
@@ -2655,6 +2676,7 @@ def test_exact_load_sum_count_proof_distinguishes_same_named_parameter_indices()
     assert strategy._exact_value_matches_readonly_reduction_proof(exact_case, summary_case) is False
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_exact_load_sum_matches_synthesized_readonly_reduction_witness():
     count_expr = _count_param()
     proof = ReductionAccumulatorProof(
@@ -3516,6 +3538,7 @@ def test_exact_load_can_match_any_readonly_reduction_ref_not_only_readonly_sum_n
     assert _pairwise_strategy()._exact_value_matches_readonly_reduction_proof(exact_case, summary_case)
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_object_contract_closes_malformed_surface_only_via_typed_aggregate_proof():
     proof = ReductionAccumulatorProof(
         reduction_kind="memory_sum",
@@ -3572,6 +3595,7 @@ def test_object_contract_closes_malformed_surface_only_via_typed_aggregate_proof
     strategy.solver_runner.run_sequential.assert_called()
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_readonly_loop_contract_uses_guard_coverage_when_surface_differs():
     left_value = _readonly_sum(_readonly_summary(start=0))
     right_value = Expression.intrinsic(
@@ -3595,6 +3619,7 @@ def test_readonly_loop_contract_uses_guard_coverage_when_surface_differs():
     strategy.solver_runner.run_sequential.assert_called()
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_path_sensitive_readonly_loop_contract_uses_accumulator_proof_terms():
     count_expr = _count_param()
     left_proof = ReductionAccumulatorProof(
@@ -3819,6 +3844,7 @@ def test_readonly_loop_contract_rejects_mismatched_return_width_without_bridge()
     strategy.solver_runner.run_sequential.assert_called()
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_ptr_sum_window_prior_missed_fixture_allows_nonzero_start_with_nonunit_step_seed():
     start_one_step_two = _readonly_summary(start=1, step=2)
     start_three_step_two = _readonly_summary(

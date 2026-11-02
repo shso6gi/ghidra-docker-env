@@ -175,10 +175,20 @@ def merge_param_and_extra_vars(
     return result
 
 
-def build_symbol_name_mapping(param_infos: List[ParameterInfo]) -> Mapping[str, str]:
-    """最終 SMT シンボル名の写像を作る。"""
+def build_symbol_name_mapping(
+    param_infos: List[ParameterInfo],
+    *,
+    side: Optional[int] = None,
+) -> Mapping[str, str]:
+    """最終 SMT シンボル名の写像を作る。
+
+    `side`（1 = 左、2 = 右）は、その側の memory・image の番地・出口の状態の記号を描くための指定（Issue #282。
+    `core.render_smt.sides`）。左右を 1 つの query で比べる描画は必ず渡す。無い写像ではそれらを描けない。
+    """
+    from scripts.function_tracer_pcode.core.render_smt.sides import with_side
+
     mapping: Dict[str, str] = {}
     for param in param_infos:
         mapping[param.original_name] = param.smt_name
-    return mapping
+    return with_side(mapping, side)
 

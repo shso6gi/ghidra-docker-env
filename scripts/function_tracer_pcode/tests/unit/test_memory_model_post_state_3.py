@@ -210,13 +210,14 @@ def test_return_analyzer_splits_effect_sensitive_observed_load_returns_into_case
         info.value.to_string(): " ".join(cond.to_string() for cond in info.conditions)
         for info in results
     }
-    assert rendered.keys() == {"(MEM[param_1] - MEM[param_2])", "(MEM[param_2] - MEM[param_1])"}
+    # Issue #282 (I3): swap の分岐で、後の store（別の parameter の指す先）と重ならないと示せない読み出しは簡約しない
+    assert rendered.keys() == {"(MEM[param_1] - MEM[param_2])", "(MEM[param_1] - MEM[param_1])"}
     assert "(param_1 != 0)" in rendered["(MEM[param_1] - MEM[param_2])"]
     assert "(param_2 != 0)" in rendered["(MEM[param_1] - MEM[param_2])"]
     assert "(not (MEM[param_2] < MEM[param_1]))" in rendered["(MEM[param_1] - MEM[param_2])"]
-    assert "(param_1 != 0)" in rendered["(MEM[param_2] - MEM[param_1])"]
-    assert "(param_2 != 0)" in rendered["(MEM[param_2] - MEM[param_1])"]
-    assert "(MEM[param_2] < MEM[param_1])" in rendered["(MEM[param_2] - MEM[param_1])"]
+    assert "(param_1 != 0)" in rendered["(MEM[param_1] - MEM[param_1])"]
+    assert "(param_2 != 0)" in rendered["(MEM[param_1] - MEM[param_1])"]
+    assert "(MEM[param_2] < MEM[param_1])" in rendered["(MEM[param_1] - MEM[param_1])"]
 
 def test_return_analyzer_keeps_already_split_observed_swap_case():
     a = Expression.parameter("param_1", 0, size=8)
@@ -335,7 +336,10 @@ def test_rewrite_observed_loads_uses_runtime_ref_provenance_when_read_order_key_
     )
 
     assert rewritten is not None
-    assert rewritten.to_string() == "(MEM[param_2] - MEM[param_1])"
+    # Issue #282 (I3): 後の store（別の parameter の指す先）と重ならないと示せないので、この読み出しは簡約しない
+    assert rewritten.to_string() == "(MEM[param_1] - MEM[param_1])"
+    # 右の読み出しは store の後の読み出し（順序つき）で、入口の値の読み出しと同じ node ではない（消し合わない）
+    assert not rewritten.operands[0].equals(rewritten.operands[1])
 
 def test_expression_expander_prefers_observed_rewrite_over_flat_raw_normalization(monkeypatch):
     import scripts.function_tracer_pcode.semantics.transform.expander as expander_module
@@ -479,9 +483,10 @@ def test_return_analyzer_splits_effect_sensitive_canonical_memory_returns_withou
         info.value.to_string(): " ".join(cond.to_string() for cond in info.conditions)
         for info in results
     }
-    assert rendered.keys() == {"(MEM[param_1] - MEM[param_2])", "(MEM[param_2] - MEM[param_1])"}
+    # Issue #282 (I3): swap の分岐で、後の store（別の parameter の指す先）と重ならないと示せない読み出しは簡約しない
+    assert rendered.keys() == {"(MEM[param_1] - MEM[param_2])", "(MEM[param_1] - MEM[param_1])"}
     assert "(not (MEM[param_2] < MEM[param_1]))" in rendered["(MEM[param_1] - MEM[param_2])"]
-    assert "(MEM[param_2] < MEM[param_1])" in rendered["(MEM[param_2] - MEM[param_1])"]
+    assert "(MEM[param_2] < MEM[param_1])" in rendered["(MEM[param_1] - MEM[param_1])"]
 
 def test_return_analyzer_keeps_even_iteration_wrapper_when_definite_replay_would_change_meaning():
     trace = Expression.parameter("param_1", 0, size=8)
@@ -653,13 +658,14 @@ def test_expression_expander_expands_observed_load_phi_difference_into_cases():
 
     assert len(expanded) == 2
     rendered = {ev.value.to_string(): " ".join(cond.to_string() for cond in ev.conditions) for ev in expanded}
-    assert rendered.keys() == {"(MEM[a] - MEM[b])", "(MEM[b] - MEM[a])"}
+    # Issue #282 (I3): swap の分岐で、後の store（別の parameter の指す先）と重ならないと示せない読み出しは簡約しない
+    assert rendered.keys() == {"(MEM[a] - MEM[b])", "(MEM[a] - MEM[a])"}
     assert "(a != 0)" in rendered["(MEM[a] - MEM[b])"]
     assert "(b != 0)" in rendered["(MEM[a] - MEM[b])"]
     assert "(not (MEM[b] < MEM[a]))" in rendered["(MEM[a] - MEM[b])"]
-    assert "(a != 0)" in rendered["(MEM[b] - MEM[a])"]
-    assert "(b != 0)" in rendered["(MEM[b] - MEM[a])"]
-    assert "(MEM[b] < MEM[a])" in rendered["(MEM[b] - MEM[a])"]
+    assert "(a != 0)" in rendered["(MEM[a] - MEM[a])"]
+    assert "(b != 0)" in rendered["(MEM[a] - MEM[a])"]
+    assert "(MEM[b] < MEM[a])" in rendered["(MEM[a] - MEM[a])"]
 
 def test_expression_expander_multiequal_shortcut_defers_flattened_observed_load_rewrite(monkeypatch):
     import scripts.function_tracer_pcode.semantics.transform.expander as expander_module
@@ -799,4 +805,7 @@ def test_canonicalize_post_state_subexpressions_rewrites_phi_operand_to_memory_l
         ],
     )
 
-    assert normalized.to_string() == "(MEM[a] - MEM[b])"
+    # Issue #282 (I3): 後の store（別の parameter の指す先）と重ならないと示せないので、この読み出しは簡約しない
+    assert normalized.to_string() == "(MEM[a] - MEM[a])"
+    # 右の読み出しは store の後の読み出し（順序つき）で、入口の値の読み出しと同じ node ではない（消し合わない）
+    assert not normalized.operands[0].equals(normalized.operands[1])

@@ -571,6 +571,9 @@ class RuntimeRefProjection:
     #: あった（Issue #215）。そのときは stable / semantic / origin の field を全部 None にし（address は
     #: その key だけ外す）、identity の完全性と、ref を持たない式との区別はこの印で判断する
     identity_unfixable: bool = False
+    #: 番地が program の image（Ghidra の memory block）の中を指すと記録された ref か（Issue #282）。
+    #: その側の image の object の番地なので、左右で同じ数値でも同じ object ではない（側ごとの記号で描く）
+    address_in_image: bool = False
 
 
 _ABSENT_RUNTIME = RuntimeRefProjection(
@@ -715,6 +718,7 @@ def project_runtime_ref(expr: Any, runtime_ref: Any) -> RuntimeRefProjection:
             runtime_ref, (CanonicalLocation, PostStateReadRef, PostStateValueRef)
         ),
         identity_unfixable=unfixable,
+        address_in_image=_address_in_image(runtime_ref),
     )
 
 
@@ -807,6 +811,26 @@ def _address_offset(runtime_ref: Any) -> Optional[int]:
         return int(runtime_ref.address_offset)
     except IDENTITY_EVALUATION_ERRORS:
         return None
+
+
+def _address_in_image(runtime_ref: Any) -> bool:
+    """`AddressValueRef` が image の中の番地（block または data object がある）を記録しているか。
+
+    tracer はすべての定数の varnode に ref を付ける（`source="constant_offset"`）が、block を引けた番地だけが
+    `block_name` / `object_symbol_name` を持つ。取得の失敗（None）は image の外と読む: その定数は数値として
+    描く（従来どおり）。
+    """
+
+    if not isinstance(runtime_ref, AddressValueRef):
+        return False
+    try:
+        return bool(runtime_ref.has_concrete_address()) and (
+            runtime_ref.block_name is not None
+            or runtime_ref.object_symbol_name is not None
+            or runtime_ref.global_object_identity() is not None
+        )
+    except IDENTITY_EVALUATION_ERRORS:
+        return True
 
 
 def _address_object_identity(runtime_ref: Any) -> Tuple[Optional[Tuple[str, int, int]], bool]:

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """シンボル名置換ユーティリティ"""
 
-from typing import Callable, List, Mapping, Sequence, Any
+from typing import Any, Callable, List, Mapping, Optional, Sequence
 
 from scripts.function_tracer_pcode.core import Condition, Expression
 
@@ -11,12 +11,16 @@ def build_symbol_replacer(
     extra_vars_info: List,
     *,
     float_mode: str = "uf",
+    side: Optional[int] = None,
 ) -> Callable[[Any], str]:
     """パラメータ名 → SMT名の最終置換関数を構築する。
 
-    文字列入力だけでなく、Expression/Condition も受け取れる。
+    文字列入力だけでなく、Expression/Condition も受け取れる。`side` はその側の memory などの記号の指定
+    （Issue #282。`build_symbol_name_mapping` と同じ）。
     """
-    mapping = _build_symbol_mapping(params_info, extra_vars_info)
+    from scripts.function_tracer_pcode.core.render_smt.sides import with_side
+
+    mapping = with_side(_build_symbol_mapping(params_info, extra_vars_info), side)
 
     def replacer(node: object) -> str:
         if isinstance(node, (Expression, Condition)):

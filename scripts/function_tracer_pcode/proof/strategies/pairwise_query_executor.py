@@ -198,10 +198,10 @@ def _derive_loop_v2_solver_query_payload(
         analysis1, analysis2, input_correspondence=input_correspondence
     )
     param_replace_fn1 = build_symbol_replacer(
-        base_ctx["params1"], base_ctx.get("extra_vars1", []), float_mode="fp"
+        base_ctx["params1"], base_ctx.get("extra_vars1", []), float_mode="fp", side=1
     )
     param_replace_fn2 = build_symbol_replacer(
-        base_ctx["params2"], base_ctx.get("extra_vars2", []), float_mode="fp"
+        base_ctx["params2"], base_ctx.get("extra_vars2", []), float_mode="fp", side=2
     )
     diagnostic_query_text = build_pair_query(
         base_ctx,
@@ -1187,6 +1187,16 @@ def counterexample_replay_targets(base_ctx: Dict[str, Any]) -> Tuple[Tuple[str, 
     return tuple(_iter_declared_symbols(base_ctx))
 
 
+def closed_formula_needs_no_replay(base_ctx: Dict[str, Any]) -> bool:
+    """SAT の query そのものを反例としてよいか（replay で固定する記号が無い閉じた式）。
+
+    側ごとの memory の配列は replay の対象に入らない（`smt/witness.py` は配列の sort を除く）ので、配列を読む
+    query は閉じた式でも反例にしない（Issue #282, I6: memory の値の実現を確かめていない）。
+    """
+
+    return not counterexample_replay_targets(base_ctx) and not base_ctx.get("side_memory_arrays")
+
+
 def count_counterexample_model_assertions(
     base_ctx: Dict[str, Any],
     counterexample_raw: Optional[Dict[str, Any]],
@@ -1216,7 +1226,7 @@ def _validate_counterexample_model(
     decisive_pairs: Optional[Sequence[Tuple[int, int]]],
 ) -> bool:
     if not counterexample_raw:
-        if not counterexample_replay_targets(base_ctx):
+        if closed_formula_needs_no_replay(base_ctx):
             # A closed formula (no parameters, no extra or runtime symbols)
             # has nothing to replay: the SAT query itself is the witness.
             return True

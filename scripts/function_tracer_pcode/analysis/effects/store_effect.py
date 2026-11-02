@@ -128,6 +128,7 @@ def _impl_summarize_store_effects(
     effects: List[StoreEffect] = []
     has_unsupported_call = False
     incomplete_reasons: Set[str] = set()
+    frame_local_effects: List[StoreEffect] = []
     store_path_global_locations: List[CanonicalLocation] = []
     unaligned_halves: List[Tuple[Tuple[object, List[List[Condition]], Optional[PcodeBlockRef]], object, Tuple[int, int]]] = []
     effect_barriers: List[Tuple[Tuple[int, int], Optional[CanonicalLocation]]] = []
@@ -355,6 +356,16 @@ def _impl_summarize_store_effects(
                 )
                 if store_kind == "stack_frame":
                     # Frame-local memory dies with the function: proven unobservable.
+                    # 同じ関数の中の読み出しの検査のために位置と順序だけ残す（Issue #282）
+                    for path_conditions in path_sets:
+                        frame_local_effects.append(
+                            StoreEffect(
+                                location=location,
+                                value=None,
+                                conditions=ConditionSimplifier.simplify_conditions(list(path_conditions)),
+                                order_key=op_order_key,
+                            )
+                        )
                     continue
                 if store_kind in {"parameter", "global"} and location is not None:
                     effect_barriers.append(((block_ordinal, op_ordinal), location))
@@ -913,6 +924,16 @@ def _impl_summarize_store_effects(
             right_op, right_path_sets, right_block_ref = right_tag
             store_kind, location = classify_store_address(half.base_expr, parameters, size=half.width)
             if store_kind == "stack_frame":
+                local_order_key = _effect_order_key(tracer, right_op)
+                for path_conditions in right_path_sets:
+                    frame_local_effects.append(
+                        StoreEffect(
+                            location=location,
+                            value=None,
+                            conditions=ConditionSimplifier.simplify_conditions(list(path_conditions)),
+                            order_key=local_order_key,
+                        )
+                    )
                 continue
             if store_kind == "unresolved" or location is None:
                 incomplete_reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
@@ -1009,7 +1030,18 @@ def _impl_summarize_store_effects(
         debug=debug,
     )
 
-    synthetic_expr = build_void_effect_summary_expr(effects)
+    from scripts.function_tracer_pcode.analysis.effects.observation_surface import (
+        EFFECT_GLOBAL_STORE_IDENTITY_REASON,
+    )
+
+    if any(effect.location.base_ref.is_global() for effect in effects):
+        # Issue #282 (I1): 左右の global の object が同じである根拠（identity の証拠）が無い
+        incomplete_reasons.add(EFFECT_GLOBAL_STORE_IDENTITY_REASON)
+    synthetic_expr = build_void_effect_summary_expr(
+        effects,
+        parameters,
+        big_endian=program_is_big_endian(getattr(tracer, "program", None)),
+    )
     if debug:
         print(
             f"[EffectSummary] collected {len(effects)} effects "
@@ -1026,6 +1058,7 @@ def _impl_summarize_store_effects(
         unsupported_call_sites=tuple(unsupported_call_sites),
         call_target_resolution_evidence=tuple(call_target_resolution_evidence),
         call_site_effect_summary_evidence=tuple(call_site_effect_summary_evidence),
+        frame_local_effects=tuple(frame_local_effects),
     )
 
 #: loop の中の書き込み（Issue #281 / #285）
@@ -1179,7 +1212,17 @@ def _impl__collect_ram_output_write_effects(
             if out is None:
                 continue
             write_class = classify(out)
-            if write_class is None or write_class == "readonly":
+            if write_class is None:
+                continue
+            if write_class == "readonly":
+                # Issue #282 (Q2): read-only と分類した場所への書き込みは、実行すれば fault するか、分類が誤っている。
+                # どちらでも黙って捨てると具体化（Q1: 先行する store を見ない）の前提が崩れるので、効果を不完全にする。
+                # 値を作らない op（呼び出しが変え得る印の INDIRECT・SSA の合流の MULTIEQUAL・出口の状態の写し）は
+                # 書き込みではない
+                if mnemonic not in {"INDIRECT", "MULTIEQUAL"} and not (
+                    return_targets and _is_ram_exit_copy(op, return_targets)
+                ):
+                    reasons.add(_EFFECT_STORE_LOCATION_UNMODELED_REASON)
                 continue
             if mnemonic == "INDIRECT":
                 # Possible modification by a call: the callee summary lane
@@ -1673,35 +1716,21 @@ def _impl__compute_effect_cycle_components(
             components[location] = frozen_component
     return components
 
-def _impl_build_void_effect_summary_expr(effects: Sequence[StoreEffect]) -> Optional[Expression]:
-    groups: Dict[CanonicalLocation, List[StoreEffect]] = {}
-    for effect in effects:
-        groups.setdefault(effect.location, []).append(effect)
+def _impl_build_void_effect_summary_expr(
+    effects: Sequence[StoreEffect],
+    parameters: Optional[Sequence[Dict]] = None,
+    *,
+    big_endian: Optional[bool] = None,
+) -> Optional[Expression]:
+    """関数が書いた memory の比較面（Issue #282: 番地を量化した観測。`observation_surface`）。
 
-    if not groups:
-        return None
+    作れない（global の object への store を含む・番地や byte の順が分からない）なら None。呼び出し側は None を
+    「面が無い」ではなく「効果を比べられない」と扱う（効果を不完全にする）。
+    """
 
-    summary_parts: List[Expression] = []
-    for location in sorted(groups.keys(), key=_location_sort_key):
-        loc_effects = sorted(groups[location], key=lambda effect: effect.order_key, reverse=True)
-        value_branches = []
-        flag_branches = []
-        for effect in loc_effects:
-            cond = Condition.combine_and(effect.conditions)
-            value_branches.append((cond, effect.value))
-            flag_branches.append((cond, Expression.constant(1, 1)))
-        value_branches.append((None, Expression.constant(0, max(1, location.size))))
-        flag_branches.append((None, Expression.constant(0, 1)))
-        value_expr = Expression.phi(value_branches)
-        value_expr.size = max(1, location.size)
-        flag_expr = Expression.phi(flag_branches)
-        flag_expr.size = 1
-        summary_parts.append(_concat(flag_expr, value_expr))
+    from scripts.function_tracer_pcode.analysis.effects.observation_surface import build_observation_surface
 
-    result = summary_parts[0]
-    for part in summary_parts[1:]:
-        result = _concat(result, part)
-    return result
+    return build_observation_surface(effects, parameters, big_endian=big_endian)
 
 def _impl__collect_definite_active_effects(
     return_conditions: Sequence[Condition],

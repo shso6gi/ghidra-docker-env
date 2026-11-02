@@ -43,8 +43,9 @@ def _sret_constructor(radsqr_value):
     obj = Expression.parameter("param_1", 0, data_type="undefined8 *", size=8)
     r = Expression.parameter("param_2", 1, data_type="float", size=4)
     effects = [
-        _store(CanonicalLocation(base_param="param_1", offset=0, size=4), r, 1),
-        _store(CanonicalLocation(base_param="param_1", offset=4, size=4), radsqr_value, 2),
+        # Issue #282: 比較面は番地の式を作るので、位置の基底は parameter の identity（index）で持つ
+        _store(CanonicalLocation(base_ref=LocationBaseRef.parameter("param_1", index=0), offset=0, size=4), r, 1),
+        _store(CanonicalLocation(base_ref=LocationBaseRef.parameter("param_1", index=0), offset=4, size=4), radsqr_value, 2),
         _store(CanonicalLocation(base_param="stackframe", offset=-8, size=8), obj, 3),  # local spill
     ]
     analysis = FunctionReturnAnalysis(
@@ -56,10 +57,16 @@ def _sret_constructor(radsqr_value):
         return_type_obj=resolve_mock_data_type("undefined8 *"),
     )
     analysis.effect_summary = EffectSummary(parameter_names=["param_1", "param_2"], effects=effects)
+    # Issue #282: 比較面（番地を量化した観測）は byte の順を使う
+    analysis.program_is_big_endian = False
     # Production summaries carry the effects-only synthetic expression (the
     # void surface); it must not become the width authority of the combined
     # stores ⊕ return surface.
-    analysis.effect_summary.synthetic_expr = build_void_effect_summary_expr(effects)
+    analysis.effect_summary.synthetic_expr = build_void_effect_summary_expr(
+        [effect for effect in effects if not effect.location.base_ref.is_stack_frame()],
+        analysis.parameters,
+        big_endian=False,
+    )
     return analysis
 
 
@@ -110,11 +117,11 @@ def test_sret_constructor_is_compared_on_stores_and_return_value():
     assert surface.kind == "memory_effect"
     assert surface.evidence["source"] == OBSERVABLE_EFFECT_SURFACE_SOURCE
     assert surface.evidence["effect_count"] == 2
-    # 2 locations x (8-bit presence flag + 32-bit value) + 64-bit return pointer
-    assert surface.explicit_bit_width == 2 * 40 + 64
-    assert surface.evidence["effect_bits"] == 80 and surface.evidence["return_bits"] == 64
+    # Issue #282: 番地を量化した 1 byte の観測（8-bit の書いたか + 8-bit の値）+ 64-bit の戻り値の pointer
+    assert surface.explicit_bit_width == 16 + 64
+    assert surface.evidence["effect_bits"] == 16 and surface.evidence["return_bits"] == 64
     assert analysis.returns[0].value.operator == "PIECE"
-    assert analysis.returns[0].value.get_bit_width() == 2 * 40 + 64
+    assert analysis.returns[0].value.get_bit_width() == 16 + 64
     assert "observable_effect_surface" in analysis.analysis_notes
 
 
@@ -144,14 +151,14 @@ def test_surface_is_not_built_for_void_or_untrusted_or_storeless_functions():
     assert local_only.returns[0].value.operator != "PIECE"
 
 
-COMBINED_BITS = 2 * 40 + 64
+COMBINED_BITS = 16 + 64
 
 
 def test_semantic_width_normalization_keeps_the_combined_surface_width():
     old, _ = _old_and_new_constructors()
     # The effects-only synthetic expression (all three stores, stack spill
     # included) is narrower than nothing but different from the surface.
-    assert old.effect_summary.synthetic_expr.get_bit_width() == 3 * 8 + 32 + 32 + 64
+    assert old.effect_summary.synthetic_expr.get_bit_width() == 16
     assert old.get_memory_effect_bit_width() == COMBINED_BITS
 
     normalized = normalize_analysis_semantic_width(old)
@@ -190,8 +197,8 @@ def test_pair_query_on_store_only_difference_is_sat_after_normalization():
 
     cases1 = extract_return_cases(old)
     cases2 = extract_return_cases(new)
-    replace1 = build_symbol_replacer(base_ctx["params1"], base_ctx.get("extra_vars1", []))
-    replace2 = build_symbol_replacer(base_ctx["params2"], base_ctx.get("extra_vars2", []))
+    replace1 = build_symbol_replacer(base_ctx["params1"], base_ctx.get("extra_vars1", []), side=1)
+    replace2 = build_symbol_replacer(base_ctx["params2"], base_ctx.get("extra_vars2", []), side=2)
     query = build_pair_query(base_ctx, cases1[0], cases2[0], replace1, replace2, "(0,0)")
 
     assert "(_ BitVec 0)" not in query

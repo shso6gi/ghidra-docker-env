@@ -80,6 +80,16 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import bui
 
 
 
+#: Issue #282 PR-282-A: 左右の memory を側ごとの配列にし、memory を読む値の構造の同一視を gate が拒否する。
+#: 左右の read-only の表・pointer の指す先が同じ内容であることは、同じ object である根拠（E 領域・image の identity）と
+#: D-M1 による共有（PR-282-P）が無いと示せないので、これらの EQ は PR-282-A では証明しない（精度の低下）。
+#: PR-282-P で回復したら strict xfail が失敗するので、この印を外す
+_PR282_MEMORY_SHARING_DEFERRED = pytest.mark.xfail(
+    strict=True,
+    reason="#282 PR-282-A: per-side memory; sharing (E region / D-M1) is PR-282-P",
+)
+
+
 def _model_binding_declared_inputs(query):
     """fixture の SAT model: query が宣言した入力をすべて束縛する（replay は宣言の完全な束縛を要求する）。"""
 
@@ -697,6 +707,7 @@ def test_loop_exact_guard_joins_the_exact_prior_term_artifact():
         encoder(session, other_guard)
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_real_method_b_producer_dual_writes_blocker_term_and_guard():
     from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
         make_internal_v2_reason_diagnostic,

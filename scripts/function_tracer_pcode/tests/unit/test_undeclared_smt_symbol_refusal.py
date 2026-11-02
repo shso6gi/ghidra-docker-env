@@ -18,6 +18,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from scripts.function_tracer_pcode.core.render_smt.sides import with_side
+
 from scripts.function_tracer_pcode.core import (
     AddressValueRef,
     CanonicalLocation,
@@ -82,7 +84,11 @@ def test_mapped_symbols_and_unmapped_renders_are_unchanged():
 def test_a_symbol_that_declares_itself_is_not_refused():
     location = CanonicalLocation(base_ref=LocationBaseRef.parameter("ptr", index=0), offset=0, size=4)
     node = published(_var("post_ptr", runtime_ref=location))
-    assert node.to_smt(symbol_name_mapping={}) == node.to_smt()
+    # Issue #282: 自前で宣言する記号はその側の状態。左右の query の写像（側つき）では側の記号になり、側の無い写像では
+    # 描かない（左右のどちらの状態か分からない）
+    assert node.to_smt(symbol_name_mapping=with_side({}, 1)) == node.to_smt() + "_s1"
+    with pytest.raises(UndeclaredSmtSymbolError):
+        node.to_smt(symbol_name_mapping={})
 
 
 def _address_variable(name="g_table", *, offset=0x1000):
@@ -94,10 +100,10 @@ def _address_variable(name="g_table", *, offset=0x1000):
 
 def test_only_an_address_rendered_as_a_literal_is_exempt():
     load = published(Expression.memory(_address_variable(), size=4))
-    assert "(_ bv4096 " in load.to_smt(symbol_name_mapping={})
+    assert "(_ bv4096 " in load.to_smt(symbol_name_mapping=with_side({}, 1))
     # address 文脈でも literal に描けない節点は、宣言が無ければ拒否する。
     with pytest.raises(UndeclaredSmtSymbolError):
-        published(Expression.memory(Expression.variable("base", size=8), size=4)).to_smt(symbol_name_mapping={})
+        published(Expression.memory(Expression.variable("base", size=8), size=4)).to_smt(symbol_name_mapping=with_side({}, 1))
 
 
 # --- monolithic: call projection の lowering は本体の try より前 -------------------------------------

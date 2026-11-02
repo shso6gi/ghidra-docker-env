@@ -128,6 +128,17 @@ _FLOAT_BV_WIDTH_TO_SORT = {
 _MEMORY_ARRAY_WIDTHS = {8, 16, 32, 64}
 
 
+def memory_read_bits(expr) -> Optional[int]:
+    """MEMORY の読み出しの幅（bit）。node の `size`（byte）が正のときだけ。推測の幅（`get_bit_width` の既定 32）を
+    使わない（Issue #282, I4）。"""
+
+    try:
+        size = int(getattr(expr, "size", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    return size * 8 if size > 0 else None
+
+
 _SMT_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -988,8 +999,15 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
     expr_type = expr.expr_type
     expr_kind = expr_type.__class__
 
+    side_tag = mapping_side_tag(symbol_name_mapping)
+
     if expr_type == expr_kind.CONSTANT:
         bits = expr.get_bit_width()
+        if symbol_name_mapping is not None and expression_addresses_image(expr):
+            # Issue #282 (I1): image の object の番地は側ごとの記号。側の無い写像では描かない
+            if side_tag is None:
+                raise UndeclaredSmtSymbolError(symbol_kind="IMAGE_ADDRESS", symbol=str(expr.value))
+            return side_address_smt(expr, bits, side_tag)
         global_address = global_address_smt(expr, bits)
         if global_address is not None:
             # The absolute address of a named global differs between the two
@@ -1013,18 +1031,30 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
             projection = semantic_projection(expr)
             if projection.is_address_value_ref and projection.address_offset is not None:
                 bits = max(1, expression_smt_bit_width(expr))
+                if symbol_name_mapping is not None and expression_addresses_image(expr):
+                    if side_tag is None:
+                        raise UndeclaredSmtSymbolError(symbol_kind="IMAGE_ADDRESS", symbol=str(expr.name))
+                    return side_address_smt(expr, bits, side_tag)
                 global_address = global_address_smt(expr, bits)
                 if global_address is not None:
                     return global_address
                 return f"(_ bv{projection.address_offset} {bits})"
         name = expr.name if expr.name else "var"
+        if symbol_name_mapping is not None and name in symbol_name_mapping:
+            return symbol_name_mapping[name]
+        if semantic_projection(expr).declares_variable_symbol:
+            # Issue #282 (I1, #248): 自前で宣言する記号（出口の状態の値・location の値）は、表示名でなく ref の
+            # identity から作る（`poststate_{abs(offset)}_{size}` は別の場所を同じ名前にしていた）。その側の状態なので、
+            # 左右の query では側ごとの記号。側の無い写像では描かない
+            name = side_state_symbol_name(expr)
+            if symbol_name_mapping is None:
+                return name
+            if side_tag is None:
+                raise UndeclaredSmtSymbolError(symbol_kind="SIDE_STATE", symbol=name)
+            return side_qualified_name(name, side_tag)
         if symbol_name_mapping is None:
             return name
-        if name in symbol_name_mapping:
-            return symbol_name_mapping[name]
-        if not semantic_projection(expr).declares_variable_symbol:
-            raise UndeclaredSmtSymbolError(symbol_kind="VARIABLE", symbol=name)
-        return name
+        raise UndeclaredSmtSymbolError(symbol_kind="VARIABLE", symbol=name)
 
     if expr_type == expr_kind.UNKNOWN:
         return _unknown_smt_symbol_name(expr)
@@ -1391,9 +1421,15 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
         return fragment.literal(")").build()
 
     if expr_type == expr_kind.MEMORY:
-        mem_bits = expression_smt_bit_width(expr) or 32
-        if mem_bits not in _MEMORY_ARRAY_WIDTHS:
-            mem_bits = 32
+        # Issue #282 (I4): 読み出しの幅は描画で狭めない。幅の分からない読み出しは描かない
+        mem_bits = memory_read_bits(expr)
+        if mem_bits is None:
+            raise UnsupportedSmtSemanticsError(
+                f"memory read width is unknown or not a whole number of bytes (size={getattr(expr, 'size', None)!r})"
+            )
+        if symbol_name_mapping is not None and side_tag is None:
+            # Issue #282 (I2): 左右の query の材料になり得る描画で、どの側の memory かが無い
+            raise UndeclaredSmtSymbolError(symbol_kind="MEMORY", symbol=f"mem{mem_bits}")
         addr_expr = expr.operands[0]
         addr_smt = render_child(addr_expr, address_context=True)
         addr_smt = _coerce_expr_to_bitvec_width(
@@ -1403,7 +1439,7 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
             prefer_sign_extension=False,
             float_mode=float_mode,
         )
-        return f"(select mem{mem_bits} {addr_smt})"
+        return f"(select {memory_array_name(mem_bits, side_tag)} {addr_smt})"
 
     if expr_type == expr_kind.PHI:
         branches = expr.value
@@ -1539,8 +1575,16 @@ from scripts.function_tracer_pcode.core.render_smt.intrinsics import (
 from scripts.function_tracer_pcode.core.render_smt.loop_lowering import (
     _neon_ext_operands_are_smt_supported,
 )
+from scripts.function_tracer_pcode.core.render_smt.sides import (  # noqa: E402
+    mapping_side_tag,
+    memory_array_name,
+    side_qualified_name,
+)
 from scripts.function_tracer_pcode.core.render_smt.unknowns import (
+    expression_addresses_image,
+    side_state_symbol_name,
     global_address_smt,
+    side_address_smt,
     _unknown_smt_symbol_name,
 )
 from scripts.function_tracer_pcode.core.render_smt.widths import (

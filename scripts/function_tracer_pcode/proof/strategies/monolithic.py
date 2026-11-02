@@ -335,12 +335,12 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                 call_replace1 = build_symbol_replacer(
                     call_base_ctx["params1"],
                     call_base_ctx.get("extra_vars1", []),
-                    float_mode="fp",
+                    float_mode="fp", side=1
                 )
                 call_replace2 = build_symbol_replacer(
                     call_base_ctx["params2"],
                     call_base_ctx.get("extra_vars2", []),
-                    float_mode="fp",
+                    float_mode="fp", side=2
                 )
                 lowered_call_projection = lower_call_projection_for_case_pair(
                     dispatch_frame,
@@ -625,6 +625,12 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
             sat_unsafety_reasons.extend(
                 self._sat_decisive_return_coverage_unsafety_reasons(coverage_unsafety_reasons)
             )
+            # Issue #282 (I6): 側ごとの memory・番地・出口の状態を読む関数の反例は、実現を確かめていない
+            from scripts.function_tracer_pcode.proof.formula.memory_state import (
+                analysis_pair_memory_state_refs,
+            )
+
+            sat_unsafety_reasons.extend(analysis_pair_memory_state_refs(analysis1, analysis2))
             if (
                 final_is_equivalent is False
                 and frozen_surface is not None
@@ -917,10 +923,10 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                     )
                     if replay_reasons:
                         from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
-                            counterexample_replay_targets,
+                            closed_formula_needs_no_replay,
                         )
                         try:
-                            replay_targets = counterexample_replay_targets(
+                            closed_formula = closed_formula_needs_no_replay(
                                 self.formula_builder.build_base_context(
                                     analysis1,
                                     analysis2,
@@ -928,8 +934,8 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                                 )
                             )
                         except Exception:
-                            replay_targets = None
-                        if replay_targets is not None and not replay_targets:
+                            closed_formula = False
+                        if closed_formula:
                             # Closed formula: nothing to replay, the SAT query
                             # itself is the complete witness.
                             replay_reasons = ()

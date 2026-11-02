@@ -13,7 +13,16 @@ from scripts.function_tracer_pcode.core.intrinsics import (
 )
 
 
-def collect_intrinsic_smt_declarations(expr) -> List[str]:
+def memory_function_name(name: str, side_tag: Optional[str]) -> str:
+    """値が memory の内容に依存する関数（read-only の表の和 `READONLY_SUM`）の名前。側ごとに別の関数にする
+    （Issue #282, I1: 同じ名前の関数を左右で共有すると、側ごとの公理が左右の memory を等しくする）。"""
+
+    from scripts.function_tracer_pcode.core.render_smt.sides import side_qualified_name
+
+    return side_qualified_name(name, side_tag)
+
+
+def collect_intrinsic_smt_declarations(expr, side_tag: Optional[str] = None) -> List[str]:
     """Collect deterministic SMT declarations needed for supported intrinsic applications."""
     declarations: List[str] = []
     seen = set()
@@ -23,7 +32,7 @@ def collect_intrinsic_smt_declarations(expr) -> List[str]:
         expr_kind = node.expr_type.__class__
         if node.expr_type != expr_kind.INTRINSIC:
             continue
-        decl = _intrinsic_smt_declaration(node)
+        decl = _intrinsic_smt_declaration(node, side_tag)
         if decl is None or decl in seen:
             continue
         seen.add(decl)
@@ -31,7 +40,19 @@ def collect_intrinsic_smt_declarations(expr) -> List[str]:
     return declarations
 
 
-def _intrinsic_smt_declaration(expr) -> Optional[str]:
+def _memory_side_tag(symbol_name_mapping) -> Optional[str]:
+    """memory に依存する関数を描く側。側の無い写像（左右の query の材料かもしれない描画）では描かない。"""
+
+    from scripts.function_tracer_pcode.core.render_smt.render import UndeclaredSmtSymbolError
+    from scripts.function_tracer_pcode.core.render_smt.sides import mapping_side_tag
+
+    tag = mapping_side_tag(symbol_name_mapping)
+    if symbol_name_mapping is not None and tag is None:
+        raise UndeclaredSmtSymbolError(symbol_kind="MEMORY_FUNCTION", symbol="memory-dependent loop summary")
+    return tag
+
+
+def _intrinsic_smt_declaration(expr, side_tag: Optional[str] = None) -> Optional[str]:
     opcode = getattr(expr, "opcode", None)
     mnemonic = getattr(expr, "name", None) or ""
     operands = getattr(expr, "operands", None) or []
@@ -43,7 +64,7 @@ def _intrinsic_smt_declaration(expr) -> Optional[str]:
         count_bits = max(1, int(expression_smt_bit_width(operands[1]) or 1))
         result_bits = max(1, int(expression_smt_bit_width(expr) or 1))
         return (
-            f"(declare-fun {_readonly_sum_function_name(expr)} "
+            f"(declare-fun {memory_function_name(_readonly_sum_function_name(expr), side_tag)} "
             f"((_ BitVec {base_bits}) (_ BitVec {count_bits})) "
             f"(_ BitVec {result_bits}))"
         )
@@ -190,7 +211,7 @@ def _lower_intrinsic_to_smt(
             prefer_sign_extension=_expr_prefers_signed_extension(count),
             float_mode=float_mode,
         )
-        return f"({_readonly_sum_function_name(expr)} {base_smt} {count_smt})"
+        return f"({memory_function_name(_readonly_sum_function_name(expr), _memory_side_tag(symbol_name_mapping))} {base_smt} {count_smt})"
 
     if opcode == COUNTED_LOOP_SUM_OPCODE or mnemonic == "COUNTED_LOOP_SUM":
         if len(operands) != 3:

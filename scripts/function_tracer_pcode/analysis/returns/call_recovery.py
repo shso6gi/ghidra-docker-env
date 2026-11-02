@@ -2569,7 +2569,8 @@ def _impl__normalize_call_target_expression(
         if pointer_size <= 0:
             return expr
 
-        loaded_value = self._read_memory_value(address_value, pointer_size)
+        # 呼び出し先の slot（Issue #282, Q1 の CODE_TARGET: 再配置は APPLIED のときだけ）
+        loaded_value = self._read_code_target_value(address_value, pointer_size)
         if loaded_value is None:
             return expr
 

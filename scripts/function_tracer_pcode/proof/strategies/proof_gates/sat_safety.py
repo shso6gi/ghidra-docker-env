@@ -316,6 +316,8 @@ def _impl__unknown_reason_id_for_blocking_unsafety(self, reason: Optional[str]):
         "bounded_call_refinement_argument_alignment_failed": "call_argument_extraction_incomplete",
         "bounded_call_refinement_deferred_target_unresolved": "call_target_resolution_unproven",
         "bounded_call_refinement_return_summary_unusable": "callee_return_summary_incomplete",
+        # Issue #282 (I3): 入口の memory の読み出しと先行する store の関係を取り出せない
+        "memory_read_alias_unresolved": "memory_effect_order_extraction_incomplete",
     }
     return call_effect_reasons.get(
         reason_kind, "effect_observation_coverage_incomplete"

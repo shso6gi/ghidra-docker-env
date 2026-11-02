@@ -1414,9 +1414,9 @@ def test_return_analyzer_normalizes_observed_load_returns_to_symbolic_post_state
     )
 
     assert normalized is not None
-    assert expression_contains_post_state_reads(normalized)
-    assert expression_contains_post_state_reads(normalized.operands[0])
-    assert expression_contains_post_state_reads(normalized.operands[1])
+    # Issue #282 (I3): swap の後の param_1 の読み出しは、後の param_2 への store と重ならないと示せない。正規化は
+    # 読み出しを時点つきのまま残し（入口の値の読み出しにしない）、`read_validation` の検査が EQ と NOT_EQ を止める
+    assert [operand.read_order_key for operand in normalized.operands] == [20, 21]
 
     lowered = lower_post_state_expression_for_smt(
         normalized,
@@ -1427,7 +1427,8 @@ def test_return_analyzer_normalizes_observed_load_returns_to_symbolic_post_state
 
     assert lowered is not None
     assert expression_contains_post_state_reads(lowered) is False
-    assert lowered.operands[0].expr_type == ExpressionType.PHI
+    # param_1 は簡約しない（時点つきの読み出し）。param_2 は最後の store（param_2 への store）が値を決める
+    assert lowered.operands[0].read_order_key is not None
     assert lowered.operands[1].expr_type == ExpressionType.PHI
 
 def test_return_analyzer_normalizes_single_arithmetic_update_rhs_to_post_state():

@@ -341,6 +341,7 @@ def _impl_analyze_function(
             deferred_calls=dict(self._current_deferred_calls),
             effect_summary=effect_summary,
             program_is_big_endian=self._program_is_big_endian(),
+            program_image_ranges=self._program_image_ranges(),
             binary_id=self._binary_id,
         )
         # Issue #131: 構築時の値は途中の写し。以降の復元・要約・refinement で増えた
@@ -393,6 +394,21 @@ def _impl_analyze_function(
                         "effect_count": len(getattr(effect_summary, "effects", []) or []),
                     },
                 )
+            elif (
+                return_type_obj is not None
+                and self._is_void_type(return_type_obj)
+                and effect_summary.synthetic_expr is None
+                and getattr(effect_summary, "effects", None)
+                and not effect_summary.has_unsupported_call
+                and not _effect_summary_incomplete_reasons(effect_summary)
+            ):
+                # Issue #282: 観測する store があるのに比較面を作れない（番地・byte の順が分からない）。面の無い void
+                # 関数として比べると store を落とすので、効果を不完全にする
+                effect_summary.incomplete_reasons = tuple(
+                    dict.fromkeys(tuple(effect_summary.incomplete_reasons) + ("effect_surface_composition_incomplete",))
+                )
+                if "effect_surface_composition_incomplete" not in result.analysis_notes:
+                    result.analysis_notes.append("effect_surface_composition_incomplete")
 
             if not (return_type_obj is not None and self._is_void_type(return_type_obj)):
                 recovered_returns = self._recover_call_wrapper_returns(

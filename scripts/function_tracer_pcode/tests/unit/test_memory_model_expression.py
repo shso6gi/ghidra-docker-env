@@ -225,7 +225,8 @@ def test_expression_expander_collapses_nested_multiequal_using_active_conditions
     )
 
     assert len(expanded) == 1
-    assert expanded[0].value.to_string() == "MEM[b]"
+    # Issue #282 (I3): 後の store（別の parameter の指す先）と重ならないと示せないので、この読み出しは簡約しない
+    assert expanded[0].value.to_string() == "MEM[a]"
 
 def test_expression_expander_collapses_nested_multiequal_with_grouped_active_conditions():
     a = Expression.parameter("a", 0, size=8)
@@ -299,7 +300,8 @@ def test_expression_expander_collapses_nested_multiequal_with_grouped_active_con
     )
 
     assert len(expanded) == 1
-    assert expanded[0].value.to_string() == "MEM[b]"
+    # Issue #282 (I3): 後の store（別の parameter の指す先）と重ならないと示せないので、この読み出しは簡約しない
+    assert expanded[0].value.to_string() == "MEM[a]"
 
 def test_return_analyzer_reduces_phi_bearing_expanded_return_without_recanonicalizing():
     a = Expression.parameter("param_1", 0, size=8)
@@ -625,4 +627,5 @@ def test_expression_expander_uses_whole_operation_shortcut_before_recursive_cart
 
     assert len(expanded) == 2
     rendered = {ev.value.to_string(): " ".join(cond.to_string() for cond in ev.conditions) for ev in expanded}
-    assert rendered.keys() == {"(MEM[a] - MEM[b])", "(MEM[b] - MEM[a])"}
+    # Issue #282 (I3): swap の分岐で、後の store（別の parameter の指す先）と重ならないと示せない読み出しは簡約しない
+    assert rendered.keys() == {"(MEM[a] - MEM[b])", "(MEM[a] - MEM[a])"}

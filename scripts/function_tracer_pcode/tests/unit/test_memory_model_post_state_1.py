@@ -709,7 +709,8 @@ def test_effect_summary_collapses_post_state_phi_with_explicit_complementary_gua
     )
 
     assert collapsed is not None
-    assert collapsed.to_string() == "MEM[b]"
+    # Issue #282 (I3): 後の store（別の parameter の指す先）と重ならないと示せないので、この読み出しは簡約しない
+    assert collapsed.to_string() == "MEM[a]"
 
 def test_effect_summary_collapses_pruned_post_state_memory_leaf_to_canonical_location():
     a = Expression.parameter("a", 0, size=8)
@@ -744,7 +745,8 @@ def test_effect_summary_collapses_pruned_post_state_memory_leaf_to_canonical_loc
     )
 
     assert collapsed is not None
-    assert collapsed.to_string() == "MEM[b]"
+    # Issue #282 (I3): 後の store（別の parameter の指す先）と重ならないと示せないので、この読み出しは簡約しない
+    assert collapsed.to_string() == "MEM[a]"
 
 def test_effect_summary_generalized_collapse_resolves_raw_post_state_memory_leaf():
     a = Expression.parameter("a", 0, size=8)
@@ -779,7 +781,8 @@ def test_effect_summary_generalized_collapse_resolves_raw_post_state_memory_leaf
     )
 
     assert collapsed is not None
-    assert collapsed.to_string() == "MEM[b]"
+    # Issue #282 (I3): 後の store（別の parameter の指す先）と重ならないと示せないので、この読み出しは簡約しない
+    assert collapsed.to_string() == "MEM[a]"
 
 def test_collapse_post_state_read_preserves_root_object_identity():
     a = Expression.parameter("a", 0, size=8)
@@ -868,7 +871,10 @@ def test_canonicalize_post_state_subexpressions_handles_composite_guard_without_
         ],
     )
 
-    assert normalized.to_string() == "(MEM[a] - MEM[b])"
+    # Issue #282 (I3): 後の store（別の parameter の指す先）と重ならないと示せないので、この読み出しは簡約しない
+    assert normalized.to_string() == "(MEM[a] - MEM[a])"
+    # 右の読み出しは store の後の読み出し（順序つき）で、入口の値の読み出しと同じ node ではない（消し合わない）
+    assert not normalized.operands[0].equals(normalized.operands[1])
 
 def test_normalize_post_state_expression_collapses_effect_rewritten_branch_value():
     value = Expression.parameter("value", 0, size=8)
@@ -1115,7 +1121,10 @@ def test_normalize_post_state_expression_promotes_observed_loads_to_symbolic_pos
     assert lowered is not None
     assert lowered.to_string() != expr.to_string()
     assert expression_contains_post_state_reads(lowered) is False
-    assert lowered.operands[0].expr_type == ExpressionType.PHI
+    # Issue #282 (I3): param_1 の出口の値は、後の param_2 への store と重ならないと示せないので簡約しない
+    # （時点を持った読み出し。`read_validation` の検査に落ちる）。param_2 は最後の store が決める
+    assert lowered.operands[0].expr_type == ExpressionType.MEMORY
+    assert lowered.operands[0].read_order_key is not None
     assert lowered.operands[1].expr_type == ExpressionType.PHI
 
 def test_lower_post_state_expression_for_smt_replays_symbolic_reads_under_merged_guards():

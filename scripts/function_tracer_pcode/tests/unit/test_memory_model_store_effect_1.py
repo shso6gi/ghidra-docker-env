@@ -104,9 +104,11 @@ def test_formula_builder_declares_memory_arrays_for_memory_returns():
     builder = FormulaBuilder(debug=False, exclude_ub=False)
     formula = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2)).formula
 
-    assert "(declare-const mem32 (Array (_ BitVec 64) (_ BitVec 32)))" in formula
-    assert "(select mem32 p_1)" in formula
-    assert "(select mem32 q_2)" in formula
+    # Issue #282: pre-state の memory は側ごとの配列
+    assert "(declare-const mem32_s1 (Array (_ BitVec 64) (_ BitVec 32)))" in formula
+    assert "(declare-const mem32_s2 (Array (_ BitVec 64) (_ BitVec 32)))" in formula
+    assert "(select mem32_s1 p_1)" in formula
+    assert "(select mem32_s2 q_2)" in formula
     assert collect_memory_bit_widths_from_analysis(analysis1) == [32]
 
 def test_memory_resolver_concretizes_small_readonly_jump_table():
@@ -586,18 +588,26 @@ def test_effect_summary_builds_synthetic_expr_for_void_writes():
         ),
     ]
 
-    summary = build_void_effect_summary_expr(effects)
+    # Issue #282: 比較面は番地を量化した 1 byte の観測（書いたか・値）。parameter と byte の順が要る
+    summary = build_void_effect_summary_expr(
+        effects,
+        [_param("ptr", size=8, is_signed=False), _param("value", size=4, index=1)],
+        big_endian=False,
+    )
 
     assert summary is not None
-    assert summary.expr_type.name == "BINARY_OP"
-    assert summary.operator == "PIECE"
+    assert summary.expr_type.name == "PHI"
+    assert summary.size == 2
+    assert build_void_effect_summary_expr(effects) is None
 
 def test_effect_summary_falls_back_to_pre_state_value_for_unwritten_stack_local_read():
+    # Issue #282 (I11): 局所変数は entry SP より下（offset < 0）。entry SP より上の slot は caller の領域で、
+    # parameter の指す先と重なり得る（その場合は簡約しない: 下の test）
     params = [_param("guard", size=8, is_signed=False)]
     slot_expr = Expression.variable(
         "local_guard",
         size=8,
-        storage_info=StorageInfo(**_stack_storage(8, size_bytes=8)),
+        storage_info=StorageInfo(**_stack_storage(-16, size_bytes=8)),
     )
     location = canonicalize_location(slot_expr, params, size=8)
     assert location is not None
@@ -619,6 +629,27 @@ def test_effect_summary_falls_back_to_pre_state_value_for_unwritten_stack_local_
     )
 
     assert rewritten.to_string() == "guard_before_call"
+
+
+def test_stack_slot_above_entry_sp_is_not_assumed_disjoint_from_a_parameter_store():
+    """Issue #282 (I11): entry SP より上の slot（stack で渡る引数・caller の frame）は parameter の指す先と重なり得る。"""
+
+    params = [_param("guard", size=8, is_signed=False)]
+    slot_expr = Expression.variable(
+        "in_stack_guard",
+        size=8,
+        storage_info=StorageInfo(**_stack_storage(8, size_bytes=8)),
+    )
+    location = canonicalize_location(slot_expr, params, size=8)
+    fallback = Expression.variable("guard_before_call", size=8)
+    rewritten = rewrite_location_read_from_effects(
+        location,
+        fallback,
+        [],
+        [StoreEffect(location=_loc("guard", 0, 8), value=Expression.constant(1, 8), conditions=[], order_key=1)],
+        params,
+    )
+    assert rewritten.to_string() != "1"
 
 def test_effect_summary_does_not_synthesize_parameter_refs_from_names():
     summary = EffectSummary(parameter_names=["param_1"], effects=[])
@@ -1309,7 +1340,10 @@ def test_effect_summary_rewrites_swap_branch_using_pre_store_values():
         ],
     )
 
-    assert rewritten.to_string() == "(MEM[b] - MEM[a])"
+    # Issue #282 (I3): 後の store（別の parameter の指す先）と重ならないと示せないので、この読み出しは簡約しない
+    assert rewritten.to_string() == "(MEM[a] - MEM[a])"
+    # 右の読み出しは store の後の読み出し（順序つき）で、入口の値の読み出しと同じ node ではない（消し合わない）
+    assert not rewritten.operands[0].equals(rewritten.operands[1])
 
 def test_expression_expander_canonicalizes_top_level_phi_input_using_effects():
     a = Expression.parameter("a", 0, size=8)
@@ -1380,7 +1414,10 @@ def test_expression_expander_canonicalizes_top_level_phi_input_using_effects():
     canonicalized = expander._trace_and_canonicalize_input_value(object(), conds, 0)
 
     assert canonicalized is not None
-    assert canonicalized.to_string() == "(MEM[a] - MEM[b])"
+    # Issue #282 (I3): 後の store（別の parameter の指す先）と重ならないと示せないので、この読み出しは簡約しない
+    assert canonicalized.to_string() == "(MEM[a] - MEM[a])"
+    # 右の読み出しは store の後の読み出し（順序つき）で、入口の値の読み出しと同じ node ではない（消し合わない）
+    assert not canonicalized.operands[0].equals(canonicalized.operands[1])
 
 def test_expression_expander_canonicalizes_multiequal_branch_memory_leaf_using_effects():
     a = Expression.parameter("a", 0, size=8)
@@ -1425,7 +1462,8 @@ def test_expression_expander_canonicalizes_multiequal_branch_memory_leaf_using_e
     canonicalized = expander._trace_and_canonicalize_input_value(object(), [swap_taken], 0)
 
     assert canonicalized is not None
-    assert canonicalized.to_string() == "MEM[b]"
+    # Issue #282 (I3): 後の store（別の parameter の指す先）と重ならないと示せないので、この読み出しは簡約しない
+    assert canonicalized.to_string() == "MEM[a]"
 
 def test_effect_summary_treats_composite_guard_as_implied_by_split_active_conditions():
     a = Expression.parameter("a", 0, size=8)
@@ -1519,7 +1557,8 @@ def test_expression_expander_collapses_nested_multiequal_after_phi_handler_prune
     )
 
     assert len(expanded) == 1
-    assert expanded[0].value.to_string() == "MEM[b]"
+    # Issue #282 (I3): 後の store（別の parameter の指す先）と重ならないと示せないので、この読み出しは簡約しない
+    assert expanded[0].value.to_string() == "MEM[a]"
 
 def test_expression_expander_canonicalizes_direct_traced_memory_leaf_via_effect_summary():
     ptr = Expression.parameter("ptr", 0, size=8)

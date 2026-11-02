@@ -38,6 +38,9 @@ from scripts.function_tracer_pcode.authority.domains.loop_recurrence import (
     LoopSourceDisposition,
     classify_effect_incomplete_reasons,
 )
+from scripts.function_tracer_pcode.analysis.effects.observation_surface import (
+    EFFECT_GLOBAL_STORE_IDENTITY_REASON as GLOBAL_STORE_REASON,
+)
 from scripts.function_tracer_pcode.core import (
     AddressValueRef,
     CanonicalLocation,
@@ -317,7 +320,8 @@ def test_classify_store_address_distinguishes_parameter_global_stack_and_unresol
         Expression.unknown("idx"),
         Expression.constant(8, 8),
     )
-    assert classify_store_address(symbolic_index, params, size=8) == ("stack_frame", None)
+    # Issue #282 (I11): index を含む frame の番地は範囲を示せないので観測から外さない
+    assert classify_store_address(symbolic_index, params, size=8) == ("unresolved", None)
     assert classify_store_address(Expression.constant(0x1000d0, 8), params, size=4) == ("unresolved", None)
     assert classify_store_address(Expression.unknown("escaped"), params, size=4) == ("unresolved", None)
 
@@ -339,7 +343,7 @@ def test_global_direct_store_becomes_a_global_store_effect():
     tracer = _Tracer([G], values={"addr": _const_addr(_global_ref(*G)), "val": _x()})
     summary = summarize_store_effects([_Block([_store_op("addr", "val", 4)])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
 
-    assert summary.incomplete_reasons == ()
+    assert summary.incomplete_reasons == (GLOBAL_STORE_REASON,)  # Issue #282: global の object の identity の証拠が無い
     assert summary.has_unsupported_call is False
     assert len(summary.effects) == 1
     effect = summary.effects[0]
@@ -348,7 +352,8 @@ def test_global_direct_store_becomes_a_global_store_effect():
     assert effect.value.to_string() == "param_1"
     assert effect.provenance is not None and effect.provenance.source_kind == "local_store"
     assert observable_store_effects(summary) == summary.effects
-    assert summary.synthetic_expr is not None
+    # Issue #282: global への store は比較面に入らない
+    assert summary.synthetic_expr is None
 
 
 def test_store_to_an_unresolved_address_fails_closed_instead_of_vanishing():
@@ -372,7 +377,9 @@ def test_store_through_an_escaped_pointer_fails_closed():
 # D. stack local / E. pointer argument / F. read only
 # --------------------------------------------------------------------------
 
-def test_stack_local_store_with_symbolic_index_is_excluded_without_blocker():
+def test_stack_local_store_with_symbolic_index_fails_closed():
+    """Issue #282 (I11): `sp + index` は index が範囲外なら caller の領域に届く。範囲を示せないので外さない。"""
+
     addr = _ptr_intrinsic(
         "PTRADD",
         _ptr_intrinsic("PTRSUB", _stack_pointer(), Expression.constant(-224, 8)),
@@ -382,8 +389,7 @@ def test_stack_local_store_with_symbolic_index_is_excluded_without_blocker():
     tracer = _Tracer([G], values={"addr": addr, "val": _x()})
     summary = summarize_store_effects([_Block([_store_op("addr", "val", 8)])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
     assert summary.effects == []
-    assert summary.incomplete_reasons == ()
-    assert summary.has_unsupported_call is False
+    assert summary.incomplete_reasons == (_EFFECT_STORE_LOCATION_UNMODELED_REASON,)
 
 
 def test_pointer_argument_store_is_unchanged_next_to_a_global_store():
@@ -394,7 +400,7 @@ def test_pointer_argument_store_is_unchanged_next_to_a_global_store():
     ops = [_store_op("p", "val", 4, target=0x100), _store_op("gaddr", "val", 4, target=0x104)]
     summary = summarize_store_effects([_Block(ops)], tracer, _Tracker(), params, direct_call_summary=forbid_callee_summary)
 
-    assert summary.incomplete_reasons == ()
+    assert summary.incomplete_reasons == (GLOBAL_STORE_REASON,)  # Issue #282: global の object の identity の証拠が無い
     kinds = sorted(effect.location.base_ref.kind for effect in summary.effects)
     assert kinds == ["global", "parameter"]
     parameter_effect = next(effect for effect in summary.effects if effect.location.base_ref.is_parameter())
@@ -445,7 +451,7 @@ def test_ram_output_copy_is_observed_through_the_return_site_exit_copy():
     tracer = _Tracer([G], values={"x": _x(), "exit:0x1000d0": _x()})
     summary = summarize_store_effects([_Block([write, ret, exit_copy])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
 
-    assert summary.incomplete_reasons == ()
+    assert summary.incomplete_reasons == (GLOBAL_STORE_REASON,)  # Issue #282: global の object の identity の証拠が無い
     assert len(summary.effects) == 1
     effect = summary.effects[0]
     assert effect.location.base_ref.global_symbol_name == "g"
@@ -493,7 +499,7 @@ def test_exit_copies_at_every_return_site_each_contribute_the_path_value():
         [_Block([write, ret1, exit1], 0), _Block([ret2, exit2], 1)], tracer, _Tracker(), [_param("param_1", 0)],
         direct_call_summary=forbid_callee_summary
     )
-    assert summary.incomplete_reasons == ()
+    assert summary.incomplete_reasons == (GLOBAL_STORE_REASON,)  # Issue #282: global の object の identity の証拠が無い
     assert len(summary.effects) == 1
 
 
@@ -508,7 +514,7 @@ def test_multiequal_merged_global_is_observed_as_a_branch_dependent_value():
     exit_copy = _exit_copy(0x1000d0, 4, True, 0x68)
     tracer = _Tracer([G], values={"exit:0x1000d0": phi})
     summary = summarize_store_effects([_Block([merge, ret, exit_copy])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
-    assert summary.incomplete_reasons == ()
+    assert summary.incomplete_reasons == (GLOBAL_STORE_REASON,)  # Issue #282: global の object の identity の証拠が無い
     assert len(summary.effects) == 1
     assert summary.effects[0].value is phi
 
@@ -546,7 +552,7 @@ def test_global_effect_value_reading_a_named_global_is_modelled():
     tracer = _Tracer([G, H], values={"addr": _const_addr(g), "val": value})
     summary = summarize_store_effects([_Block([_store_op("addr", "val", 4)])], tracer, _Tracker(), [_param("param_1", 0)], direct_call_summary=forbid_callee_summary)
     assert len(summary.effects) == 1
-    assert summary.incomplete_reasons == ()
+    assert summary.incomplete_reasons == (GLOBAL_STORE_REASON,)  # Issue #282: global の object の identity の証拠が無い
 
 
 def _unidentified_writable_ref(addr):
@@ -593,47 +599,34 @@ def _global_effect(name, base, size, value, order=1):
     return StoreEffect(location=location, value=value, conditions=[], order_key=order)
 
 
-def test_non_void_global_store_is_part_of_the_comparison_surface():
+def test_non_void_global_store_blocks_the_comparison_without_identity_evidence():
+    """Issue #282 (I1): 左右の global の object が同じである根拠が無いので、global への store は比較面に入らず、
+    効果を不完全にする（戻り値だけで比べることもしない）。"""
     analyzer = _analyzer()
     with_store = _int_function([_global_effect("g", 0x1000d0, 4, _x())])
     without_store = _int_function([])
 
-    assert analyzer._apply_observable_effect_surface(with_store, with_store.return_type_obj, "int") is True
-    assert with_store.comparison_surface is not None
-    assert with_store.comparison_surface.kind == "memory_effect"
-    assert with_store.comparison_surface.explicit_bit_width == 8 + 32 + 32
-    assert with_store.returns[0].value.operator == "PIECE"
+    assert analyzer._apply_observable_effect_surface(with_store, with_store.return_type_obj, "int") is False
+    assert with_store.comparison_surface is None
+    assert GLOBAL_STORE_REASON in with_store.effect_summary.incomplete_reasons
+    assert GLOBAL_STORE_REASON in with_store.get_equivalence_blocking_unsafety_reasons()
+    assert GLOBAL_STORE_REASON in with_store.get_decisive_sat_unsafety_reasons()
 
     assert analyzer._apply_observable_effect_surface(without_store, without_store.return_type_obj, "int") is False
     assert without_store.comparison_surface is None
     assert without_store.effect_summary.incomplete_reasons == ()
 
 
-def test_non_void_global_store_pair_is_not_provable_equal():
-    """Same return value, different global post-state: never EQUIVALENT."""
-    analyzer = _analyzer()
-    with_store = _int_function([_global_effect("g", 0x1000d0, 4, _x())])
-    without_store = _int_function([])
-    analyzer._apply_observable_effect_surface(with_store, with_store.return_type_obj, "int")
-    analyzer._apply_observable_effect_surface(without_store, without_store.return_type_obj, "int")
-
-    # The surfaces have different widths (stores ⊕ return vs return only) and
-    # different shapes, so the pairwise strategy can never prove them equal;
-    # its width gates classify the pair instead of accepting the return value.
-    assert with_store.comparison_surface.explicit_bit_width != 32
-    assert without_store.returns[0].value.get_bit_width() == 32
-    assert with_store.returns[0].value.to_string() != without_store.returns[0].value.to_string()
-
-
-def test_two_binaries_with_the_same_global_store_get_identical_surfaces():
-    """Cross-compiler / cross-ISA: absolute addresses differ, the symbol does not."""
+def test_two_binaries_with_the_same_global_store_are_not_identified_by_the_symbol_name():
+    """Issue #282 (I1): 名前と大きさが同じ global でも、同じ object である根拠（identity の証拠）が無い。
+    以前は symbol の名前から作った共有の記号で同じ面にしていた。"""
     analyzer = _analyzer()
     left = _int_function([_global_effect("g", 0x1000d0, 4, _x())])
     right = _int_function([_global_effect("g", 0x2020a0, 4, _x())])
-    analyzer._apply_observable_effect_surface(left, left.return_type_obj, "int")
-    analyzer._apply_observable_effect_surface(right, right.return_type_obj, "int")
-    assert left.returns[0].value.to_string() == right.returns[0].value.to_string()
-    assert left.comparison_surface.explicit_bit_width == right.comparison_surface.explicit_bit_width
+    for analysis in (left, right):
+        assert analyzer._apply_observable_effect_surface(analysis, analysis.return_type_obj, "int") is False
+        assert analysis.comparison_surface is None
+        assert GLOBAL_STORE_REASON in analysis.effect_summary.incomplete_reasons
 
 
 # --------------------------------------------------------------------------
@@ -692,8 +685,9 @@ def test_global_effect_next_to_a_named_global_read_in_the_return_is_composed():
     analyzer = _analyzer()
     analysis = _int_function([_global_effect("h", 0x1000d8, 16, _x())])
     analysis.returns = [ReturnInfo("0x1010", _global_read(_global_ref(*G), 4), [])]
-    assert analyzer._apply_observable_effect_surface(analysis, analysis.return_type_obj, "int") is True
-    assert analysis.effect_summary.incomplete_reasons == ()
+    # Issue #282 (I1): global への store は比較面に入らない（identity の証拠が無い）
+    assert analyzer._apply_observable_effect_surface(analysis, analysis.return_type_obj, "int") is False
+    assert analysis.effect_summary.incomplete_reasons == (GLOBAL_STORE_REASON,)
 
 
 def test_global_effect_next_to_an_unidentified_writable_read_in_the_return_fails_closed():

@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Safe width-adapter simplifications."""
 
+from scripts.function_tracer_pcode.core.address_provenance import carries_image_address
+
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
 from scripts.function_tracer_pcode.semantics.normalize.context import NormalizationContext
 from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
@@ -46,7 +48,8 @@ def _normalize_extension(expr: Expression) -> Expression:
     if target_size <= 0:
         return expr
 
-    if operand.expr_type == ExpressionType.CONSTANT:
+    if operand.expr_type == ExpressionType.CONSTANT and not carries_image_address(operand):
+        # Issue #282: image の番地の出自を持つ定数は畳み込まない
         source_bits = max(1, operand.get_bit_width())
         target_bits = target_size * 8
         mask = (1 << source_bits) - 1
@@ -89,7 +92,12 @@ def _normalize_subpiece(expr: Expression) -> Expression:
         if inner.size and target_size and inner.size == target_size:
             return inner
 
-    if byte_offset == 0 and source.expr_type == ExpressionType.CONSTANT and target_size > 0:
+    if (
+        byte_offset == 0
+        and source.expr_type == ExpressionType.CONSTANT
+        and target_size > 0
+        and not carries_image_address(source)
+    ):
         target_bits = target_size * 8
         value = int(source.value) & ((1 << target_bits) - 1)
         folded = Expression.constant(value, target_size)

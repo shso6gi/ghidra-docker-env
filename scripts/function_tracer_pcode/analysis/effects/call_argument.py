@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import IntEnum
+from scripts.function_tracer_pcode.core.memory_relation import MemoryRelation
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 import re
 from itertools import product
@@ -1978,19 +1978,20 @@ def _impl__path_writes_storage(
 _CALL_MNEMONICS = frozenset({"CALL", "CALLIND", "CALLOTHER"})
 
 
-class MemoryRelation(IntEnum):
-    """op の書き込み（または範囲）と記憶域の関係。値は `_storage_match_rank` の rank と同じ並び
-    （0 = 触れない、3 = ちょうど同じ、それ以外 = 触れ得るが値は決まらない）。
+# 値の型は `core.memory_relation` が持つ（同じ関数の中の位置の関係 `location_relation` と共有する。Issue #282）。
+# rank（`_storage_match_rank`）から関係へは、この明示の写像だけで移す
+_RELATION_BY_STORAGE_RANK = {
+    0: MemoryRelation.DISJOINT,
+    1: MemoryRelation.OVERLAP,
+    2: MemoryRelation.UNKNOWN,
+    3: MemoryRelation.SAME,
+}
 
-    `DISJOINT` は **重ならないと証明できた** ときだけ（同じ空間で範囲が離れている、別の空間の varnode、
-    書き込みの無い op）。重なりを否定できないとき（幅・場所が分からない）は `UNKNOWN` で、`OVERLAP`
-    （一部だけ重なると分かっている）と同じく値は分からないと扱う。
-    """
 
-    DISJOINT = 0
-    OVERLAP = 1
-    UNKNOWN = 2
-    SAME = 3
+def _relation_from_storage_rank(rank) -> MemoryRelation:
+    """`_storage_match_rank` の rank を関係にする。表に無い rank は `UNKNOWN`（重なりを否定しない）。"""
+
+    return _RELATION_BY_STORAGE_RANK.get(rank, MemoryRelation.UNKNOWN)
 
 
 def _impl__op_write_relation(op, target_storage: StorageInfo, tracer) -> MemoryRelation:
@@ -2024,7 +2025,7 @@ def _impl__op_write_relation(op, target_storage: StorageInfo, tracer) -> MemoryR
         return MemoryRelation.DISJOINT if is_register else MemoryRelation.UNKNOWN
     if output is None:
         return MemoryRelation.DISJOINT
-    return MemoryRelation(_varnode_storage_match_rank(output, target_storage, tracer))
+    return _relation_from_storage_rank(_varnode_storage_match_rank(output, target_storage, tracer))
 
 
 def _impl__op_clobbers_argument_register(op, target_storage: StorageInfo, tracer) -> bool:

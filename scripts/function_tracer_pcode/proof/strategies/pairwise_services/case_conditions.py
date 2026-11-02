@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from scripts.function_tracer_pcode.proof.formula.memory_state import query_reads_side_state
+
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
 from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
@@ -301,6 +303,10 @@ def _impl__condition_region_is_unsat_for_cases(
     conditions: Sequence[Condition],
     cases: Sequence[ReturnCase],
 ) -> bool:
+    # Issue #282 (I1): 左右の条件を 1 つの oracle に入れる。側ごとの memory・image の番地・出口の状態を読む
+    # 条件は、oracle の 1 つの配列で描くと左右の memory を同一視するので、証明できないとする
+    if query_reads_side_state(list(conditions or ())):
+        return False
     parameters: List[Dict[str, Any]] = []
     for case in cases or []:
         parameters.extend(list(getattr(case, "parameters", None) or []))
@@ -320,6 +326,10 @@ def _impl__condition_set_implies(
     conclusions: Sequence[Condition],
     parameters: Sequence[Dict[str, Any]],
 ) -> bool:
+    # Issue #282 (I1): 左右の条件を 1 つの oracle に入れる。側ごとの memory・image の番地・出口の状態を読む
+    # 条件は、oracle の 1 つの配列で描くと左右の memory を同一視するので、証明できないとする
+    if query_reads_side_state(list(premises or ()) + list(conclusions or ())):
+        return False
     if not conclusions:
         return True
     for conclusion in conclusions or []:
@@ -343,6 +353,10 @@ def _impl__condition_set_is_unsat(
     conditions: Sequence[Condition],
     parameters: Sequence[Dict[str, Any]],
 ) -> bool:
+    # Issue #282 (I1): 左右の条件を 1 つの oracle に入れる。側ごとの memory・image の番地・出口の状態を読む
+    # 条件は、oracle の 1 つの配列で描くと左右の memory を同一視するので、証明できないとする
+    if query_reads_side_state(list(conditions or ())):
+        return False
     if self._conditions_have_parameter_mask_constant_conflict(list(conditions or ())):
         return True
     identity_conditions = self._conditions_with_object_identity_parameter_symbols(

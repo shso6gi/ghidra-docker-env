@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """条件の簡略化・矛盾検出モジュール（強化版）"""
 
+from scripts.function_tracer_pcode.core.address_provenance import carries_image_address
+
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Dict, Set, Optional, Tuple
 from scripts.function_tracer_pcode.core import (
@@ -514,6 +516,9 @@ class ConditionSimplifier(CnfReasoningMixin, ScalarBoundsMixin, SimplifierDebugM
         raw_value: int,
         bits: int,
     ) -> Expression:
+        # Issue #282: image の番地の出自を持つ定数を含む式は畳み込まない（元の式を残す）
+        if carries_image_address(expr):
+            return expr
         size_bytes = int(getattr(expr, "size", 0) or 0)
         if size_bytes <= 0:
             size_bytes = max(1, (bits + 7) // 8)
