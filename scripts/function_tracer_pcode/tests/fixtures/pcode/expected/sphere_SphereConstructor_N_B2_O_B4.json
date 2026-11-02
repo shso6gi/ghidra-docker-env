@@ -3,9 +3,7 @@
  "case_id": "sphere_SphereConstructor_N_B2_O_B4",
  "conditional_assumption_kinds": [],
  "conditional_outcome": null,
- "decisive_proof_kinds": [
-  "SAFE_COUNTEREXAMPLE"
- ],
+ "decisive_proof_kinds": [],
  "expected_stable_reason_ids": [
   "counterexample_analysis_safety_unproven",
   "counterexample_partition_replay_ambiguous",
