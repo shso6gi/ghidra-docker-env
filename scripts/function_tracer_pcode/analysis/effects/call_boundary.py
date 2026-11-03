@@ -801,7 +801,12 @@ class CalleeImporter:
         return moved.derive_with_operands([new_address])
 
     def _reads_callee_frame(self, expr: Expression) -> bool:
-        from scripts.function_tracer_pcode.analysis.effects.location import _impl_classify_store_address as classify_store_address
+        from scripts.function_tracer_pcode.analysis.effects.location import (
+            _impl__address_root_is_stack_frame as address_root_is_stack_frame,
+            _impl_classify_store_address as classify_store_address,
+        )
 
         kind, _location = classify_store_address(expr.operands[0], list(self.timeline.parameters), size=expr.size)
-        return kind == "stack_frame"
+        # 観測の判定（`frame_local_range`。Issue #282）より広く、frame に根を持つ番地をすべて callee の frame とみなす
+        # （拒否は広いほど安全）
+        return kind == "stack_frame" or address_root_is_stack_frame(expr.operands[0])

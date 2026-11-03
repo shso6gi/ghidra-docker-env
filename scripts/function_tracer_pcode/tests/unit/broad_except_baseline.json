@@ -60,9 +60,6 @@
       "_impl__resolve_function_ref_from_address": {"logged": 0, "unlogged": 1},
       "_impl_resolve_call_targets": {"logged": 0, "unlogged": 1}
     },
-    "analysis.effects.constant_folding": {
-      "_impl__read_program_memory_value": {"logged": 0, "unlogged": 1}
-    },
     "analysis.effects.expression_forms": {
       "_impl__condition_evidence_key": {"logged": 0, "unlogged": 1},
       "_impl__encode_signed_token": {"logged": 0, "unlogged": 1},
@@ -202,8 +199,7 @@
     },
     "analysis.recurrence.readonly_reduction": {
       "_impl__address_points_to_readonly_data": {"logged": 0, "unlogged": 3},
-      "_impl__base_witnesses_exactly_cover_region": {"logged": 0, "unlogged": 1},
-      "_impl__read_readonly_int32_lanes": {"logged": 0, "unlogged": 5}
+      "_impl__base_witnesses_exactly_cover_region": {"logged": 0, "unlogged": 1}
     },
     "analysis.recurrence.return_region": {
       "_impl__exit_region_return_refs_using_value.<locals>.prove_block": {"logged": 0, "unlogged": 1},
@@ -323,8 +319,7 @@
       "EffectIntegrationService.build_effect_summary.<locals>.summarize_call": {"logged": 0, "unlogged": 1},
       "EffectIntegrationService.build_function_control_effect_profile": {"logged": 0, "unlogged": 11},
       "EffectIntegrationService.concretize_readonly_loads": {"logged": 0, "unlogged": 1},
-      "EffectIntegrationService.propagate_indirect_return_effect": {"logged": 0, "unlogged": 1},
-      "EffectIntegrationService.read_memory_value": {"logged": 0, "unlogged": 1}
+      "EffectIntegrationService.propagate_indirect_return_effect": {"logged": 0, "unlogged": 1}
     },
     "analysis.returns.expression_cases": {
       "ExpressionCaseService.count_object_centric_unknowns": {"logged": 0, "unlogged": 1},
@@ -463,7 +458,6 @@
       "AddressRefMixin._make_address_runtime_ref": {"logged": 0, "unlogged": 2},
       "AddressRefMixin._make_address_runtime_ref.<locals>._build_runtime_ref": {"logged": 0, "unlogged": 4},
       "AddressRefMixin._make_address_runtime_ref_for_offset": {"logged": 0, "unlogged": 10},
-      "AddressRefMixin._read_program_memory_value": {"logged": 0, "unlogged": 1},
       "AddressRefMixin._varnode_supports_symbolic_post_state_promotion": {"logged": 0, "unlogged": 4},
       "AddressRefMixin.global_object_location_for_varnode": {"logged": 0, "unlogged": 1},
       "AddressRefMixin.ram_varnode_write_class": {"logged": 0, "unlogged": 2}

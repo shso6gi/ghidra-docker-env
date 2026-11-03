@@ -867,6 +867,8 @@ class ReturnAnalyzer:
         return self._effect_integration.propagate_indirect_return_effect(tracked, pcode_op, tracer)
     def _read_memory_value(self, address_value, size_bytes):
         return self._effect_integration.read_memory_value(address_value, size_bytes)
+    def _read_code_target_value(self, address_value, size_bytes):
+        return self._effect_integration.read_code_target_value(address_value, size_bytes)
     def _rebuild_effect_sensitive_case_wrapper(self, original, rewritten, conditions, effect_summary):
         return self._effect_integration.rebuild_effect_sensitive_case_wrapper(original, rewritten, conditions, effect_summary)
     def _return_info_effective_region_conditions(self, info):
@@ -891,6 +893,10 @@ class ReturnAnalyzer:
         return self._program_access.program_identity()
     def _program_is_big_endian(self):
         return self._program_access.program_is_big_endian()
+    def _program_image_ranges(self):
+        from scripts.function_tracer_pcode.analysis.program_image import image_ranges
+
+        return image_ranges(self.program)
     def _program_transaction(self, description):
         return self._program_access.program_transaction(description)
     def _program_userop_name(self, userop_id):

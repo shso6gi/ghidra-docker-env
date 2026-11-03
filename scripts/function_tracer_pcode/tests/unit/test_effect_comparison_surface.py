@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder impor
 )
 from scripts.function_tracer_pcode.core import (
     CanonicalLocation,
+    LocationBaseRef,
     ComparisonSurface,
     Condition,
     Expression,
@@ -64,7 +65,15 @@ def _void_effect_analysis(
         parameter_names=["ptr", "value"],
         effects=list(effects),
     )
-    synthetic_expr = build_void_effect_summary_expr(effect_summary.effects)
+    # Issue #282: 比較面は番地を量化した観測（parameter と byte の順が要る）
+    synthetic_expr = build_void_effect_summary_expr(
+        effect_summary.effects,
+        [
+            {"name": "ptr", "index": 0, "size": 8, "data_type": "int *", "is_signed": False},
+            {"name": "value", "index": 1, "size": 4, "data_type": "int", "is_signed": True},
+        ],
+        big_endian=False,
+    )
     assert synthetic_expr is not None
     effect_summary.synthetic_expr = synthetic_expr
     return FunctionReturnAnalysis(
@@ -114,7 +123,8 @@ def _equivalent_void_effect_analyses() -> tuple[FunctionReturnAnalysis, Function
     nonnull = _nonnull_condition(ptr)
     positive = _positive_condition(value)
     non_positive = positive.negate()
-    location = CanonicalLocation(base_param="ptr", offset=0, size=4)
+    # Issue #282: 比較面は番地の式を作るので、位置の基底は parameter の identity（index）で持つ
+    location = CanonicalLocation(base_ref=LocationBaseRef.parameter("ptr", index=0), offset=0, size=4)
 
     branchy = _void_effect_analysis(
         "void_writer_branchy",
@@ -170,7 +180,7 @@ def test_void_effect_analysis_exposes_memory_effect_comparison_surface():
     surface = analysis1.get_comparison_surface()
 
     assert surface.kind == "memory_effect"
-    assert analysis1.get_memory_effect_bit_width() == 40
+    assert analysis1.get_memory_effect_bit_width() == 16
     with pytest.raises(ValueError, match="return_value solver width"):
         analysis1.get_return_value_solver_bit_width()
     with pytest.raises(ValueError, match="ambiguous"):
@@ -218,9 +228,9 @@ def test_memory_effect_keeps_synthetic_effect_width_when_surface_is_rederived():
     surface = analysis1.get_comparison_surface()
 
     assert surface.kind == "memory_effect"
-    assert surface.explicit_bit_width == 40
-    assert analysis1.get_memory_effect_bit_width() == 40
-    assert get_return_size(analysis1) == 40
+    assert surface.explicit_bit_width == 16
+    assert analysis1.get_memory_effect_bit_width() == 16
+    assert get_return_size(analysis1) == 16
     assert surface.evidence["source"] == "effect_summary.synthetic_expr"
 
 
@@ -232,8 +242,8 @@ def test_formula_builder_uses_effect_surface_width_for_void_effect_equivalence()
 
     assert "(_ BitVec 0)" not in formula
     assert "(_ extract -1 0)" not in formula
-    assert "(define-fun return_1 () (_ BitVec 40)" in formula
-    assert "(define-fun return_2 () (_ BitVec 40)" in formula
+    assert "(define-fun return_1 () (_ BitVec 16)" in formula
+    assert "(define-fun return_2 () (_ BitVec 16)" in formula
     assert _run_z3(formula) == "unsat"
 
 
@@ -248,12 +258,12 @@ def test_pairwise_query_uses_effect_surface_width_for_void_effects():
 
     cases1 = extract_return_cases(analysis1)
     cases2 = extract_return_cases(analysis2)
-    replace1 = build_symbol_replacer(base_ctx["params1"], base_ctx.get("extra_vars1", []))
-    replace2 = build_symbol_replacer(base_ctx["params2"], base_ctx.get("extra_vars2", []))
+    replace1 = build_symbol_replacer(base_ctx["params1"], base_ctx.get("extra_vars1", []), side=1)
+    replace2 = build_symbol_replacer(base_ctx["params2"], base_ctx.get("extra_vars2", []), side=2)
     query = build_pair_query(base_ctx, cases1[0], cases2[0], replace1, replace2, "(0,0)")
 
-    assert base_ctx["return_size1"] == 40
-    assert base_ctx["return_size2"] == 40
+    assert base_ctx["return_size1"] == 16
+    assert base_ctx["return_size2"] == 16
     assert "(_ BitVec 0)" not in query
     assert "(_ extract -1 0)" not in query
     assert _run_z3(query) == "unsat"
@@ -266,5 +276,5 @@ def test_semantic_width_normalization_preserves_memory_effect_surface():
     surface = normalized.get_comparison_surface()
 
     assert surface.kind == "memory_effect"
-    assert normalized.get_memory_effect_bit_width() == 40
+    assert normalized.get_memory_effect_bit_width() == 16
     assert surface.use_sign_extension is False

@@ -278,6 +278,20 @@ def assess_identical_function_identity(
             identity_evidence_ok=True,
         )
 
+    # Issue #282 (I12): この EQ は「同じ program を同じ状態で呼ぶ」ことを前提にする。前提が D に入っていなければ
+    # 無条件の EQ にしない（fast path を適用せず通常の解析へ進む）
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.memory_policy import (
+        IDENTICAL_BINARY_PREMISES,
+        premises_admit_unconditional_eq,
+    )
+
+    if not premises_admit_unconditional_eq(IDENTICAL_BINARY_PREMISES):
+        return IdenticalIdentityAssessment(
+            identities=(left, right),
+            disposition={"applicable": True, "applied": False, "reason": "memory_premise_not_admitted"},
+            identity_evidence_ok=True,
+        )
+
     fast_path_result = _apply_fast_path(
         session,
         program1,
@@ -366,6 +380,10 @@ def _apply_fast_path(
     )
     from scripts.function_tracer_pcode.checker.result import EquivalenceResult
     from scripts.function_tracer_pcode.smt import ParallelResult
+    from scripts.function_tracer_pcode.proof.formula.input_correspondence.memory_policy import (
+        IDENTICAL_BINARY_PREMISES,
+        premise_record,
+    )
 
     binary1_name = program1.getName() if hasattr(program1, "getName") else "binary1"
     binary2_name = program2.getName() if hasattr(program2, "getName") else "binary2"
@@ -421,6 +439,8 @@ def _apply_fast_path(
             "kind": "identical_function_identity",
             "proof_artifact_digest": artifact.artifact_digest,
             "artifact": dict(artifact.body),
+            # Issue #282 (I12): この EQ が使った memory の前提と、方針表の扱い
+            "memory_premises": [list(row) for row in premise_record(IDENTICAL_BINARY_PREMISES)],
         },
     )
 

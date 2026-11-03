@@ -125,7 +125,11 @@ def _x():
 
 
 def _global_function(name, base, op, *, program_id):
-    """``int f(int x) { g = g <op> x; return 0; }`` with ``g`` at ``base``."""
+    """``int f(int x) { g = g <op> x; return 0; }`` with ``g`` at ``base``.
+
+    Issue #282 (I1): 左右の global の object が同じである根拠（identity の証拠）が無いので、global への store は比較面に
+    入らない（効果を不完全にし、EQ と NOT_EQ の両方を止める）。
+    """
     ref = _global_ref(name, base, 4, program_id=program_id)
     value = Expression.binary_op(op, _global_read(ref, 4), _x())
     location = CanonicalLocation(base_ref=LocationBaseRef.global_object(name, 4, space_name="ram"), offset=0, size=4)
@@ -138,8 +142,18 @@ def _global_function(name, base, op, *, program_id):
     analysis.effect_summary = EffectSummary(parameter_names=["param_1"], effects=effects)
     analysis.effect_summary.synthetic_expr = build_void_effect_summary_expr(effects)
     analyzer = _analyzer()
-    assert analyzer._apply_observable_effect_surface(analysis, analysis.return_type_obj, "int") is True
+    assert analyzer._apply_observable_effect_surface(analysis, analysis.return_type_obj, "int") is False
     return analysis
+
+
+def _global_reader(name, base, op, *, program_id):
+    """``int f(int x) { return g <op> x; }``（store なし）。"""
+    ref = _global_ref(name, base, 4, program_id=program_id)
+    return FunctionReturnAnalysis(
+        function_name="f", entry_point="0x1000", parameters=[_param("param_1", 0)],
+        returns=[ReturnInfo("0x1010", Expression.binary_op(op, _global_read(ref, 4), _x()), [])],
+        return_type="int", return_type_obj=resolve_mock_data_type("int"),
+    )
 
 
 def _pair_query(left, right):
@@ -149,41 +163,47 @@ def _pair_query(left, right):
     base_ctx = builder.build_base_context(left, right, input_correspondence=build_input_correspondence_set(left, right))
     cases1 = extract_return_cases(left)
     cases2 = extract_return_cases(right)
-    replace1 = build_symbol_replacer(base_ctx["params1"], base_ctx.get("extra_vars1", []))
-    replace2 = build_symbol_replacer(base_ctx["params2"], base_ctx.get("extra_vars2", []))
+    replace1 = build_symbol_replacer(base_ctx["params1"], base_ctx.get("extra_vars1", []), side=1)
+    replace2 = build_symbol_replacer(base_ctx["params2"], base_ctx.get("extra_vars2", []), side=2)
     return base_ctx, build_pair_query(base_ctx, cases1[0], cases2[0], replace1, replace2, "(0,0)")
 
 
-def test_same_global_update_on_two_binaries_is_provably_equal():
-    """``g = g + x`` at 0x1000d0 (binary 1) vs at 0x2020a0 (binary 2): UNSAT."""
-    left = _global_function("g", 0x1000d0, "INT_ADD", program_id=1)
-    right = _global_function("g", 0x2020a0, "INT_ADD", program_id=2)
+def test_same_global_update_is_not_compared_without_identity_evidence():
+    """``g = g + x`` を 2 つの binary で比べる。名前と大きさが同じでも、同じ object である根拠が無い（Issue #282）。"""
+    for analysis in (
+        _global_function("g", 0x1000d0, "INT_ADD", program_id=1),
+        _global_function("g", 0x2020a0, "INT_ADD", program_id=2),
+    ):
+        assert analysis.comparison_surface is None
+        assert "effect_global_store_identity_unproven" in analysis.effect_summary.incomplete_reasons
+        assert "effect_global_store_identity_unproven" in analysis.get_equivalence_blocking_unsafety_reasons()
+        assert "effect_global_store_identity_unproven" in analysis.get_decisive_sat_unsafety_reasons()
+
+
+def test_global_reads_are_per_side_symbols_and_not_provably_equal():
+    """``return g + x`` を 2 つの binary で比べる。左右の g の番地・中身は側ごとの記号（同じ値とみなさない）。"""
+    left = _global_reader("g", 0x1000d0, "INT_ADD", program_id=1)
+    right = _global_reader("g", 0x2020a0, "INT_ADD", program_id=2)
     base_ctx, query = _pair_query(left, right)
     symbol = global_address_symbol_name(("g", 4, 0))
-    assert query.count(f"(declare-const {symbol} (_ BitVec 64))") == 1
-    assert f"(assert (not (= {symbol} (_ bv0 64))))" in query
+    for tag in ("s1", "s2"):
+        assert query.count(f"(declare-const {symbol}_{tag} (_ BitVec 64))") == 1
+        assert f"(assert (not (= {symbol}_{tag} (_ bv0 64))))" in query
+        assert (f"{symbol}_{tag}", 64) in counterexample_replay_targets(base_ctx)
     assert "1048784" not in query and "2105504" not in query  # no absolute addresses
-    assert (symbol, 64) in counterexample_replay_targets(base_ctx)
-    assert _run_z3(query) == "unsat"
-
-
-def test_different_global_updates_are_not_equal():
-    """``g = g + x`` vs ``g = g - x``: SAT (a real observable difference)."""
-    left = _global_function("g", 0x1000d0, "INT_ADD", program_id=1)
-    right = _global_function("g", 0x2020a0, "INT_SUB", program_id=2)
-    _base_ctx, query = _pair_query(left, right)
     assert _run_z3(query) == "sat"
 
 
-def test_distinct_globals_are_disjoint_in_the_formula():
-    left = _global_function("g", 0x1000d0, "INT_ADD", program_id=1)
-    right = _global_function("h", 0x2020a0, "INT_ADD", program_id=2)
+def test_distinct_globals_are_disjoint_within_one_side():
+    left = _global_reader("g", 0x1000d0, "INT_ADD", program_id=1)
+    left.returns[0].value = Expression.binary_op(
+        "INT_ADD", left.returns[0].value, _global_read(_global_ref("h", 0x1000e0, 4, program_id=1), 4)
+    )
+    right = _global_reader("g", 0x2020a0, "INT_ADD", program_id=2)
     _base_ctx, query = _pair_query(left, right)
-    g = global_address_symbol_name(("g", 4, 0))
-    h = global_address_symbol_name(("h", 4, 0))
+    g = global_address_symbol_name(("g", 4, 0)) + "_s1"
+    h = global_address_symbol_name(("h", 4, 0)) + "_s1"
     assert f"(assert (or (bvule (bvadd {g} (_ bv4 64)) {h}) (bvule (bvadd {h} (_ bv4 64)) {g})))" in query
-    # writing g vs writing h: different surfaces, never equal
-    assert _run_z3(query) == "sat"
 
 
 # --------------------------------------------------------------------------

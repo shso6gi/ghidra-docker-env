@@ -575,6 +575,26 @@ class _FakeMemoryBlock:
     def isWrite(self):
         return self._write
 
+    # Issue #282 (Q1): 具体化は block の init・volatile・overlay・範囲を確かめる
+    def isInitialized(self):
+        return True
+
+    def isVolatile(self):
+        return False
+
+    def isOverlay(self):
+        return False
+
+    def getStart(self):
+        return _FakeAddress("ram", offset=self._start)
+
+    def getEnd(self):
+        return _FakeAddress("ram", offset=self._end)
+
+class _FakeRelocationTable:
+    def getRelocations(self, _address):
+        return iter(())
+
 class _FakeMemory:
     def __init__(self, blocks, bytes_by_address=None):
         self._blocks = list(blocks or [])
@@ -621,6 +641,9 @@ class _FakeProgram:
 
     def getLanguage(self):
         return self._language
+
+    def getRelocationTable(self):
+        return _FakeRelocationTable()
 
 class _IdentityTracer:
     def __init__(self, expressions=None, storages=None):

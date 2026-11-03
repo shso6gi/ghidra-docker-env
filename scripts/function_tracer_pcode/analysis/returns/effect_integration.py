@@ -1881,31 +1881,16 @@ class EffectIntegrationService:
             return value
 
     def read_memory_value(self, address_value: int, size_bytes: int) -> Optional[int]:
-        """Read an unsigned integer from program memory."""
-        if address_value < 0 or size_bytes <= 0:
-            return None
+        """Read an unsigned integer from program memory when it may become a data value (Issue #282, Q1)."""
+        from scripts.function_tracer_pcode.analysis.program_image import DATA_VALUE, read_image_value
 
-        try:
-            memory = self.program_value().getMemory()
-            default_space = self.program_value().getAddressFactory().getDefaultAddressSpace()
-            addr = default_space.getAddress(address_value)
-            if addr is None:
-                return None
+        return read_image_value(self.program_value(), address_value, size_bytes, purpose=DATA_VALUE)
 
-            raw_bytes = []
-            for offset in range(size_bytes):
-                byte_val = memory.getByte(addr.add(offset))
-                raw_bytes.append(int(byte_val) & 0xFF)
+    def read_code_target_value(self, address_value: int, size_bytes: int) -> Optional[int]:
+        """Read a code address (switch table entry, call target slot) from program memory (Issue #282, Q1)."""
+        from scripts.function_tracer_pcode.analysis.program_image import CODE_TARGET, read_image_value
 
-            is_big_endian = self.program_value().getLanguage().isBigEndian()
-            ordered = raw_bytes if is_big_endian else list(reversed(raw_bytes))
-
-            result = 0
-            for byte_val in ordered:
-                result = (result << 8) | byte_val
-            return result
-        except Exception:
-            return None
+        return read_image_value(self.program_value(), address_value, size_bytes, purpose=CODE_TARGET)
 
     def apply_observable_effect_surface(
         self,
@@ -1992,7 +1977,20 @@ class EffectIntegrationService:
                         "return observation reads writable memory without a global identity",
                     )
 
-        effects_expr = build_void_effect_summary_expr(effects)
+        if any(effect.location.base_ref.is_global() for effect in effects):
+            from scripts.function_tracer_pcode.analysis.effects.observation_surface import (
+                EFFECT_GLOBAL_STORE_IDENTITY_REASON,
+            )
+
+            return _fail_closed(
+                EFFECT_GLOBAL_STORE_IDENTITY_REASON,
+                "global object store without identity evidence across sides",
+            )
+        effects_expr = build_void_effect_summary_expr(
+            effects,
+            list(getattr(result, "parameters", None) or ()),
+            big_endian=getattr(result, "program_is_big_endian", None),
+        )
         if effects_expr is None:
             return _fail_closed(_EFFECT_SURFACE_COMPOSITION_REASON, "no effect expression")
         effect_bits = int(effects_expr.get_bit_width() or 0)

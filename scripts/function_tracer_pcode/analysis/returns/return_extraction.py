@@ -428,6 +428,7 @@ def _impl__try_pre_return_counted_loop_summary(
         deferred_calls=dict(self._current_deferred_calls),
         effect_summary=effect_summary,
         program_is_big_endian=self._program_is_big_endian(),
+            program_image_ranges=self._program_image_ranges(),
         binary_id=self._binary_id,
     )
     summarizer = StructuralRecurrenceSummarizer(

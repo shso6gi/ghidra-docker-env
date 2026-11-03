@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from scripts.function_tracer_pcode.core.address_provenance import carries_image_address
+
+
 from typing import List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
@@ -119,6 +122,15 @@ def _simplify_proven_boolean_compare(
 
 
 def _fold_constant_expression(expr: Expression) -> Expression:
+    # Issue #282: image の番地の出自を持つ定数は畳み込まない（新しい定数に出自を移せない）。畳み込むのは operand が
+    # すべて定数のときだけなので、そのときだけ調べる（部分木を毎回辿らない）
+    operands = list(expr.operands or ())
+    if (
+        operands
+        and all(getattr(op, "expr_type", None) == ExpressionType.CONSTANT for op in operands)
+        and any(carries_image_address(op) for op in operands)
+    ):
+        return expr
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
         operand = expr.operands[0]
         operand_value = _const_value(operand)

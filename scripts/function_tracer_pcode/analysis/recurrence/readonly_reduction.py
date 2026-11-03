@@ -120,51 +120,23 @@ def _impl__readonly_affine_progression_literal_step(self, analysis) -> Optional[
 
 
 def _impl__read_readonly_int32_lanes(self, address_value: int, lane_count: int) -> Optional[Tuple[int, ...]]:
+    """read-only の image の int32 の lane の列（Issue #282, Q1: `analysis.program_image` が具体化してよいときだけ）。"""
+
+    from scripts.function_tracer_pcode.analysis.program_image import DATA_VALUE, read_image_value
+
     if address_value < 0 or lane_count <= 0:
         return None
     program = getattr(self.tracer, "program", None)
     if program is None:
         return None
-    try:
-        memory = program.getMemory()
-        address_factory = program.getAddressFactory()
-        default_space = address_factory.getDefaultAddressSpace()
-        address = default_space.getAddress(int(address_value))
-    except Exception:
-        return None
-    if memory is None or address is None:
-        return None
-    try:
-        block = memory.getBlock(address)
-    except Exception:
-        block = None
-    if block is None:
-        return None
-    try:
-        if block.isExecute() or block.isWrite() or not block.isRead():
-            return None
-    except Exception:
-        return None
     lanes: List[int] = []
-    try:
-        is_big_endian = bool(program.getLanguage().isBigEndian())
-    except Exception:
-        is_big_endian = False
-    try:
-        for lane in range(int(lane_count)):
-            raw_bytes = [
-                int(memory.getByte(address.add(lane * 4 + offset))) & 0xFF
-                for offset in range(4)
-            ]
-            ordered = raw_bytes if is_big_endian else list(reversed(raw_bytes))
-            value = 0
-            for byte_value in ordered:
-                value = (value << 8) | byte_value
-            if value & 0x80000000:
-                value -= 0x100000000
-            lanes.append(value)
-    except Exception:
-        return None
+    for lane in range(int(lane_count)):
+        value = read_image_value(program, int(address_value) + lane * 4, 4, purpose=DATA_VALUE)
+        if value is None:
+            return None
+        if value & 0x80000000:
+            value -= 0x100000000
+        lanes.append(value)
     return tuple(lanes)
 
 

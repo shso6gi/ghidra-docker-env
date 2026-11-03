@@ -264,6 +264,25 @@ def _is_bound_loop_variable(expr: Expression, frame: Any) -> bool:
     )
 
 
+def _side_state_ref_types() -> Tuple[type, ...]:
+    from scripts.function_tracer_pcode.core.runtime_refs import (
+        ObservedMemoryReadRef,
+        PostStateReadRef,
+        ReadonlyReductionRef,
+        ReadonlyReductionTermRef,
+    )
+
+    return (ObservedMemoryReadRef, PostStateReadRef, ReadonlyReductionRef, ReadonlyReductionTermRef)
+
+
+def side_state_kinds(value: Expression) -> Tuple[str, ...]:
+    """node 1 つが表す、側ごとの状態の種類（`proof.formula.memory_state` と同じ規則）。"""
+
+    from scripts.function_tracer_pcode.proof.formula.memory_state import _node_kinds
+
+    return tuple(_node_kinds(value))
+
+
 def _read_side(values: Sequence[Any], rows: Mapping[int, ParameterInfo], side: str) -> Tuple[Tuple[str, ...], Tuple[Any, ...]]:
     """比べる値の読み（1 回の走査。runtime ref の中と束縛の文脈を含む）の拒否と、読んだ値の列。
 
@@ -279,6 +298,8 @@ def _read_side(values: Sequence[Any], rows: Mapping[int, ParameterInfo], side: s
     for value, frame in reachable_semantic_values_in_binder_scope(tuple(values)):
         surface.append((value, frame.binders_in_scope()))
         if not isinstance(value, Expression):
+            if isinstance(value, _SIDE_STATE_REF_TYPES):
+                refs.append(f"memory_uncorresponded:{side}:{type(value).__name__}")
             continue
         if value.expr_type is ExpressionType.PARAMETER:
             refusal = _parameter_read_refusal(value, rows, side)
@@ -286,7 +307,15 @@ def _read_side(values: Sequence[Any], rows: Mapping[int, ParameterInfo], side: s
                 refs.append(refusal)
         elif value.expr_type is ExpressionType.VARIABLE and not _is_bound_loop_variable(value, frame):
             refs.append(f"input_variable:{side}:{value.name}")
+        else:
+            # Issue #282 (I1): その側の memory・image の object の番地・memory に依存する関数の値は、左右で同じ
+            # 構造でも同じ値とは言えない（owner の表に対応の根拠が無い）
+            for kind in side_state_kinds(value):
+                refs.append(f"memory_uncorresponded:{side}:{kind}")
     return tuple(refs), tuple(surface)
+
+
+_SIDE_STATE_REF_TYPES = _side_state_ref_types()
 
 
 def checked_surface(values: Sequence[Any]) -> Tuple[Tuple[Any, Tuple[Any, ...]], ...]:

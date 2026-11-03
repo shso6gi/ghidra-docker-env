@@ -60,7 +60,7 @@ def test_collaborator_holds_only_its_dependencies():
 def test_every_delegator_forwards_to_the_collaborator():
     analyzer = _analyzer()
     names = [n for n, _ in inspect.getmembers(EffectIntegrationService, predicate=inspect.isfunction) if n != "__init__"]
-    assert len(names) == 28
+    assert len(names) == 29
     for name in names:
         sentinel = object()
         assert not isinstance(inspect.getattr_static(ReturnAnalyzer, "_" + name), (staticmethod, classmethod)), name

@@ -446,8 +446,8 @@ def render_expected_region_query(
     left_index, right_index = region_id.split(":", 1)
     left = next(case for case in census.cases1 if str(case.index) == left_index)
     right = next(case for case in census.cases2 if str(case.index) == right_index)
-    replace1 = _symbol_replacer(base_ctx["params1"], base_ctx.get("extra_vars1", []), float_mode="fp")
-    replace2 = _symbol_replacer(base_ctx["params2"], base_ctx.get("extra_vars2", []), float_mode="fp")
+    replace1 = _symbol_replacer(base_ctx["params1"], base_ctx.get("extra_vars1", []), float_mode="fp", side=1)
+    replace2 = _symbol_replacer(base_ctx["params2"], base_ctx.get("extra_vars2", []), float_mode="fp", side=2)
     # First render a seed without assertions, then dependency-slice the shared prelude.
     seed_ctx = dict(base_ctx)
     seed_ctx["header_lines"] = []

@@ -49,6 +49,16 @@ class _Block:
     def isVolatile(self):
         return False
 
+    # Issue #282 (Q1): 具体化は block の範囲・overlay でないこと・再配置を確かめる
+    def isOverlay(self):
+        return False
+
+    def getStart(self):
+        return _ImageAddress(0)
+
+    def getEnd(self):
+        return _ImageAddress(0xFFFFFFFF)
+
 
 class _ImageAddress:
     def __init__(self, offset):
@@ -56,6 +66,14 @@ class _ImageAddress:
 
     def add(self, delta):
         return _ImageAddress(self.offset + delta)
+
+    def getOffset(self):
+        return self.offset
+
+
+class _RelocationTable:
+    def getRelocations(self, _address):
+        return iter(())
 
 
 class _Memory:
@@ -102,6 +120,9 @@ class _Program:
 
     def getAddressFactory(self):
         return _AddressFactory()
+
+    def getRelocationTable(self):
+        return _RelocationTable()
 
     def getSymbolTable(self):
         raise RuntimeError("no symbol table in this fake")

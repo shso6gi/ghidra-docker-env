@@ -2,8 +2,10 @@
  "binary1_name": "newV-arm64-clang-O1",
  "binary2_name": "oldV-arm64-clang-O3",
  "c_active_reason_ids": [
-  "outcome_cfg_reachability_unproven",
-  "outcome_cfg_reachability_unproven"
+  "outcome_path_region_completeness_unproven",
+  "outcome_path_region_completeness_unproven",
+  "return_abi_provenance_unavailable",
+  "return_abi_provenance_unavailable"
  ],
  "canonical_outcome": "UNKNOWN",
  "conditional_outcome": null,
@@ -16,12 +18,13 @@
  "identical_fast_path_disposition": null,
  "is_equivalent": null,
  "q_open_proof_kinds": [
-  "unary_outcome_cfg_reachability",
-  "unary_outcome_cfg_reachability"
+  "return_abi_provenance",
+  "return_abi_provenance",
+  "unary_outcome_path_region_completeness",
+  "unary_outcome_path_region_completeness"
  ],
  "schema": "recorded-pcode-check-snapshot-v1",
  "stage_path": [
-  "S_PAIRWISE",
-  "S_MONOLITHIC_FALLBACK"
+  "S_PAIRWISE"
  ]
 }

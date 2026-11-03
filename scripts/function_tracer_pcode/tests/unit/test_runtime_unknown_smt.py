@@ -298,11 +298,12 @@ def test_formula_builder_adds_readonly_reduction_finite_witness_axioms():
     base_ctx = FormulaBuilder().build_base_context(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
-    assert "(declare-const mem32 (Array (_ BitVec 64) (_ BitVec 32)))" in header_text
+    # Issue #282: pre-state の memory は側ごとの配列
+    assert "(declare-const mem32_s1 (Array (_ BitVec 64) (_ BitVec 32)))" in header_text
     assert "Readonly reduction finite witness axioms" in header_text
     assert "Readonly reduction contract equality axioms" not in header_text
     assert "(=> (= param_2_1 (_ bv1 32))" in header_text
-    assert "(select mem32 param_1_1)" in header_text
+    assert "(select mem32_s1 param_1_1)" in header_text
 
 
 def test_formula_builder_keeps_finite_witness_axioms_without_contract_key():
@@ -362,7 +363,7 @@ def test_formula_builder_keeps_finite_witness_axioms_without_contract_key():
     assert "Readonly reduction finite witness axioms" in header_text
     assert "Readonly reduction contract equality axioms" not in header_text
     assert "(=> (= param_2_1 (_ bv1 32))" in header_text
-    assert "(select mem32 param_1_1)" in header_text
+    assert "(select mem32_s1 param_1_1)" in header_text
 
 
 def test_formula_builder_removes_readonly_global_contract_equality_even_when_contracts_match():
@@ -766,7 +767,7 @@ def test_formula_builder_readonly_witness_axioms_accept_storage_backed_operands(
 
     assert "Readonly reduction finite witness axioms" in header_text
     assert "(=> (= renamed_count_1 (_ bv1 32))" in header_text
-    assert "(select mem32 renamed_base_1)" in header_text
+    assert "(select mem32_s1 renamed_base_1)" in header_text
 
 
 def test_formula_builder_refuses_readonly_witness_axioms_when_operands_do_not_match_ref():
@@ -1806,7 +1807,8 @@ def test_formula_builder_declares_intrinsics_introduced_by_render_analysis(monke
     base_ctx = FormulaBuilder().build_base_context(raw_analysis1, analysis2, input_correspondence=build_input_correspondence_set(raw_analysis1, analysis2))
     header_text = "\n".join(base_ctx["header_lines"])
 
-    assert f"(declare-fun {declared_name} ((_ BitVec 64) (_ BitVec 64)) (_ BitVec 32))" in header_text
+    # Issue #282: 表の和は memory に依存する関数なので、側ごとの関数（左は `_s1`）
+    assert f"(declare-fun {declared_name}_s1 ((_ BitVec 64) (_ BitVec 64)) (_ BitVec 32))" in header_text
 
 
 def test_monolithic_counterexample_validation_uses_render_analysis_cases(monkeypatch):

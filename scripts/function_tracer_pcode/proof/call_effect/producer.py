@@ -830,8 +830,8 @@ def _parameter_prelude(
     lines.extend(correspondence.premise_lines(left_infos, right_infos))
     return (
         lines,
-        build_symbol_name_mapping(left_infos),
-        build_symbol_name_mapping(right_infos),
+        build_symbol_name_mapping(left_infos, side=1),
+        build_symbol_name_mapping(right_infos, side=2),
     )
 
 

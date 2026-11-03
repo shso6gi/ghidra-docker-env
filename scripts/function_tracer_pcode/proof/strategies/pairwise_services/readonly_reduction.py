@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from scripts.function_tracer_pcode.proof.formula.memory_state import query_reads_side_state
+
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core import (
@@ -1591,6 +1593,9 @@ def _impl__combined_conditions_imply_reduction_count(
         list(getattr(exact_case, "parameters", None) or [])
         + list(getattr(summary_case, "parameters", None) or []),
     )
+    if query_reads_side_state(implication_conditions):
+        # Issue #282 (I1): 左右の条件をまとめた oracle の問い合わせに側ごとの memory を入れない
+        return False
     solver_result = ConditionSMTOracle.conjunction_is_unsat(identity_conditions)
     if solver_result is not None:
         return solver_result
@@ -1686,6 +1691,9 @@ def _impl__combined_conditions_imply_reduction_count_values(
         implication_conditions,
         parameters,
     )
+    if query_reads_side_state(implication_conditions):
+        # Issue #282 (I1): 左右の条件をまとめた oracle の問い合わせに側ごとの memory を入れない
+        return False
     solver_result = ConditionSMTOracle.conjunction_is_unsat(identity_conditions)
     if solver_result is not None:
         return solver_result

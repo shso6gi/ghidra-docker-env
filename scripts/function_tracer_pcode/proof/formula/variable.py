@@ -25,6 +25,9 @@ from scripts.function_tracer_pcode.core import (
 )
 
 
+from scripts.function_tracer_pcode.core.observation_index import is_observation_index  # noqa: E402
+
+
 class VariableClassification(Enum):
     """変数の分類"""
     PARAMETER = auto()              # パラメータ本体
@@ -346,6 +349,8 @@ class VariableAnalyzer:
                 name not in param_names
                 and not self._is_symbolic_location_read_expr(expr)
                 and not self._is_concrete_address_expr(expr)
+                # store の観測の番地は入力ではなく、左右で同じ記号（Issue #282: `core.observation_index`）
+                and not is_observation_index(expr)
             )
         }
         

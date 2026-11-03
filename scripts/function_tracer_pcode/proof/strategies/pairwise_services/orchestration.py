@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from scripts.function_tracer_pcode.proof.formula.memory_state import case_pair_memory_state_refs
 import hashlib
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -491,12 +492,12 @@ def _impl_check(
     symbol_replace_fn1 = build_symbol_replacer(
         base_ctx["params1"],
         base_ctx.get("extra_vars1", []),
-        float_mode="fp",
+        float_mode="fp", side=1
     )
     symbol_replace_fn2 = build_symbol_replacer(
         base_ctx["params2"],
         base_ctx.get("extra_vars2", []),
-        float_mode="fp",
+        float_mode="fp", side=2
     )
 
     if self.debug:
@@ -686,7 +687,8 @@ def _impl_check(
     # Stage 1 is a real prepass: every logical guard edge is materialized
     # before return-width/value preparation or any legacy value shortcut.
     from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
-    counterexample_replay_targets,
+        closed_formula_needs_no_replay,
+        counterexample_replay_targets,
         execute_guard_overlap,
     )
 
@@ -1402,7 +1404,8 @@ def _impl_check(
                     _case1=case1,
                     _case2=case2,
                     _sat_unsafety_reasons=tuple(sat_unsafety_reasons)
-                    + tuple(self._pair_return_width_unsafety_reasons(base_ctx, pair_id)),
+                    + tuple(self._pair_return_width_unsafety_reasons(base_ctx, pair_id))
+                    + tuple(case_pair_memory_state_refs(case1, case2)),
                     _analysis1=analysis1,
                     _analysis2=analysis2,
                 ):
@@ -1623,6 +1626,8 @@ def _impl_check(
                 pair_sat_unsafety_reasons = list(sat_unsafety_reasons) + list(
                     self._pair_return_width_unsafety_reasons(base_ctx, pair_id)
                 )
+                # Issue #282 (I6): 側ごとの memory・番地・出口の状態を読む case の組の反例は、実現を確かめていない
+                pair_sat_unsafety_reasons.extend(case_pair_memory_state_refs(case1, case2))
                 analysis_safety_validated = not pair_sat_unsafety_reasons
                 if pair_sat_unsafety_reasons:
                     from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
@@ -1701,7 +1706,7 @@ def _impl_check(
                     analysis2,
                 )
                 replay_validated = not replay_reasons
-                if replay_reasons and not counterexample_replay_targets(base_ctx):
+                if replay_reasons and closed_formula_needs_no_replay(base_ctx):
                     # Closed formula: no symbol to fix, nothing to replay; the
                     # validated SAT query is the complete witness.
                     replay_reasons = ()
@@ -1971,6 +1976,21 @@ def _impl_check(
                         object_evidence=getattr(result, "object_evidence", None),
                         action_status=getattr(result, "action_status", None),
                         detail=result.blocking_detail,
+                    )
+                )
+            # Issue #282 (I6): この組の値の比較は決まらなかった。組が側ごとの memory・番地・出口の状態を読むなら、
+            # 差があったとしても反例の実現を確かめていないので NOT_EQ にもできない。その理由を残す
+            undecided_memory_refs = case_pair_memory_state_refs(case1, case2)
+            if undecided_memory_refs:
+                unknown_reasons.append(
+                    self._make_sat_unsafety_unknown_reason(
+                        undecided_memory_refs,
+                        analysis1,
+                        analysis2,
+                        case1=case1,
+                        case2=case2,
+                        pair_id=pair_id,
+                        stage="S_PAIRWISE",
                     )
                 )
             self._debug_print(f"  Pair {pair_id}: final result UNKNOWN/TIMEOUT")

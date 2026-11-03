@@ -350,7 +350,10 @@ def _impl__materialize_function_pointer_argument(
     if pointer_size <= 0:
         return expr
 
-    loaded_value = _read_program_memory_value(tracer, address_value, pointer_size)
+    # 関数 pointer の slot（Issue #282, Q1 の CODE_TARGET）
+    from scripts.function_tracer_pcode.analysis.program_image import CODE_TARGET
+
+    loaded_value = _read_program_memory_value(tracer, address_value, pointer_size, purpose=CODE_TARGET)
     if loaded_value is None:
         return expr
 
@@ -583,6 +586,18 @@ def _impl__rewrite_canonical_location_read(
     if active_cycle_components is None:
         active_cycle_components = _compute_effect_cycle_components(effects, parameters)
 
+    if _effects_may_alias_without_proof(
+        location,
+        normalized_return_conditions,
+        effects,
+        max_order_key=max_order_key,
+    ):
+        # Issue #282 (I3): 読み出しより前に、重ならないとも同じ場所とも証明できない store がある。どの store の値
+        # （または入口の値）になるかは決まらないので簡約しない。読み出しの時点（order）を持った memory の読み出しを
+        # 返す: 入口の値の読み出しとは別の node なので、正規化が両者を同じ値として消さず（`x - x`）、
+        # `read_validation` の検査（先行する store と重ならないこと）に落ちて EQ と NOT_EQ の両方が止まる
+        return _unresolved_read_after_effects(candidate_expr, fallback_expr, max_order_key)
+
     if _matches_existing_effect_value(
         candidate_expr,
         location,
@@ -669,6 +684,70 @@ def _impl__rewrite_canonical_location_read(
     resolved = Expression.phi(branches)
     resolved.size = max(candidate_expr.size or 0, fallback_expr.size or 0, location.size)
     return resolved
+
+def _unresolved_read_after_effects(
+    candidate_expr: Expression,
+    fallback_expr: Expression,
+    max_order_key: Optional[int],
+) -> Expression:
+    from scripts.function_tracer_pcode.analysis.effects.read_validation import POST_STATE_READ_ORDER
+
+    if fallback_expr is not None and (
+        expression_contains_post_state_reads(fallback_expr)
+        or (
+            fallback_expr.expr_type == ExpressionType.MEMORY
+            and getattr(fallback_expr, "read_order_key", None) is not None
+        )
+    ):
+        # 出口の状態の記号のまま（側ごとの自由な記号として描かれる）か、時点を持った読み出しのまま
+        return fallback_expr
+    if candidate_expr is None or candidate_expr.expr_type != ExpressionType.MEMORY or not candidate_expr.operands:
+        # parameter を基底にしない位置（出口の状態の記号の VARIABLE）: 元の読み出しのまま（側ごとの状態の記号）
+        return fallback_expr
+    order = max_order_key if max_order_key is not None else POST_STATE_READ_ORDER
+    return Expression.memory(candidate_expr.operands[0], size=candidate_expr.size, read_order_key=order)
+
+
+def _effects_may_alias_without_proof(
+    location: CanonicalLocation,
+    return_conditions: Sequence[Condition],
+    effects: Sequence[StoreEffect],
+    *,
+    max_order_key: Optional[int] = None,
+) -> bool:
+    """`location` の読み出しの値が、関係（`location_relation`）を証明できない store に依存し得るか。
+
+    設計 v3 §6.2 の規則: 読み出しより前の store は、DISJOINT なら見なくてよい。SAME の store より前の store は、
+    その SAME の store が必ず後で上書きするなら（SAME の store の条件が、前の store の条件と読み出しの経路の
+    条件から導かれるなら）見なくてよい。それ以外（OVERLAP・UNKNOWN の store で、上書きを示せないもの）があれば True。
+    """
+
+    from scripts.function_tracer_pcode.analysis.effects.location_relation import location_relation
+    from scripts.function_tracer_pcode.core.memory_relation import MemoryRelation
+
+    candidates = []
+    for effect in effects:
+        if max_order_key is not None and effect.order_key >= max_order_key:
+            continue
+        effect_conditions = ConditionSimplifier.simplify_conditions_object_centric(list(effect.conditions))
+        combined = list(return_conditions) + effect_conditions
+        if ConditionSimplifier.object_centric_is_contradiction(combined):
+            continue
+        relation = location_relation(location, effect.location, combined)
+        if relation is MemoryRelation.DISJOINT:
+            continue
+        candidates.append((effect.order_key, relation, effect_conditions, combined))
+    same_stores = [item for item in candidates if item[1] is MemoryRelation.SAME]
+    for order_key, relation, _conditions, combined in candidates:
+        if relation is MemoryRelation.SAME:
+            continue
+        overwritten = any(
+            same_order > order_key and not subtract_implied_conditions(same_conditions, combined)
+            for same_order, _relation, same_conditions, _same_combined in same_stores
+        )
+        if not overwritten:
+            return True
+    return False
 
 def _impl_rewrite_observed_loads_from_effects(
     expr: Optional[Expression],

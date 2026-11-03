@@ -523,6 +523,13 @@ CAUSE_SLOTS_ADDED_AFTER_ISSUE125 = {
     NEW_PRODUCER_SITE_ID: ("expression_size_budget_exceeded", "comparison_undecidable"),
 }
 
+#: PR-125-A の後に別 Issue が **既存 site** へ足した producer（site は増えない）。
+#: producer を足す PR はここへ producer id を足す（それ以外の contract 変化は落とす）。
+PRODUCERS_ADDED_AFTER_ISSUE125 = {
+    # Issue #282 (PR #289): `recurrence_promotion` が出す slice3 の effect の前提の signal。
+    "recurrence-summary-call-effect": ("typed-summary-effect-prerequisite-v2",),
+}
+
 #: 現在期待される producer site 総数。
 EXPECTED_PRODUCER_SITE_COUNT = (
     PRODUCER_SITE_COUNT_BEFORE_ISSUE125 + 1
@@ -621,6 +628,12 @@ def test_producer_sites_manifest_keeps_every_existing_site_contract():
             slot for slot in current["expected_cause_slots"]
             if not (set(slot["allowed_reason_ids"]) <= added)
             or slot in contract["expected_cause_slots"]
+        ]
+        added_producers = set(PRODUCERS_ADDED_AFTER_ISSUE125.get(site_id, ()))
+        current["allowed_producer_ids"] = [
+            producer for producer in current["allowed_producer_ids"]
+            if producer not in added_producers
+            or producer in contract["allowed_producer_ids"]
         ]
         assert current == contract, site_id
 

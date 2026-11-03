@@ -613,9 +613,14 @@ class EffectSummary:
     call_target_resolution_evidence: Tuple[CallTargetResolutionEvidence, ...] = ()
     call_site_effect_summary_evidence: Tuple[CallSiteEffectSummaryEvidence, ...] = ()
     function_control_effect_profile: Optional[FunctionControlEffectProfile] = None
+    # Issue #282 (I3 / I11 / AC 9): entry SP より下の定数の範囲への store（`frame_local_range`）。局所と証明できない
+    # ので、これがあれば `effect_store_location_unmodeled` が EQ と NOT_EQ を止める。比べる面には入れないが、同じ
+    # 関数の中の読み出しが先行する store に依存しないことの検査（`read_validation`）は見る。値は持たない
+    frame_local_effects: Tuple[StoreEffect, ...] = ()
 
     def __post_init__(self) -> None:
         self.incomplete_reasons = tuple(dict.fromkeys(self.incomplete_reasons or ()))
+        self.frame_local_effects = tuple(self.frame_local_effects or ())
         self.unsupported_call_sites = tuple(self.unsupported_call_sites or ())
         self.call_target_resolution_evidence = tuple(self.call_target_resolution_evidence or ())
         self.call_site_effect_summary_evidence = tuple(self.call_site_effect_summary_evidence or ())

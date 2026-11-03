@@ -97,6 +97,7 @@ FUNCTION_ANALYSIS_FIELD_CLASSIFICATION = MappingProxyType({
     "effect_summary": "semantic_projection", "signature_hypotheses": "semantic",
     "return_type_provenance": "semantic", "comparison_surface": "semantic",
     "analysis_scope_key": "semantic", "program_is_big_endian": "semantic",
+    "program_image_ranges": "semantic",
     "completed_recovery_proof_ids": "derived_proof",
     "completed_recovery_proof_evidence": "derived_proof",
     "binary_id": "semantic", "summary_return_candidates": "semantic",

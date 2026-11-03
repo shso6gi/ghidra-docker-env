@@ -513,6 +513,7 @@ def test_collect_unknown_smt_declarations_includes_symbolic_post_state_variables
         ),
     )
 
-    assert collect_unknown_smt_declarations(published(expr)) == [
-        ("poststate_stackframe_tail_n32_size_4", 32)
-    ]
+    # Issue #282 (#248): 記号は表示名でなく ref の identity から作る
+    from scripts.function_tracer_pcode.core.render_smt.unknowns import side_state_symbol_name
+
+    assert collect_unknown_smt_declarations(published(expr)) == [(side_state_symbol_name(published(expr)), 32)]

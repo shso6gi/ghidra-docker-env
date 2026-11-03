@@ -80,6 +80,16 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import bui
 
 
 
+#: Issue #282 PR-282-A: 左右の memory を側ごとの配列にし、memory を読む値の構造の同一視を gate が拒否する。
+#: 左右の read-only の表・pointer の指す先が同じ内容であることは、同じ object である根拠（E 領域・image の identity）と
+#: D-M1 による共有（PR-282-P）が無いと示せないので、これらの EQ は PR-282-A では証明しない（精度の低下）。
+#: PR-282-P で回復したら strict xfail が失敗するので、この印を外す
+_PR282_MEMORY_SHARING_DEFERRED = pytest.mark.xfail(
+    strict=True,
+    reason="#282 PR-282-A: per-side memory; sharing (E region / D-M1) is PR-282-P",
+)
+
+
 def _model_binding_declared_inputs(query):
     """fixture の SAT model: query が宣言した入力をすべて束縛する（replay は宣言の完全な束縛を要求する）。"""
 
@@ -697,6 +707,7 @@ def test_loop_exact_guard_joins_the_exact_prior_term_artifact():
         encoder(session, other_guard)
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_real_method_b_producer_dual_writes_blocker_term_and_guard():
     from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import (
         make_internal_v2_reason_diagnostic,
@@ -2802,3 +2813,87 @@ def test_slice3_effect_prerequisite_suppresses_candidate_local_slice4_effect_cau
     assert len(authority.occurrence.proof_requirement_ids) == 1
 
 
+
+
+def test_slice3_effect_prerequisite_is_admitted_at_the_recurrence_summary_site():
+    """`recurrence_promotion` が `recurrence-summary-call-effect` で出す slice3 の signal は、封印済みの
+    site の producer として通る（Issue #282: 通らないと pair 全体が ERROR になる）。"""
+    from scripts.function_tracer_pcode.analysis.returns.summary_returns import (
+        accept_summary_return_candidates,
+    )
+    from scripts.function_tracer_pcode.authority.domains.call_effect import (
+        CALL_EFFECT_REASON_REGISTRY,
+        CALL_EFFECT_RECOVERY_REGISTRY,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.execution_authority import (
+        ExecutionAuthorityDeploymentPolicy,
+        activate_execution_authority_deployment,
+        install_execution_authority_signing_key,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.pilot import (
+        ProductionDualWritePilotConnector,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.production_signals import (
+        emit_call_effect_signal,
+    )
+    from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
+    from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
+    from scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates import (
+        _analysis_with_exact_returns,
+        _cond,
+        _const,
+        _n,
+        _summary_const,
+        _with_summary_proof,
+    )
+
+    analysis = _analysis_with_exact_returns(effect_summary=None)
+    summary_return = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(1), _n())],
+        pcode_identity="summary:n_gt_one",
+    ))
+    accepted = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, summary_return],
+        summary_note="counted_loop_summary",
+    )
+    signals = summary_effect_prerequisite_signals_from_acceptance(analysis, accepted)
+    assert signals
+
+    install_execution_authority_signing_key(
+        "recurrence-summary-call-effect-key", b"r" * 32
+    )
+    activate_execution_authority_deployment(ExecutionAuthorityDeploymentPolicy(
+        "recurrence-summary-call-effect-policy", 1, "test-owner", "test-source",
+        "recurrence-summary-call-effect-key", (), 3600, "test-revocation",
+    ))
+    root = Path(__file__).resolve().parents[4]
+    phase7_manifest = json.loads((root / (
+        "artifacts/unknown_taxonomy_v2/phase7/producer-sites.json"
+    )).read_text(encoding="utf-8"))
+    connector = ProductionDualWritePilotConnector(
+        ShadowLifecycleReducer(
+            reason_registry=CALL_EFFECT_REASON_REGISTRY,
+            recovery_registry=CALL_EFFECT_RECOVERY_REGISTRY,
+        ),
+        domain_signal_encoder=CompositeProductionSignalEncoder({
+            SummaryEffectPrerequisiteProductionSignal: CallEffectPilotEncoder(),
+        }),
+        phase7_runtime_factory=lambda identity: runtime_from_audited_manifest(
+            phase7_manifest, identity
+        ),
+    )
+    session = connector.begin({"case": "recurrence-summary-call-effect"})
+    with production_signal_scope(session):
+        for signal in signals:
+            emit_call_effect_signal(
+                signal, producer_site_manifest_id="recurrence-summary-call-effect"
+            )
+
+    assert session.domain_signal_error_details == []
+    projection = session.preview_lifecycle_projection()
+    assert {row.reason_id for row in projection.c_active_base} == {
+        "effect_observation_coverage_incomplete"
+    }

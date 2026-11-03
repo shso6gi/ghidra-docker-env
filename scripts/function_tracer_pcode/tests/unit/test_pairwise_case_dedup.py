@@ -626,9 +626,11 @@ def test_extract_return_cases_preserves_original_object_centric_value_for_smt_lo
     assert cases[0].value_expr.operator == "INT_SUB"
     assert cases[0].normalized_value_expr.operator == "INT_ADD"
     smt = cases[0].get_value_smt(lambda expr: expr)
-    assert "(select mem32 param_2)" in smt
+    # Issue #282 (I3): swap の後の param_1 の読み出しは、後の param_2 への store と重ならないと示せないので
+    # 簡約しない（時点つきの読み出し）。その解析は `memory_read_alias_unresolved` で EQ と NOT_EQ が止まる
     assert "(select mem32 param_1)" in smt
     assert "(bvsub (select mem32 param_1) (select mem32 param_2))" not in smt
+    assert "memory_read_alias_unresolved" in analysis.get_equivalence_blocking_unsafety_reasons()
 
 
 def test_return_case_value_smt_does_not_replay_materialized_object_state_value():

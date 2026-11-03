@@ -67,10 +67,10 @@ class ReturnWidthObservationMixin:
             input_correspondence=input_correspondence,
         )
         replace1 = build_symbol_replacer(
-            base_ctx["params1"], base_ctx.get("extra_vars1", []), float_mode="fp"
+            base_ctx["params1"], base_ctx.get("extra_vars1", []), float_mode="fp", side=1
         )
         replace2 = build_symbol_replacer(
-            base_ctx["params2"], base_ctx.get("extra_vars2", []), float_mode="fp"
+            base_ctx["params2"], base_ctx.get("extra_vars2", []), float_mode="fp", side=2
         )
         from scripts.function_tracer_pcode.proof.strategies.proof_gates.return_coverage import (
             prepare_unary_return_coverage_for_width,
@@ -263,12 +263,12 @@ class ReturnWidthObservationMixin:
         replace1 = build_symbol_replacer(
             base_ctx["params1"],
             base_ctx.get("extra_vars1", []),
-            float_mode="fp",
+            float_mode="fp", side=1
         )
         replace2 = build_symbol_replacer(
             base_ctx["params2"],
             base_ctx.get("extra_vars2", []),
-            float_mode="fp",
+            float_mode="fp", side=2
         )
         reasons = self._collect_return_coverage_unsafety_reasons(
             base_ctx,

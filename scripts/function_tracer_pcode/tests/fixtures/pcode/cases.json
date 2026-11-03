@@ -23,8 +23,8 @@
    },
    "pr_gate": true,
    "recording": {
-    "analysis_source_digest": "fefeb18ed2e245e13f4c961da639b05f035a72b5370c506728f7d94a0141da46",
-    "commit": "7fc64edee3afeb275836bd217d3e574adff01b8d",
+    "analysis_source_digest": "4d80d0ad77ac3a5cb980022a9bb312da8220e2ea4bf01485c1a20453c4f48822",
+    "commit": "4b2d61ea513b8d4823d7bc2a143e65ffb6693b27",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -62,8 +62,8 @@
    },
    "pr_gate": false,
    "recording": {
-    "analysis_source_digest": "fefeb18ed2e245e13f4c961da639b05f035a72b5370c506728f7d94a0141da46",
-    "commit": "7fc64edee3afeb275836bd217d3e574adff01b8d",
+    "analysis_source_digest": "4d80d0ad77ac3a5cb980022a9bb312da8220e2ea4bf01485c1a20453c4f48822",
+    "commit": "4b2d61ea513b8d4823d7bc2a143e65ffb6693b27",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -101,8 +101,8 @@
    },
    "pr_gate": false,
    "recording": {
-    "analysis_source_digest": "fefeb18ed2e245e13f4c961da639b05f035a72b5370c506728f7d94a0141da46",
-    "commit": "7fc64edee3afeb275836bd217d3e574adff01b8d",
+    "analysis_source_digest": "4d80d0ad77ac3a5cb980022a9bb312da8220e2ea4bf01485c1a20453c4f48822",
+    "commit": "4b2d61ea513b8d4823d7bc2a143e65ffb6693b27",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -140,8 +140,8 @@
    },
    "pr_gate": true,
    "recording": {
-    "analysis_source_digest": "fefeb18ed2e245e13f4c961da639b05f035a72b5370c506728f7d94a0141da46",
-    "commit": "7fc64edee3afeb275836bd217d3e574adff01b8d",
+    "analysis_source_digest": "4d80d0ad77ac3a5cb980022a9bb312da8220e2ea4bf01485c1a20453c4f48822",
+    "commit": "4b2d61ea513b8d4823d7bc2a143e65ffb6693b27",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -179,8 +179,8 @@
    },
    "pr_gate": true,
    "recording": {
-    "analysis_source_digest": "fefeb18ed2e245e13f4c961da639b05f035a72b5370c506728f7d94a0141da46",
-    "commit": "7fc64edee3afeb275836bd217d3e574adff01b8d",
+    "analysis_source_digest": "4d80d0ad77ac3a5cb980022a9bb312da8220e2ea4bf01485c1a20453c4f48822",
+    "commit": "4b2d61ea513b8d4823d7bc2a143e65ffb6693b27",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -218,8 +218,8 @@
    },
    "pr_gate": true,
    "recording": {
-    "analysis_source_digest": "fefeb18ed2e245e13f4c961da639b05f035a72b5370c506728f7d94a0141da46",
-    "commit": "7fc64edee3afeb275836bd217d3e574adff01b8d",
+    "analysis_source_digest": "4d80d0ad77ac3a5cb980022a9bb312da8220e2ea4bf01485c1a20453c4f48822",
+    "commit": "4b2d61ea513b8d4823d7bc2a143e65ffb6693b27",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -258,8 +258,8 @@
    },
    "pr_gate": true,
    "recording": {
-    "analysis_source_digest": "fefeb18ed2e245e13f4c961da639b05f035a72b5370c506728f7d94a0141da46",
-    "commit": "7fc64edee3afeb275836bd217d3e574adff01b8d",
+    "analysis_source_digest": "4d80d0ad77ac3a5cb980022a9bb312da8220e2ea4bf01485c1a20453c4f48822",
+    "commit": "4b2d61ea513b8d4823d7bc2a143e65ffb6693b27",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -276,14 +276,16 @@
    ]
   },
   {
-   "budget_seconds": 40,
+   "budget_seconds": 80,
    "case_id": "sphere_SphereConstructor_N_B2_O_B4",
    "dataset_label": "Neq",
    "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
    "function_name": "SphereConstructor",
    "ground_truth_file": "ground_truth/sphere_SphereConstructor_N_B2_O_B4.json",
    "issue_refs": [
-    "#109"
+    "#109",
+    "#219",
+    "#282"
    ],
    "left": {
     "binary_id": "B2",
@@ -292,13 +294,13 @@
     "sha256": "55fd9f11d9112e8b9f681c9aaa8da087dd2879c1c3d7e538eda6aa134af82667"
    },
    "measured_seconds": {
-    "container": 6.4,
-    "github_hosted_runner": 15.9
+    "container": 16.1,
+    "github_hosted_runner": 25.6
    },
    "pr_gate": true,
    "recording": {
-    "analysis_source_digest": "fefeb18ed2e245e13f4c961da639b05f035a72b5370c506728f7d94a0141da46",
-    "commit": "7fc64edee3afeb275836bd217d3e574adff01b8d",
+    "analysis_source_digest": "4d80d0ad77ac3a5cb980022a9bb312da8220e2ea4bf01485c1a20453c4f48822",
+    "commit": "4b2d61ea513b8d4823d7bc2a143e65ffb6693b27",
     "dirty": false,
     "identical_fast_path": false
    },
@@ -336,8 +338,8 @@
    },
    "pr_gate": true,
    "recording": {
-    "analysis_source_digest": "fefeb18ed2e245e13f4c961da639b05f035a72b5370c506728f7d94a0141da46",
-    "commit": "7fc64edee3afeb275836bd217d3e574adff01b8d",
+    "analysis_source_digest": "4d80d0ad77ac3a5cb980022a9bb312da8220e2ea4bf01485c1a20453c4f48822",
+    "commit": "4b2d61ea513b8d4823d7bc2a143e65ffb6693b27",
     "dirty": false,
     "identical_fast_path": false
    },

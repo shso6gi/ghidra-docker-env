@@ -1,3 +1,4 @@
+import pytest
 # -*- coding: utf-8 -*-
 
 from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
@@ -21,6 +22,16 @@ from scripts.function_tracer_pcode.core import (
     ReturnInfo,
 )
 from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
+
+
+#: Issue #282 PR-282-A: 左右の memory を側ごとの配列にし、memory を読む値の構造の同一視を gate が拒否する。
+#: 左右の read-only の表・pointer の指す先が同じ内容であることは、同じ object である根拠（E 領域・image の identity）と
+#: D-M1 による共有（PR-282-P）が無いと示せないので、これらの EQ は PR-282-A では証明しない（精度の低下）。
+#: PR-282-P で回復したら strict xfail が失敗するので、この印を外す
+_PR282_MEMORY_SHARING_DEFERRED = pytest.mark.xfail(
+    strict=True,
+    reason="#282 PR-282-A: per-side memory; sharing (E region / D-M1) is PR-282-P",
+)
 
 
 def _solver_runner():
@@ -243,6 +254,7 @@ def test_pairwise_extracts_cases_from_solver_view_consistently():
     assert extract_cases.call_args_list[1].args[0] is solver_right
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_pairwise_short_circuits_semantically_equal_readonly_reductions():
     strategy = PairwiseStrategy(echo_input_correspondence(Mock()), _solver_runner(), debug=False)
 

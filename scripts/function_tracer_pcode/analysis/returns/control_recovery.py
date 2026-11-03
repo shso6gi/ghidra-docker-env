@@ -1425,6 +1425,7 @@ def _impl__recover_switch_like_returns_from_placeholder_analysis(
         unknown_event_count=1,
         unknown_event_reasons=["indirect_control_flow_unresolved"],
         program_is_big_endian=self._program_is_big_endian(),
+            program_image_ranges=self._program_image_ranges(),
         binary_id=self._binary_id,
     )
     recovered = self._recover_switch_like_returns_from_pcode(
@@ -1803,7 +1804,8 @@ def _impl__recover_switch_like_returns_from_pcode(
         condition_tracker=condition_tracker,
         parameters=self._current_parameters,
         concretize_readonly_loads=self._concretize_readonly_loads,
-        read_memory_value=self._read_memory_value,
+        # switch の表の entry は制御の解決にだけ使う番地（Issue #282, Q1 の CODE_TARGET）
+        read_memory_value=self._read_code_target_value,
         max_cases=self._bounded_call_max_cases,
         debug=self.debug,
         debug_print=self._debug_print if self.debug else None,

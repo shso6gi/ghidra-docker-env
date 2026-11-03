@@ -3,15 +3,14 @@
  "case_id": "sphere_SphereConstructor_N_B2_O_B4",
  "conditional_assumption_kinds": [],
  "conditional_outcome": null,
- "decisive_proof_kinds": [
-  "SAFE_COUNTEREXAMPLE"
- ],
+ "decisive_proof_kinds": [],
  "expected_stable_reason_ids": [
   "counterexample_analysis_safety_unproven",
+  "counterexample_partition_replay_ambiguous",
   "outcome_cfg_reachability_unproven"
  ],
  "final_outcome": "UNKNOWN",
- "recorded_at_commit": "b526e14d1cd309aea2b2dfc6a1e21ad329d5eaa2",
+ "recorded_at_commit": "0d97acc641742e2f62b83b17269c5d9c75c614d3",
  "schema": "recorded-pair-expected-v1",
  "stage_path": [
   "S_PAIRWISE",

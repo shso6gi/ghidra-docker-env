@@ -87,9 +87,22 @@ def _abi_facts(*, return_type="/void", type_length=0, storage="MISSING", calling
     return facts
 
 
+#: Issue #282: global の object への store は、左右の object が同じである根拠が無いので比較面に入らない
+#: （`effect_global_store_identity_unproven`）。void の効果だけの面の fixture は pointer の parameter への store にする
+_POINTER_PARAMETER = {"name": "p", "index": 1, "size": 8, "data_type": "int *", "is_signed": False}
+
+
 def _global_effect(value, order=1):
-    location = CanonicalLocation(base_ref=LocationBaseRef.global_object("g", 4, space_name="ram"), offset=0, size=4)
+    location = CanonicalLocation(base_ref=LocationBaseRef.parameter("p", index=1), offset=0, size=4)
     return StoreEffect(location=location, value=value, conditions=[], order_key=order)
+
+
+def _surface(effects):
+    return build_void_effect_summary_expr(
+        list(effects),
+        [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}, _POINTER_PARAMETER],
+        big_endian=False,
+    )
 
 
 def _void_analysis(side, *, effects=None, incomplete=(), unsupported=False, surface=True, facts=None):
@@ -101,7 +114,7 @@ def _void_analysis(side, *, effects=None, incomplete=(), unsupported=False, surf
     summary = EffectSummary(parameter_names=["param_1"], effects=list(effects))
     summary.incomplete_reasons = tuple(incomplete)
     summary.has_unsupported_call = unsupported
-    summary.synthetic_expr = build_void_effect_summary_expr(list(effects))
+    summary.synthetic_expr = _surface(effects)
     analysis.effect_summary = summary
     if surface and summary.synthetic_expr is not None:
         analysis.returns = [ReturnInfo(f"0x{10 if side == 'left' else 20}10", summary.synthetic_expr, [])]
@@ -412,7 +425,7 @@ def _param_x():
 
 def _e2e_void(side, value, **kwargs):
     analysis = _void_analysis(side, effects=[_global_effect(value)], **kwargs)
-    analysis.parameters = [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}]
+    analysis.parameters = [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}, _POINTER_PARAMETER]
     return analysis
 
 
@@ -424,10 +437,14 @@ def test_e2e_same_void_global_effect_is_equivalent():
 
 
 def test_e2e_different_void_global_effect_is_not_equivalent():
+    """Issue #282 (I6): 書いた値の違いの反例は観測の番地に依存する。番地の実現（image の外・null page の外）を
+    確かめるのは PR-282-P（witness の選び直しが要る）なので、この段階では理由つきの UNKNOWN。EQ にはならない。"""
     other = Expression.binary_op("INT_ADD", _param_x(), Expression.constant(1, size=4))
     result = _run_production_check("diff", _e2e_void("left", _param_x()), _e2e_void("right", other))
-    assert result["final_outcome"] == "NOT_EQ"
-    assert result["is_equivalent"] is False
+    assert result["final_outcome"] == "UNKNOWN"
+    assert result["is_equivalent"] is not True
+    reasons = {r.get("reason_id") for r in result["unknown_reasons"]}
+    assert "counterexample_analysis_safety_unproven" in reasons, reasons
 
 
 def test_e2e_incomplete_void_effect_stays_unknown_with_the_abi_blocker():
@@ -458,17 +475,20 @@ def _matching_width_non_void(side="right"):
     bit-for-bit the same solver term as the void side's effect surface
     (presence flag 1 ⊕ stored ``x``), with a real return storage."""
     x = _param_x()
-    value = Expression.binary_op("PIECE", Expression.constant(1, size=1), x)
-    value.size = 5
+    low = Expression.binary_op("SUBPIECE", x, Expression.constant(0, size=4))
+    low.size = 1
+    # Issue #282: void の効果だけの面は 1 byte の観測（書いたか ⊕ 値の 1 byte）の 16 bit
+    value = Expression.binary_op("PIECE", Expression.constant(1, size=1), low)
+    value.size = 2
     analysis = FunctionReturnAnalysis(
         f"fn-{side}", "0x2000", [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
-        [ReturnInfo("0x2010", value, [])], return_type="undefined5", binary_id=f"bin-{side}",
+        [ReturnInfo("0x2010", value, [])], return_type="undefined2", binary_id=f"bin-{side}",
     )
     analysis.return_abi_facts = {
         "schema_version": 1,
         "calling_convention": {"status": "PRESENT", "value": ("ghidra_calling_convention_v1", "default"), "source": "getModelName"},
-        "declared_or_effective_return_type": {"status": "PRESENT", "value": ("ghidra_return_type_v1", "/undefined5", 5), "source": "getReturnType"},
-        "return_storage_descriptor": {"status": "PRESENT", "value": ("ghidra_return_storage_v1", (("ghidra_return_storage_member_v1", "register", 0, 5),)), "source": "getReturnStorage"},
+        "declared_or_effective_return_type": {"status": "PRESENT", "value": ("ghidra_return_type_v1", "/undefined2", 2), "source": "getReturnType"},
+        "return_storage_descriptor": {"status": "PRESENT", "value": ("ghidra_return_storage_v1", (("ghidra_return_storage_member_v1", "register", 0, 2),)), "source": "getReturnStorage"},
     }
     return analysis
 
@@ -481,8 +501,8 @@ def test_e2e_matching_width_void_effect_versus_non_void_value_is_never_equivalen
     must refuse to compare a memory-effect surface against a return value."""
     left = _e2e_void("left", _param_x())
     right = _matching_width_non_void()
-    assert left.comparison_surface.explicit_bit_width == 40
-    assert right.returns[0].value.get_bit_width() == 40
+    assert left.comparison_surface.explicit_bit_width == 16
+    assert right.returns[0].value.get_bit_width() == 16
     result = _run_production_check("mixed-width", left, right)
     assert result["final_outcome"] != "EQUIVALENT", result.get("unknown_reasons")
     assert result["is_equivalent"] is not True
@@ -511,28 +531,32 @@ def _non_void_with_global_store(side="left"):
     from conftest import resolve_mock_data_type
 
     analysis = FunctionReturnAnalysis(
-        f"fn-{side}", "0x1000", [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}],
+        f"fn-{side}", "0x1000", [{"name": "param_1", "index": 0, "size": 4, "data_type": "int", "is_signed": True}, _POINTER_PARAMETER],
         [ReturnInfo("0x1010", Expression.constant(0, size=4), [])], return_type="int",
         return_type_obj=resolve_mock_data_type("int"), binary_id=f"bin-{side}",
     )
     effects = [_global_effect(_param_x())]
     analysis.effect_summary = EffectSummary(parameter_names=["param_1"], effects=effects)
-    analysis.effect_summary.synthetic_expr = build_void_effect_summary_expr(effects)
+    analysis.effect_summary.synthetic_expr = _surface(effects)
+    analysis.program_is_big_endian = False
     analyzer = ReturnAnalyzer(Mock(), debug=False)
     analyzer._parameters.is_void_type = lambda dtype: str(dtype) == "void"
     assert analyzer._apply_observable_effect_surface(analysis, analysis.return_type_obj, "int") is True
     assert analysis.comparison_surface.kind == "memory_effect"
-    assert analysis.comparison_surface.explicit_bit_width == 72
+    # Issue #282: 比較面は 1 byte の観測（書いたか 8 bit + 値 8 bit）と戻り値 32 bit
+    assert analysis.comparison_surface.explicit_bit_width == 48
     analysis.return_abi_facts = _abi_facts(return_type="/int", type_length=4, storage="PRESENT")
     return analysis
 
 
-def _matching_width_non_void_value(side="right", *, width_bytes=9):
-    """``undefined9 f(int x)`` returning ``concat(0x01, x, 0x00000000)``: the same
-    72-bit solver term as the stores ⊕ return surface of the left side."""
+def _matching_width_non_void_value(side="right", *, width_bytes=6):
+    """``undefined6 f(int x)`` returning ``concat(0x01, low8(x), 0x00000000)``: the same
+    48-bit width as the stores ⊕ return surface of the left side (Issue #282: 16-bit observation)."""
     x = _param_x()
-    inner = Expression.binary_op("PIECE", Expression.constant(1, size=1), x)
-    inner.size = 5
+    low = Expression.binary_op("SUBPIECE", x, Expression.constant(0, size=4))
+    low.size = 1
+    inner = Expression.binary_op("PIECE", Expression.constant(1, size=1), low)
+    inner.size = 2
     value = Expression.binary_op("PIECE", inner, Expression.constant(0, size=4))
     value.size = width_bytes
     analysis = FunctionReturnAnalysis(
@@ -555,7 +579,7 @@ def test_e2e_matching_width_non_void_memory_effect_versus_return_value_is_never_
     void effect-only path is not involved; the surface kinds still differ."""
     left = _non_void_with_global_store("left")
     right = _matching_width_non_void_value("right")
-    assert right.returns[0].value.get_bit_width() == 72
+    assert right.returns[0].value.get_bit_width() == 48
     result = _run_production_check("mixed-nonvoid", left, right)
     assert result["final_outcome"] != "EQUIVALENT", result.get("unknown_reasons")
     assert result["is_equivalent"] is not True

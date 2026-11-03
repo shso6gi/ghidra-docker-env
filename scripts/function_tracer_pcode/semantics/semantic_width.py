@@ -523,6 +523,11 @@ class SemanticWidthNormalizer:
         original_bits = expr.get_bit_width()
         if original_bits <= narrow_bits or narrow_bits <= 0:
             return None
+        from scripts.function_tracer_pcode.core.address_provenance import carries_image_address
+
+        if carries_image_address(expr):
+            # Issue #282: image の番地の出自を持つ定数は素の数値に作り直さない
+            return None
 
         original_mask = (1 << original_bits) - 1
         narrow_mask = (1 << narrow_bits) - 1

@@ -237,10 +237,11 @@ def test_deleting_one_required_api_is_detected(monkeypatch):
 
 @pytest.mark.recorded_replay
 def test_deleting_one_memory_read_is_detected_even_though_the_outcome_matches(monkeypatch):
-    """memory read を 1 件消しても最終 outcome と判定面は変わらない。
+    """memory read を 1 件消すと、``missing_accesses`` に記録され、再生は ``RecordedSurfaceMissing`` で止まる。
 
-    つまり outcome 一致だけを見る test ではこの欠落を検出できない。検出して
-    いるのは ``missing_accesses`` であることを、判定面の一致と同時に固定する。
+    以前は image の byte の読み出しが broad except で欠落を吸収し、判定面が変わらなかった（outcome 一致だけを見る
+    test では検出できなかった）。Issue #282 の Q1 の入口は Ghidra の読み出しの例外だけを吸収するので、欠落は
+    ``missing_accesses`` と例外の両方で見える。
     """
 
     left_payload = _read("left.json")
@@ -252,10 +253,10 @@ def test_deleting_one_memory_read_is_detected_even_though_the_outcome_matches(mo
     left, _right, payload, _collector, (_result, failure) = _replay(
         left_payload, right_payload, case_id="missing-memory", monkeypatch=monkeypatch,
     )
-    assert failure is None, failure
-    assert payload is not None
-    # 判定面は記録時と完全に一致する（= outcome では検出できない）。
-    assert check_snapshot(payload) == _read("check_snapshot.json")
+    # Issue #282 (Q1): image の byte の読み出しは `analysis/program_image.py` の 1 つの入口で、Ghidra の読み出しの
+    # 例外（`MemoryAccessException` など）だけを「読めない」とする。以前の読み出しは broad except で何でも吸収して
+    # いたので、記録の欠落も判定面を変えずに消えていた。今は ``RecordedSurfaceMissing`` まで出る
+    assert isinstance(failure, RecordedSurfaceMissing), failure
 
     assert left.missing_accesses, (
         "deleting memory read {} on {} was absorbed".format(member_key, object_id)

@@ -60,7 +60,8 @@ def test_effect_summary_rewrites_observed_post_call_loads_into_phi_difference():
         ],
     )
 
-    assert rewritten.to_string() == "(PHI(MEM[b] if (MEM[b] < MEM[a]), MEM[a]) - PHI(MEM[a] if (MEM[b] < MEM[a]), MEM[b]))"
+    # Issue #282 (I3): 後の store（別の parameter の指す先）と重ならないと示せないので、この読み出しは簡約しない
+    assert rewritten.to_string() == "(MEM[a] - PHI(MEM[a] if (MEM[b] < MEM[a]), MEM[b]))"
 
 def test_normalize_post_state_expression_preserves_iteration_delta_wrapped_step_value_symbolically():
     trace = Expression.parameter("trace", 0, size=8)

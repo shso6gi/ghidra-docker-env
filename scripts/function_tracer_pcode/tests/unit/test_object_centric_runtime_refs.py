@@ -1,3 +1,4 @@
+import pytest
 # -*- coding: utf-8 -*-
 
 from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import positional_comparison
@@ -60,6 +61,16 @@ from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
 from scripts.function_tracer_pcode.tests.unit._loop_test_fixtures import (
     readonly_loop_summary as _readonly_loop_summary,
     readonly_sum_expr as _readonly_sum_expr,
+)
+
+
+#: Issue #282 PR-282-A: 左右の memory を側ごとの配列にし、memory を読む値の構造の同一視を gate が拒否する。
+#: 左右の read-only の表・pointer の指す先が同じ内容であることは、同じ object である根拠（E 領域・image の identity）と
+#: D-M1 による共有（PR-282-P）が無いと示せないので、これらの EQ は PR-282-A では証明しない（精度の低下）。
+#: PR-282-P で回復したら strict xfail が失敗するので、この印を外す
+_PR282_MEMORY_SHARING_DEFERRED = pytest.mark.xfail(
+    strict=True,
+    reason="#282 PR-282-A: per-side memory; sharing (E region / D-M1) is PR-282-P",
 )
 
 
@@ -1364,6 +1375,7 @@ def test_method_b_closure_relation_records_one_sided_summary_exact_terms():
     assert ("exact_constant_bias", 0) in relation
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_method_b_covering_case_producer_records_only_covering_evidence():
     base = Expression.parameter("base", index=0, data_type="int *", size=8)
     exact_expr = Expression.binary_op(
@@ -1428,6 +1440,7 @@ def test_method_b_covering_case_producer_records_only_covering_evidence():
     assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_method_b_guard_partition_producer_records_when_count_guard_is_proven():
     base = Expression.parameter("base", index=0, data_type="int *", size=8)
     count = Expression.parameter("count", index=1, data_type="int", size=4)
@@ -1511,6 +1524,7 @@ def test_method_b_guard_partition_producer_records_when_count_guard_is_proven():
     assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_method_b_guard_partition_producer_records_count_membership_when_range_is_proven():
     base = Expression.parameter("base", index=0, data_type="int *", size=8)
     count = Expression.parameter("count", index=1, data_type="int", size=4)
@@ -1586,6 +1600,7 @@ def test_method_b_guard_partition_producer_records_count_membership_when_range_i
         assert strategy._method_b_closure_proof_is_complete(reason, analysis1, analysis2) is False
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_method_b_guard_partition_producer_rejects_open_count_range():
     base = Expression.parameter("base", index=0, data_type="int *", size=8)
     count = Expression.parameter("count", index=1, data_type="int", size=4)
@@ -2817,6 +2832,7 @@ def test_pairwise_readonly_runtime_values_use_method_b_seed_compensation():
     ) is True
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_pairwise_full_path_prefers_method_b_loop_meaning_signature():
     full = _readonly_sum_expr(_readonly_loop_summary(start=0))
     suffix = _readonly_sum_expr(
@@ -2898,6 +2914,7 @@ def test_pairwise_method_b_unknown_carries_object_target_and_proof_ids():
     assert actions == ()
 
 
+@_PR282_MEMORY_SHARING_DEFERRED
 def test_monkeypatched_method_b_full_path_uses_canonical_solver_authority():
     base = Expression.parameter("base", index=0, data_type="int *", size=8)
     count = Expression.parameter("count", index=1, data_type="int", size=4)

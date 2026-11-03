@@ -316,11 +316,12 @@ def test_baseline_is_a_frozen_snapshot_with_stable_totals():
     # eval-prep PR-4: Phase 4-B（`checker/abi_retry.py`）を撤去（#184、-1 key / -1）
     # Issue #281 review 6: 引数の記憶域の照合で varnode を読む broad except を Ghidra の読み出しの例外に狭めた
     # （`call_argument` の 3 関数、-3 key / -4）
+    # Issue #282: image の byte の読み出しを `analysis/program_image.py` の 1 つの入口（Q1）にした（4 関数、-4 key / -8）
     assert baseline_totals(entries) == {
-        "keys": 579,
+        "keys": 575,
         "logged": 0,
-        "unlogged": 902,
-        "handlers": 902,
+        "unlogged": 894,
+        "handlers": 894,
     }
 
 

@@ -5,14 +5,14 @@
  "conditional_outcome": null,
  "decisive_proof_kinds": [],
  "expected_stable_reason_ids": [
-  "outcome_cfg_reachability_unproven"
+  "outcome_path_region_completeness_unproven",
+  "return_abi_provenance_unavailable"
  ],
  "final_outcome": "UNKNOWN",
- "recorded_at_commit": "b526e14d1cd309aea2b2dfc6a1e21ad329d5eaa2",
+ "recorded_at_commit": "4b2d61ea513b8d4823d7bc2a143e65ffb6693b27",
  "schema": "recorded-pair-expected-v1",
  "stage_path": [
-  "S_PAIRWISE",
-  "S_MONOLITHIC_FALLBACK"
+  "S_PAIRWISE"
  ],
  "variant": "default"
 }

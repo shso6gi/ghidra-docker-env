@@ -344,3 +344,7 @@ from scripts.function_tracer_pcode.analysis.effects.store_effect import (  # noq
     _impl_is_call_effect_summary_allowed as is_call_effect_summary_allowed,
     _impl_summarize_store_effects as summarize_store_effects,
 )
+from scripts.function_tracer_pcode.analysis.effects.read_validation import (  # noqa: F401
+    MEMORY_READ_ALIAS_UNRESOLVED_REASON,
+    unresolved_memory_read_aliases,
+)

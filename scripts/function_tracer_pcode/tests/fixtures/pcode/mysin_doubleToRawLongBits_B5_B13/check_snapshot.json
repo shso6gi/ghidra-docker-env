@@ -1,22 +1,25 @@
 {
  "binary1_name": "newV-arm64-gcc-O0",
  "binary2_name": "newV-mips64-gcc-O0",
- "c_active_reason_ids": [],
- "canonical_outcome": "EQUIVALENT",
- "conditional_outcome": null,
- "decisive_proof_kinds": [
-  "EQ_CLOSURE"
+ "c_active_reason_ids": [
+  "comparison_equivalence_closure_unproven"
  ],
+ "canonical_outcome": "UNKNOWN",
+ "conditional_outcome": null,
+ "decisive_proof_kinds": [],
  "decisive_proof_provenance_kind": null,
  "error_kind": null,
- "final_outcome": "EQUIVALENT",
+ "final_outcome": "UNKNOWN",
  "function1_name": "doubleToRawLongBits",
  "function2_name": "doubleToRawLongBits",
  "identical_fast_path_disposition": null,
- "is_equivalent": true,
- "q_open_proof_kinds": [],
+ "is_equivalent": null,
+ "q_open_proof_kinds": [
+  "comparison_equivalence_closure"
+ ],
  "schema": "recorded-pcode-check-snapshot-v1",
  "stage_path": [
-  "S_PAIRWISE"
+  "S_PAIRWISE",
+  "S_MONOLITHIC_FALLBACK"
  ]
 }

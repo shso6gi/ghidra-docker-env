@@ -123,6 +123,8 @@ REPLAY_ENTRY_POINTS = {
     "test_issue22d_output_schema_locality.py": "_replay_with_query_log",
     # Issue #106 PR-106-A: 解析の期限つきの再生（E1 / E2）
     "test_issue106a_pair_deadline.py": "_replay_with_deadline",
+    # Issue #282: corpus の外の bessi0 の記録（GT が無いので corpus に入れない）
+    "test_issue282_bessi0_recorded.py": "_replay_bessi0",
 }
 RECORDED_REPLAY_MARKER = "recorded_replay"
 

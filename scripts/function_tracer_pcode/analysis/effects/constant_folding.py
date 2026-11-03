@@ -219,26 +219,16 @@ def _impl__read_program_memory_value(
     tracer,
     address_value: int,
     size_bytes: int,
+    *,
+    purpose: Optional[str] = None,
 ) -> Optional[int]:
+    """image の値（Issue #282, Q1: `analysis.program_image` が具体化してよいときだけ）。"""
+
+    from scripts.function_tracer_pcode.analysis.program_image import DATA_VALUE, read_image_value
+
     if tracer is None or getattr(tracer, "program", None) is None:
         return None
-    if not isinstance(address_value, int) or address_value < 0 or size_bytes <= 0:
-        return None
-    try:
-        program = tracer.program
-        memory = program.getMemory()
-        default_space = program.getAddressFactory().getDefaultAddressSpace()
-        addr = default_space.getAddress(address_value)
-        raw_bytes = []
-        for offset in range(size_bytes):
-            raw_bytes.append(int(memory.getByte(addr.add(offset))) & 0xFF)
-        ordered = raw_bytes if program.getLanguage().isBigEndian() else list(reversed(raw_bytes))
-        result = 0
-        for byte_val in ordered:
-            result = (result << 8) | byte_val
-        return result
-    except Exception:
-        return None
+    return read_image_value(tracer.program, address_value, size_bytes, purpose=purpose or DATA_VALUE)
 
 
 def _impl__expression_truth_value(expr: Optional[Expression]) -> Optional[bool]:
@@ -291,11 +281,15 @@ def _impl__is_stack_frame_base_expression(expr: Optional[Expression]) -> bool:
     if expr is None:
         return False
 
+    # entry SP を起点とする番地の基底は、SP の register の **入口の値** だけ（Issue #282, I11）。frame pointer の
+    # register は名前だけでは frame ではない（frame pointer を設定しない関数では callee-saved の汎用 register で、
+    # 入口の値は caller の値）。入口の値かどうかは `parameter_entry.is_register_entry_variable` が決める
+    from scripts.function_tracer_pcode.analysis.effects.parameter_entry import is_register_entry_variable
+
     expr_storage = _coerce_storage_info(getattr(expr, "storage_info", None))
-    if expr_storage is not None:
-        if bool(expr_storage.is_stack_pointer) or bool(expr_storage.is_frame_pointer):
-            return True
-    return False
+    if expr_storage is None or not bool(expr_storage.is_stack_pointer):
+        return False
+    return is_register_entry_variable(expr)
 
 
 def _impl__constant_factor(expr: Expression) -> Optional[int]:
