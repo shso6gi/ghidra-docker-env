@@ -21,7 +21,6 @@ key（#283）。key の無い読み出しは関数の出口の読み出し（す
 
 from __future__ import annotations
 
-import weakref
 from typing import List, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core import Condition, Expression, ExpressionType
@@ -153,49 +152,17 @@ def _lowered(expr, conditions, effects, parameters):
     return lowered if lowered is not None else expr
 
 
-#: 解析ごとの検査の結果。解析の object は hash できない（dataclass）ので id で引き、弱参照で同じ object かを確かめる。
-#: 値は検査が読む object の列（identity で比べる）と結果
-_FINDINGS_MEMO: dict = {}
-_FINDINGS_MEMO_LIMIT = 4096
-
-
-def _memo_inputs(analysis) -> Tuple[object, ...]:
-    effect_summary = getattr(analysis, "effect_summary", None)
-    returns = _sequence(getattr(analysis, "returns", None))
-    return (
-        effect_summary,
-        getattr(effect_summary, "effects", None),
-        getattr(effect_summary, "frame_local_effects", None),
-        getattr(analysis, "parameters", None),
-        *_sequence(getattr(effect_summary, "effects", None)),
-        *_sequence(getattr(effect_summary, "frame_local_effects", None)),
-        *(item for ret in returns for item in (ret, getattr(ret, "value", None), getattr(ret, "conditions", None))),
-        *(cond for ret in returns for cond in _sequence(getattr(ret, "conditions", None))),
-    )
-
-
 def unresolved_memory_read_aliases(analysis) -> List[Tuple[str, ...]]:
     """`analysis` の戻り値・条件・store の値と条件のうち、先行する store との関係を証明できない入口の memory の
-    読み出し（空なら検査に通った）。判定できない（上限超過）ときも 1 件の finding を返す。"""
+    読み出し（空なら検査に通った）。判定できない（上限超過）ときも 1 件の finding を返す。
 
-    inputs = _memo_inputs(analysis)
-    cached = _FINDINGS_MEMO.get(id(analysis))
-    if (
-        cached is not None
-        and cached[0]() is analysis
-        and len(cached[1]) == len(inputs)
-        and all(a is b for a, b in zip(cached[1], inputs))
-    ):
-        return list(cached[2])
-    findings = _unresolved_memory_read_aliases(analysis)
-    try:
-        owner = weakref.ref(analysis)
-    except TypeError:
-        return findings
-    if len(_FINDINGS_MEMO) >= _FINDINGS_MEMO_LIMIT:
-        _FINDINGS_MEMO.clear()
-    _FINDINGS_MEMO[id(analysis)] = (owner, inputs, tuple(findings))
-    return findings
+    結果は使い回さない（呼ぶたびに検査する）。`StoreEffect` は mutable で、検査の後に順序・位置・条件の list が
+    同じ object のまま変わり得る（PR #289 review: identity で引く memo は `order_key` を 20 → 5 に変えた後も
+    検出なしを返した）。検査は解析 1 つにつき数 ms で（記録 corpus 10 件で 1 process あたり 6 ms 以下）、使い回す
+    利点が無い。
+    """
+
+    return _unresolved_memory_read_aliases(analysis)
 
 
 def _unresolved_memory_read_aliases(analysis) -> List[Tuple[str, ...]]:

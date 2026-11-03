@@ -335,6 +335,78 @@ def test_p15_reads_disjoint_from_or_before_every_store_pass():
     assert not _analysis("f", before, effects=[_store(P, 0, 4, 7, 5)]).has_unresolved_memory_read_aliases()
 
 
+def _read_of_q(order):
+    read = Expression.memory(_p("q", 1), size=4)
+    read.read_order_key = order
+    return read
+
+
+def _contradiction():
+    return Condition(Expression.binary_op("INT_EQUAL", Expression.constant(0, 8), Expression.constant(1, 8)))
+
+
+def _move_store_before_the_read(analysis):
+    analysis.effect_summary.effects[0].order_key = 5
+
+
+def _replace_store_location(analysis):
+    analysis.effect_summary.effects[0].location = CanonicalLocation(base_ref=Q, offset=0, size=4, steps=())
+
+
+def _drop_contradicting_store_guard(analysis):
+    analysis.effect_summary.effects[0].conditions.clear()
+
+
+def _drop_contradicting_path_condition(analysis):
+    analysis.returns[0].conditions.clear()
+
+
+@pytest.mark.parametrize(
+    "build, change",
+    [
+        # 検査の後に store の順序が読み出しより前へ動く（20 → 5）
+        pytest.param(lambda: dict(effects=[_store(P, 0, 4, 7, 20)]), _move_store_before_the_read, id="order_key"),
+        # 位置が読み出しと重ならない `q + 8` から読み出しと同じ `q` に変わる
+        pytest.param(lambda: dict(effects=[_store(Q, 8, 4, 7, 5)]), _replace_store_location, id="location"),
+        # store の条件の list を同じ object のまま書き換える（矛盾する条件を外す）
+        pytest.param(
+            lambda: dict(effects=[_store(P, 0, 4, 7, 5, conditions=[_contradiction()])]),
+            _drop_contradicting_store_guard,
+            id="store_conditions",
+        ),
+        # 戻り値の経路の条件の list を同じ object のまま書き換える
+        pytest.param(
+            lambda: dict(effects=[_store(P, 0, 4, 7, 5)], conditions=[_contradiction()]),
+            _drop_contradicting_path_condition,
+            id="path_conditions",
+        ),
+    ],
+)
+def test_alias_check_follows_inputs_changed_after_an_earlier_check(build, change):
+    """検査の結果を、検査が読んだ入力が変わった後に使い回さない（PR #289 review: 以前の memo は object の identity
+    だけを比べ、同じ `StoreEffect` の `order_key` を 20 → 5 に変えても、検出なしの結果を返していた）。"""
+
+    from scripts.function_tracer_pcode.analysis.effects.read_validation import _unresolved_memory_read_aliases
+
+    analysis = _analysis("f", _read_of_q(10), **build())
+    assert not analysis.has_unresolved_memory_read_aliases()
+    change(analysis)
+    assert _unresolved_memory_read_aliases(analysis), "the changed input must have a finding when checked afresh"
+    assert analysis.has_unresolved_memory_read_aliases()
+    assert "memory_read_alias_unresolved" in analysis.get_equivalence_blocking_unsafety_reasons()
+    assert "memory_read_alias_unresolved" in analysis.get_decisive_sat_unsafety_reasons()
+
+
+def test_alias_check_of_unchanged_inputs_gives_the_same_answer():
+    """入力が変わらなければ、何度検査しても同じ答え（検出なし・検出ありの両方）。"""
+
+    clean = _analysis("f", _read_of_q(10), effects=[_store(P, 0, 4, 7, 20)])
+    flagged = _analysis("f", _read_of_q(10), effects=[_store(P, 0, 4, 7, 5)])
+    for _ in range(3):
+        assert not clean.has_unresolved_memory_read_aliases()
+        assert flagged.has_unresolved_memory_read_aliases()
+
+
 def test_fallback_branch_under_the_negated_store_guard_passes():
     """`if (c) *p = 1; return *p;` の lowering（c なら 1、そうでなければ入口の値）は検査に通る。"""
 
