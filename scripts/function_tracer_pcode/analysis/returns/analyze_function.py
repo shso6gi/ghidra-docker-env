@@ -33,6 +33,7 @@ from scripts.function_tracer_pcode.analysis.returns._api import PcodeTracer
 from scripts.function_tracer_pcode.analysis.returns.parameters import (
     _sealed_return_abi_facts,
 )
+from scripts.function_tracer_pcode.analysis.effects.frame_alias import frame_alias_unproven, mark_frame_alias_unproven
 from scripts.function_tracer_pcode.analysis.returns.expansion_budget import (
     emit_analysis_expansion_budget_diagnostics,
 )
@@ -256,6 +257,12 @@ def _impl_analyze_function(
         self._debug_print(f"Found {len(return_ops)} RETURN operations")
 
         empty_effect_summary = self._make_empty_effect_summary(parameters)
+        # Issue #282 AC 9: frame と frame の外の access の alias が判定に影響し得ない証拠が無ければ、効果を不完全にする
+        # （stack 変数・退避・callee の frame は high P-code に現れないので、機械語の P-code で調べる）
+        frame_alias_reason = frame_alias_unproven(self.program, function)
+        if frame_alias_reason is not None:
+            self._debug_print(f"[FrameAlias] {frame_alias_reason}")
+            mark_frame_alias_unproven(empty_effect_summary)
         recovered_control_returns, control_region_notes = self._recover_control_region_returns_early(
             function,
             tracer,
@@ -282,6 +289,8 @@ def _impl_analyze_function(
                     bound_parameter_values=normalized_bound_parameter_values,
                     bound_parameter_storage_values=normalized_bound_parameter_storage_values,
                 )
+            if frame_alias_reason is not None and effect_summary is not None:
+                mark_frame_alias_unproven(effect_summary)
             self._current_effect_summary = effect_summary
             # Issue #131: 自分自身の効果要約で観測した切り捨て（STORE 値展開と、その
             # 中で採用した callee 要約への参照）を現在の解析 scope へ取り込む。

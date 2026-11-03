@@ -122,10 +122,14 @@ def _cfg_outcome_summaries() -> tuple:
     return tuple(names)
 
 
-def analyze_through_pipeline(template: Any, *, outcome_seed: bool = False) -> Any:
+def analyze_through_pipeline(template: Any, *, outcome_seed: bool = False, frame_alias: Any = None) -> Any:
     """``template``（公開前の解析）の return から始めて、本物の解析の段と公開境界を通した解析。
 
     呼ぶたびに新しい解析器・新しい return の複製を使う（本番の再解析と同じく、毎回新しい解析を作る）。
+
+    ``frame_alias`` は機械語の P-code から作る frame の alias の証拠（`analysis/effects/frame_alias.py`）の代わり。
+    template は機械語を持たないので、decompile の結果・ABI の事実と同じく Ghidra の境界の事実として渡す: None は
+    「frame と frame の外の access が組み合わさらない」、文字列は「証拠なし」（その理由）。
     """
 
     from scripts.function_tracer_pcode.analysis.returns import analyze_function as analyze_function_module
@@ -158,6 +162,7 @@ def analyze_through_pipeline(template: Any, *, outcome_seed: bool = False) -> An
         stack.enter_context(
             patch.object(analyze_function_module, "_sealed_return_abi_facts", lambda *_args: copy.deepcopy(abi_facts))
         )
+        stack.enter_context(patch.object(analyze_function_module, "frame_alias_unproven", lambda *_args: frame_alias))
         stack.enter_context(
             patch.object(analyzer._program_access, "find_function_by_name", return_value=function)
         )
