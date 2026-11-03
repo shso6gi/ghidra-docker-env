@@ -143,11 +143,15 @@
   ],
   "B3": [
    {
-    "analysis_notes": [],
+    "analysis_notes": [
+     "effect_store_location_unmodeled"
+    ],
     "effect_summary": {
      "effects": [],
      "has_unsupported_call": false,
-     "incomplete_reasons": [],
+     "incomplete_reasons": [
+      "effect_store_location_unmodeled"
+     ],
      "parameter_names": [
       "param_1"
      ],

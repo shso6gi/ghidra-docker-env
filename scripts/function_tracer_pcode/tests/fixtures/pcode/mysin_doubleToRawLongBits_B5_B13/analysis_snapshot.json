@@ -8,12 +8,15 @@
   "B13": [
    {
     "analysis_notes": [
+     "effect_store_location_unmodeled",
      "bounded_call_refinement"
     ],
     "effect_summary": {
      "effects": [],
      "has_unsupported_call": false,
-     "incomplete_reasons": [],
+     "incomplete_reasons": [
+      "effect_store_location_unmodeled"
+     ],
      "parameter_names": [
       "param_1"
      ],
@@ -128,12 +131,15 @@
   "B5": [
    {
     "analysis_notes": [
+     "effect_store_location_unmodeled",
      "bounded_call_refinement"
     ],
     "effect_summary": {
      "effects": [],
      "has_unsupported_call": false,
-     "incomplete_reasons": [],
+     "incomplete_reasons": [
+      "effect_store_location_unmodeled"
+     ],
      "parameter_names": [
       "param_1"
      ],

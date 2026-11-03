@@ -8,6 +8,7 @@
   "B1": [
    {
     "analysis_notes": [
+     "effect_store_location_unmodeled",
      "effect_call_argument_evidence",
      "bounded_call_refinement_deferred_expanded",
      "bounded_call_refinement_preserved_unresolved_deferred_call",
@@ -16,7 +17,9 @@
     "effect_summary": {
      "effects": [],
      "has_unsupported_call": true,
-     "incomplete_reasons": [],
+     "incomplete_reasons": [
+      "effect_store_location_unmodeled"
+     ],
      "parameter_names": [
       "param_1"
      ],
@@ -152,6 +155,7 @@
   "B2": [
    {
     "analysis_notes": [
+     "effect_store_location_unmodeled",
      "effect_call_argument_evidence",
      "bounded_call_refinement_deferred_expanded",
      "bounded_call_refinement_preserved_unresolved_deferred_call",
@@ -160,7 +164,9 @@
     "effect_summary": {
      "effects": [],
      "has_unsupported_call": true,
-     "incomplete_reasons": [],
+     "incomplete_reasons": [
+      "effect_store_location_unmodeled"
+     ],
      "parameter_names": [
       "param_1"
      ],

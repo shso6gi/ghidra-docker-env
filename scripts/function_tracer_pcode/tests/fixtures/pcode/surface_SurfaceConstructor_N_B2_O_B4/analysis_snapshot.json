@@ -7,7 +7,10 @@
  "sides": {
   "B2": [
    {
-    "analysis_notes": [],
+    "analysis_notes": [
+     "effect_store_location_unmodeled",
+     "unknown_return"
+    ],
     "effect_summary": {
      "effects": [
       {
@@ -292,7 +295,9 @@
       }
      ],
      "has_unsupported_call": false,
-     "incomplete_reasons": [],
+     "incomplete_reasons": [
+      "effect_store_location_unmodeled"
+     ],
      "parameter_names": [
       "param_1",
       "param_2",
@@ -310,7 +315,7 @@
     "entry_point": "00100140",
     "expansion_budget_truncations": [],
     "function_name": "SurfaceConstructor",
-    "incomplete_control_flow": false,
+    "incomplete_control_flow": true,
     "parameters": [
      {
       "data_type": "undefined4 *",
@@ -533,16 +538,16 @@
     "returns": [
      {
       "acceptance_status": null,
-      "address": "00100140",
+      "address": "00100184",
       "branch_index": 0,
       "conditions": [],
       "order_index": 0,
-      "pcode_identity": null,
-      "pcode_order": null,
-      "pcode_time": null,
+      "pcode_identity": "00100184:t48",
+      "pcode_order": 20,
+      "pcode_time": 48,
       "return_kind": "exact",
       "validation_blockers": [],
-      "value": "PHI(((1 << 8) | (((param_9 / 998277230) >> int(((__observed_store_address__ - (param_1 + 32)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 32)) < 4), ((1 << 8) | ((in_stack_00000008 >> int(((__observed_store_address__ - (param_1 + 36)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 36)) < 4), ((1 << 8) | ((in_stack_00000000 >> int(((__observed_store_address__ - (param_1 + 28)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 28)) < 4), ((1 << 8) | ((1092616192 >> int(((__observed_store_address__ - (param_1 + 4)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 4)) < 4), ((1 << 8) | ((param_8 >> int(((__observed_store_address__ - (param_1 + 24)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 24)) < 4), ((1 << 8) | ((param_7 >> int(((__observed_store_address__ - (param_1 + 20)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 20)) < 4), ((1 << 8) | ((param_6 >> int(((__observed_store_address__ - (param_1 + 16)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 16)) < 4), ((1 << 8) | ((param_5 >> int(((__observed_store_address__ - (param_1 + 12)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 12)) < 4), ((1 << 8) | ((param_4 >> int(((__observed_store_address__ - (param_1 + 8)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 8)) < 4), ((1 << 8) | ((param_2 >> int(((__observed_store_address__ - param_1) * 8))) & 255)) if ((__observed_store_address__ - param_1) < 4), 0)"
+      "value": "void"
      }
     ],
     "schema": "recorded-pcode-analysis-snapshot-v1",
@@ -562,7 +567,10 @@
   ],
   "B4": [
    {
-    "analysis_notes": [],
+    "analysis_notes": [
+     "effect_store_location_unmodeled",
+     "unknown_return"
+    ],
     "effect_summary": {
      "effects": [
       {
@@ -847,7 +855,9 @@
       }
      ],
      "has_unsupported_call": false,
-     "incomplete_reasons": [],
+     "incomplete_reasons": [
+      "effect_store_location_unmodeled"
+     ],
      "parameter_names": [
       "param_1",
       "param_2",
@@ -865,7 +875,7 @@
     "entry_point": "00100140",
     "expansion_budget_truncations": [],
     "function_name": "SurfaceConstructor",
-    "incomplete_control_flow": false,
+    "incomplete_control_flow": true,
     "parameters": [
      {
       "data_type": "undefined4 *",
@@ -1088,16 +1098,16 @@
     "returns": [
      {
       "acceptance_status": null,
-      "address": "00100140",
+      "address": "00100180",
       "branch_index": 0,
       "conditions": [],
       "order_index": 0,
-      "pcode_identity": null,
-      "pcode_order": null,
-      "pcode_time": null,
+      "pcode_identity": "00100180:t47",
+      "pcode_order": 20,
+      "pcode_time": 47,
       "return_kind": "exact",
       "validation_blockers": [],
-      "value": "PHI(((1 << 8) | (((param_9 * 998277230) >> int(((__observed_store_address__ - (param_1 + 32)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 32)) < 4), ((1 << 8) | ((in_stack_00000008 >> int(((__observed_store_address__ - (param_1 + 36)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 36)) < 4), ((1 << 8) | ((in_stack_00000000 >> int(((__observed_store_address__ - (param_1 + 28)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 28)) < 4), ((1 << 8) | ((param_8 >> int(((__observed_store_address__ - (param_1 + 24)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 24)) < 4), ((1 << 8) | ((param_7 >> int(((__observed_store_address__ - (param_1 + 20)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 20)) < 4), ((1 << 8) | ((param_6 >> int(((__observed_store_address__ - (param_1 + 16)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 16)) < 4), ((1 << 8) | ((param_5 >> int(((__observed_store_address__ - (param_1 + 12)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 12)) < 4), ((1 << 8) | ((param_4 >> int(((__observed_store_address__ - (param_1 + 8)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 8)) < 4), ((1 << 8) | ((param_3 >> int(((__observed_store_address__ - (param_1 + 4)) * 8))) & 255)) if ((__observed_store_address__ - (param_1 + 4)) < 4), ((1 << 8) | ((param_2 >> int(((__observed_store_address__ - param_1) * 8))) & 255)) if ((__observed_store_address__ - param_1) < 4), 0)"
+      "value": "void"
      }
     ],
     "schema": "recorded-pcode-analysis-snapshot-v1",
