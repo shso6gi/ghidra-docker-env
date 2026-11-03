@@ -638,6 +638,37 @@ def test_start_refuses_while_a_launch_is_unfinished(h, capsys):
     assert launch.exit_kind == records.KIND_NOT_STARTED and launch.terminal
 
 
+_SHORT_UPTIME = """import time
+_real = time.monotonic
+_origin = _real()
+time.monotonic = lambda: _real() - _origin + {uptime}
+"""
+
+
+@pytest.mark.parametrize("uptime", [1.0, 5000.0])
+def test_the_first_observation_surveys_other_containers_whatever_the_host_uptime(
+        tmp_path, monkeypatch, uptime):
+    """#293: 他 container の調査は launch の最初の観測行から（host の起動からの秒数に依らない）。
+
+    supervisor の process だけ ``time.monotonic()`` を「起動から ``uptime`` 秒」にずらす。周期は
+    1000 秒なので、調査は最初の 1 行だけ（以後の観測行には付かない）。
+    """
+    shim = tmp_path / "uptime"
+    shim.mkdir()
+    (shim / "sitecustomize.py").write_text(_SHORT_UPTIME.format(uptime=uptime))
+    inherited = os.environ.get("PYTHONPATH")
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(shim)] + ([inherited] if inherited else [])))
+    h = Harness(tmp_path, monkeypatch, poll="0.2", period="1000")
+    assert h.start() == wrapper.EXIT_OK
+    time.sleep(1.5)
+    h.end_container(exit_code=0)
+    h.wait_released()
+    (launch,) = h.records().launches
+    assert len(launch.watch) >= 3, len(launch.watch)
+    surveyed = [index for index, row in enumerate(launch.watch) if "other_running_containers" in row]
+    assert surveyed == [0], surveyed
+
+
 def test_observations_are_saved_at_the_observation_interval_not_the_period(tmp_path, monkeypatch):
     """review 1 P2: 保存は観測ごと（0.2 秒）。周期（ここでは 1000 秒）の行だけにしない。"""
     h = Harness(tmp_path, monkeypatch, poll="0.2", period="1000")
