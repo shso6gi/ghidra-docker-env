@@ -276,14 +276,16 @@
    ]
   },
   {
-   "budget_seconds": 40,
+   "budget_seconds": 80,
    "case_id": "sphere_SphereConstructor_N_B2_O_B4",
    "dataset_label": "Neq",
    "function_confirmed_by": "--list-functions @ 06692c4c7e9083f81ca6d7924a86e8c53f7a639e",
    "function_name": "SphereConstructor",
    "ground_truth_file": "ground_truth/sphere_SphereConstructor_N_B2_O_B4.json",
    "issue_refs": [
-    "#109"
+    "#109",
+    "#219",
+    "#282"
    ],
    "left": {
     "binary_id": "B2",
@@ -292,8 +294,8 @@
     "sha256": "55fd9f11d9112e8b9f681c9aaa8da087dd2879c1c3d7e538eda6aa134af82667"
    },
    "measured_seconds": {
-    "container": 6.4,
-    "github_hosted_runner": 15.9
+    "container": 16.1,
+    "github_hosted_runner": 25.6
    },
    "pr_gate": true,
    "recording": {
