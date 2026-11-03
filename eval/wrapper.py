@@ -1184,7 +1184,9 @@ def watch(ev: Evaluation, number: int, container: str) -> Tuple[Optional[Dict[st
     waiter = new_waiter()
     last_valid: Optional[Dict[str, Any]] = None
     failures = 0
-    last_period = 0.0
+    # 最初の観測で他 container を調べる（#293）。0.0 から始めると、host の起動から period 秒経つまで
+    # （``time.monotonic()`` < period の間）最初の調査が抜ける。
+    last_period: Optional[float] = None
     stop_sent = False
     next_poll = 0.0
     while True:
@@ -1212,7 +1214,7 @@ def watch(ev: Evaluation, number: int, container: str) -> Tuple[Optional[Dict[st
                    "executions": records.observe_start_records(ev.out)}
             if row["observed"]:
                 last_valid = row
-            if now - last_period >= WATCH_PERIOD_SECONDS:
+            if last_period is None or now - last_period >= WATCH_PERIOD_SECONDS:
                 row["other_running_containers"] = other_running_containers(ev)
                 last_period = now
             try:
