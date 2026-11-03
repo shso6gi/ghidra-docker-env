@@ -149,6 +149,8 @@ _PRODUCER_IDS_BY_SITE = {
     ),
     "recurrence-summary-call-effect": (
         "internal_typed_pure_direct_call_stage_producer",
+        # `recurrence_promotion` が出す slice3 の effect の前提（`summary_effect_prerequisite_signals_from_acceptance`）
+        "typed-summary-effect-prerequisite-v2",
     ),
     "recurrence-summary-abi-width": (
         "typed-summary-width-occurrence-v2",

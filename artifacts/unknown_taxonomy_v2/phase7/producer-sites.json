@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "d20c7cf5829a8f409c34b22680c011e70f4fcf3cc27544f6a0c0b41063f12190",
+  "manifest_digest": "354f764e0786f34c25588b21ca65c98863c23125e1bc0cf3d4bd3bd26dc79cc7",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 34,
   "sites": [
@@ -789,7 +789,8 @@
         "ELIGIBLE"
       ],
       "allowed_producer_ids": [
-        "internal_typed_pure_direct_call_stage_producer"
+        "internal_typed_pure_direct_call_stage_producer",
+        "typed-summary-effect-prerequisite-v2"
       ],
       "branch_or_attempt_contract_id": "recurrence-summary-call-effect:invocation",
       "column": 12,
