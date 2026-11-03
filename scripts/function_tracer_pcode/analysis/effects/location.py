@@ -161,7 +161,18 @@ def _impl__memory_expr_with_runtime_location(
     runtime_location: Optional[CanonicalLocation] = None,
     runtime_snapshot: Optional[PostStateSnapshotRef] = None,
     runtime_ref: Any = None,
+    parameters: Optional[Sequence[Dict]] = None,
 ) -> Expression:
+    if (
+        isinstance(runtime_ref, PostStateValueRef)
+        and parameters is not None
+        and runtime_location == runtime_ref.location
+        and canonicalize_location(address, parameters, size=max(1, int(size or 0))) == runtime_ref.location
+    ):
+        # Issue #284: 出口の値に具体化した MEMORY のうち、番地が主張の位置 L そのものなら、L の出口の状態の読み出し
+        # （記号の正規形）にしてよい（どちらも L の出口の値）。番地が別の位置なら値の主張のまま
+        # （`_merge_memory_runtime_ref`）
+        runtime_ref = None
     return Expression.memory(
         address,
         size=max(1, int(size or 0)),

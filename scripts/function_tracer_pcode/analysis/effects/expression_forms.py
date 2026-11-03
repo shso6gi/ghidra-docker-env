@@ -12,6 +12,7 @@ from scripts.function_tracer_pcode.core import (
     ObservedMemoryReadRef,
     PostStateReadRef,
     PostStateSnapshotRef,
+    PostStateValueRef,
     expression_key_or_identity,
     object_target_key,
     condition_value_identity,
@@ -167,6 +168,13 @@ def _impl__merge_memory_runtime_ref(
         if location == runtime_ref.location and snapshot == runtime_ref.snapshot_ref:
             return runtime_ref
         return runtime_ref.with_location(location).with_snapshot(snapshot)
+    if isinstance(runtime_ref, PostStateValueRef):
+        # Issue #284: 値の主張（この node の値は L の出口の値）。番地は元の読み出しの番地のままなので、L の位置の
+        # 主張（出口の状態の読み出し）に変えない: 変えると lowering が番地の位置の出口の値に置き換える。
+        # 同じ L の位置なら主張をそのまま保ち、別の位置を求められたら主張を落とす（時点つきの読み出しに戻る）
+        if runtime_location is None or runtime_location == runtime_ref.location:
+            return runtime_ref
+        return None
     if runtime_location is not None and runtime_snapshot is not None:
         return PostStateReadRef(
             location=runtime_location,
