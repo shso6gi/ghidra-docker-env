@@ -9,10 +9,12 @@
 値が「t の `*q`」から「出口の `*q`」（= 7）に変わる（偽 EQ / 偽 NOT_EQ の形）。
 """
 
+import pytest
+
 from scripts.function_tracer_pcode.analysis.effects import post_state
 from scripts.function_tracer_pcode.analysis.effects.expression_forms import _impl__merge_memory_runtime_ref
-from scripts.function_tracer_pcode.analysis.effects.models import StoreEffect
-from scripts.function_tracer_pcode.core import Expression
+from scripts.function_tracer_pcode.analysis.effects.models import EffectSummary, StoreEffect
+from scripts.function_tracer_pcode.core import Condition, Expression, FunctionReturnAnalysis, ReturnInfo
 from scripts.function_tracer_pcode.core.runtime_refs import (
     CanonicalLocation,
     LocationBaseRef,
@@ -150,3 +152,71 @@ def test_merging_keeps_the_existing_behaviour_for_read_refs():
 
     assert _impl__merge_memory_runtime_ref(None, Q) == Q
     assert _impl__merge_memory_runtime_ref(None, None) is None
+
+
+# ---------------------------------------------------------------------------
+# #289 と統合した経路: production の expander → 戻り値の正規化 → lowering → 読み出しの検査（PR #294 review）
+# ---------------------------------------------------------------------------
+#
+# 手作りの ref だけでなく、tracer が作る形（時点つきの観測した読み出し）から本物の段を通す。
+# `*p = *q; *q = 7; return *p;` の値は p == q なら 7、領域が重ならなければ元の `*q`。どちらの関係でも、
+# 一方の値だけを返す関数（`return 7` / `return 元の *q`）と EQ にしてはいけない。#289 の上ではこの形は物化されず
+# （後の store を読む値を持つので definite replay しない）、関係を示せない読み出しは時点つきのまま検査に落ちる。
+# 関係を経路の条件で与えても（`p == q`・`q == p + 4`）、別の parameter の間の関係は `location_relation` が読まない
+# ので値は決まらず、検査（`memory_read_alias_unresolved`）か出口の状態の記号（`symbolic_post_state_reads`）で
+# EQ と NOT_EQ の両方を止める（精度の回復は PR-282-P）。
+
+
+_READ_P = 400
+_BLOCKING = {"memory_read_alias_unresolved", "symbolic_post_state_reads"}
+
+
+def _integrated_value(conditions):
+    from scripts.function_tracer_pcode.analysis.returns.analyzer import ReturnAnalyzer
+    from scripts.function_tracer_pcode.semantics.transform.expander import ExpressionExpander
+
+    summary = EffectSummary(parameter_names=["p", "q"], effects=_effects())
+    expander = ExpressionExpander(
+        tracer=None, condition_tracker=None, debug=False, effect_summary=summary, parameters=PARAMETERS
+    )
+    traced = expander._canonicalize_traced_expression(
+        Expression.memory(
+            _parameter("p", 0), size=4, read_order_key=_READ_P, runtime_ref=ObservedMemoryReadRef(order_key=_READ_P)
+        ),
+        list(conditions),
+    )
+    analyzer = ReturnAnalyzer(program=object(), debug=False)
+    analyzer._current_parameters = PARAMETERS
+    normalized = analyzer._normalize_return_value_with_effect_summary(traced, list(conditions), summary)
+    value = normalized if normalized is not None else traced
+    analysis = FunctionReturnAnalysis(
+        function_name="f",
+        entry_point="0x0",
+        parameters=list(PARAMETERS),
+        returns=[ReturnInfo(address="0x1", conditions=list(conditions), value=value)],
+        return_type="int",
+    )
+    analysis.effect_summary = summary
+    return analysis
+
+
+def _relation(op, left, right):
+    return Condition(Expression.binary_op(op, left, right), False)
+
+
+@pytest.mark.parametrize(
+    "conditions",
+    [
+        pytest.param([], id="no-relation"),
+        pytest.param([_relation("INT_EQUAL", _parameter("p", 0), _parameter("q", 1))], id="p-equals-q"),
+        pytest.param(
+            [_relation("INT_EQUAL", _parameter("q", 1),
+                       Expression.binary_op("INT_ADD", _parameter("p", 0), Expression.constant(4, 8)))],
+            id="disjoint",
+        ),
+    ],
+)
+def test_integrated_path_never_decides_a_read_whose_store_order_it_cannot_prove(conditions):
+    analysis = _integrated_value(conditions)
+    assert _BLOCKING & set(analysis.get_equivalence_blocking_unsafety_reasons())
+    assert _BLOCKING & set(analysis.get_decisive_sat_unsafety_reasons())
