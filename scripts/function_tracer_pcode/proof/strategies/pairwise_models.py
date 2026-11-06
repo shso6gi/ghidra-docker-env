@@ -49,6 +49,7 @@ class ReturnCase:
         self.program_is_big_endian = program_is_big_endian
         self._conditions_smt_cache: Dict[tuple, List[str]] = {}
         self._value_smt_cache: Dict[tuple, str] = {}
+        self._smt_value_expression_cache: Optional[tuple] = None
         self._publish_semantic_values()
 
     def _publish_semantic_values(self) -> None:
@@ -72,6 +73,7 @@ class ReturnCase:
         self.summary_conditions = list(summary_conditions or self.conditions)
         self._conditions_smt_cache.clear()
         self._value_smt_cache.clear()
+        self._smt_value_expression_cache = None
         self._publish_semantic_values()
 
     def replace_value(self, value_expr, normalized_value_expr=None) -> None:
@@ -86,6 +88,7 @@ class ReturnCase:
             normalized_value_expr if normalized_value_expr is not None else value_expr
         )
         self._value_smt_cache.clear()
+        self._smt_value_expression_cache = None
         self._publish_semantic_values()
 
     @staticmethod
@@ -126,6 +129,31 @@ class ReturnCase:
         self._conditions_smt_cache[cache_key] = rendered_conditions
         return rendered_conditions
 
+    def smt_value_expression(self):
+        """`get_value_smt` が描く式。effect があれば post-state の読みを経路の条件で降ろした式。
+
+        降ろした式は、解析の戻り値・条件・effect に無い記号（出口の状態の値など）を含み得る。query はこの式から
+        宣言を足す（`pairwise_query_builder.build_case_symbol_declarations`）。
+        """
+
+        if self._smt_value_expression_cache is not None:
+            return self._smt_value_expression_cache[0]
+        rendered_expr = self.value_expr
+        if (
+            self.effect_summary is not None
+            and getattr(self.effect_summary, "effects", None)
+        ):
+            lowered_expr = lower_post_state_expression_for_smt_if_needed(
+                self.value_expr,
+                self.conditions,
+                self.effect_summary.effects,
+                self.parameters,
+            )
+            if lowered_expr is not None:
+                rendered_expr = lowered_expr
+        self._smt_value_expression_cache = (rendered_expr,)
+        return rendered_expr
+
     def get_value_smt(
         self,
         param_replace_fn,
@@ -143,19 +171,7 @@ class ReturnCase:
         if result is not None:
             return result
 
-        rendered_expr = self.value_expr
-        if (
-            self.effect_summary is not None
-            and getattr(self.effect_summary, "effects", None)
-        ):
-            lowered_expr = lower_post_state_expression_for_smt_if_needed(
-                self.value_expr,
-                self.conditions,
-                self.effect_summary.effects,
-                self.parameters,
-            )
-            if lowered_expr is not None:
-                rendered_expr = lowered_expr
+        rendered_expr = self.smt_value_expression()
 
         if param_replace_fn is None:
             result = rendered_expr.to_smt(float_mode="fp")
