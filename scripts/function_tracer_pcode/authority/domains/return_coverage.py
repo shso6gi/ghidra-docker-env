@@ -35,9 +35,13 @@ terminal も無いまま終わり、終了処理が ERROR にしていた。
 fallback を止めたのは raw pair の不足なので、その cause が残る（判定は UNKNOWN のまま変わらない）。view の比較の
 判定は view の runtime に書かれ、runner の記録にならない。
 
-* reason は 2 つ: ``return_coverage_gap``（全域でない入力の領域がある）と ``return_coverage_inconclusive``
+* reason は 3 つ: ``return_coverage_gap``（全域でない入力の領域がある）と ``return_coverage_inconclusive``
   （全域かどうか決められない: 条件を SMT へ訳せない、solver が答えない ...）。どちらも legacy の
-  ``UnknownReasonId`` と同じ id。
+  ``UnknownReasonId`` と同じ id。``return_partition_control_flow_incomplete``（Issue #257）は、制御フローが
+  不完全で戻り値が未解決（または条件なしの return が重なる）側があり、runner が monolithic fallback を止めた比較:
+  return の分割そのものが関数の全経路を表していない。gate の判定ではなく、fallback を止めた理由から記録する。
+* fallback を止める理由（``core.analysis.MONOLITHIC_FALLBACK_SKIP_REASONS``）と、その比較の UNKNOWN を説明する
+  cause の owner の対応は ``MONOLITHIC_FALLBACK_SKIP_CAUSE_OWNERS`` の 1 つの表に置く。
 * ``decision_effect`` は ``blocks_equivalence``。被覆の欠けは「全域で同じ値を返す」証明を塞ぐ。反例
   （NOT_EQ）の側は、被覆の欠けを SAT の安全性の理由として既に扱っている（``sat_safety``）。
 * identity scope は ``RELATIONAL``: cause は「この比較（raw pair・branch・generation）のこの側の被覆」で、
@@ -49,6 +53,7 @@ fallback を止めたのは raw pair の不足なので、その cause が残る
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from scripts.function_tracer_pcode.authority.contracts import (
@@ -94,7 +99,23 @@ RETURN_COVERAGE_IDENTITY_SCOPE = IdentityScope.RELATIONAL
 #: 避けるためだけの履歴。cause が active かは lifecycle projection が正本）。
 RETURN_COVERAGE_LEDGER_KEY = "return_coverage_ever_observed"
 
+#: return-coverage gate が判定する被覆の不足（比較の ``coverage_verdict`` に記録される reason）
 RETURN_COVERAGE_REASON_IDS = (RETURN_COVERAGE_GAP_REASON_ID, RETURN_COVERAGE_INCONCLUSIVE_REASON_ID)
+#: runner が「制御フローが不完全」で monolithic fallback を止めた比較の側（Issue #257）
+RETURN_PARTITION_CONTROL_FLOW_REASON_ID = "return_partition_control_flow_incomplete"
+#: この domain が所有する reason の全部
+RETURN_COVERAGE_DOMAIN_REASON_IDS = RETURN_COVERAGE_REASON_IDS + (RETURN_PARTITION_CONTROL_FLOW_REASON_ID,)
+
+#: cause を outcome partition の段が持つ理由の owner（seed のある解析の unknown outcome）
+OUTCOME_PARTITION_STAGE_OWNER = "outcome_partition_stage"
+#: monolithic fallback を止める理由 → その比較を UNKNOWN にする cause の owner（Issue #257: 表は 1 つ）。
+#: 理由を足すときはここに owner を足す（``core.analysis.MONOLITHIC_FALLBACK_SKIP_REASONS`` と一致することを test が見る）。
+MONOLITHIC_FALLBACK_SKIP_CAUSE_OWNERS = MappingProxyType({
+    "unknown_outcome_partition": OUTCOME_PARTITION_STAGE_OWNER,
+    "return_case_coverage_gap": RETURN_COVERAGE_GAP_REASON_ID,
+    "return_case_coverage_inconclusive": RETURN_COVERAGE_INCONCLUSIVE_REASON_ID,
+    "incomplete_control_flow": RETURN_PARTITION_CONTROL_FLOW_REASON_ID,
+})
 
 RETURN_COVERAGE_REASON_REGISTRY = SealedReasonRegistry.build(tuple(
     ReasonDefinition(
@@ -104,7 +125,7 @@ RETURN_COVERAGE_REASON_REGISTRY = SealedReasonRegistry.build(tuple(
         frozenset((RETURN_COVERAGE_PROOF_KIND,)), True,
         "return_coverage_v1", RecoveryAddressability.REQUIREMENT_REQUIRED,
     )
-    for reason_id in RETURN_COVERAGE_REASON_IDS
+    for reason_id in RETURN_COVERAGE_DOMAIN_REASON_IDS
 ))
 RETURN_COVERAGE_RECOVERY_REGISTRY = SealedRecoveryRegistry.build((
     SatisfactionContractDefinition(
@@ -131,7 +152,7 @@ class ReturnCoverageBlockerSignal:
     producer_id: str = RETURN_COVERAGE_PRODUCER_ID
 
     def __post_init__(self) -> None:
-        if self.declared_reason_id not in RETURN_COVERAGE_REASON_IDS:
+        if self.declared_reason_id not in RETURN_COVERAGE_DOMAIN_REASON_IDS:
             raise ValueError("return-coverage signal reason is not domain-owned")
         comparison = tuple(self.comparison_identity)
         if not comparison or any(type(item) is not str or not item for item in comparison):
@@ -269,7 +290,7 @@ class UnsealedCoverageObservation:
     function_identity: Any
 
     def __post_init__(self) -> None:
-        if self.reason_id not in RETURN_COVERAGE_REASON_IDS:
+        if self.reason_id not in RETURN_COVERAGE_DOMAIN_REASON_IDS:
             raise ValueError("unsealed coverage observation reason is not domain-owned")
         if type(self.label) is not str or not self.label:
             raise TypeError("unsealed coverage observation has no side label")
@@ -297,6 +318,27 @@ def unsealed_coverage_observations(
                 observations.append(UnsealedCoverageObservation(
                     label, reason_id, tuple(analysis.outcome_function_identity()),
                 ))
+    return tuple(observations)
+
+
+def control_flow_skip_observations(analysis1: Any, analysis2: Any) -> tuple[UnsealedCoverageObservation, ...]:
+    """runner が monolithic fallback を止めた理由のうち、制御フローの不完全さ（``incomplete_control_flow``）の側。
+
+    gate の判定でなく、runner がこの比較の analysis から fallback を止めた理由そのもの
+    （``FunctionReturnAnalysis.monolithic_fallback_skip_reasons``）を読む。制御フローの不完全さと未解決の戻り値は
+    analysis の解析結果そのもので、比較をまたいで追記される印ではない。seed の有無で除外しない（seed のある
+    解析で outcome partition の段の cause が既にあっても、足すのは EQ を止める側の cause だけ）。
+    """
+
+    from scripts.function_tracer_pcode.core.analysis import FALLBACK_SKIP_INCOMPLETE_CONTROL_FLOW
+
+    observations = []
+    for label, analysis in (("function1", analysis1), ("function2", analysis2)):
+        reasons = getattr(analysis, "monolithic_fallback_skip_reasons", None)
+        if callable(reasons) and FALLBACK_SKIP_INCOMPLETE_CONTROL_FLOW in reasons():
+            observations.append(UnsealedCoverageObservation(
+                label, RETURN_PARTITION_CONTROL_FLOW_REASON_ID, tuple(analysis.outcome_function_identity()),
+            ))
     return tuple(observations)
 
 
@@ -343,7 +385,11 @@ class UnsealedCoverageTerminal:
             ReturnCoverageBlockerSignal(
                 declared_reason_id=item.reason_id,
                 function_identity=item.function_identity,
-                coverage_check="return_coverage_gate_verdict",
+                coverage_check=(
+                    "monolithic_fallback_skip_reason"
+                    if item.reason_id == RETURN_PARTITION_CONTROL_FLOW_REASON_ID
+                    else "return_coverage_gate_verdict"
+                ),
                 comparison_identity=self.observed_comparison,
                 evidence_refs=(f"coverage_label:{item.label}", "monolithic_fallback_skipped"),
             )
@@ -389,7 +435,10 @@ def adopt_final_unsealed_coverage(result: Any, final_legacy_outcome: Any) -> int
 
 
 __all__ = (
+    "MONOLITHIC_FALLBACK_SKIP_CAUSE_OWNERS",
+    "OUTCOME_PARTITION_STAGE_OWNER",
     "RETURN_COVERAGE_DOMAIN",
+    "RETURN_COVERAGE_DOMAIN_REASON_IDS",
     "RETURN_COVERAGE_GAP_REASON_ID",
     "RETURN_COVERAGE_IDENTITY_SCOPE",
     "RETURN_COVERAGE_INCONCLUSIVE_REASON_ID",
@@ -398,12 +447,14 @@ __all__ = (
     "RETURN_COVERAGE_REASON_REGISTRY",
     "RETURN_COVERAGE_RECOVERY_REGISTRY",
     "RETURN_COVERAGE_SITE_ID",
+    "RETURN_PARTITION_CONTROL_FLOW_REASON_ID",
     "ReturnCoverageBlockerSignal",
     "ReturnCoveragePilotEncoder",
     "UnsealedCoverageObservation",
     "UnsealedCoverageTerminal",
     "adopt_final_unsealed_coverage",
     "comparison_identity_of",
+    "control_flow_skip_observations",
     "observe_final_unsealed_coverage",
     "unsealed_coverage_observations",
 )

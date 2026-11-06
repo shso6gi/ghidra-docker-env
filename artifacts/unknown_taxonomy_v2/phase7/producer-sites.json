@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "354f764e0786f34c25588b21ca65c98863c23125e1bc0cf3d4bd3bd26dc79cc7",
+  "manifest_digest": "9ec02b91a07beaf4b2bfffc6d53447f4789f106865e997c5215b325f131e525c",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 34,
   "sites": [
@@ -1006,12 +1006,22 @@
           "expected_target_kind": "function_return_coverage",
           "slot_id": "return-coverage-final-terminal:return_coverage_inconclusive",
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
+        },
+        {
+          "allowed_reason_ids": [
+            "return_partition_control_flow_incomplete"
+          ],
+          "expected_domain": "return_coverage",
+          "expected_identity_scope": "RELATIONAL",
+          "expected_target_kind": "function_return_coverage",
+          "slot_id": "return-coverage-final-terminal:return_partition_control_flow_incomplete",
+          "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 369,
+      "line": 415,
       "path": "scripts/function_tracer_pcode/authority/domains/return_coverage.py",
       "producer_site_manifest_id": "return-coverage-final-terminal",
-      "source_sha256": "aea1c7930c765add207b38ef14ac740b7c3415a489f88f10c158bc5a97b6d06a"
+      "source_sha256": "da36f1fa8d1094130f33e9f51fea20064894fe3ed490a5806e2cd6e74f29941e"
     },
     {
       "allowed_dispositions": [

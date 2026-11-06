@@ -60,9 +60,12 @@ def _signal(reason_id: str = RETURN_COVERAGE_GAP_REASON_ID, identity: Any = _IDE
 # ---------------------------------------------------------------------------
 
 
-def test_the_two_reasons_are_sealed_relational_equivalence_blockers():
+def test_the_domain_reasons_are_sealed_relational_equivalence_blockers():
     definitions = {item.reason_id: item for item in RETURN_COVERAGE_REASON_REGISTRY.snapshot()}
-    assert set(definitions) == {RETURN_COVERAGE_GAP_REASON_ID, RETURN_COVERAGE_INCONCLUSIVE_REASON_ID}
+    # Issue #257: 制御フローの不完全さで fallback を止めた比較の reason も同じ domain
+    assert set(definitions) == {
+        RETURN_COVERAGE_GAP_REASON_ID, RETURN_COVERAGE_INCONCLUSIVE_REASON_ID, domain.RETURN_PARTITION_CONTROL_FLOW_REASON_ID,
+    }
     for definition in definitions.values():
         assert definition.decision_effect == "blocks_equivalence"
         assert definition.domain == "return_coverage"
@@ -73,7 +76,7 @@ def test_the_reasons_are_registered_where_the_authority_reads_them():
     from scripts.function_tracer_pcode.authority.lifecycle.pilot import PILOT_TYPED_CAUSE_KINDS
     from scripts.function_tracer_pcode.authority.process.supervisor import PROCESS_DURABLE_REASON_REGISTRY
 
-    for reason_id in RETURN_COVERAGE_REASON_IDS:
+    for reason_id in domain.RETURN_COVERAGE_DOMAIN_REASON_IDS:
         assert reason_id in PILOT_TYPED_CAUSE_KINDS
         assert PROCESS_DURABLE_REASON_REGISTRY.get(reason_id).domain == "return_coverage"
 
@@ -90,7 +93,7 @@ def test_the_producer_site_is_the_final_terminal_adoption_in_the_tracked_manifes
     assert site["path"].endswith("authority/domains/return_coverage.py")
     assert sorted(
         reason for slot in site["expected_cause_slots"] for reason in slot["allowed_reason_ids"]
-    ) == sorted(RETURN_COVERAGE_REASON_IDS)
+    ) == sorted(domain.RETURN_COVERAGE_DOMAIN_REASON_IDS)
     assert {slot["expected_identity_scope"] for slot in site["expected_cause_slots"]} == {"RELATIONAL"}
 
 
