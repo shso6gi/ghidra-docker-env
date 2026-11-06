@@ -273,6 +273,10 @@ def coerce_value_to_bitvec_width(
     use_sign_extension: bool = False,
 ) -> str:
     """値式を target_size の bitvector に揃える。"""
+    if is_boolean_return_expr(expr):
+        # Bool sort の値は target_size の 0/1 にした時点で揃っている。式の幅（Bool は 1 bit）で伸ばし直すと
+        # 幅が target_size を越える（raytrace intersect: `(_ BitVec 15)` と `(_ BitVec 8)` の比較で parse 失敗）
+        return coerce_return_value_to_bitvec(expr, value_smt, target_size)
     value_smt = coerce_return_value_to_bitvec(expr, value_smt, target_size)
     value_smt = _rewrite_ambiguous_negative_constant(
         expr,
