@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Pairwise strategy helper models."""
 
+import weakref
 from typing import Any, Dict, List, Optional
 
 from scripts.function_tracer_pcode.core import Condition, ReturnInfo
@@ -13,6 +14,11 @@ from scripts.function_tracer_pcode.proof.formula.returns import (
     coerce_value_to_bitvec_width,
     should_sign_extend_value,
 )
+
+
+#: `ReturnCase.smt_value_expression` の memo。case の属性に置くと、case から辿る意味値（公開・証明書の検査面）が
+#: 変わるので、case の外に置く
+_SMT_VALUE_EXPRESSIONS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
 
 class ReturnCase:
@@ -49,7 +55,6 @@ class ReturnCase:
         self.program_is_big_endian = program_is_big_endian
         self._conditions_smt_cache: Dict[tuple, List[str]] = {}
         self._value_smt_cache: Dict[tuple, str] = {}
-        self._smt_value_expression_cache: Optional[tuple] = None
         self._publish_semantic_values()
 
     def _publish_semantic_values(self) -> None:
@@ -73,7 +78,7 @@ class ReturnCase:
         self.summary_conditions = list(summary_conditions or self.conditions)
         self._conditions_smt_cache.clear()
         self._value_smt_cache.clear()
-        self._smt_value_expression_cache = None
+        _SMT_VALUE_EXPRESSIONS.pop(self, None)
         self._publish_semantic_values()
 
     def replace_value(self, value_expr, normalized_value_expr=None) -> None:
@@ -88,7 +93,7 @@ class ReturnCase:
             normalized_value_expr if normalized_value_expr is not None else value_expr
         )
         self._value_smt_cache.clear()
-        self._smt_value_expression_cache = None
+        _SMT_VALUE_EXPRESSIONS.pop(self, None)
         self._publish_semantic_values()
 
     @staticmethod
@@ -136,8 +141,9 @@ class ReturnCase:
         宣言を足す（`pairwise_query_builder.build_case_symbol_declarations`）。
         """
 
-        if self._smt_value_expression_cache is not None:
-            return self._smt_value_expression_cache[0]
+        cached = _SMT_VALUE_EXPRESSIONS.get(self)
+        if cached is not None:
+            return cached[0]
         rendered_expr = self.value_expr
         if (
             self.effect_summary is not None
@@ -151,7 +157,7 @@ class ReturnCase:
             )
             if lowered_expr is not None:
                 rendered_expr = lowered_expr
-        self._smt_value_expression_cache = (rendered_expr,)
+        _SMT_VALUE_EXPRESSIONS[self] = (rendered_expr,)
         return rendered_expr
 
     def get_value_smt(

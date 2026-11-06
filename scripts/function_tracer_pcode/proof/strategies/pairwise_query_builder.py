@@ -759,7 +759,8 @@ def build_case_symbol_declarations(base_ctx: Dict[str, Any], sided_cases) -> Lis
     式は header に無い記号（出口の状態の値など）を含み得る。宣言は描く式そのものから、描く側の接尾辞
     （`build_symbol_replacer` の `smt_side_tag`）で作る。足すのは宣言だけで、記号には何の制約も置かない。
 
-    `sided_cases` は (case, 描画の関数) の列。
+    `sided_cases` は (case, 描画の関数) の列。式を持たない case（描いた SMT の文字列だけを返すもの）は
+    宣言を足さない。
     """
 
     from scripts.function_tracer_pcode.core.render_smt.unknowns import collect_unknown_smt_declarations
@@ -768,8 +769,11 @@ def build_case_symbol_declarations(base_ctx: Dict[str, Any], sided_cases) -> Lis
     missing: List[Tuple[str, int]] = []
     for case, param_replace_fn in sided_cases:
         side_tag = getattr(param_replace_fn, "smt_side_tag", None)
-        expressions = [case.smt_value_expression()]
-        expressions.extend(getattr(condition, "expression", None) for condition in case.conditions)
+        value_expression = getattr(case, "smt_value_expression", None)
+        expressions = [value_expression()] if callable(value_expression) else []
+        expressions.extend(
+            getattr(condition, "expression", None) for condition in getattr(case, "conditions", None) or ()
+        )
         for expr in expressions:
             if expr is None:
                 continue
