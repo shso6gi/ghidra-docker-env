@@ -768,6 +768,56 @@ def test_q1_reads_only_initialized_read_only_unrelocated_bytes_in_one_block():
     assert read_image_value(preceding, 0x100160, 4) is None  # a relocation that starts before the read
 
 
+class _JLongSpace(_Space):
+    """JPype の `AddressSpace.getAddress(long)` と同じく、Java の long に収まらない offset で `OverflowError`。"""
+
+    def getAddress(self, offset):
+        if not -(1 << 63) <= offset <= (1 << 63) - 1:
+            raise OverflowError("int too big to convert")
+        return _Address(offset)
+
+
+class _JLongProgram(_Program):
+    def getAddressFactory(self):
+        class _Factory:
+            def getDefaultAddressSpace(self):
+                return _JLongSpace()
+
+        return _Factory()
+
+
+def test_image_reads_past_the_java_long_offset_range_are_not_concretized():
+    """Neq 正式評価 4285315a の INVALID 72 件: 戻り値の定数 `2**64 - 1` を番地の候補にした読み出しが
+    `getAddress` の `OverflowError` で pair 全体を落としていた。収まらない番地は具体化しない（None）。"""
+
+    from scripts.function_tracer_pcode.analysis.program_image import read_image_value
+
+    data = {0x100160 + i: b for i, b in enumerate(b"\x01\x02\x03\x04")}
+    program = _JLongProgram([_Block(0x100160, 0x1001EF)], data=data)
+    assert read_image_value(program, 0x100160, 4) == 0x04030201
+    assert read_image_value(program, (1 << 64) - 1, 4) is None
+    assert read_image_value(program, (1 << 64) - 16, 4) is None
+    assert read_image_value(program, (1 << 63) - 2, 4) is None  # 最後の byte が long の範囲を越える
+    assert read_image_value(program, (1 << 63) - 4, 4) is None  # 収まるが block の外
+
+
+def test_readonly_affine_literal_ignores_return_constants_outside_the_address_range():
+    from types import SimpleNamespace
+
+    from scripts.function_tracer_pcode.analysis.recurrence import readonly_reduction as rr
+
+    lanes = b"".join(v.to_bytes(4, "little") for v in (3, 5, 7, 9))
+    data = {0x100160 + i: b for i, b in enumerate(lanes)}
+    host = SimpleNamespace(tracer=SimpleNamespace(program=_JLongProgram([_Block(0x100160, 0x1001EF)], data=data)))
+    host._read_readonly_int32_lanes = lambda address, count: rr._impl__read_readonly_int32_lanes(host, address, count)
+    host._expression_integer_constants = lambda value: list(value)
+    analysis = SimpleNamespace(returns=[SimpleNamespace(value=((1 << 64) - 1,))])
+    assert rr._impl__readonly_affine_progression_literal(host, analysis) is None
+    analysis = SimpleNamespace(returns=[SimpleNamespace(value=((1 << 64) - 1, 0x100160))])
+    literal = rr._impl__readonly_affine_progression_literal(host, analysis)
+    assert (literal.step, literal.lane_base) == (2, 3)
+
+
 def test_image_ranges_skip_overlay_blocks():
     from scripts.function_tracer_pcode.analysis.program_image import image_ranges
 
