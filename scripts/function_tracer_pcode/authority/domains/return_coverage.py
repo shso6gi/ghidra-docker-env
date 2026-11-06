@@ -117,22 +117,35 @@ MONOLITHIC_FALLBACK_SKIP_CAUSE_OWNERS = MappingProxyType({
     "incomplete_control_flow": RETURN_PARTITION_CONTROL_FLOW_REASON_ID,
 })
 
+#: 制御フローの不完全さの回復の証明（seed の有無に依らないので被覆の証明とは別の名前）
+RETURN_PARTITION_CONTROL_FLOW_PROOF_KIND = "return_partition_control_flow_proof"
+RETURN_PARTITION_CONTROL_FLOW_CONTRACT_ID = "return-partition-control-flow-recovery"
+#: reason → (回復の proof kind, 契約)
+_RECOVERY_BY_REASON = MappingProxyType({
+    RETURN_COVERAGE_GAP_REASON_ID: (RETURN_COVERAGE_PROOF_KIND, RETURN_COVERAGE_CONTRACT_ID),
+    RETURN_COVERAGE_INCONCLUSIVE_REASON_ID: (RETURN_COVERAGE_PROOF_KIND, RETURN_COVERAGE_CONTRACT_ID),
+    RETURN_PARTITION_CONTROL_FLOW_REASON_ID: (
+        RETURN_PARTITION_CONTROL_FLOW_PROOF_KIND, RETURN_PARTITION_CONTROL_FLOW_CONTRACT_ID,
+    ),
+})
+
 RETURN_COVERAGE_REASON_REGISTRY = SealedReasonRegistry.build(tuple(
     ReasonDefinition(
         reason_id, RETURN_COVERAGE_DOMAIN, "semantic_partition_blocker",
         "blocks_equivalence", frozenset((RETURN_COVERAGE_TARGET_KIND,)),
         ("return_cases", "coverage_check"),
-        frozenset((RETURN_COVERAGE_PROOF_KIND,)), True,
+        frozenset((_RECOVERY_BY_REASON[reason_id][0],)), True,
         "return_coverage_v1", RecoveryAddressability.REQUIREMENT_REQUIRED,
     )
     for reason_id in RETURN_COVERAGE_DOMAIN_REASON_IDS
 ))
-RETURN_COVERAGE_RECOVERY_REGISTRY = SealedRecoveryRegistry.build((
+RETURN_COVERAGE_RECOVERY_REGISTRY = SealedRecoveryRegistry.build(tuple(
     SatisfactionContractDefinition(
-        RETURN_COVERAGE_CONTRACT_ID, 1,
-        (RequirementSlotDefinition("coverage", frozenset((RETURN_COVERAGE_PROOF_KIND,))),),
+        contract_id, 1,
+        (RequirementSlotDefinition("coverage", frozenset((proof_kind,))),),
         requirement_slot("coverage"),
-    ),
+    )
+    for proof_kind, contract_id in sorted(set(_RECOVERY_BY_REASON.values()))
 ))
 
 
@@ -237,12 +250,13 @@ class ReturnCoveragePilotEncoder:
             active_semantic_precondition=("final_comparison_unsealed", signal.comparison_identity),
             correspondence_contract=None,
         )
+        proof_kind, contract_id = _RECOVERY_BY_REASON[signal.declared_reason_id]
         requirement = ProofRequirement(
             "return-coverage-q-" + authority_digest(target)[:32],
-            RETURN_COVERAGE_PROOF_KIND, target,
+            proof_kind, target,
         )
         bound = self._binding_factory.bind(
-            contract_definition_id=RETURN_COVERAGE_CONTRACT_ID,
+            contract_definition_id=contract_id,
             contract_version=1, bindings={"coverage": requirement},
         )
         occurrence = CauseOccurrence(
