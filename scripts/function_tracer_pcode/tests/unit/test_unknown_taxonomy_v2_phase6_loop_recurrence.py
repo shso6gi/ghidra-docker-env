@@ -2815,12 +2815,8 @@ def test_slice3_effect_prerequisite_suppresses_candidate_local_slice4_effect_cau
 
 
 
-def test_slice3_effect_prerequisite_is_admitted_at_the_recurrence_summary_site():
-    """`recurrence_promotion` が `recurrence-summary-call-effect` で出す slice3 の signal は、封印済みの
-    site の producer として通る（Issue #282: 通らないと pair 全体が ERROR になる）。"""
-    from scripts.function_tracer_pcode.analysis.returns.summary_returns import (
-        accept_summary_return_candidates,
-    )
+def _emit_at_recurrence_summary_site(signals):
+    """`recurrence-summary-call-effect` の site で signal を出した session（封印済み manifest の runtime）。"""
     from scripts.function_tracer_pcode.authority.domains.call_effect import (
         CALL_EFFECT_REASON_REGISTRY,
         CALL_EFFECT_RECOVERY_REGISTRY,
@@ -2838,29 +2834,6 @@ def test_slice3_effect_prerequisite_is_admitted_at_the_recurrence_summary_site()
     )
     from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowLifecycleReducer
     from scripts.function_tracer_pcode.authority.sites.runtime import runtime_from_audited_manifest
-    from scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates import (
-        _analysis_with_exact_returns,
-        _cond,
-        _const,
-        _n,
-        _summary_const,
-        _with_summary_proof,
-    )
-
-    analysis = _analysis_with_exact_returns(effect_summary=None)
-    summary_return = _with_summary_proof(ReturnInfo(
-        address="0x1008",
-        value=_summary_const(2),
-        conditions=[_cond("INT_SLESS", _const(1), _n())],
-        pcode_identity="summary:n_gt_one",
-    ))
-    accepted = accept_summary_return_candidates(
-        analysis,
-        [*analysis.returns, summary_return],
-        summary_note="counted_loop_summary",
-    )
-    signals = summary_effect_prerequisite_signals_from_acceptance(analysis, accepted)
-    assert signals
 
     install_execution_authority_signing_key(
         "recurrence-summary-call-effect-key", b"r" * 32
@@ -2892,8 +2865,73 @@ def test_slice3_effect_prerequisite_is_admitted_at_the_recurrence_summary_site()
                 signal, producer_site_manifest_id="recurrence-summary-call-effect"
             )
 
+    return session
+
+
+def test_slice3_effect_prerequisite_is_admitted_at_the_recurrence_summary_site():
+    """`recurrence_promotion` が `recurrence-summary-call-effect` で出す slice3 の signal は、封印済みの
+    site の producer として通る（Issue #282: 通らないと pair 全体が ERROR になる）。"""
+    from scripts.function_tracer_pcode.analysis.returns.summary_returns import (
+        accept_summary_return_candidates,
+    )
+    from scripts.function_tracer_pcode.tests.unit.test_summary_return_candidates import (
+        _analysis_with_exact_returns,
+        _cond,
+        _const,
+        _n,
+        _summary_const,
+        _with_summary_proof,
+    )
+
+    analysis = _analysis_with_exact_returns(effect_summary=None)
+    summary_return = _with_summary_proof(ReturnInfo(
+        address="0x1008",
+        value=_summary_const(2),
+        conditions=[_cond("INT_SLESS", _const(1), _n())],
+        pcode_identity="summary:n_gt_one",
+    ))
+    accepted = accept_summary_return_candidates(
+        analysis,
+        [*analysis.returns, summary_return],
+        summary_note="counted_loop_summary",
+    )
+    signals = summary_effect_prerequisite_signals_from_acceptance(analysis, accepted)
+    assert signals
+
+    session = _emit_at_recurrence_summary_site(signals)
+
     assert session.domain_signal_error_details == []
     projection = session.preview_lifecycle_projection()
     assert {row.reason_id for row in projection.c_active_base} == {
         "effect_observation_coverage_incomplete"
     }
+
+
+def test_no_proof_summary_effect_prerequisite_stays_an_unbound_active_cause():
+    """Neq 正式評価 4285315a の ERROR 100 件（REVE limit1/limit2/inlining）: 回復の契約を持たない理由
+    （`unsupported_call_effect_semantics`）の slice3 signal が、契約 `(None, 1)` の束縛で KeyError になり、
+    pair 全体が ERROR になっていた。契約にも要件にも束縛しない active な cause として残る（EQ を止めたまま）。"""
+    from scripts.function_tracer_pcode.authority.domains import call_effect
+
+    spec = call_effect.CALL_EFFECT_REASON_SPECS["unsupported_call_effect_semantics"]
+    assert spec.contract_definition_id is None
+    signal = SummaryEffectPrerequisiteProductionSignal(
+        "unsupported_call_effect_semantics",
+        IdentityScope.UNARY,
+        spec.target_kind,
+        ("call_effect_object_v2", "function", "snapshot", "callsite"),
+        "snapshot",
+        ("call_effect_semantics_supported", False, "unsupported_call_effect"),
+        ("summary_candidate_effect_prerequisite", "callsite"),
+        ("occurrence", "unsupported_call_effect"),
+        "typed-summary-effect-prerequisite-v2",
+        _factory_token=call_effect._SUMMARY_EFFECT_SIGNAL_TOKEN,
+    )
+    session = _emit_at_recurrence_summary_site((signal,))
+
+    assert session.domain_signal_error_details == []
+    projection = session.preview_lifecycle_projection()
+    assert {row.reason_id for row in projection.c_active_base} == {
+        "unsupported_call_effect_semantics"
+    }
+    assert projection.q_open_base == ()
