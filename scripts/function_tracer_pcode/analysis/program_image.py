@@ -4,6 +4,10 @@
 **image の byte を解析の値にする（具体化する）経路の唯一の入口**。memory の読み出しを image の値に置き換えて
 よいのは、次をすべて満たすときだけ（設計 v3 §7.2）。満たさなければ None（具体化しない）:
 
+0. `[addr, addr+size)` の最後の byte の offset が Java の `long` の非負の範囲（`2**63 - 1` 以下）に収まる。
+   Ghidra の `AddressSpace.getAddress(long)` はそれより大きい値を受け取れない（JPype は `OverflowError` を
+   上げる）。上半分の番地は `getOffset` が負の値で返すので、収まらない番地の block は 1. も満たせない。
+   戻り値の定数（`-1` の 64 bit 表現など）を番地の候補として渡す呼び出し側があるので、ここで不成立にする。
 1. `[addr, addr+size)` が、overlay でない 1 つの block に収まる（block をまたぐ読み出しは、後ろの block の
    属性を見ていない）。
 2. その block の init・read が True、write・volatile が False。取得できない属性（例外・bool でない値）は
@@ -30,6 +34,9 @@ CODE_TARGET = "code_target"
 #: 見つけた再配置の長さで範囲との交わりを判定する
 _RELOCATION_LOOKBEHIND = 16
 _DEFAULT_RELOCATION_LENGTH = 8
+
+#: `AddressSpace.getAddress(long)` に渡せる最大の offset（条件 0.）
+_MAX_ADDRESS_OFFSET = (1 << 63) - 1
 
 
 class _Unreadable(Exception):
@@ -165,6 +172,8 @@ def read_image_value(
         return None
     if purpose not in (DATA_VALUE, CODE_TARGET):
         raise ValueError(f"unknown image read purpose: {purpose!r}")
+    if address_value + size_bytes - 1 > _MAX_ADDRESS_OFFSET:
+        return None
     try:
         raw, big_endian = _checked_bytes(program, address_value, size_bytes, purpose)
     except _Unreadable:

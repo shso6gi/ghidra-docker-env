@@ -247,6 +247,28 @@ def _skipped_fallback_coverage(runtime: Any, analysis1: Any, analysis2: Any) -> 
     return [(verdict[0], observations)] if observations else []
 
 
+def _skipped_fallback_observations(
+    runtime: Any, raw_comparison: tuple, analysis1: Any, analysis2: Any,
+) -> List[Tuple[Tuple[str, ...], tuple]]:
+    """runner が monolithic fallback を止めた比較の UNKNOWN を説明する記録: ``[(観測した比較, observations)]`` か ``[]``。
+
+    被覆の不足（gate の判定）を先に取る。無ければ、fallback を止めた理由のうち制御フローの不完全さ（Issue #257）を
+    runner の raw pair の比較（``raw_comparison``: runner の runtime で最後に動いた比較）の観測として取る。
+    どちらも無い理由（seed のある解析の unknown outcome）は outcome partition の段の cause が持つ
+    （``MONOLITHIC_FALLBACK_SKIP_CAUSE_OWNERS``）。
+    """
+
+    from scripts.function_tracer_pcode.authority.domains.return_coverage import control_flow_skip_observations
+
+    coverage = _skipped_fallback_coverage(runtime, analysis1, analysis2)
+    if coverage:
+        return coverage
+    if len(tuple(raw_comparison or ())) != 3:
+        return []
+    observations = control_flow_skip_observations(analysis1, analysis2)
+    return [(tuple(raw_comparison), observations)] if observations else []
+
+
 def _attach_unsealed_coverage_terminal(result: Any, observed_comparison: tuple, observations: tuple) -> None:
     """fallback を止めた被覆の不足を、この runner の結果の比較に束縛して記録する（cause にはしない）。
 
@@ -288,6 +310,8 @@ def run_obligation_branch_plan(
     accumulated_pairwise_debug_stats: Dict[str, int] = {}
     by_id = {spec.stage_id.value: spec for spec in checker.stage_plan}
     skipped_fallback_observations: List[Any] = []
+    #: runner の runtime で最後に動いた比較（runner の raw pair の比較）の identity（Issue #257 の記録が名指しする）
+    raw_comparison: List[str] = []
 
     def eligible(branch_id: str):
         if branch_id == "S_LOOP_TEMPLATE_ABSTRACTION":
@@ -298,7 +322,9 @@ def run_obligation_branch_plan(
                     return True
                 # この runner の比較はここで終わる（monolithic は最後の branch。eligibility は判定がまだ無いとき
                 # だけ評価される）。被覆の不足は runner の結果に束縛して記録し、cause にするかは終了処理が決める。
-                skipped_fallback_observations[:] = _skipped_fallback_coverage(runtime, analysis1, analysis2)
+                skipped_fallback_observations[:] = _skipped_fallback_observations(
+                    runtime, tuple(raw_comparison), analysis1, analysis2,
+                )
                 return False
             return monolithic_fallback_is_eligible
         return None
@@ -749,6 +775,10 @@ def run_obligation_branch_plan(
                     active_production_pilot_session(), receipt, dispatch_frame,
                 )
         last_result = result
+        if branch_runtime is runtime:
+            from scripts.function_tracer_pcode.authority.domains.return_coverage import comparison_identity_of
+
+            raw_comparison[:] = comparison_identity_of(dispatch_frame) or raw_comparison
         attempt_outcome, cutover_actions, continue_fallback = (
             _cutover_branch_policy(result)
         )

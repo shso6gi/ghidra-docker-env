@@ -44,6 +44,7 @@ from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementId,
 )
 from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
+    build_case_symbol_declarations,
     build_void_return_disequivalence_query,
 )
 
@@ -1626,6 +1627,9 @@ def _build_same_side_case_equality_validation_query(
         "",
     ]
     lines.extend(base_ctx["header_lines"])
+    lines.extend(build_case_symbol_declarations(
+        base_ctx, ((case1, param_replace_fn), (case2, param_replace_fn)),
+    ))
     lines.extend(model_assertions)
     lines.extend(_build_case_assertions(case1, param_replace_fn))
     lines.extend(_build_case_assertions(case2, param_replace_fn))
@@ -1696,6 +1700,9 @@ def _build_model_validation_query(
         "",
     ]
     lines.extend(base_ctx["header_lines"])
+    lines.extend(build_case_symbol_declarations(
+        base_ctx, ((case1, param_replace_fn1), (case2, param_replace_fn2)),
+    ))
     lines.extend(model_assertions)
     lines.extend(_build_case_assertions(case1, param_replace_fn1))
     lines.extend(_build_case_assertions(case2, param_replace_fn2))

@@ -33,7 +33,7 @@ from scripts.function_tracer_pcode.authority.domains.return_coverage import (
     RETURN_COVERAGE_DOMAIN,
     RETURN_COVERAGE_IDENTITY_SCOPE,
     RETURN_COVERAGE_PRODUCER_ID,
-    RETURN_COVERAGE_REASON_IDS,
+    RETURN_COVERAGE_DOMAIN_REASON_IDS,
     RETURN_COVERAGE_SITE_ID,
 )
 from scripts.function_tracer_pcode.authority.domains.call_effect_sites import (
@@ -248,7 +248,7 @@ _CAUSE_REASON_IDS_BY_SITE = {
         "comparison_equivalence_closure_unproven",
     ),
     CROSS_SIDE_IDENTITY_SITE_ID: (CROSS_SIDE_IDENTITY_REASON_ID,),
-    RETURN_COVERAGE_SITE_ID: RETURN_COVERAGE_REASON_IDS,
+    RETURN_COVERAGE_SITE_ID: RETURN_COVERAGE_DOMAIN_REASON_IDS,
     "call-effect-producer-blocker": ("pure_call_semantics_unproven",),
     "call-effect-producer-prerequisite": (
         "abi_argument_relation_unproven",
@@ -347,7 +347,7 @@ _REASON_IDENTITY_SCOPES = {
     **{reason_id: "RELATIONAL" for reason_id in SAT_SAFETY_REASON_RESOLUTION},
     "comparison_equivalence_closure_unproven": "RELATIONAL",
     CROSS_SIDE_IDENTITY_REASON_ID: CROSS_SIDE_IDENTITY_IDENTITY_SCOPE.value,
-    **{reason_id: RETURN_COVERAGE_IDENTITY_SCOPE.value for reason_id in RETURN_COVERAGE_REASON_IDS},
+    **{reason_id: RETURN_COVERAGE_IDENTITY_SCOPE.value for reason_id in RETURN_COVERAGE_DOMAIN_REASON_IDS},
     ANALYSIS_BUDGET_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,
     EXPRESSION_SIZE_BUDGET_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,
     COMPARISON_UNDECIDABLE_REASON_ID: ANALYSIS_LIMITATION_IDENTITY_SCOPE.value,

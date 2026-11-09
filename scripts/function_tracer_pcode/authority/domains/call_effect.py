@@ -1276,6 +1276,13 @@ class CallEffectPilotEncoder:
         )
         return CauseOccurrenceAuthority(occurrence, bound)
 
+    @staticmethod
+    def _summary_effect_occurrence_id(session: Any, cause: Any) -> str:
+        return "summary-effect-occ-" + authority_digest({
+            "cause_id": cause.value,
+            "result_occurrence_id": session.identity.result_occurrence_id,
+        })[:32]
+
     def _summary_effect_authority(
         self,
         session: Any,
@@ -1296,6 +1303,29 @@ class CallEffectPilotEncoder:
             active_semantic_precondition=("summary_candidate_requires_effect_fact", True),
             correspondence_contract=("one_function_snapshot",),
         )
+        if spec.contract_definition_id is None:
+            # A NO_PROOF_RECOVERY reason (e.g. unsupported_call_effect_semantics) has no recovery
+            # contract: the occurrence binds no contract and no requirement, so nothing can complete
+            # it and it stays active (it keeps blocking the decision).
+            occurrence = CauseOccurrence(
+                self._summary_effect_occurrence_id(session, cause),
+                cause,
+                signal.reason_id,
+                authority_digest(signal.canonical_target_key),
+                signal.target_kind,
+                IdentityScope.UNARY,
+                None,
+                None,
+                None,
+                None,
+                (),
+                signal.evidence_refs,
+                "typed_summary_effect_prerequisite",
+                session.identity.source_snapshot_fingerprint,
+                signal.producer_id,
+                session.identity.execution_identity_digest,
+            )
+            return CauseOccurrenceAuthority(occurrence, None)
         bindings: dict[str, ProofRequirement] = {}
         slot_names = spec.proof_kinds if len(spec.proof_kinds) > 1 else ("proof",)
         for slot_name, proof_kind in zip(slot_names, spec.proof_kinds):
@@ -1318,12 +1348,8 @@ class CallEffectPilotEncoder:
             contract_version=1,
             bindings=bindings,
         )
-        occurrence_id = "summary-effect-occ-" + authority_digest({
-            "cause_id": cause.value,
-            "result_occurrence_id": session.identity.result_occurrence_id,
-        })[:32]
         occurrence = CauseOccurrence(
-            occurrence_id,
+            self._summary_effect_occurrence_id(session, cause),
             cause,
             signal.reason_id,
             authority_digest(signal.canonical_target_key),

@@ -521,6 +521,8 @@ CAUSE_SLOTS_ADDED_AFTER_ISSUE125 = {
     # Issue #22 PR-22-D: 式サイズ予算。analysis-limitation の site を共有する。
     # Issue #242（第 8 回）: 比べる側の契約の判定不能。同じ site を共有する。
     NEW_PRODUCER_SITE_ID: ("expression_size_budget_exceeded", "comparison_undecidable"),
+    # Issue #257: 制御フローの不完全さで monolithic fallback を止めた比較。return-coverage の site を共有する。
+    "return-coverage-final-terminal": ("return_partition_control_flow_incomplete",),
 }
 
 #: PR-125-A の後に別 Issue が **既存 site** へ足した producer（site は増えない）。

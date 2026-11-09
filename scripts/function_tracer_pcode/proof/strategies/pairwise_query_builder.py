@@ -132,6 +132,9 @@ def build_canonical_return_observation_query(
     if replay_marker:
         lines.append(replay_marker)
     lines.extend(base_ctx["header_lines"])
+    lines.extend(build_case_symbol_declarations(
+        base_ctx, ((case1, param_replace_fn1), (case2, param_replace_fn2)),
+    ))
     lines.extend(str(item) for item in model_assertions)
     lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
     lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
@@ -580,6 +583,9 @@ def build_pair_query(
             logic=base_ctx.get("smt_logic", "QF_BV"),
         )
         lines.extend(base_ctx["header_lines"])
+        lines.extend(build_case_symbol_declarations(
+            base_ctx, ((case1, param_replace_fn1), (case2, param_replace_fn2)),
+        ))
         lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
         lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
         lines.extend(_build_loop_summary_case_comments(case1.value_expr, "Case1"))
@@ -743,6 +749,49 @@ def save_unknown_query(debug_print, query: str, pair_id: str, stage: str, output
         debug_print(f"  Saved unknown query to: {filepath}")
     except Exception as exc:
         debug_print(f"  Failed to save unknown query: {exc}")
+
+
+def build_case_symbol_declarations(base_ctx: Dict[str, Any], sided_cases) -> List[str]:
+    """query が描く case の式の記号のうち、共通の header が宣言していないものの宣言。
+
+    header は解析の戻り値・条件・effect の式から宣言を集める（`FormulaBuilder._collect_runtime_unknown_declarations`）。
+    case の値は描く前に post-state の読みを経路の条件で降ろすので（`ReturnCase.smt_value_expression`）、降ろした
+    式は header に無い記号（出口の状態の値など）を含み得る。宣言は描く式そのものから、描く側の接尾辞
+    （`build_symbol_replacer` の `smt_side_tag`）で作る。足すのは宣言だけで、記号には何の制約も置かない。
+
+    `sided_cases` は (case, 描画の関数) の列。式を持たない case（描いた SMT の文字列だけを返すもの）は
+    宣言を足さない。
+    """
+
+    from scripts.function_tracer_pcode.core.render_smt.unknowns import collect_unknown_smt_declarations
+
+    declared = set(base_ctx.get("runtime_unknown_declarations") or ())
+    missing: List[Tuple[str, int]] = []
+    for case, param_replace_fn in sided_cases:
+        side_tag = getattr(param_replace_fn, "smt_side_tag", None)
+        value_expression = getattr(case, "smt_value_expression", None)
+        expressions = [value_expression()] if callable(value_expression) else []
+        expressions.extend(
+            getattr(condition, "expression", None) for condition in getattr(case, "conditions", None) or ()
+        )
+        for expr in expressions:
+            if expr is None:
+                continue
+            for decl in collect_unknown_smt_declarations(expr, side_tag):
+                if decl in declared:
+                    continue
+                declared.add(decl)
+                missing.append(decl)
+    if not missing:
+        return []
+    lines = [
+        "; ----------------------------------------",
+        "; Runtime objects introduced by the rendered case values",
+        "; ----------------------------------------",
+    ]
+    lines.extend(f"(declare-const {name} (_ BitVec {bits}))" for name, bits in missing)
+    lines.append("")
+    return lines
 
 
 def _build_query_header(*comment_lines: str, logic: str = "QF_BV") -> List[str]:

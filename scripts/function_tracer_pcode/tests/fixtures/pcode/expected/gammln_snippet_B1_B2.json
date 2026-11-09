@@ -8,6 +8,7 @@
   "callsite_correspondence_unproven",
   "outcome_path_region_completeness_unproven",
   "pure_call_semantics_unproven",
+  "return_partition_control_flow_incomplete",
   "return_width_provenance_unavailable"
  ],
  "final_outcome": "UNKNOWN",

@@ -6,7 +6,8 @@
  "decisive_proof_kinds": [],
  "expected_stable_reason_ids": [
   "outcome_path_region_completeness_unproven",
-  "pure_call_semantics_unproven"
+  "pure_call_semantics_unproven",
+  "return_partition_control_flow_incomplete"
  ],
  "final_outcome": "UNKNOWN",
  "recorded_at_commit": "b526e14d1cd309aea2b2dfc6a1e21ad329d5eaa2",

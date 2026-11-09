@@ -768,6 +768,56 @@ def test_q1_reads_only_initialized_read_only_unrelocated_bytes_in_one_block():
     assert read_image_value(preceding, 0x100160, 4) is None  # a relocation that starts before the read
 
 
+class _JLongSpace(_Space):
+    """JPype の `AddressSpace.getAddress(long)` と同じく、Java の long に収まらない offset で `OverflowError`。"""
+
+    def getAddress(self, offset):
+        if not -(1 << 63) <= offset <= (1 << 63) - 1:
+            raise OverflowError("int too big to convert")
+        return _Address(offset)
+
+
+class _JLongProgram(_Program):
+    def getAddressFactory(self):
+        class _Factory:
+            def getDefaultAddressSpace(self):
+                return _JLongSpace()
+
+        return _Factory()
+
+
+def test_image_reads_past_the_java_long_offset_range_are_not_concretized():
+    """Neq 正式評価 4285315a の INVALID 72 件: 戻り値の定数 `2**64 - 1` を番地の候補にした読み出しが
+    `getAddress` の `OverflowError` で pair 全体を落としていた。収まらない番地は具体化しない（None）。"""
+
+    from scripts.function_tracer_pcode.analysis.program_image import read_image_value
+
+    data = {0x100160 + i: b for i, b in enumerate(b"\x01\x02\x03\x04")}
+    program = _JLongProgram([_Block(0x100160, 0x1001EF)], data=data)
+    assert read_image_value(program, 0x100160, 4) == 0x04030201
+    assert read_image_value(program, (1 << 64) - 1, 4) is None
+    assert read_image_value(program, (1 << 64) - 16, 4) is None
+    assert read_image_value(program, (1 << 63) - 2, 4) is None  # 最後の byte が long の範囲を越える
+    assert read_image_value(program, (1 << 63) - 4, 4) is None  # 収まるが block の外
+
+
+def test_readonly_affine_literal_ignores_return_constants_outside_the_address_range():
+    from types import SimpleNamespace
+
+    from scripts.function_tracer_pcode.analysis.recurrence import readonly_reduction as rr
+
+    lanes = b"".join(v.to_bytes(4, "little") for v in (3, 5, 7, 9))
+    data = {0x100160 + i: b for i, b in enumerate(lanes)}
+    host = SimpleNamespace(tracer=SimpleNamespace(program=_JLongProgram([_Block(0x100160, 0x1001EF)], data=data)))
+    host._read_readonly_int32_lanes = lambda address, count: rr._impl__read_readonly_int32_lanes(host, address, count)
+    host._expression_integer_constants = lambda value: list(value)
+    analysis = SimpleNamespace(returns=[SimpleNamespace(value=((1 << 64) - 1,))])
+    assert rr._impl__readonly_affine_progression_literal(host, analysis) is None
+    analysis = SimpleNamespace(returns=[SimpleNamespace(value=((1 << 64) - 1, 0x100160))])
+    literal = rr._impl__readonly_affine_progression_literal(host, analysis)
+    assert (literal.step, literal.lane_base) == (2, 3)
+
+
 def test_image_ranges_skip_overlay_blocks():
     from scripts.function_tracer_pcode.analysis.program_image import image_ranges
 
@@ -966,3 +1016,46 @@ def test_float_store_values_are_observed_as_their_bits():
         _analysis("f", left, params=params, return_type="void"), _analysis("g", right, params=params, return_type="void")
     )
     assert _check(formula) == z3.unsat
+
+
+def test_pair_query_declares_side_state_symbols_that_only_the_rendered_case_values_contain():
+    """Neq 正式評価 4285315a の ERROR（airy chebev_c1d 28 件）: case の値を描く前に post-state の読みを降ろすと、
+    解析の戻り値・条件・effect に無い出口の状態の値（global の location の値）が現れる。header はそれを宣言して
+    いないので、z3 は `unknown constant state_*_s2` で parse に失敗し、pair 全体が ERROR になっていた。
+    query は描く case の式そのものから宣言を足す。"""
+
+    from scripts.function_tracer_pcode.core.render_smt.unknowns import side_state_symbol_name
+    from scripts.function_tracer_pcode.proof.formula.symbol_replace import build_symbol_replacer
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import build_pair_query
+
+    def returns_constant(name):
+        return FunctionReturnAnalysis(
+            function_name=name, entry_point="0x0", parameters=list(PARAMS), return_type="long",
+            returns=[ReturnInfo(address="0x1", conditions=[], value=Expression.constant(0, 8))],
+        )
+
+    left, right = published(returns_constant("f")), published(returns_constant("g"))
+    base_ctx = FormulaBuilder(debug=False, exclude_ub=False).build_base_context(
+        left, right, input_correspondence=build_input_correspondence_set(left, right),
+    )
+    global_cell = CanonicalLocation(
+        base_ref=LocationBaseRef.global_object("c1_d", 8), offset=0, size=8,
+    )
+    location_value = published(Expression.variable("c1_d", size=8, runtime_ref=global_cell))
+    symbol = side_state_symbol_name(location_value)
+    assert all(symbol not in line for line in base_ctx["header_lines"])
+
+    def case(analysis, value):
+        return ReturnCase(index=0, conditions=[], value_expr=value, return_info=analysis.returns[0],
+                          parameters=list(analysis.parameters))
+
+    replace1 = build_symbol_replacer(base_ctx["params1"], base_ctx["extra_vars1"], float_mode="fp", side=1)
+    replace2 = build_symbol_replacer(base_ctx["params2"], base_ctx["extra_vars2"], float_mode="fp", side=2)
+    query = build_pair_query(
+        base_ctx, case(left, published(Expression.constant(0, 8))), case(right, location_value),
+        replace1, replace2, "(0,0)",
+    )
+    assert f"(declare-const {symbol}_s2 (_ BitVec 64))" in query
+    assert f"{symbol}_s1" not in query
+    assert _check(query) == z3.sat

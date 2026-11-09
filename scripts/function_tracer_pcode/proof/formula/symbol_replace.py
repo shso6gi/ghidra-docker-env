@@ -18,7 +18,7 @@ def build_symbol_replacer(
     文字列入力だけでなく、Expression/Condition も受け取れる。`side` はその側の memory などの記号の指定
     （Issue #282。`build_symbol_name_mapping` と同じ）。
     """
-    from scripts.function_tracer_pcode.core.render_smt.sides import with_side
+    from scripts.function_tracer_pcode.core.render_smt.sides import mapping_side_tag, with_side
 
     mapping = with_side(_build_symbol_mapping(params_info, extra_vars_info), side)
 
@@ -29,6 +29,8 @@ def build_symbol_replacer(
             return _replace_symbol_text(node, mapping)
         return _replace_symbol_text(str(node), mapping)
 
+    # 描く側の記号の接尾辞。描いた式から宣言を作る側（`build_case_symbol_declarations`）が同じ名前を使う
+    replacer.smt_side_tag = mapping_side_tag(mapping)
     return replacer
 
 

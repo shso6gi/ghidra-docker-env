@@ -6,7 +6,10 @@ import pytest
 
 from conftest import resolve_mock_data_type
 from scripts.function_tracer_pcode.core import Condition, Expression
-from scripts.function_tracer_pcode.proof.formula.returns import coerce_return_value_to_bitvec
+from scripts.function_tracer_pcode.proof.formula.returns import (
+    coerce_return_value_to_bitvec,
+    coerce_value_to_bitvec_width,
+)
 from scripts.function_tracer_pcode.core.intrinsics import COUNTED_STATE_TRANSITION_VALUE_OPCODE
 from scripts.function_tracer_pcode.core.render_smt import (
     UnsupportedSmtOperatorError,
@@ -911,3 +914,18 @@ def test_float_phi_all_fp_branches_return_boundary_does_not_double_convert():
     assert expr_smt.count("((_ fp.to_ieee_bv) (fp.") == 2
     assert return_smt == expr_smt
     assert "((_ fp.to_ieee_bv) (ite" not in return_smt
+
+
+@pytest.mark.parametrize("operator", ["INT_SLESS", "INT_EQUAL", "FLOAT_LESSEQUAL"])
+@pytest.mark.parametrize("target_bits", [8, 32])
+def test_boolean_case_value_is_widened_once_to_the_target_width(operator, target_bits):
+    """Neq 正式評価 4285315a の ERROR（raytrace intersect 30 件）: 比較の結果を戻り値として比べると、0/1 の
+    `ite` を target の幅で作った後に Bool の 1 bit から伸ばし直し、幅が target を越えていた。"""
+    import z3
+
+    value = published(Expression.binary_op(operator, _param("x"), _param("y")))
+    rendered = coerce_value_to_bitvec_width(value, "b", target_bits)
+    term = z3.parse_smt2_string(
+        f"(declare-const b Bool)(declare-const r (_ BitVec {target_bits}))(assert (= r {rendered}))"
+    )[0].arg(1)
+    assert term.sort() == z3.BitVecSort(target_bits)

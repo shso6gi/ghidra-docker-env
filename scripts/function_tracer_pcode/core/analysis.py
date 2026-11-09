@@ -1345,6 +1345,20 @@ def derive_memory_effect_bit_width(returns, effect_summary, expr_bit_width) -> i
 
 
 #: 解析 1 件分の直列化の作業量を数える観測点（`ExpressionSizeBudgetExceeded.site`）。
+#: monolithic fallback を止める理由（``FunctionReturnAnalysis.monolithic_fallback_skip_reasons`` の code）。
+#: 各理由で止めた比較の UNKNOWN を説明する cause の owner は 1 つの表
+#: （``authority.domains.return_coverage.MONOLITHIC_FALLBACK_SKIP_CAUSE_OWNERS``）が持つ（Issue #257）。
+FALLBACK_SKIP_UNKNOWN_OUTCOME_PARTITION = "unknown_outcome_partition"
+FALLBACK_SKIP_RETURN_COVERAGE_GAP = "return_case_coverage_gap"
+FALLBACK_SKIP_RETURN_COVERAGE_INCONCLUSIVE = "return_case_coverage_inconclusive"
+FALLBACK_SKIP_INCOMPLETE_CONTROL_FLOW = "incomplete_control_flow"
+MONOLITHIC_FALLBACK_SKIP_REASONS = (
+    FALLBACK_SKIP_UNKNOWN_OUTCOME_PARTITION,
+    FALLBACK_SKIP_RETURN_COVERAGE_GAP,
+    FALLBACK_SKIP_RETURN_COVERAGE_INCONCLUSIVE,
+    FALLBACK_SKIP_INCOMPLETE_CONTROL_FLOW,
+)
+
 ANALYSIS_SERIALIZATION_SITE = "core.analysis.FunctionReturnAnalysis.to_dict"
 
 
@@ -2042,17 +2056,24 @@ class FunctionReturnAnalysis:
 
     def should_skip_monolithic_fallback(self) -> bool:
         """解析が不完全で monolithic fallback を避けるべきか。"""
+        return bool(self.monolithic_fallback_skip_reasons())
+
+    def monolithic_fallback_skip_reasons(self) -> Tuple[str, ...]:
+        """monolithic fallback を止める理由（``MONOLITHIC_FALLBACK_SKIP_REASONS`` の code、並びはその順）。"""
+        reasons: List[str] = []
         if self.has_unknown_outcome_partition():
-            return True
-        if "return_case_coverage_gap" in self.analysis_notes:
-            return True
-        if "return_case_coverage_inconclusive" in self.analysis_notes:
-            return True
-        if self.recovered_from_decompiler:
-            return False
-        if not self.incomplete_control_flow:
-            return False
-        return self.has_unresolved_return_value() or self.has_overlapping_unconditional_returns()
+            reasons.append(FALLBACK_SKIP_UNKNOWN_OUTCOME_PARTITION)
+        if FALLBACK_SKIP_RETURN_COVERAGE_GAP in self.analysis_notes:
+            reasons.append(FALLBACK_SKIP_RETURN_COVERAGE_GAP)
+        if FALLBACK_SKIP_RETURN_COVERAGE_INCONCLUSIVE in self.analysis_notes:
+            reasons.append(FALLBACK_SKIP_RETURN_COVERAGE_INCONCLUSIVE)
+        if (
+            not self.recovered_from_decompiler
+            and self.incomplete_control_flow
+            and (self.has_unresolved_return_value() or self.has_overlapping_unconditional_returns())
+        ):
+            reasons.append(FALLBACK_SKIP_INCOMPLETE_CONTROL_FLOW)
+        return tuple(reasons)
 
     def has_unknown_outcome_partition(self) -> bool:
         return bool(self.unknown_outcomes and (self.return_outcomes or self.divergence_outcomes))
