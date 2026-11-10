@@ -411,13 +411,13 @@ def _retained_exact_marker_matches_return(
     return tuple(marker[1]) == expected_identity and marker[2] == expected_payload
 
 
-def _shared_return_binding_evidence(candidates: Sequence[SummaryReturnCandidate]) -> Optional[Any]:
+def _shared_return_binding_evidence(returns: Sequence[ReturnInfo]) -> Optional[Any]:
     """proposal の全 member が同じ return binding の証拠を持つときだけ、その証拠（Issue #297）。
 
     member ごとに証拠が違う・欠けている proposal は証拠を持たない（promotion の proof が拒否する）。
     """
 
-    evidences = [getattr(candidate.return_info, "summary_return_binding_evidence", None) for candidate in candidates]
+    evidences = [getattr(ret, "summary_return_binding_evidence", None) for ret in returns]
     if not evidences or any(item is None for item in evidences):
         return None
     first = evidences[0].stable_key()
@@ -432,14 +432,18 @@ def attach_quarantined_recurrence_proposal(
 ) -> Optional[QuarantinedRecurrenceProposal]:
     """Attach an immutable proof-free proposal without changing normal returns."""
 
+    proposed_returns = tuple(proposed_returns or ())
+    # Issue #297: return binding の証拠は proposal だけが持つ（digest に入る）。候補・ReturnInfo は
+    # 解析の successor・比較の case として写され・辿られるので、P-code の写しを運ばせない。
+    binding_evidence = _shared_return_binding_evidence(proposed_returns)
     candidates = tuple(
         build_summary_return_candidate(
             analysis,
-            ret,
+            replace(ret, summary_return_binding_evidence=None),
             summary_note=summary_note,
             candidate_index=index,
         )
-        for index, ret in enumerate(tuple(proposed_returns or ()))
+        for index, ret in enumerate(proposed_returns)
     )
     if not candidates:
         return None
@@ -525,7 +529,7 @@ def attach_quarantined_recurrence_proposal(
             for candidate in proposal_candidates
         ),
         retained_refs,
-        return_binding_evidence=_shared_return_binding_evidence(proposal_candidates),
+        return_binding_evidence=binding_evidence if proposal_candidates else None,
     )
     proposals = tuple(getattr(analysis, "quarantined_recurrence_proposals", ()) or ())
     if all(item.digest != proposal.digest for item in proposals):

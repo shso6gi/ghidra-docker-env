@@ -4,8 +4,8 @@
 counted scalar loop の summary だけを受理する。規則（すべて成り立つときだけ成立）:
 
 - ``KIND``: 候補はすべて counted scalar loop の transition の証拠を持つ（他の種類は拒否する）。
-- ``EV``: proposal に証拠があり、producer の失敗が無く、関数の identity と P-code の写しの digest が
-  **現在の解析** と一致する（別の解析・別の proposal の証拠を使わない）。
+- ``EV``: proposal に証拠があり（証拠は proposal だけが持ち、digest に入る）、producer の失敗が無く、
+  関数の identity と P-code の写しの digest が **現在の解析** と一致する（別の解析の証拠を使わない）。
 - ``R-census``: 写しの op の key・block の辺・RETURN の集合が、同じ HighFunction を別に数えた census
   （control profile）と一致する。census の key は full で、重複が無い。
 - ``B5``: 証拠の accumulator PHI・header が、transition の key と同じ。
@@ -109,10 +109,8 @@ def _check(analysis: Any, proposal: Any, members: List[Any]) -> List[str]:
         failures.append("EV:function_identity")
     if getattr(analysis, "pcode_dataflow_digest", None) != snapshot.digest:
         failures.append("EV:pcode_source")
-    for member in members:
-        carried = getattr(member.return_info, "summary_return_binding_evidence", None)
-        if carried is None or carried.digest != evidence.digest:
-            failures.append("EV:candidate_evidence")
+    # 候補は proposal に束縛済み（``_bind_accepted_candidates_to_proposal``）。証拠は proposal だけが持ち、
+    # その digest は proposal の digest に入るので、別の proposal の証拠は使えない。
     if failures:
         return failures
 

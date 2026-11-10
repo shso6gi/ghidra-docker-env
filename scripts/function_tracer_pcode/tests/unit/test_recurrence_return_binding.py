@@ -249,7 +249,7 @@ class _Case:
         self.loop = loop
         evidence = evidence or _evidence(loop)
         tkey = (kind, ("accumulator_phi", loop.acc), ("header_block", _block_key(1)))
-        carried = candidate_evidence if candidate_evidence is not None else evidence
+        carried = None if candidate_evidence is False else (candidate_evidence if candidate_evidence is not None else evidence)
         base_info = ReturnInfo(address="0x44", value=base_value, conditions=[base_guard or _cond(True)],
                                summary_transition_evidence_key=tkey, summary_return_binding_evidence=carried)
         loop_info = ReturnInfo(address="0x44", value=loop_value if loop_value is not None else _loop_value(),
@@ -453,10 +453,23 @@ def test_evidence_from_another_analysis_is_rejected():
     assert "EV:pcode_source" in _Case(digest="0" * 64).failures()
 
 
-def test_candidate_carrying_other_evidence_is_rejected():
-    other_loop = _Loop(step=1)
-    other = _evidence(other_loop, update_cases=(_update_case(Expression.binary_op("INT_ADD", ACC, N)),))
-    assert "EV:candidate_evidence" in _Case(candidate_evidence=other).failures()
+def test_only_the_proposal_carries_the_evidence():
+    # 候補の ReturnInfo は証拠を運ばない（解析の successor・比較の case として写されるため）。proposal の証拠で判定する
+    assert _Case(candidate_evidence=False).run()[0] == "return_binding_v1"
+
+
+def test_attach_moves_the_evidence_onto_the_proposal_only():
+    from scripts.function_tracer_pcode.analysis.returns.summary_returns import _shared_return_binding_evidence
+
+    loop = _Loop()
+    evidence = _evidence(loop)
+    with_evidence = [ReturnInfo(address="0x44", value=ZERO, conditions=[_cond(True)],
+                                summary_return_binding_evidence=evidence) for _ in range(2)]
+    assert _shared_return_binding_evidence(with_evidence) is evidence
+    other = _evidence(loop, initial_signature=("other",))
+    mixed = [with_evidence[0], replace(with_evidence[1], summary_return_binding_evidence=other)]
+    assert _shared_return_binding_evidence(mixed) is None
+    assert _shared_return_binding_evidence([replace(with_evidence[0], summary_return_binding_evidence=None)]) is None
 
 
 def test_producer_failure_is_rejected():
@@ -768,3 +781,15 @@ def test_legacy_extraction_returns_the_same_cases():
     # 既存の呼び出し（model の抽出）は、完全性の記録を足す前と同じ case を受け取る
     legacy, (cases, _completeness) = _extraction(no_delta=("b",), legacy=True)
     assert isinstance(legacy, list) and tuple(legacy) == cases
+
+
+def test_analysis_successor_copies_the_evidence_it_carries():
+    # 解析の successor は ReturnInfo・候補を field ごとに写す。証拠を載せた解析も写せ、写しの digest は同じ
+    from scripts.function_tracer_pcode.core.analysis import _semantic_copy
+
+    evidence = _evidence(_Loop())
+    copied = _semantic_copy(evidence)
+    assert copied.digest == evidence.digest
+    assert copied.snapshot.op(evidence.accumulator_phi_key) is not None
+    info = ReturnInfo(address="0x44", value=ZERO, conditions=[_cond(True)], summary_return_binding_evidence=evidence)
+    assert _semantic_copy(info).summary_return_binding_evidence.digest == evidence.digest

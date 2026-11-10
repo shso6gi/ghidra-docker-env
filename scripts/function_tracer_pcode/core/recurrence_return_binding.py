@@ -137,12 +137,9 @@ class PcodeDataflowSnapshot:
     blocks: Tuple[PcodeFactBlock, ...]
     ops: Tuple[PcodeFactOp, ...]
     schema_version: str = PCODE_DATAFLOW_SNAPSHOT_SCHEMA
-    _ops_by_key: Dict[Tuple[Any, ...], PcodeFactOp] = field(
-        default_factory=dict, init=False, repr=False, compare=False, hash=False,
-    )
-    _blocks_by_index: Dict[int, PcodeFactBlock] = field(
-        default_factory=dict, init=False, repr=False, compare=False, hash=False,
-    )
+    # 索引（``_ops_by_key`` / ``_blocks_by_index``）と digest は dataclass の field にしない。解析の
+    # successor は dataclass を ``replace`` で field ごとに写す（``core.analysis._semantic_copy``）ので、
+    # ``init=False`` の field があると写せない。写しは ``__post_init__`` で索引を作り直す。
 
     def __post_init__(self) -> None:
         if self.schema_version != PCODE_DATAFLOW_SNAPSHOT_SCHEMA:
