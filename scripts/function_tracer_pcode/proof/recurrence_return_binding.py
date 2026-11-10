@@ -13,7 +13,8 @@ counted scalar loop の summary だけを受理する。規則（すべて成り
 - ``B2``: RETURN の入力の幅 = PHI の幅 = 候補の幅 = summary の ``result_size``。
 - ``X2`` / ``T6``: header の強連結成分から出る辺はちょうど 1 本で header から出る。header を除くと循環が無い。
 - ``T``: header の比較は帰納変数 PHI に直接かかる strict な大小比較で、step は ±1 と向きが合う。比較の
-  両辺と帰納変数は同じ幅で、limit はループの外で決まる（wrap も非停止も起きない形だけ）。
+  両辺と帰納変数は同じ幅で、limit はループ不変（外で決まるか、不変な入力の純粋な整数演算。wrap も
+  非停止も起きない形だけ）。
 - ``C``: 候補は base と loop の 2 つ。loop の値の step・符号・start・limit・初期値が P-code の事実と一致し、
   base の値は初期値と一致する。``E``: 閉じた式（exact lowering）がある。
 - ``G``: loop の guard ⇔ ``start REL limit``、base の guard ⇔ その否定（SMT）。
@@ -42,7 +43,7 @@ from scripts.function_tracer_pcode.core.recurrence_return_binding import (
     CountedLoopReturnBindingEvidence,
     header_guard,
     induction_steps,
-    input_defined_outside,
+    input_is_loop_invariant,
     is_full_pcode_op_key,
     loop_region,
     region_exit_edges,
@@ -162,7 +163,7 @@ def _check(analysis: Any, proposal: Any, members: List[Any]) -> List[str]:
         if set(guard.widths) != {iv_phi.output_size}:
             failures.append("T:width")
         compare = snapshot.op(guard.compare_key)
-        if not input_defined_outside(snapshot, compare.inputs[guard.limit_operand], region):
+        if not input_is_loop_invariant(snapshot, compare.inputs[guard.limit_operand], region):
             failures.append("T:limit_not_loop_invariant")
 
     # C / E / G / U / Z（候補の値の意味）

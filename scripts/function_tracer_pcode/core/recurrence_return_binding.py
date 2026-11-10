@@ -572,12 +572,38 @@ def induction_steps(
     return tuple(steps), None
 
 
-def input_defined_outside(
+#: ループの中で計算されても、入力がすべてループ不変なら値もループ不変な op（純粋な整数演算・bit の写し）。
+#: MULTIEQUAL（ループの値を運ぶ）・LOAD / CALL（memory・副作用）・除算（trap）は入れない。
+LOOP_INVARIANT_PURE_MNEMONICS = frozenset({
+    "COPY", "CAST", "INT_ZEXT", "INT_SEXT", "SUBPIECE", "PIECE", "INT_ADD", "INT_SUB", "INT_MULT",
+    "INT_2COMP", "INT_NEGATE", "INT_XOR", "INT_AND", "INT_OR", "INT_LEFT", "INT_RIGHT", "INT_SRIGHT",
+})
+#: ループ不変の判定で辿る op の数の上限（超えたら不変とは言わない）。
+LOOP_INVARIANT_MAX_OPS = 64
+
+
+def input_is_loop_invariant(
     snapshot: PcodeDataflowSnapshot, item: PcodeFactInput, region: frozenset,
 ) -> bool:
-    """入力の値がループの外で決まること（定数・関数の入力・region の外の op の出力）。"""
+    """入力の値がループ不変であること（T-inv）。
 
-    final, _links = follow_passthrough(snapshot, item)
-    if final.kind != "op":
-        return True
-    return snapshot.op(final.producer_key).block_index not in region
+    定数・関数の入力・region の外の op の出力は不変。region の中の op は、純粋な整数演算
+    （``LOOP_INVARIANT_PURE_MNEMONICS``）で、入力がすべて不変なときだけ不変（例: ``while (i < n + n)`` の
+    ``INT_MULT(n, 2)`` は header で毎回計算されるが不変）。MULTIEQUAL・memory・call を通るなら不変と言わない。
+    """
+
+    pure = {_opcode(name) for name in LOOP_INVARIANT_PURE_MNEMONICS}
+    stack = [item]
+    seen = set()
+    while stack:
+        current = stack.pop()
+        if current.kind != "op":
+            continue
+        op = snapshot.op(current.producer_key)
+        if op.block_index not in region or op.key in seen:
+            continue
+        seen.add(op.key)
+        if op.opcode not in pure or len(seen) > LOOP_INVARIANT_MAX_OPS:
+            return False
+        stack.extend(op.inputs)
+    return True

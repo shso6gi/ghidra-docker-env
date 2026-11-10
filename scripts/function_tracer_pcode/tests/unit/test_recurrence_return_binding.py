@@ -102,7 +102,7 @@ class _Loop:
 
     def __init__(
         self, *, step: int = 1, compare: str = "INT_SLESS", return_op: Optional[str] = None,
-        counter_via: Optional[str] = None, limit_in_body: bool = False, extra_exit: bool = False,
+        counter_via: Optional[str] = None, limit: str = "free", extra_exit: bool = False,
         inner_cycle: bool = False, width: int = 4,
     ) -> None:
         w = width
@@ -112,7 +112,9 @@ class _Loop:
         self.cbr = _key(0x28, 3, OPC["CBRANCH"], 3 if counter_via is None else 4)
         self.inext = _key(0x30, 4, OPC["INT_ADD"])
         self.anext = _key(0x34, 5, OPC["INT_ADD"], 1)
-        self.limit_def = _key(0x38, 6, OPC["INT_ADD"], 2)
+        self.limit_def = _key(0x38, 6, OPC[{"header_mult": "INT_MULT", "loop_carried": "MULTIEQUAL",
+                                            "load": "LOAD"}.get(limit, "INT_ADD")], 4)
+        self.limit_next = _key(0x3c, 10, OPC["INT_SUB"], 2)
         self.ret_copy = _key(0x40, 7, OPC[return_op or "COPY"])
         self.ret = _key(0x44, 8, OPC["RETURN"], 1)
         counter_input = PcodeFactInput("op", w, producer_key=self.iv)
@@ -127,12 +129,23 @@ class _Loop:
             via_width = 8 if counter_via == "INT_ZEXT" else w
             header_ops.append(PcodeFactOp(self.via, OPC[counter_via], counter_via, 1, via_width, (counter_input,)))
             counter_input = PcodeFactInput("op", via_width, producer_key=self.via)
-        limit = (
-            PcodeFactInput("op", counter_input.size, producer_key=self.limit_def) if limit_in_body
-            else PcodeFactInput("free", counter_input.size)
+        size = counter_input.size
+        limit_input = (
+            PcodeFactInput("free", size) if limit == "free"
+            else PcodeFactInput("op", size, producer_key=self.limit_def)
         )
-        header_ops += [
-            PcodeFactOp(self.cmp, OPC[compare], compare, 1, 1, (counter_input, limit)),
+        limit_ops = []
+        if limit == "header_mult":      # `while (i < n + n)`: header で毎回計算するが不変
+            limit_ops = [PcodeFactOp(self.limit_def, OPC["INT_MULT"], "INT_MULT", 1, size, (
+                PcodeFactInput("free", size), PcodeFactInput("constant", size, constant=2)))]
+        elif limit == "loop_carried":   # limit が反復ごとに変わる（`n = n - 1`）
+            limit_ops = [PcodeFactOp(self.limit_def, OPC["MULTIEQUAL"], "MULTIEQUAL", 1, size, (
+                PcodeFactInput("free", size), PcodeFactInput("op", size, producer_key=self.limit_next)))]
+        elif limit == "load":           # limit を memory から読む
+            limit_ops = [PcodeFactOp(self.limit_def, OPC["LOAD"], "LOAD", 1, size, (
+                PcodeFactInput("constant", 8, constant=0), PcodeFactInput("free", 8)))]
+        header_ops += limit_ops + [
+            PcodeFactOp(self.cmp, OPC[compare], compare, 1, 1, (counter_input, limit_input)),
             PcodeFactOp(self.cbr, OPC["CBRANCH"], "CBRANCH", 1, None, (
                 PcodeFactInput("free", 8), PcodeFactInput("op", 1, producer_key=self.cmp))),
         ]
@@ -142,11 +155,9 @@ class _Loop:
             PcodeFactOp(self.anext, OPC["INT_ADD"], "INT_ADD", 2, w, (
                 PcodeFactInput("op", w, producer_key=self.acc), PcodeFactInput("free", w))),
         ]
-        if limit_in_body:
-            # limit をループの中で計算する（値が反復ごとに決まり得る。外で決まらない limit は受理しない）
-            body_ops.append(PcodeFactOp(self.limit_def, OPC["INT_ADD"], "INT_ADD", 2, counter_input.size, (
-                PcodeFactInput("free", counter_input.size),
-                PcodeFactInput("constant", counter_input.size, constant=1))))
+        if limit == "loop_carried":
+            body_ops.append(PcodeFactOp(self.limit_next, OPC["INT_SUB"], "INT_SUB", 2, size, (
+                PcodeFactInput("op", size, producer_key=self.limit_def), PcodeFactInput("constant", size, constant=1))))
         ret_value = PcodeFactInput("op", w, producer_key=self.acc)
         if return_op == "INT_ADD":
             ret_ops = [PcodeFactOp(self.ret_copy, OPC["INT_ADD"], "INT_ADD", 3, w, (
@@ -330,7 +341,8 @@ def test_candidate_width_must_match_the_return_width():
     (_Loop(compare="INT_SLESSEQUAL"), "T:form:iv<=L/(1,)"),    # `<=`（limit = MAX で 0 回に化ける）
     (_Loop(compare="INT_NOTEQUAL"), "T:guard_op:INT_NOTEQUAL"),
     (_Loop(counter_via="INT_ZEXT"), "T:guard_counter_operand_not_unique_or_cast"),  # w8 の形
-    (_Loop(limit_in_body=True), "T:limit_not_loop_invariant"),  # T-inv の不成立
+    (_Loop(limit="loop_carried"), "T:limit_not_loop_invariant"),  # T-inv の不成立（反復ごとに変わる）
+    (_Loop(limit="load"), "T:limit_not_loop_invariant"),          # T-inv の不成立（memory から読む）
 ])
 def test_wrapping_or_non_terminating_loop_forms_are_rejected(loop, expected):
     assert expected in _Case(loop).failures()
@@ -341,9 +353,10 @@ def test_same_width_cast_on_the_counter_keeps_the_counter_identity():
     assert _Case(_Loop(counter_via="CAST")).run()[0] == "return_binding_v1"
 
 
-def test_loop_invariant_limit_is_accepted():
-    # T-inv の成立: limit が関数の入力（ループの外で決まる）
-    assert _Case(_Loop(limit_in_body=False)).run()[0] == "return_binding_v1"
+@pytest.mark.parametrize("limit", ["free", "header_mult"])
+def test_loop_invariant_limit_is_accepted(limit):
+    # T-inv の成立: limit が関数の入力、または不変な入力の純粋な整数演算（REVE/loop5 の `n + n`）
+    assert _Case(_Loop(limit=limit)).run()[0] == "return_binding_v1"
 
 
 def test_second_loop_exit_is_rejected():
