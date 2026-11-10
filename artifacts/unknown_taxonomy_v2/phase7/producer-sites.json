@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "b1eac94fe51ab773af1659b0a4d4484f31eb21d5e548a9266c10ef02f2f1062e",
+  "manifest_digest": "a308514edc06fe53b69ceb9a18cbec716f83de768444487c85699d3083426be2",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 34,
   "sites": [
@@ -779,10 +779,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 827,
+      "line": 828,
       "path": "scripts/function_tracer_pcode/proof/recurrence_promotion.py",
       "producer_site_manifest_id": "recurrence-summary-abi-width",
-      "source_sha256": "1d8ad2db60ddaedba4a215fff7a10e42b518a8e34a005fbd895c4dce62ad9c23"
+      "source_sha256": "ebfefe1c537683a7a5c4b1763cca524bf117c2c6b1bbb240db4a55274b7357f7"
     },
     {
       "allowed_dispositions": [
@@ -839,10 +839,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 819,
+      "line": 820,
       "path": "scripts/function_tracer_pcode/proof/recurrence_promotion.py",
       "producer_site_manifest_id": "recurrence-summary-call-effect",
-      "source_sha256": "1d8ad2db60ddaedba4a215fff7a10e42b518a8e34a005fbd895c4dce62ad9c23"
+      "source_sha256": "ebfefe1c537683a7a5c4b1763cca524bf117c2c6b1bbb240db4a55274b7357f7"
     },
     {
       "allowed_dispositions": [
@@ -969,10 +969,10 @@
           "slot_semantics": "ALTERNATIVE_REASON_CHOICE"
         }
       ],
-      "line": 823,
+      "line": 824,
       "path": "scripts/function_tracer_pcode/proof/recurrence_promotion.py",
       "producer_site_manifest_id": "recurrence-summary-loop",
-      "source_sha256": "1d8ad2db60ddaedba4a215fff7a10e42b518a8e34a005fbd895c4dce62ad9c23"
+      "source_sha256": "ebfefe1c537683a7a5c4b1763cca524bf117c2c6b1bbb240db4a55274b7357f7"
     },
     {
       "allowed_dispositions": [

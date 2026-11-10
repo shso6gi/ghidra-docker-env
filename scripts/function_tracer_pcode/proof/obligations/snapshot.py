@@ -116,6 +116,9 @@ FUNCTION_ANALYSIS_FIELD_CLASSIFICATION = MappingProxyType({
     # 違うときと台帳があるときだけ出すので、差があれば fingerprint が別の前提になる。
     "raw_parameter_domains": "semantic",
     "parameter_domain_hypotheses": "semantic",
+    # Issue #297: return binding の証拠の出所の確認に使う P-code の写しの digest。``to_dict`` には
+    # 出さない（同じ HighFunction から決定的に作るので、解析の前提を変えない）。
+    "pcode_dataflow_digest": "semantic",
 })
 
 

@@ -281,6 +281,10 @@ class ReturnInfo:
     retained_exact_return_ref: Optional[Tuple[Any, ...]] = None
     validation_blockers: Tuple[str, ...] = field(default_factory=tuple)
     return_path_evidence: Optional[ReturnPathEvidence] = None
+    #: Issue #297: recurrence summary の member が、関数の RETURN の値を表すことの証拠
+    #: （``core.recurrence_return_binding.CountedLoopReturnBindingEvidence``）。builder が付け、
+    #: proposal に載る。出力・fingerprint には入れない（proposal の digest が identity を持つ）。
+    summary_return_binding_evidence: Optional[Any] = None
 
     def __post_init__(self) -> None:
         # 解析結果は **確定した意味** なので、組み上がった時点で凍らせる。
@@ -1411,6 +1415,11 @@ class FunctionReturnAnalysis:
     raw_parameter_domains: Optional[RawParameterDomains] = None
     # Issue #185: 封印の後に parameter の領域を変えた仮説の台帳（provenance。proof ではない）。
     parameter_domain_hypotheses: Tuple[ParameterDomainHypothesis, ...] = ()
+    # Issue #297: この解析の HighFunction から取った P-code の事実の写し（``PcodeDataflowSnapshot``）の
+    # digest。写しを作った producer が、同じ解析に 1 度だけ書く（successor は引き継ぐ。再解析は新しい
+    # 解析なので None から始まる）。return binding の証拠は、この digest と一致しなければ使えない。
+    # 出力・fingerprint には入れない（P-code の写しは解析の前提ではなく、証拠の出所の確認に使う）。
+    pcode_dataflow_digest: Optional[str] = None
 
     def __setattr__(self, name: str, value: Any) -> None:
         if name == "expansion_budget_truncations":

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Optional, Any
 from scripts.function_tracer_pcode.core.storage import StorageInfo
+from scripts.function_tracer_pcode.core.runtime_refs.pcode import PCODE_OPCODE_BY_MNEMONIC
 from scripts.function_tracer_pcode.analysis import PcodeTracer
 from scripts.function_tracer_pcode.analysis.bounded_refinement import BoundedCallRefiner
 from scripts.function_tracer_pcode.analysis.condition import (
@@ -71,7 +72,8 @@ from scripts.function_tracer_pcode.analysis.recurrence.summarizer import (
 )
 from scripts.function_tracer_pcode.analysis.switch import build_switch_dispatch_summaries
 from scripts.function_tracer_pcode.analysis.session import AnalysisSession
-_PCODE_OPCODE_BY_MNEMONIC = {'COPY': 1, 'LOAD': 2, 'STORE': 3, 'BRANCH': 4, 'CBRANCH': 5, 'BRANCHIND': 6, 'CALL': 7, 'CALLIND': 8, 'RETURN': 10, 'INT_ZEXT': 17, 'INT_SEXT': 18, 'MULTIEQUAL': 60, 'INDIRECT': 61, 'PIECE': 62, 'SUBPIECE': 63, 'CAST': 64}
+# 番号は core の表が唯一の定義（Issue #297）。ここはその部分集合（従来の登録範囲）だけを写す。
+_PCODE_OPCODE_BY_MNEMONIC = {name: PCODE_OPCODE_BY_MNEMONIC[name] for name in ('COPY', 'LOAD', 'STORE', 'BRANCH', 'CBRANCH', 'BRANCHIND', 'CALL', 'CALLIND', 'RETURN', 'INT_ZEXT', 'INT_SEXT', 'MULTIEQUAL', 'INDIRECT', 'PIECE', 'SUBPIECE', 'CAST')}
 _PCODE_CALL_OPCODES = {_PCODE_OPCODE_BY_MNEMONIC['CALL'], _PCODE_OPCODE_BY_MNEMONIC['CALLIND']}
 _PCODE_BRANCHLIKE_OPCODES = {_PCODE_OPCODE_BY_MNEMONIC['BRANCH'], _PCODE_OPCODE_BY_MNEMONIC['CBRANCH'], _PCODE_OPCODE_BY_MNEMONIC['BRANCHIND']}
 _PCODE_VALUE_PASSTHROUGH_OPCODES = {_PCODE_OPCODE_BY_MNEMONIC['COPY'], _PCODE_OPCODE_BY_MNEMONIC['CAST'], _PCODE_OPCODE_BY_MNEMONIC['INT_ZEXT'], _PCODE_OPCODE_BY_MNEMONIC['INT_SEXT'], _PCODE_OPCODE_BY_MNEMONIC['SUBPIECE']}

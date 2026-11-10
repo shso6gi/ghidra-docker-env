@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-from typing import Any, Mapping, Sequence, Tuple
+from typing import Any, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.core.json_encoding import each, materialize
 from scripts.function_tracer_pcode.core.condition import Condition
@@ -506,7 +506,10 @@ class QuarantinedRecurrenceProposal:
     pattern_kind: str
     new_returns: Tuple[QuarantinedRecurrenceReturn, ...]
     retained_exact_return_refs: Tuple[RetainedExactReturnRef, ...]
-    schema_version: str = "quarantined_recurrence_proposal_v1"
+    #: Issue #297: summary が関数の RETURN の値を表すことの証拠（``core.recurrence_return_binding``）。
+    #: digest に入るので、別の proposal・別の解析の証拠は流用できない。無ければ promotion は拒否する。
+    return_binding_evidence: Optional[Any] = None
+    schema_version: str = "quarantined_recurrence_proposal_v2"
 
     def __post_init__(self) -> None:
         def ordered(items: Sequence[Any], tag: str) -> Tuple[Any, ...]:
@@ -539,6 +542,10 @@ class QuarantinedRecurrenceProposal:
             self.schema_version, self.seed_core_digest, self.pattern_kind,
             tuple(item.stable_key() for item in self.new_returns),
             tuple(item.stable_key() for item in self.retained_exact_return_refs),
+            (
+                None if self.return_binding_evidence is None
+                else ("return_binding_evidence_digest_v1", self.return_binding_evidence.digest)
+            ),
         )
 
     @property
@@ -578,7 +585,7 @@ def semantic_recurrence_closure_digest(
 
 _RECURRENCE_SUBPROOF_KINDS = (
     "candidate_validation", "transition_termination", "overlap",
-    "partition_coverage", "effect_surface",
+    "partition_coverage", "effect_surface", "return_binding",
 )
 
 _RECURRENCE_SUBPROOF_METHODS = {
@@ -587,6 +594,8 @@ _RECURRENCE_SUBPROOF_METHODS = {
     "overlap": "condition_smt_overlap_validator_v2",
     "partition_coverage": "condition_smt_partition_totality_v2",
     "effect_surface": "recurrence_effect_surface_validator_v2",
+    # Issue #297: summary が関数の RETURN の値を表すこと（遷移の正しさとは別の命題）。
+    "return_binding": "recurrence_return_binding_validator_v1",
 }
 
 _TRANSITION_PROPOSITION_TAGS = frozenset({
@@ -843,6 +852,18 @@ def _validate_subproof_proposition(proof_kind: str, value: Any) -> None:
         if len(receipts) != 1 or receipts[0].query_role != "partition_coverage_miss" or receipts[0].result_status != "unsat":
             raise ValueError("recurrence coverage proof requires one UNSAT query receipt")
         return
+    if proof_kind == "return_binding":
+        if (
+            len(value) != 5 or value[0] != "return_binding_v1"
+            or not isinstance(value[1], str) or not value[1]
+            or not isinstance(value[2], str) or not value[2]
+            or not isinstance(value[3], tuple) or not value[3]
+            or not all(_is_semantic_identity(item) for item in value[3])
+            or not isinstance(value[4], tuple) or not value[4]
+            or not all(isinstance(item, str) and item for item in value[4])
+        ):
+            raise ValueError("recurrence return binding proposition schema is invalid")
+        return
     if len(value) != 3 or value[0] != "effect_surface_v2" or not isinstance(value[1], str) or not value[1]:
         raise ValueError("recurrence effect proposition schema is invalid")
     if not isinstance(value[2], tuple) or not value[2]:
@@ -941,10 +962,10 @@ class RecurrenceValidationEvidence:
     proposal_digest: str
     function_recurrence_binding_digest: str
     subproofs: Tuple[RecurrenceSubproofEvidence, ...]
-    schema_version: str = "recurrence_validation_evidence_v2"
+    schema_version: str = "recurrence_validation_evidence_v3"
 
     def __post_init__(self) -> None:
-        if self.schema_version != "recurrence_validation_evidence_v2":
+        if self.schema_version != "recurrence_validation_evidence_v3":
             raise ValueError("recurrence validation evidence version is not allowed")
         if not all((
             self.seed_core_digest, self.proposal_digest,
@@ -960,6 +981,7 @@ class RecurrenceValidationEvidence:
             "overlap": (self.subproofs[0].digest, self.subproofs[1].digest),
             "partition_coverage": (self.subproofs[2].digest,),
             "effect_surface": (self.subproofs[0].digest,),
+            "return_binding": (self.subproofs[0].digest, self.subproofs[1].digest),
         }
         for item in self.subproofs:
             if any(dependency not in known for dependency in item.dependencies):
@@ -974,6 +996,7 @@ class RecurrenceValidationEvidence:
             propositions["overlap"][1],
             propositions["partition_coverage"][1],
             propositions["effect_surface"][1],
+            propositions["return_binding"][1],
         )
         if any(binding != self.proposal_digest for binding in proposal_bindings):
             raise ValueError("recurrence subproof proposal binding mismatch")
@@ -985,8 +1008,9 @@ class RecurrenceValidationEvidence:
             item[1] for item in propositions["transition_termination"][3]
         }
         effect_ids = {item[1] for item in propositions["effect_surface"][2]}
+        binding_ids = set(propositions["return_binding"][3])
         if not (
-            candidate_ids == transition_ids == transition_surface_ids == effect_ids
+            candidate_ids == transition_ids == transition_surface_ids == effect_ids == binding_ids
         ):
             raise ValueError("recurrence subproof candidate binding mismatch")
         candidate_transition = {item[1]: item[4] for item in candidate_records}

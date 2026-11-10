@@ -14,6 +14,23 @@ from scripts.function_tracer_pcode.core.json_encoding import (as_list, each, inl
 _MAX_PARENT_PCODE_OP_SCAN = 10000
 
 
+#: P-code の opcode の番号（Ghidra 12.0.1 の ``ghidra.program.model.pcode.PcodeOp`` の定数）。repo の唯一の表で、
+#: analysis はここから読む（同じ番号を別の場所で持たない）。判定層はこの表で op を判定し、Ghidra を import
+#: しない。値は単体 test で固定し、PyGhidra のある環境では opt-in の test で Ghidra の定数と照合する。
+PCODE_OPCODE_BY_MNEMONIC: Dict[str, int] = {
+    "COPY": 1, "LOAD": 2, "STORE": 3, "BRANCH": 4, "CBRANCH": 5, "BRANCHIND": 6,
+    "CALL": 7, "CALLIND": 8, "CALLOTHER": 9, "RETURN": 10,
+    "INT_EQUAL": 11, "INT_NOTEQUAL": 12, "INT_SLESS": 13, "INT_SLESSEQUAL": 14,
+    "INT_LESS": 15, "INT_LESSEQUAL": 16, "INT_ZEXT": 17, "INT_SEXT": 18,
+    "INT_ADD": 19, "INT_SUB": 20, "BOOL_NEGATE": 37,
+    "MULTIEQUAL": 60, "INDIRECT": 61, "PIECE": 62, "SUBPIECE": 63, "CAST": 64,
+    "POPCOUNT": 72, "LZCOUNT": 73,
+}
+PCODE_MNEMONIC_BY_OPCODE: Dict[int, str] = {
+    opcode: mnemonic for mnemonic, opcode in PCODE_OPCODE_BY_MNEMONIC.items()
+}
+
+
 def _coerce_nonnegative_int(value: Any) -> Optional[int]:
     if type(value) is int:
         return value if value >= 0 else None  # exact な整数（最も多い形: API の offset / seq）

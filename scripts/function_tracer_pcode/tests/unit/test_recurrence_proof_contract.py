@@ -132,7 +132,17 @@ def _validation_evidence(seed, proposal, binding):
         "recurrence_effect_surface_validator_v2",
         dependencies=(candidate_proof.digest,),
     )
-    proofs = (candidate_proof, transition_proof, overlap_proof, coverage_proof, effect_proof)
+    # Issue #297: summary が RETURN の値を表すことは、遷移とは別の必須の subproof
+    return_binding_proof = RecurrenceSubproofEvidence(
+        "return_binding",
+        ("return_binding_v1", proposal.digest, "e" * 64, (candidate_id,), ("R", "T", "U", "Z")),
+        "recurrence_return_binding_validator_v1",
+        dependencies=(candidate_proof.digest, transition_proof.digest),
+    )
+    proofs = (
+        candidate_proof, transition_proof, overlap_proof, coverage_proof, effect_proof,
+        return_binding_proof,
+    )
     return RecurrenceValidationEvidence(
         seed.digest, proposal.digest, binding, proofs
     )
@@ -258,6 +268,33 @@ def test_subproof_semantic_allowlist_rejects_arbitrary_method_and_proposition():
             ("test_proposition", "candidate_validation"),
             "summary_return_candidate_validator_v2",
         )
+
+
+def test_validation_evidence_requires_the_return_binding_subproof():
+    # Issue #297: 遷移の証明だけでは artifact を作れない（return binding は別の必須の命題）
+    seed = RecurrenceSeedCore(("function", "f"), ("active",), (), ("pure",))
+    proposal = QuarantinedRecurrenceProposal(seed.digest, "unit-step", (), ())
+    complete = _validation_evidence(seed, proposal, "b" * 64)
+    with pytest.raises(ValueError, match="allowlist is incomplete"):
+        RecurrenceValidationEvidence(seed.digest, proposal.digest, "b" * 64, complete.subproofs[:5])
+    candidate, transition = complete.subproofs[0], complete.subproofs[1]
+    other_candidate = RecurrenceSubproofEvidence(
+        "return_binding",
+        ("return_binding_v1", proposal.digest, "e" * 64, ("other-candidate",), ("R",)),
+        "recurrence_return_binding_validator_v1",
+        dependencies=(candidate.digest, transition.digest),
+    )
+    with pytest.raises(ValueError, match="candidate binding mismatch"):
+        RecurrenceValidationEvidence(
+            seed.digest, proposal.digest, "b" * 64, complete.subproofs[:5] + (other_candidate,),
+        )
+    with pytest.raises(ValueError, match="return binding proposition schema"):
+        RecurrenceSubproofEvidence(
+            "return_binding", ("return_binding_v1", proposal.digest, "", (), ()),
+            "recurrence_return_binding_validator_v1",
+        )
+    round_trip = RecurrenceValidationEvidence.from_dict(json.loads(json.dumps(complete.to_dict())))
+    assert round_trip.proof_result_digest == complete.proof_result_digest
 
 
 def test_smt_receipt_rejects_tampered_digest_status_and_surface():

@@ -411,6 +411,19 @@ def _retained_exact_marker_matches_return(
     return tuple(marker[1]) == expected_identity and marker[2] == expected_payload
 
 
+def _shared_return_binding_evidence(candidates: Sequence[SummaryReturnCandidate]) -> Optional[Any]:
+    """proposal の全 member が同じ return binding の証拠を持つときだけ、その証拠（Issue #297）。
+
+    member ごとに証拠が違う・欠けている proposal は証拠を持たない（promotion の proof が拒否する）。
+    """
+
+    evidences = [getattr(candidate.return_info, "summary_return_binding_evidence", None) for candidate in candidates]
+    if not evidences or any(item is None for item in evidences):
+        return None
+    first = evidences[0].stable_key()
+    return evidences[0] if all(item.stable_key() == first for item in evidences[1:]) else None
+
+
 def attach_quarantined_recurrence_proposal(
     analysis: FunctionReturnAnalysis,
     *,
@@ -512,6 +525,7 @@ def attach_quarantined_recurrence_proposal(
             for candidate in proposal_candidates
         ),
         retained_refs,
+        return_binding_evidence=_shared_return_binding_evidence(proposal_candidates),
     )
     proposals = tuple(getattr(analysis, "quarantined_recurrence_proposals", ()) or ())
     if all(item.digest != proposal.digest for item in proposals):
