@@ -36,7 +36,6 @@ from scripts.function_tracer_pcode.analysis.recurrence._shared import (
     _runtime_expression_signature,
 )
 from scripts.function_tracer_pcode.analysis.debug import summarize_expression
-from scripts.function_tracer_pcode.core.recurrence_return_binding import UpdateCaseCompleteness
 
 
 def _impl_try_summarize_pre_return_counted_scalar_loop(
@@ -233,9 +232,7 @@ def _impl__build_counted_scalar_loop_summary(
     ):
         self._debug("Declined counted scalar loop summary: residue affine uses address-like vector literal")
         return None
-    update_cases, update_completeness = self._try_extract_counted_loop_update_cases_for_summary(
-        accumulator, induction, guard,
-    )
+    update_cases = self._try_extract_counted_loop_update_cases_for_summary(accumulator, induction, guard)
     loop_cases = self._build_counted_loop_case_refs(
         update_cases, loop_binders=tuple(accumulator.member_placeholders),
     )
@@ -478,15 +475,13 @@ def _impl__build_counted_scalar_loop_summary(
         f"step={induction.step}, "
         f"cases={[(case.modulus, case.residue, case.affine) for case in residue_cases]})"
     )
-    # Issue #297: summary が RETURN の値を表すことの証拠。builder が 1 回の抽出で得た更新 case と
-    # 完全性の記録を、P-code の写しと束ねて両 member に付ける（判定は promotion の proof が行う）。
+    # Issue #297: summary が RETURN の値を表すことの証拠（P-code の写しと、ループの PHI の key）を
+    # 両 member に付ける。判定は promotion の proof が、写しから作った値と候補を照合して行う。
     binding_evidence = self._counted_loop_return_binding_evidence(
         high_function=high_function,
         analysis=analysis,
         induction=induction,
         accumulator=accumulator,
-        update_cases=update_cases,
-        completeness=update_completeness,
     )
     summarized = [
         replace(item, summary_return_binding_evidence=binding_evidence) for item in summarized
@@ -1452,25 +1447,6 @@ def _impl__extract_counted_loop_update_cases(
     induction: CountedLoopInduction,
     guard: CountedLoopGuard,
 ) -> List[CountedLoopUpdateCase]:
-    cases, _completeness = self._extract_counted_loop_update_cases_with_completeness(
-        accumulator, induction, guard,
-    )
-    return list(cases)
-
-
-def _impl__extract_counted_loop_update_cases_with_completeness(
-    self,
-    accumulator: CountedLoopAccumulator,
-    induction: CountedLoopInduction,
-    guard: CountedLoopGuard,
-) -> Tuple[Tuple[CountedLoopUpdateCase, ...], UpdateCaseCompleteness]:
-    """1 回分の更新 case と、抽出が **落としたもの** の記録を返す（Issue #297）。
-
-    case は従来の抽出と同じ。落としたもの（経路の件数の打ち切り、条件を作れなかった分岐の辺、
-    未解決の入力・更新、delta の抽出の失敗、``update_varnode`` の経路が覆わない backedge、本体から
-    経路の無い backedge）を数える。残った case の条件の論理和が真でも、落ちた経路を覆ったことにはならない。
-    """
-
     header_block = getattr(induction.phi_op, "getParent", lambda: None)()
     placeholders = {
         induction.phi_output: induction.placeholder,
@@ -1487,44 +1463,23 @@ def _impl__extract_counted_loop_update_cases_with_completeness(
         )
     )
 
-    truncated = False
-    unknown_edges = 0
-    unresolved = 0
-    delta_failures = 0
-    uncovered: List[int] = []
-    multi_backedge_update_varnode = False
-
-    def enumerate_paths(*, target_block):
-        nonlocal truncated, unknown_edges
-        paths, incomplete, unknown = self._enumerate_paths_with_conditions_report(
+    raw_cases: List[Tuple[List[Condition], Expression]] = []
+    if accumulator.update_varnode is not None:
+        expr = self._build_pcode_expression(accumulator.update_varnode, placeholders=placeholders)
+        if expr is None or self._expression_is_unresolved(expr):
+            return []
+        target_block = accumulator.update_block or guard.latch_block or guard.body_block
+        for conditions in self._enumerate_paths_with_conditions(
             start_block=guard.body_block,
             target_block=target_block,
             header_block=header_block,
             placeholders=placeholders,
             stop_block=guard.exit_block,
-        )
-        truncated = truncated or bool(incomplete)
-        unknown_edges += int(unknown)
-        if not paths:
-            uncovered.append(_block_index_or_minus_one(target_block))
-        return paths
-
-    raw_cases: List[Tuple[List[Condition], Expression]] = []
-    if accumulator.update_varnode is not None:
-        if len(self._accumulator_backedge_indices(accumulator)) != 1:
-            multi_backedge_update_varnode = True
-        expr = self._build_pcode_expression(accumulator.update_varnode, placeholders=placeholders)
-        if expr is None or self._expression_is_unresolved(expr):
-            return (), UpdateCaseCompleteness(
-                unresolved_update_inputs=1,
-                update_varnode_with_multiple_backedges=multi_backedge_update_varnode,
-            )
-        target_block = accumulator.update_block or guard.latch_block or guard.body_block
-        for conditions in enumerate_paths(target_block=target_block):
-            raw_cases.append((conditions, expr))
+            ):
+                raw_cases.append((conditions, expr))
     else:
         if accumulator.phi_op is None:
-            return (), UpdateCaseCompleteness(extraction_failure="accumulator_phi_missing")
+            return []
         parent_block = getattr(accumulator.phi_op, "getParent", lambda: None)()
         in_size = int(getattr(parent_block, "getInSize", lambda: 0)() or 0) if parent_block is not None else 0
         for backedge_index in self._accumulator_backedge_indices(accumulator):
@@ -1537,35 +1492,39 @@ def _impl__extract_counted_loop_update_cases_with_completeness(
                 for index in range(input_count):
                     expr = self._build_pcode_expression(def_op.getInput(index), placeholders=placeholders)
                     if expr is None or self._expression_is_unresolved(expr):
-                        unresolved += 1
                         continue
                     target_block = None
                     if def_parent is not None and index < def_in_size:
                         target_block = def_parent.getIn(index)
                     if target_block is None:
                         target_block = def_parent or guard.body_block
-                    for conditions in enumerate_paths(target_block=target_block):
+                    for conditions in self._enumerate_paths_with_conditions(
+                        start_block=guard.body_block,
+                        target_block=target_block,
+                        header_block=header_block,
+                        placeholders=placeholders,
+                        stop_block=guard.exit_block,
+                    ):
                         raw_cases.append((conditions, expr))
                 continue
             expr = self._build_pcode_expression(backedge_varnode, placeholders=placeholders)
             if expr is None or self._expression_is_unresolved(expr):
-                unresolved += 1
                 continue
             target_block = None
             if parent_block is not None and backedge_index < in_size:
                 target_block = parent_block.getIn(backedge_index)
             if target_block is None:
                 target_block = getattr(def_op, "getParent", lambda: None)() if def_op is not None else guard.body_block
-            for conditions in enumerate_paths(target_block=target_block):
+            for conditions in self._enumerate_paths_with_conditions(
+                start_block=guard.body_block,
+                target_block=target_block,
+                header_block=header_block,
+                placeholders=placeholders,
+                stop_block=guard.exit_block,
+            ):
                 raw_cases.append((conditions, expr))
         if not raw_cases:
-            return (), UpdateCaseCompleteness(
-                path_enumeration_truncated=truncated,
-                unknown_branch_conditions=unknown_edges,
-                unresolved_update_inputs=unresolved,
-                uncovered_backedge_targets=tuple(uncovered),
-                extraction_failure="no_update_case",
-            )
+            return []
 
     cases: List[CountedLoopUpdateCase] = []
     seen = set()
@@ -1576,7 +1535,6 @@ def _impl__extract_counted_loop_update_cases_with_completeness(
         reduced_update = _reduce_expression_under_conditions(update_expr, simplified) or update_expr
         delta_expr = self._extract_additive_delta(reduced_update, accumulator.placeholder, list(simplified))
         if delta_expr is None:
-            delta_failures += 1
             continue
         key = (
             _runtime_conditions_signature(simplified),
@@ -1592,21 +1550,7 @@ def _impl__extract_counted_loop_update_cases_with_completeness(
                 delta_expr=delta_expr,
             )
         )
-    return tuple(cases), UpdateCaseCompleteness(
-        path_enumeration_truncated=truncated,
-        unknown_branch_conditions=unknown_edges,
-        unresolved_update_inputs=unresolved,
-        delta_extraction_failures=delta_failures,
-        uncovered_backedge_targets=tuple(uncovered),
-        update_varnode_with_multiple_backedges=multi_backedge_update_varnode,
-    )
-
-
-def _block_index_or_minus_one(block) -> int:
-    try:
-        return int(block.getIndex())
-    except (AttributeError, TypeError, ValueError):
-        return -1
+    return cases
 
 
 def _impl__try_extract_counted_loop_update_cases_for_summary(
@@ -1614,13 +1558,11 @@ def _impl__try_extract_counted_loop_update_cases_for_summary(
     accumulator: CountedLoopAccumulator,
     induction: CountedLoopInduction,
     guard: CountedLoopGuard,
-) -> Tuple[Tuple[CountedLoopUpdateCase, ...], UpdateCaseCompleteness]:
-    """summary 用の抽出（1 回だけ）。失敗は完全性の欠落として記録する（Issue #297）。"""
-
+) -> Tuple[CountedLoopUpdateCase, ...]:
     try:
-        return self._extract_counted_loop_update_cases_with_completeness(accumulator, induction, guard)
-    except (AttributeError, TypeError, IndexError, RecursionError) as exc:
-        return (), UpdateCaseCompleteness(extraction_failure=type(exc).__name__)
+        return tuple(self._extract_counted_loop_update_cases(accumulator, induction, guard))
+    except (AttributeError, TypeError, IndexError, RecursionError):
+        return ()
 
 
 def _impl__build_counted_loop_case_refs(
@@ -1692,27 +1634,10 @@ def _impl__validate_counted_loop_update_cases(
     affine delta assigned to that residue.  This keeps direct summaries from
     becoming a shortcut around the real P-code update semantics.
     """
-    return self._validate_update_cases_against_residue_cases(
-        cases=cases,
-        residue_cases=residue_cases,
-        induction_placeholder=induction.placeholder,
-        accumulator_placeholder=accumulator.placeholder,
-    )
-
-
-def _impl__validate_update_cases_against_residue_cases(
-    self,
-    *,
-    cases: Sequence[CountedLoopUpdateCase],
-    residue_cases: Sequence[ResidueLoopCase],
-    induction_placeholder: Expression,
-    accumulator_placeholder: Expression,
-) -> bool:
-    """各更新 case が「accumulator + その residue の affine」と SMT で等しいこと（builder と proof が共有）。"""
     if not cases or not residue_cases:
         return False
 
-    counter_name = induction_placeholder.name or "__loop_iv"
+    counter_name = induction.placeholder.name or "__loop_iv"
     by_residue = {
         (int(case.modulus), int(case.residue)): case
         for case in residue_cases
@@ -1735,13 +1660,13 @@ def _impl__validate_update_cases_against_residue_cases(
             return False
 
         affine_delta = self._build_affine_delta_expression(
-            induction_placeholder,
+            induction.placeholder,
             residue_case.affine,
             max(
                 int(getattr(case.delta_expr, "size", 0) or 0),
                 int(getattr(case.update_expr, "size", 0) or 0),
-                int(getattr(accumulator_placeholder, "size", 0) or 0),
-                int(getattr(induction_placeholder, "size", 0) or 0),
+                int(getattr(accumulator.placeholder, "size", 0) or 0),
+                int(getattr(induction.placeholder, "size", 0) or 0),
                 4,
             ),
             bias_expr=residue_case.bias_expr,
@@ -1753,8 +1678,8 @@ def _impl__validate_update_cases_against_residue_cases(
             case.update_expr,
             case.delta_expr,
             affine_delta,
-            accumulator_placeholder,
-            induction_placeholder,
+            accumulator.placeholder,
+            induction.placeholder,
             *(condition.expression for condition in case.conditions or [] if condition is not None),
         )
         if not self._prove_expression_equivalence_under_conditions(
@@ -1766,14 +1691,14 @@ def _impl__validate_update_cases_against_residue_cases(
             self._debug("Declined counted scalar loop summary: extracted delta does not match residue affine case")
             return False
 
-        expected_update = self._sum_expression_terms([accumulator_placeholder, affine_delta])
+        expected_update = self._sum_expression_terms([accumulator.placeholder, affine_delta])
         if expected_update is None:
             return False
         expected_update = expected_update.derive_with(
             size=max(
                 int(getattr(expected_update, "size", 0) or 0),
                 int(getattr(case.update_expr, "size", 0) or 0),
-                int(getattr(accumulator_placeholder, "size", 0) or 0),
+                int(getattr(accumulator.placeholder, "size", 0) or 0),
             )
         )
         if not self._prove_expression_equivalence_under_conditions(

@@ -1767,6 +1767,7 @@ def _validate_recurrence_completion_inputs(
         seed_core_digest=signal.seed_core.digest,
         proposal_digest=signal.proposal.digest,
         function_recurrence_binding_digest=binding,
+        proposal=signal.proposal,
     )
     if signal.successor_analysis.analysis_view_identity is None:
         raise ValueError("recurrence successor lineage is missing")

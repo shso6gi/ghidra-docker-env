@@ -7,30 +7,56 @@ promotion が受理する recurrence summary は、遷移の正しさ（``transi
 - :class:`PcodeDataflowSnapshot` は、関数の P-code の事実（op・def-use・幅・block の辺）を 1 回で
   読み取った写しである。RETURN の chain、ループの guard・帰納変数の step などは、proof がこの写しから
   自分で導く（同じ事実を別の場所で独立に解釈しない）。
-- :class:`UpdateCaseCompleteness` は、更新 case の抽出が **落としたもの** の記録である。
-  残った case の条件の論理和が真でも、落ちた経路を覆ったことにはならない。
 - :class:`CountedLoopReturnBindingEvidence` は、counted scalar loop の summary 1 つに対する証拠である。
   digest は proposal の digest に入る。
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
-from scripts.function_tracer_pcode.core.recurrence_contracts import RecurrenceDigestCodec
+from scripts.function_tracer_pcode.core.recurrence_contracts import (
+    RETURN_BINDING_PROPOSITION,
+    RETURN_BINDING_RULES,
+    RecurrenceDigestCodec,
+)
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PCODE_MNEMONIC_BY_OPCODE,
     PCODE_OPCODE_BY_MNEMONIC,
 )
 
-PCODE_DATAFLOW_SNAPSHOT_SCHEMA = "pcode_dataflow_snapshot_v1"
-UPDATE_CASE_COMPLETENESS_SCHEMA = "counted_update_case_completeness_v1"
-COUNTED_LOOP_RETURN_BINDING_SCHEMA = "counted_loop_return_binding_evidence_v1"
+PCODE_DATAFLOW_SNAPSHOT_SCHEMA = "pcode_dataflow_snapshot_v2"
+COUNTED_LOOP_RETURN_BINDING_SCHEMA = "counted_loop_return_binding_evidence_v2"
 
 #: 入力の種類。``op`` は P-code op の出力（``producer_key`` がその op の key）、``constant`` は定数、
-#: ``free`` はどの op も定義しない入力（関数の入力・未定義の値）。
+#: ``free`` はどの op も定義しない入力（関数の入力・分岐先の address など。置き場所で識別する）。
 PCODE_FACT_INPUT_KINDS = frozenset({"op", "constant", "free"})
+#: 置き場所が値を識別しない空間（一時変数）。この空間の ``free`` な入力は写しに入れられない。
+UNIDENTIFIED_STORAGE_SPACES = frozenset({"unique", "const"})
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def is_frozen_value(value: Any) -> bool:
+    """値が作った後に変わらない形（``None``・bool・int・str・その tuple）だけでできていること。
+
+    証拠の identity（digest）は作ったときに計算する。中身が変えられる値（list・dict・式の object）を
+    含むと、digest と中身が食い違い得るので、証拠には入れない。
+    """
+
+    stack = [value]
+    while stack:
+        current = stack.pop()
+        if current is None or isinstance(current, (bool, int, str)):
+            continue
+        if type(current) is tuple:
+            stack.extend(current)
+            continue
+        return False
+    return True
 
 
 def pcode_opcode_is_consistent(mnemonic: Any, opcode: Any) -> bool:
@@ -63,15 +89,26 @@ def is_full_pcode_op_key(key: Any) -> bool:
 
 @dataclass(frozen=True)
 class PcodeFactInput:
+    """op の入力 1 つ。``free`` の入力は、どの op も定義しない値の **置き場所**（``storage``）で識別する。
+
+    同じ op の key・同じ CFG でも、入力の置き場所・幅・引数の番号が違えば別の値なので、写しの digest に
+    入れる（入れないと、入力だけが違う解析の証拠を取り違える）。置き場所の無い入力（``unique`` 空間の
+    未定義値など）は識別できないので、producer は写しを作らない。
+    """
+
     kind: str
     size: int
     producer_key: Optional[Tuple[Any, ...]] = None
     constant: Optional[int] = None
+    #: ``free`` の入力の置き場所 ``(空間の名前, offset)``。
+    storage: Optional[Tuple[str, int]] = None
+    #: ``free`` の入力が関数の引数のとき、その番号（Ghidra の parameter の category index）。
+    parameter_index: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.kind not in PCODE_FACT_INPUT_KINDS:
             raise ValueError(f"unknown P-code input kind: {self.kind!r}")
-        if not isinstance(self.size, int) or isinstance(self.size, bool) or self.size <= 0:
+        if not _is_int(self.size) or self.size <= 0:
             raise ValueError("P-code input size must be a positive int")
         if (self.kind == "op") != (self.producer_key is not None):
             raise ValueError("only an op input carries a producer key")
@@ -79,9 +116,27 @@ class PcodeFactInput:
             raise ValueError("P-code input producer key is not a full op key")
         if (self.kind == "constant") != (self.constant is not None):
             raise ValueError("only a constant input carries a value")
+        if self.constant is not None and (not _is_int(self.constant) or self.constant < 0):
+            raise ValueError("P-code constant must be a non-negative int")
+        if (self.kind == "free") != (self.storage is not None):
+            raise ValueError("only a free input carries a storage identity")
+        if self.storage is not None and not (
+            isinstance(self.storage, tuple) and len(self.storage) == 2
+            and isinstance(self.storage[0], str) and self.storage[0]
+            and self.storage[0] not in UNIDENTIFIED_STORAGE_SPACES
+            and _is_int(self.storage[1]) and self.storage[1] >= 0
+        ):
+            raise ValueError("P-code free input storage is not identified")
+        if self.parameter_index is not None and (
+            self.kind != "free" or not _is_int(self.parameter_index) or self.parameter_index < 0
+        ):
+            raise ValueError("only a free input is a parameter, with a non-negative index")
 
     def stable_key(self) -> Tuple[Any, ...]:
-        return ("pcode_fact_input_v1", self.kind, self.size, self.producer_key, self.constant)
+        return (
+            "pcode_fact_input_v2", self.kind, self.size, self.producer_key, self.constant,
+            self.storage, self.parameter_index,
+        )
 
 
 @dataclass(frozen=True)
@@ -94,8 +149,12 @@ class PcodeFactOp:
     inputs: Tuple[PcodeFactInput, ...]
 
     def __post_init__(self) -> None:
-        if not is_full_pcode_op_key(self.key):
+        if not is_full_pcode_op_key(self.key) or not is_frozen_value(self.key):
             raise ValueError("P-code op key is not a full op key")
+        if type(self.inputs) is not tuple or not all(type(item) is PcodeFactInput for item in self.inputs):
+            raise ValueError("P-code op inputs must be a tuple of input facts")
+        if not _is_int(self.block_index):
+            raise ValueError("P-code op block index must be an int")
         if self.key[6] != self.opcode:
             raise ValueError("P-code op key and opcode disagree")
         if not pcode_opcode_is_consistent(self.mnemonic, self.opcode):
@@ -122,6 +181,15 @@ class PcodeFactBlock:
     false_successor: Optional[int]
     op_keys: Tuple[Tuple[Any, ...], ...]
 
+    def __post_init__(self) -> None:
+        if not (
+            _is_int(self.index) and is_frozen_value(self.key)
+            and is_frozen_value((self.predecessors, self.successors, self.op_keys))
+            and all(_is_int(item) for item in self.predecessors + self.successors)
+            and all(item is None or _is_int(item) for item in (self.true_successor, self.false_successor))
+        ):
+            raise ValueError("P-code block fact is not frozen")
+
     def stable_key(self) -> Tuple[Any, ...]:
         return (
             "pcode_fact_block_v1", self.index, self.key, self.predecessors, self.successors,
@@ -144,8 +212,14 @@ class PcodeDataflowSnapshot:
     def __post_init__(self) -> None:
         if self.schema_version != PCODE_DATAFLOW_SNAPSHOT_SCHEMA:
             raise ValueError("P-code dataflow snapshot schema is not allowed")
-        if not self.function_identity:
-            raise ValueError("P-code dataflow snapshot needs a function identity")
+        if not self.function_identity or not is_frozen_value(self.function_identity):
+            raise ValueError("P-code dataflow snapshot needs a frozen function identity")
+        if type(self.blocks) is not tuple or type(self.ops) is not tuple:
+            raise ValueError("P-code dataflow snapshot facts must be tuples")
+        if not all(type(item) is PcodeFactBlock for item in self.blocks) or not all(
+            type(item) is PcodeFactOp for item in self.ops
+        ):
+            raise ValueError("P-code dataflow snapshot facts must be fact records")
         ops_by_key: Dict[Tuple[Any, ...], PcodeFactOp] = {}
         for op in self.ops:
             if op.key in ops_by_key:
@@ -192,6 +266,18 @@ class PcodeDataflowSnapshot:
     def digest(self) -> str:
         return self._digest
 
+    def rebuilt(self) -> "PcodeDataflowSnapshot":
+        """field（作った後に変わらない fact の tuple）だけから作り直した写し。
+
+        索引と digest は ``__post_init__`` が field から計算する。proof はこの写しだけを読むので、
+        索引・digest が field と食い違うことはない（作り直した digest を元の digest と照合する）。
+        """
+
+        return PcodeDataflowSnapshot(
+            function_identity=self.function_identity, blocks=self.blocks, ops=self.ops,
+            schema_version=self.schema_version,
+        )
+
     def op(self, key: Tuple[Any, ...]) -> Optional[PcodeFactOp]:
         return self._ops_by_key.get(key)
 
@@ -203,109 +289,93 @@ class PcodeDataflowSnapshot:
 
 
 @dataclass(frozen=True)
-class UpdateCaseCompleteness:
-    """更新 case の抽出が落としたものの記録（どれか 1 つでもあれば完全性は示されない）。"""
-
-    path_enumeration_truncated: bool = False
-    unknown_branch_conditions: int = 0
-    unresolved_update_inputs: int = 0
-    delta_extraction_failures: int = 0
-    uncovered_backedge_targets: Tuple[int, ...] = ()
-    update_varnode_with_multiple_backedges: bool = False
-    extraction_failure: Optional[str] = None
-    schema_version: str = UPDATE_CASE_COMPLETENESS_SCHEMA
-
-    def failures(self) -> Tuple[str, ...]:
-        out = []
-        if self.extraction_failure:
-            out.append(f"extraction_failed:{self.extraction_failure}")
-        if self.path_enumeration_truncated:
-            out.append("path_enumeration_truncated")
-        if self.unknown_branch_conditions:
-            out.append("branch_condition_unknown")
-        if self.unresolved_update_inputs:
-            out.append("update_input_unresolved")
-        if self.delta_extraction_failures:
-            out.append("delta_extraction_failed")
-        if self.uncovered_backedge_targets:
-            out.append("backedge_uncovered")
-        if self.update_varnode_with_multiple_backedges:
-            out.append("update_varnode_with_multiple_backedges")
-        return tuple(out)
-
-    @property
-    def is_complete(self) -> bool:
-        return not self.failures()
-
-    def stable_key(self) -> Tuple[Any, ...]:
-        return (
-            self.schema_version, bool(self.path_enumeration_truncated),
-            int(self.unknown_branch_conditions), int(self.unresolved_update_inputs),
-            int(self.delta_extraction_failures), tuple(self.uncovered_backedge_targets),
-            bool(self.update_varnode_with_multiple_backedges), self.extraction_failure,
-        )
-
-
-@dataclass(frozen=True)
-class CountedUpdateCase:
-    """抽出した 1 回分の更新（条件と、accumulator の更新後の値）。式は SMT 用の live な値で、
-    identity は producer が計算した署名（``*_signature``）で持つ。"""
-
-    conditions: Tuple[Any, ...] = field(compare=False)
-    update_expression: Any = field(compare=False)
-    conditions_signature: Tuple[Any, ...] = ()
-    update_signature: Tuple[Any, ...] = ()
-
-    def stable_key(self) -> Tuple[Any, ...]:
-        return ("counted_update_case_v1", self.conditions_signature, self.update_signature)
-
-
-@dataclass(frozen=True)
 class CountedLoopReturnBindingEvidence:
     """counted scalar loop の summary 1 つに対する return binding の証拠。
 
-    P-code の事実（``snapshot``）と、builder が P-code から作った式（start / limit / 初期値・更新 case）を
-    1 つに束ねる。どの規則が成り立つかは proof が判定する（ここは判定しない）。``producer_failures`` は
-    producer が証拠を揃えられなかった理由で、1 つでもあれば proof は拒否する。
+    P-code の **事実だけ** を持つ: 関数の P-code の写し（``snapshot``）と、ループの accumulator・帰納変数の
+    PHI の key。start / limit / 初期値・1 回分の更新・条件の意味は、proof が写しから自分で導く
+    （producer が作った式を信じない）。中身はすべて作った後に変わらない値なので、digest は中身と食い違わない。
+    ``producer_failures`` は producer が写しを揃えられなかった理由で、1 つでもあれば proof は拒否する。
     """
 
     function_identity: Tuple[Any, ...]
     snapshot: Optional[PcodeDataflowSnapshot]
     accumulator_phi_key: Optional[Tuple[Any, ...]]
     induction_phi_key: Optional[Tuple[Any, ...]]
-    start_expression: Any = field(default=None, compare=False)
-    limit_expression: Any = field(default=None, compare=False)
-    initial_expression: Any = field(default=None, compare=False)
-    induction_placeholder: Any = field(default=None, compare=False)
-    accumulator_placeholder: Any = field(default=None, compare=False)
-    start_signature: Tuple[Any, ...] = ()
-    limit_signature: Tuple[Any, ...] = ()
-    initial_signature: Tuple[Any, ...] = ()
-    update_cases: Tuple[CountedUpdateCase, ...] = ()
-    completeness: UpdateCaseCompleteness = field(default_factory=UpdateCaseCompleteness)
     producer_failures: Tuple[str, ...] = ()
     schema_version: str = COUNTED_LOOP_RETURN_BINDING_SCHEMA
 
     def __post_init__(self) -> None:
         if self.schema_version != COUNTED_LOOP_RETURN_BINDING_SCHEMA:
             raise ValueError("counted-loop return binding evidence schema is not allowed")
-        object.__setattr__(
-            self, "_digest", RecurrenceDigestCodec.digest(self.schema_version, self.stable_key()),
-        )
+        if self.snapshot is not None and type(self.snapshot) is not PcodeDataflowSnapshot:
+            raise ValueError("counted-loop return binding snapshot must be a P-code dataflow snapshot")
+        if not is_frozen_value((
+            self.function_identity, self.accumulator_phi_key, self.induction_phi_key,
+        )) or type(self.function_identity) is not tuple:
+            raise ValueError("counted-loop return binding identity must be frozen")
+        if type(self.producer_failures) is not tuple or not all(
+            isinstance(item, str) and item for item in self.producer_failures
+        ):
+            raise ValueError("counted-loop return binding producer failures must be strings")
+        object.__setattr__(self, "_digest", self.recomputed_digest())
 
-    def stable_key(self) -> Tuple[Any, ...]:
+    def stable_key(self, snapshot_digest: Optional[str] = None) -> Tuple[Any, ...]:
+        if snapshot_digest is None and self.snapshot is not None:
+            snapshot_digest = self.snapshot.digest
         return (
-            self.schema_version, self.function_identity,
-            None if self.snapshot is None else self.snapshot.digest,
-            self.accumulator_phi_key, self.induction_phi_key,
-            self.start_signature, self.limit_signature, self.initial_signature,
-            tuple(item.stable_key() for item in self.update_cases),
-            self.completeness.stable_key(), tuple(self.producer_failures),
+            self.schema_version, self.function_identity, snapshot_digest,
+            self.accumulator_phi_key, self.induction_phi_key, tuple(self.producer_failures),
         )
 
     @property
     def digest(self) -> str:
         return self._digest
+
+    def recomputed_digest(self) -> str:
+        """写しを field から作り直して計算した digest（proof・artifact の検査はこれを使う）。"""
+
+        snapshot_digest = None if self.snapshot is None else self.snapshot.rebuilt().digest
+        return RecurrenceDigestCodec.digest(self.schema_version, self.stable_key(snapshot_digest))
+
+
+def return_binding_proposition(proposal: Any) -> Tuple[Any, ...]:
+    """proposal に対する return binding の subproof の命題（proof・発行・再利用が同じ形を作る）。
+
+    ``(命題の名前, proposal の digest, 中身から作り直した証拠の digest, 候補の id, 規則の全部)``。
+    証拠の無い proposal には命題が無い（``ValueError``）。
+    """
+
+    evidence = getattr(proposal, "return_binding_evidence", None)
+    if type(evidence) is not CountedLoopReturnBindingEvidence:
+        raise ValueError("recurrence proposal has no return binding evidence")
+    return (
+        RETURN_BINDING_PROPOSITION,
+        proposal.digest,
+        evidence.recomputed_digest(),
+        tuple(sorted(
+            (item.candidate_id for item in proposal.new_returns),
+            key=lambda value: repr(value),
+        )),
+        RETURN_BINDING_RULES,
+    )
+
+
+def validate_return_binding_subproof(subproofs: Any, proposal: Any) -> None:
+    """artifact の return binding の subproof が、**この** proposal とその証拠・候補を束ねていること。
+
+    artifact を発行・保存・再利用するたびに検査する。証拠の無い proposal・別の proposal / 証拠 /
+    候補の命題・規則の一部だけの命題は ``ValueError``。
+    """
+
+    expected = return_binding_proposition(proposal)
+    if proposal.return_binding_evidence.digest != expected[2]:
+        raise ValueError("recurrence return binding evidence changed after the proposal was made")
+    items = [item for item in tuple(subproofs or ()) if getattr(item, "proof_kind", None) == "return_binding"]
+    if len(items) != 1:
+        raise ValueError("recurrence artifact needs exactly one return binding subproof")
+    if tuple(items[0].proposition_key) != expected:
+        raise ValueError("recurrence return binding subproof is not bound to the proposal evidence")
 
 
 # ---------------------------------------------------------------------------

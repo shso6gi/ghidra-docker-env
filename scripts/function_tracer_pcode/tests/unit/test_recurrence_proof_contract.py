@@ -42,13 +42,57 @@ from scripts.function_tracer_pcode.core.recurrence_contracts import (
     RecurrenceSubproofEvidence,
     RecurrenceSMTQueryReceipt,
     RecurrenceValidationEvidence,
+    RETURN_BINDING_PROPOSITION,
+    RETURN_BINDING_RULES,
     RetainedExactReturnRef,
     function_recurrence_binding_digest,
     semantic_recurrence_closure_digest,
 )
+from scripts.function_tracer_pcode.core.recurrence_return_binding import (
+    CountedLoopReturnBindingEvidence,
+    PcodeDataflowSnapshot,
+    PcodeFactBlock,
+    PcodeFactInput,
+    PcodeFactOp,
+    return_binding_proposition,
+)
 
 
-def _validation_evidence(seed, proposal, binding):
+_FUNCTION = ("function_identity_v1", "bin", ("function", 1, 0x100), "00000100")
+
+
+def _return_binding_evidence(constant=0):
+    """1 つの RETURN だけの関数の P-code の写しを持つ証拠（artifact の束縛の検査に使う）。"""
+
+    key = (
+        "pcode_op", "bin", ("function_entry", "ram", 0x100), ("seq_target", "ram", 0x104),
+        0x104, 0, 10, 0,
+    )
+    op = PcodeFactOp(key, 10, "RETURN", 0, None, (
+        PcodeFactInput("constant", 8, constant=0), PcodeFactInput("constant", 4, constant=constant),
+    ))
+    block = PcodeFactBlock(
+        0, ("pcode_block", "bin", ("function_entry", "ram", 0x100), 0, ("start", 0x100)),
+        (), (), None, None, (key,),
+    )
+    snapshot = PcodeDataflowSnapshot(_FUNCTION, (block,), (op,))
+    return CountedLoopReturnBindingEvidence(_FUNCTION, snapshot, key, key)
+
+
+def _bound_proposal(seed, pattern="unit-step", *, evidence=None, candidate_id="test-candidate"):
+    """artifact の候補（``test-candidate``）と return binding の証拠を持つ proposal。"""
+
+    member = QuarantinedRecurrenceReturn(
+        (), ImmutableRecurrenceExpression.from_expression(Expression.constant(1)),
+        candidate_id, ("transition", pattern),
+    )
+    return QuarantinedRecurrenceProposal(
+        seed.digest, pattern, (member,), (),
+        return_binding_evidence=_return_binding_evidence() if evidence is None else evidence,
+    )
+
+
+def _validation_evidence(seed, proposal, binding, return_binding=None):
     width_sort = ("width_sort_v1", 4, "bitvec", "signed")
     candidate_id = "test-candidate"
     condition_key = ImmutableRecurrenceCondition.from_condition(Condition(
@@ -135,8 +179,8 @@ def _validation_evidence(seed, proposal, binding):
     # Issue #297: summary が RETURN の値を表すことは、遷移とは別の必須の subproof
     return_binding_proof = RecurrenceSubproofEvidence(
         "return_binding",
-        ("return_binding_v1", proposal.digest, "e" * 64, (candidate_id,), ("R", "T", "U", "Z")),
-        "recurrence_return_binding_validator_v1",
+        return_binding if return_binding is not None else return_binding_proposition(proposal),
+        "recurrence_return_binding_validator_v2",
         dependencies=(candidate_proof.digest, transition_proof.digest),
     )
     proofs = (
@@ -148,7 +192,7 @@ def _validation_evidence(seed, proposal, binding):
     )
 
 
-def _content_bound_artifact(seed, proposal, premise_digest, target, view_id):
+def _content_bound_artifact(seed, proposal, premise_digest, target, view_id, *, return_binding=None):
     binding = function_recurrence_binding_digest(
         seed.digest, proposal.digest, premise_digest
     )
@@ -156,7 +200,7 @@ def _content_bound_artifact(seed, proposal, premise_digest, target, view_id):
         seed.digest, proposal.digest, binding,
         "recurrence_validation_complete", target,
     )
-    evidence = _validation_evidence(seed, proposal, binding)
+    evidence = _validation_evidence(seed, proposal, binding, return_binding)
     closure = semantic_recurrence_closure_digest(
         binding,
         (requirement.to_key(),),
@@ -273,15 +317,18 @@ def test_subproof_semantic_allowlist_rejects_arbitrary_method_and_proposition():
 def test_validation_evidence_requires_the_return_binding_subproof():
     # Issue #297: 遷移の証明だけでは artifact を作れない（return binding は別の必須の命題）
     seed = RecurrenceSeedCore(("function", "f"), ("active",), (), ("pure",))
-    proposal = QuarantinedRecurrenceProposal(seed.digest, "unit-step", (), ())
+    proposal = _bound_proposal(seed)
     complete = _validation_evidence(seed, proposal, "b" * 64)
     with pytest.raises(ValueError, match="allowlist is incomplete"):
         RecurrenceValidationEvidence(seed.digest, proposal.digest, "b" * 64, complete.subproofs[:5])
     candidate, transition = complete.subproofs[0], complete.subproofs[1]
     other_candidate = RecurrenceSubproofEvidence(
         "return_binding",
-        ("return_binding_v1", proposal.digest, "e" * 64, ("other-candidate",), ("R",)),
-        "recurrence_return_binding_validator_v1",
+        (
+            RETURN_BINDING_PROPOSITION, proposal.digest, proposal.return_binding_evidence.digest,
+            ("other-candidate",), RETURN_BINDING_RULES,
+        ),
+        "recurrence_return_binding_validator_v2",
         dependencies=(candidate.digest, transition.digest),
     )
     with pytest.raises(ValueError, match="candidate binding mismatch"):
@@ -290,8 +337,13 @@ def test_validation_evidence_requires_the_return_binding_subproof():
         )
     with pytest.raises(ValueError, match="return binding proposition schema"):
         RecurrenceSubproofEvidence(
-            "return_binding", ("return_binding_v1", proposal.digest, "", (), ()),
-            "recurrence_return_binding_validator_v1",
+            "return_binding", (RETURN_BINDING_PROPOSITION, proposal.digest, "", (), ()),
+            "recurrence_return_binding_validator_v2",
+        )
+    with pytest.raises(ValueError, match="every rule"):
+        RecurrenceSubproofEvidence(
+            "return_binding", return_binding_proposition(proposal)[:4] + (("R",),),
+            "recurrence_return_binding_validator_v2",
         )
     round_trip = RecurrenceValidationEvidence.from_dict(json.loads(json.dumps(complete.to_dict())))
     assert round_trip.proof_result_digest == complete.proof_result_digest
@@ -519,15 +571,15 @@ def _cache_entry(seed, proposal, premise_digest, target):
 
 def test_recurrence_cache_keeps_two_proposals_and_requires_exact_binding():
     seed = RecurrenceSeedCore(("function", "f"), ("active",), (), ("pure",))
-    proposal_a = QuarantinedRecurrenceProposal(seed.digest, "unit-step-a", (), ())
-    proposal_b = QuarantinedRecurrenceProposal(seed.digest, "unit-step-b", (), ())
+    proposal_a = _bound_proposal(seed, "unit-step-a")
+    proposal_b = _bound_proposal(seed, "unit-step-b")
     assert proposal_a.digest != proposal_b.digest
     premise_digest = "a" * 64
     entry_a = _cache_entry(seed, proposal_a, premise_digest, ("target", "f"))
     entry_b = _cache_entry(seed, proposal_b, premise_digest, ("target", "f"))
     cache = ValidatedUnaryArtifactCache()
-    cache.put_recurrence(entry_a)
-    cache.put_recurrence(entry_b)
+    cache.put_recurrence(entry_a, proposal=proposal_a)
+    cache.put_recurrence(entry_b, proposal=proposal_b)
 
     def lookup(entry):
         return cache.get_recurrence(
@@ -561,7 +613,7 @@ def test_recurrence_cache_keeps_two_proposals_and_requires_exact_binding():
 
 def test_cache_rejects_proposal_fields_on_legacy_domain():
     seed = RecurrenceSeedCore(("function", "f"), ("active",), (), ("pure",))
-    proposal = QuarantinedRecurrenceProposal(seed.digest, "unit-step", (), ())
+    proposal = _bound_proposal(seed, "unit-step")
     entry = _cache_entry(seed, proposal, "b" * 64, ("target", "f"))
     invalid = ValidatedUnaryArtifactEntry(
         entry.artifact,
@@ -583,7 +635,7 @@ def test_production_publish_cache_lookup_and_import_recompute_selected_proposal(
     analysis = SimpleNamespace(binary_id="left", function_name="f", entry_point=1)
     peer = SimpleNamespace(binary_id="right", function_name="f", entry_point=2)
     seed = RecurrenceSeedCore(("function", "f"), ("active",), (), ("pure",))
-    proposal = QuarantinedRecurrenceProposal(seed.digest, "unit-step", (), ())
+    proposal = _bound_proposal(seed, "unit-step")
     contract = ("recurrence_domain_contract_v1", "integer_bitvector")
     policy = "recurrence-summary-normalization-v1"
     unary = ObligationRuntimeSession.create_unary(
@@ -618,7 +670,7 @@ def test_production_publish_cache_lookup_and_import_recompute_selected_proposal(
         domain_contract=contract,
         normalization_policy_digest=policy,
     )
-    other = QuarantinedRecurrenceProposal(seed.digest, "other", (), ())
+    other = _bound_proposal(seed, "other")
     with pytest.raises(ValueError, match="recurrence import"):
         pair.import_unary_artifact_for_analysis(
             entry,
@@ -632,10 +684,98 @@ def test_production_publish_cache_lookup_and_import_recompute_selected_proposal(
         )
 
 
+def _publication_fixture(proposal, seed, *, return_binding=None):
+    """``proposal`` に束縛した artifact（``return_binding`` を与えればその命題にする）と unary runtime。"""
+
+    unary = ObligationRuntimeSession.create_unary(
+        SimpleNamespace(binary_id="left", function_name="f", entry_point=1),
+        domain=UnaryArtifactDomain.RECURRENCE_SUMMARY_V1.value,
+        semantic_seed=seed,
+        domain_contract=("recurrence_domain_contract_v1", "integer_bitvector"),
+        normalization_policy_digest="recurrence-summary-normalization-v1",
+    )
+    artifact = _content_bound_artifact(
+        seed, proposal, unary.premise_digest, ("target", "f"), unary.current_view.view_id,
+        return_binding=return_binding,
+    )
+    unary.artifacts.append(artifact)
+    return unary, artifact
+
+
+def test_publication_rejects_a_proposal_without_return_binding_evidence():
+    # 指摘 4: 証拠の無い proposal に束縛した artifact（命題は全規則を名乗っても）は発行できない
+    seed = RecurrenceSeedCore(("function", "f"), ("active",), (), ("pure",))
+    bare = QuarantinedRecurrenceProposal(seed.digest, "unit-step", _bound_proposal(seed).new_returns, ())
+    forged = (RETURN_BINDING_PROPOSITION, bare.digest, "e" * 64, ("test-candidate",), RETURN_BINDING_RULES)
+    unary, artifact = _publication_fixture(bare, seed, return_binding=forged)
+    with pytest.raises(ValueError, match="no return binding evidence"):
+        unary.publish_recurrence_artifact(artifact, seed, bare)
+
+
+def test_publication_and_import_reject_a_subproof_bound_to_other_evidence():
+    seed = RecurrenceSeedCore(("function", "f"), ("active",), (), ("pure",))
+    proposal = _bound_proposal(seed)
+    other = _bound_proposal(seed, evidence=_return_binding_evidence(constant=7))
+    forged = (RETURN_BINDING_PROPOSITION, proposal.digest) + return_binding_proposition(other)[2:]
+    unary, artifact = _publication_fixture(proposal, seed, return_binding=forged)
+    with pytest.raises(ValueError, match="not bound to the proposal evidence"):
+        unary.publish_recurrence_artifact(artifact, seed, proposal)
+
+
+def test_publication_rejects_a_payload_whose_rules_were_cut_down():
+    seed = RecurrenceSeedCore(("function", "f"), ("active",), (), ("pure",))
+    proposal = _bound_proposal(seed)
+    unary, artifact = _publication_fixture(proposal, seed)
+    payload = json.loads(json.dumps(artifact.payload, default=list))
+    for item in payload["recurrence_validation_evidence"]["subproofs"]:
+        if item["proof_kind"] == "return_binding":
+            item["proposition_key"][4] = ["R"]
+    cut = replace(artifact, payload={**artifact.payload, "recurrence_validation_evidence": payload["recurrence_validation_evidence"]})
+    unary.artifacts[-1] = cut
+    with pytest.raises(ValueError, match="every rule"):
+        unary.publish_recurrence_artifact(cut, seed, proposal)
+
+
+def test_cache_stores_recurrence_artifacts_only_with_their_proposal():
+    seed = RecurrenceSeedCore(("function", "f"), ("active",), (), ("pure",))
+    proposal = _bound_proposal(seed)
+    entry = _cache_entry(seed, proposal, "a" * 64, ("target", "f"))
+    cache = ValidatedUnaryArtifactCache()
+    with pytest.raises(ValueError, match="with their selected proposal"):
+        cache.put(entry)
+    with pytest.raises(ValueError, match="selected proposal"):
+        cache.put_recurrence(entry, proposal=_bound_proposal(seed, "other"))
+    cache.put_recurrence(entry, proposal=proposal)
+
+
+def test_import_rechecks_the_evidence_of_the_selected_proposal():
+    # 発行の後に証拠の中身が変わった proposal では再利用できない
+    analysis = SimpleNamespace(binary_id="left", function_name="f", entry_point=1)
+    peer = SimpleNamespace(binary_id="right", function_name="f", entry_point=2)
+    seed = RecurrenceSeedCore(("function", "f"), ("active",), (), ("pure",))
+    proposal = _bound_proposal(seed)
+    unary, artifact = _publication_fixture(proposal, seed)
+    entry = unary.publish_recurrence_artifact(artifact, seed, proposal)
+    object.__setattr__(proposal.return_binding_evidence, "snapshot", _return_binding_evidence(7).snapshot)
+    pair = ObligationRuntimeSession.create(analysis, peer)
+    pair.unary_artifact_cache = unary.unary_artifact_cache
+    with pytest.raises(ValueError, match="changed after"):
+        pair.import_unary_artifact_for_analysis(
+            entry,
+            analysis=analysis,
+            domain=UnaryArtifactDomain.RECURRENCE_SUMMARY_V1.value,
+            semantic_seed=seed,
+            selected_recurrence_proposal=proposal,
+            pair_side="left",
+            domain_contract=("recurrence_domain_contract_v1", "integer_bitvector"),
+            normalization_policy_digest="recurrence-summary-normalization-v1",
+        )
+
+
 def test_recurrence_publication_rejects_empty_validated_payload():
     analysis = SimpleNamespace(binary_id="left", function_name="f", entry_point=1)
     seed = RecurrenceSeedCore(("function", "f"), ("active",), (), ("pure",))
-    proposal = QuarantinedRecurrenceProposal(seed.digest, "unit-step", (), ())
+    proposal = _bound_proposal(seed, "unit-step")
     unary = ObligationRuntimeSession.create_unary(
         analysis,
         domain=UnaryArtifactDomain.RECURRENCE_SUMMARY_V1.value,

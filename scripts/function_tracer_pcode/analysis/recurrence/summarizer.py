@@ -261,11 +261,9 @@ class StructuralRecurrenceSummarizer:
     _try_summarize_counted_scalar_loop = _svc_counted_loop._impl__try_summarize_counted_scalar_loop
     _unique_multiequal_accumulator_update_input = _svc_counted_loop._impl__unique_multiequal_accumulator_update_input
     _validate_counted_loop_update_cases = _svc_counted_loop._impl__validate_counted_loop_update_cases
-    _validate_update_cases_against_residue_cases = _svc_counted_loop._impl__validate_update_cases_against_residue_cases
     # recurrence.return_binding (Issue #297)
     _capture_pcode_dataflow_snapshot = _svc_return_binding._impl__capture_pcode_dataflow_snapshot
     _counted_loop_return_binding_evidence = _svc_return_binding._impl__counted_loop_return_binding_evidence
-    _extract_counted_loop_update_cases_with_completeness = _svc_counted_loop._impl__extract_counted_loop_update_cases_with_completeness
     _varnode_aliases_accumulator_object = _svc_counted_loop._impl__varnode_aliases_accumulator_object
     _varnode_is_accumulator_update_for_phi = _svc_counted_loop._impl__varnode_is_accumulator_update_for_phi
     try_summarize_pre_return_counted_scalar_loop = _svc_counted_loop._impl_try_summarize_pre_return_counted_scalar_loop
@@ -315,7 +313,6 @@ class StructuralRecurrenceSummarizer:
     _counter_singleton_region_covers_return_conditions = _svc_guard_proof._impl__counter_singleton_region_covers_return_conditions
     _enumerate_paths_with_conditions = _svc_guard_proof._impl__enumerate_paths_with_conditions
     _enumerate_paths_with_conditions_result = _svc_guard_proof._impl__enumerate_paths_with_conditions_result
-    _enumerate_paths_with_conditions_report = _svc_guard_proof._impl__enumerate_paths_with_conditions_report
     _exact_counter_value_from_conditions = _svc_guard_proof._impl__exact_counter_value_from_conditions
     _expression_is_boolean_condition_value = _svc_guard_proof._impl__expression_is_boolean_condition_value
     _first_return_overlapping_conditions = _svc_guard_proof._impl__first_return_overlapping_conditions

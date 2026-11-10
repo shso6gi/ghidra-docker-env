@@ -5,33 +5,25 @@
 - :func:`_impl__capture_pcode_dataflow_snapshot` は関数の P-code の事実を 1 回だけ読み、
   ``PcodeDataflowSnapshot`` にする。走査は解析の census（control profile の block 数・op 数）を上限にし、
   上限を超えたら写しを作らない（記録の足りない iterator で回り続けない）。
-- :func:`_impl__counted_loop_return_binding_evidence` は、写しと、builder が 1 回の抽出で得た
-  更新 case・完全性の記録を束ねる。start / limit / 初期値の式は、写しから選んだ varnode から作る。
+- :func:`_impl__counted_loop_return_binding_evidence` は、写しと、builder が見つけたループの
+  accumulator・帰納変数の PHI の key を束ねる。式は作らない（値の意味は proof が写しから作る）。
 
 どの規則が成り立つかは判定しない（``proof.recurrence_return_binding`` が判定する）。
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from scripts.function_tracer_pcode.core.recurrence_return_binding import (
+    UNIDENTIFIED_STORAGE_SPACES,
     CountedLoopReturnBindingEvidence,
-    CountedUpdateCase,
     PcodeDataflowSnapshot,
     PcodeFactBlock,
     PcodeFactInput,
     PcodeFactOp,
-    UpdateCaseCompleteness,
-    header_guard,
-    loop_region,
-    split_phi_inputs,
 )
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import PcodeBlockRef, PcodeOpRef
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
-    _runtime_conditions_signature,
-    _runtime_expression_signature,
-)
 
 #: Ghidra / 記録 object の読み取りで起こり得る失敗（broad except は使わない）。
 _READ_FAILURES = (AttributeError, TypeError, ValueError, IndexError, RuntimeError)
@@ -39,6 +31,33 @@ _READ_FAILURES = (AttributeError, TypeError, ValueError, IndexError, RuntimeErro
 
 class _SnapshotBoundExceeded(Exception):
     """走査が census の上限を超えた（記録の足りない iterator・壊れた CFG）。"""
+
+
+class _FreeInputUnidentified(Exception):
+    """どの op も定義しない入力の置き場所を識別できない（写しの digest で入力を区別できない）。"""
+
+
+_U64 = (1 << 64) - 1
+
+
+def _free_input(varnode, size: int) -> PcodeFactInput:
+    """定義の無い入力を、置き場所（空間・offset）と、関数の引数ならその番号で表す。"""
+
+    address = varnode.getAddress()
+    space = address.getAddressSpace() if address is not None else None
+    name = str(space.getName()) if space is not None else ""
+    if not name or name in UNIDENTIFIED_STORAGE_SPACES:
+        raise _FreeInputUnidentified()
+    parameter_index = None
+    high = varnode.getHigh() if bool(varnode.isInput()) else None
+    symbol = high.getSymbol() if high is not None else None
+    if symbol is not None and bool(symbol.isParameter()):
+        index = int(symbol.getCategoryIndex())
+        parameter_index = index if index >= 0 else None
+    return PcodeFactInput(
+        "free", size, storage=(name, int(varnode.getOffset()) & _U64), parameter_index=parameter_index,
+    )
+
 
 
 def _bounded(iterator_factory, budget: List[int]):
@@ -134,11 +153,14 @@ def _impl__capture_pcode_dataflow_snapshot(
                     varnode = op.getInput(position)
                     size = int(varnode.getSize())
                     if bool(varnode.isConstant()):
-                        inputs.append(PcodeFactInput("constant", size, constant=int(varnode.getOffset())))
+                        # Java の long は符号付き。値は幅の bit だけを持つ（P-code の定数の意味）
+                        inputs.append(PcodeFactInput(
+                            "constant", size, constant=int(varnode.getOffset()) & ((1 << (8 * size)) - 1),
+                        ))
                         continue
                     definition = varnode.getDef()
                     if definition is None:
-                        inputs.append(PcodeFactInput("free", size))
+                        inputs.append(_free_input(varnode, size))
                         continue
                     producer = key_by_seq.get(_seq_identity(definition))
                     if producer is None:
@@ -179,6 +201,8 @@ def _impl__capture_pcode_dataflow_snapshot(
         )
     except _SnapshotBoundExceeded:
         return None, {}, "scan_bound_exceeded"
+    except _FreeInputUnidentified:
+        return None, {}, "free_input_identity_unavailable"
     except _READ_FAILURES as exc:
         return None, {}, f"snapshot_read_failed:{type(exc).__name__}"
     return snapshot, live_ops, None
@@ -191,8 +215,6 @@ def _impl__counted_loop_return_binding_evidence(
     analysis,
     induction,
     accumulator,
-    update_cases: Sequence[Any],
-    completeness: UpdateCaseCompleteness,
 ) -> CountedLoopReturnBindingEvidence:
     """counted scalar loop の summary 1 つの証拠を作る。揃わないものは ``producer_failures`` に書く。"""
 
@@ -206,72 +228,20 @@ def _impl__counted_loop_return_binding_evidence(
     if failure:
         failures.append(failure)
     acc_key = iv_key = None
-    start_expr = limit_expr = init_expr = None
     if snapshot is not None:
         acc_key = _live_key(live_ops, accumulator.phi_op)
         iv_key = _live_key(live_ops, induction.phi_op)
-        header_index = int(induction.phi_op.getParent().getIndex())
-        region = loop_region(snapshot, header_index)
         if acc_key is None or iv_key is None:
             failures.append("loop_phi_not_in_snapshot")
-        else:
-            iv_split = split_phi_inputs(snapshot, snapshot.op(iv_key), header_index, region)
-            acc_split = split_phi_inputs(snapshot, snapshot.op(acc_key), header_index, region)
-            if iv_split is None or len(iv_split[0]) != 1:
-                failures.append("induction_entry_edge")
-            else:
-                start_expr = self._build_pcode_expression(
-                    induction.phi_op.getInput(iv_split[0][0]),
-                    placeholders={induction.phi_output: induction.placeholder},
-                )
-            if acc_split is None or len(acc_split[0]) != 1:
-                failures.append("accumulator_entry_edge")
-            else:
-                entry_varnode = accumulator.phi_op.getInput(acc_split[0][0])
-                init_expr = self._trace_varnode_expression(entry_varnode)
-                if init_expr is None or self._expression_is_unresolved(init_expr):
-                    init_expr = self._build_pcode_expression(entry_varnode, placeholders={})
-            guard, guard_failure = header_guard(snapshot, header_index, iv_key, region)
-            if guard is None:
-                failures.append(f"header_guard:{guard_failure}")
-            else:
-                compare = live_ops[guard.compare_key]
-                limit_expr = self._build_pcode_expression(
-                    compare.getInput(guard.limit_operand),
-                    placeholders={induction.phi_output: induction.placeholder},
-                )
-        for name, expr in (("start", start_expr), ("limit", limit_expr), ("initial", init_expr)):
-            if expr is None or self._expression_is_unresolved(expr):
-                if not any(item.startswith(name) or item.endswith("entry_edge") for item in failures):
-                    failures.append(f"{name}_unresolved")
         if analysis.pcode_dataflow_digest is None:
             analysis.pcode_dataflow_digest = snapshot.digest
         elif analysis.pcode_dataflow_digest != snapshot.digest:
             failures.append("pcode_dataflow_digest_conflict")
-    cases = tuple(
-        CountedUpdateCase(
-            conditions=tuple(case.conditions or ()),
-            update_expression=case.update_expr,
-            conditions_signature=_runtime_conditions_signature(list(case.conditions or ())),
-            update_signature=_runtime_expression_signature(case.update_expr),
-        )
-        for case in update_cases or ()
-    )
     return CountedLoopReturnBindingEvidence(
         function_identity=function_identity,
         snapshot=snapshot,
         accumulator_phi_key=acc_key,
         induction_phi_key=iv_key,
-        start_expression=start_expr,
-        limit_expression=limit_expr,
-        initial_expression=init_expr,
-        induction_placeholder=induction.placeholder,
-        accumulator_placeholder=accumulator.placeholder,
-        start_signature=_runtime_expression_signature(start_expr) if start_expr is not None else (),
-        limit_signature=_runtime_expression_signature(limit_expr) if limit_expr is not None else (),
-        initial_signature=_runtime_expression_signature(init_expr) if init_expr is not None else (),
-        update_cases=cases,
-        completeness=completeness,
         producer_failures=tuple(failures),
     )
 
@@ -286,83 +256,3 @@ def _live_key(live_ops: Dict[Tuple[Any, ...], Any], op) -> Optional[Tuple[Any, .
         if _seq_identity(candidate) == target:
             return key
     return None
-
-
-# ---------------------------------------------------------------------------
-# proof が使う SMT の入口（局所の z3。UB の前提を加えない。UNSAT だけを成立とし、
-# timeout・unknown・query を作れないときは成立しない）
-# ---------------------------------------------------------------------------
-
-
-def _smt_summarizer():
-    from scripts.function_tracer_pcode.analysis.recurrence.summarizer import StructuralRecurrenceSummarizer
-
-    # P-code を読まない式の検査だけに使う（tracer を持たない）
-    return StructuralRecurrenceSummarizer(None)
-
-
-def prove_values_equal_under(left, right, conditions: Sequence[Any]) -> bool:
-    """``conditions`` の下で ``left == right`` が恒真であること。"""
-
-    summarizer = _smt_summarizer()
-    parameters = summarizer._collect_summary_parameter_specs(
-        left, right, *(item.expression for item in conditions or () if item is not None),
-    )
-    return bool(summarizer._prove_expression_equivalence_under_conditions(
-        left, right, list(conditions or ()), parameters,
-    ))
-
-
-def condition_sets_equivalent(left: Sequence[Any], right: Sequence[Any]) -> bool:
-    return bool(_smt_summarizer()._condition_sets_equivalent(list(left or ()), list(right or ())))
-
-
-def case_guards_are_total(case_conditions: Sequence[Sequence[Any]]) -> bool:
-    """case の条件（連言）の論理和が恒真であること。loop の placeholder を含んでよい
-    （条件の oracle は placeholder を描けないので、式の同値の query で示す）。"""
-
-    from scripts.function_tracer_pcode.core import Condition, Expression
-
-    disjunction = None
-    for conditions in case_conditions:
-        conditions = list(conditions or ())
-        if not conditions:
-            return True
-        conjunction = Condition.combine_and(conditions)
-        if conjunction is None:
-            return False
-        expr = conjunction.expression
-        if bool(getattr(conjunction, "negated", False)):
-            expr = Expression.unary_op("BOOL_NEGATE", expr)
-            expr.size = 1
-        if disjunction is None:
-            disjunction = expr
-        else:
-            disjunction = Expression.binary_op("BOOL_OR", disjunction, expr)
-            disjunction.size = 1
-    if disjunction is None:
-        return False
-    return prove_values_equal_under(disjunction, Expression.constant(1, size=1), ())
-
-
-def case_residues(conditions_by_case: Sequence[Sequence[Any]], counter_name: str) -> Tuple[Optional[Tuple[int, int]], ...]:
-    """各 case の条件から読める counter の剰余 ``(modulus, residue)``（読めなければ None）。"""
-
-    summarizer = _smt_summarizer()
-    return tuple(
-        summarizer._extract_exact_residue_case(list(conditions or ()), counter_name)
-        for conditions in conditions_by_case
-    )
-
-
-def update_cases_match_residues(
-    cases: Sequence[Any], residue_cases: Sequence[Any], *, induction_placeholder, accumulator_placeholder,
-) -> bool:
-    """builder と同じ検査（``_validate_update_cases_against_residue_cases``）を、渡した residue で行う。"""
-
-    return bool(_smt_summarizer()._validate_update_cases_against_residue_cases(
-        cases=cases,
-        residue_cases=residue_cases,
-        induction_placeholder=induction_placeholder,
-        accumulator_placeholder=accumulator_placeholder,
-    ))

@@ -583,6 +583,14 @@ def semantic_recurrence_closure_digest(
     )
 
 
+#: Issue #297: return binding の subproof の命題の名前と、成り立たせなければならない規則の **全部**。
+#: 命題はこの規則の列をそのまま持つ（一部の規則だけの命題は、発行・再利用のどちらでも受け付けない）。
+RETURN_BINDING_PROPOSITION = "return_binding_v2"
+RETURN_BINDING_RULES = (
+    "KIND", "EV", "R-census", "B5", "R", "B2", "X2", "T6", "T", "C", "E", "G", "U", "Z",
+)
+
+
 _RECURRENCE_SUBPROOF_KINDS = (
     "candidate_validation", "transition_termination", "overlap",
     "partition_coverage", "effect_surface", "return_binding",
@@ -595,7 +603,7 @@ _RECURRENCE_SUBPROOF_METHODS = {
     "partition_coverage": "condition_smt_partition_totality_v2",
     "effect_surface": "recurrence_effect_surface_validator_v2",
     # Issue #297: summary が関数の RETURN の値を表すこと（遷移の正しさとは別の命題）。
-    "return_binding": "recurrence_return_binding_validator_v1",
+    "return_binding": "recurrence_return_binding_validator_v2",
 }
 
 _TRANSITION_PROPOSITION_TAGS = frozenset({
@@ -854,15 +862,16 @@ def _validate_subproof_proposition(proof_kind: str, value: Any) -> None:
         return
     if proof_kind == "return_binding":
         if (
-            len(value) != 5 or value[0] != "return_binding_v1"
+            len(value) != 5 or value[0] != RETURN_BINDING_PROPOSITION
             or not isinstance(value[1], str) or not value[1]
             or not isinstance(value[2], str) or not value[2]
             or not isinstance(value[3], tuple) or not value[3]
             or not all(_is_semantic_identity(item) for item in value[3])
-            or not isinstance(value[4], tuple) or not value[4]
-            or not all(isinstance(item, str) and item for item in value[4])
+            or len(set(value[3])) != len(value[3])
         ):
             raise ValueError("recurrence return binding proposition schema is invalid")
+        if value[4] != RETURN_BINDING_RULES:
+            raise ValueError("recurrence return binding proposition does not carry every rule")
         return
     if len(value) != 3 or value[0] != "effect_surface_v2" or not isinstance(value[1], str) or not value[1]:
         raise ValueError("recurrence effect proposition schema is invalid")

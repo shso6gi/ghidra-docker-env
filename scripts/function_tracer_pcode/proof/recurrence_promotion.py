@@ -970,7 +970,7 @@ def _prepare_side_for_proposal(
     return_binding_proof = RecurrenceSubproofEvidence(
         "return_binding",
         return_binding_proposition,
-        "recurrence_return_binding_validator_v1",
+        "recurrence_return_binding_validator_v2",
         dependencies=(candidate_proof.digest, transition_proof.digest),
     )
     validation_evidence = RecurrenceValidationEvidence(

@@ -1028,44 +1028,16 @@ def _impl__enumerate_paths_with_conditions_result(
     stop_block=None,
     limit: int = 8,
 ) -> Tuple[List[List[Condition]], bool]:
-    paths, incomplete, _unknown_edges = self._enumerate_paths_with_conditions_report(
-        start_block=start_block,
-        target_block=target_block,
-        header_block=header_block,
-        placeholders=placeholders,
-        stop_block=stop_block,
-        limit=limit,
-    )
-    return paths, incomplete
-
-def _impl__enumerate_paths_with_conditions_report(
-    self,
-    *,
-    start_block,
-    target_block,
-    header_block,
-    placeholders: Dict[object, Expression],
-    stop_block=None,
-    limit: int = 8,
-) -> Tuple[List[List[Condition]], bool, int]:
-    """経路と、件数の打ち切りの有無と、**条件を作れなかった分岐の辺の数** を返す。
-
-    後続が 2 つ以上ある block の辺で条件が ``None`` の場合、その経路の条件は実際より弱い
-    （分岐を区別していない）。経路は従来どおり返すが、数えて呼び出し側に知らせる（Issue #297:
-    更新 case の完全性はこの数が 0 のときだけ示せる）。
-    """
-
     if start_block is None or target_block is None:
-        return [[]], False, 0
+        return [[]], False
     target_key = self._block_key(target_block)
     header_key = self._block_key(header_block)
     stop_key = self._block_key(stop_block)
     paths: List[List[Condition]] = []
     incomplete = False
-    unknown_edges = 0
 
     def dfs(current, active_conditions: List[Condition], visited: set) -> None:
-        nonlocal incomplete, unknown_edges
+        nonlocal incomplete
         if len(paths) >= limit:
             incomplete = True
             return
@@ -1077,8 +1049,7 @@ def _impl__enumerate_paths_with_conditions_report(
             return
         visited = set(visited)
         visited.add(current_key)
-        successors = self._collect_block_successors(current)
-        for successor in successors:
+        for successor in self._collect_block_successors(current):
             successor_key = self._block_key(successor)
             if successor_key in visited or successor_key == header_key:
                 continue
@@ -1090,12 +1061,10 @@ def _impl__enumerate_paths_with_conditions_report(
             next_conditions = list(active_conditions)
             if branch_condition is not None:
                 next_conditions.append(branch_condition)
-            elif len(successors) >= 2:
-                unknown_edges += 1
             dfs(successor, next_conditions, visited)
 
     dfs(start_block, [], set())
-    return paths, incomplete, unknown_edges
+    return paths, incomplete
 
 def _impl__build_block_edge_condition(
     self,

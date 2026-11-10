@@ -1,5 +1,5 @@
 {
-  "manifest_digest": "a308514edc06fe53b69ceb9a18cbec716f83de768444487c85699d3083426be2",
+  "manifest_digest": "5c2093124860779a885030cffa4c652d0115c8c0f79e41edd784fda30b033801",
   "manifest_kind": "unknown-taxonomy-v2-phase7-producer-sites-v2",
   "site_count": 34,
   "sites": [
@@ -782,7 +782,7 @@
       "line": 828,
       "path": "scripts/function_tracer_pcode/proof/recurrence_promotion.py",
       "producer_site_manifest_id": "recurrence-summary-abi-width",
-      "source_sha256": "ebfefe1c537683a7a5c4b1763cca524bf117c2c6b1bbb240db4a55274b7357f7"
+      "source_sha256": "a6dc20c473cc68421d2294548a56232c37e15151a22a5f43c47f4454774d31fe"
     },
     {
       "allowed_dispositions": [
@@ -842,7 +842,7 @@
       "line": 820,
       "path": "scripts/function_tracer_pcode/proof/recurrence_promotion.py",
       "producer_site_manifest_id": "recurrence-summary-call-effect",
-      "source_sha256": "ebfefe1c537683a7a5c4b1763cca524bf117c2c6b1bbb240db4a55274b7357f7"
+      "source_sha256": "a6dc20c473cc68421d2294548a56232c37e15151a22a5f43c47f4454774d31fe"
     },
     {
       "allowed_dispositions": [
@@ -972,7 +972,7 @@
       "line": 824,
       "path": "scripts/function_tracer_pcode/proof/recurrence_promotion.py",
       "producer_site_manifest_id": "recurrence-summary-loop",
-      "source_sha256": "ebfefe1c537683a7a5c4b1763cca524bf117c2c6b1bbb240db4a55274b7357f7"
+      "source_sha256": "a6dc20c473cc68421d2294548a56232c37e15151a22a5f43c47f4454774d31fe"
     },
     {
       "allowed_dispositions": [

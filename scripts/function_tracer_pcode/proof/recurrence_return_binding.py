@@ -1,11 +1,16 @@
 """Issue #297: recurrence summary が関数の RETURN の値を表すことの証明（return binding）。
 
 遷移の正しさ（``_validated_transition_termination``）とは別の命題である。初回は、証拠を揃えられる
-counted scalar loop の summary だけを受理する。規則（すべて成り立つときだけ成立）:
+counted scalar loop の summary だけを受理する。
+
+証拠（``CountedLoopReturnBindingEvidence``）は P-code の **事実だけ** を持つ。値の意味は、この proof が
+写しから自分で作り（``proof.recurrence_pcode_semantics``）、候補の式とは SMT で照合する。producer
+（builder・tracer）が作った式は信じない。規則（すべて成り立つときだけ成立）:
 
 - ``KIND``: 候補はすべて counted scalar loop の transition の証拠を持つ（他の種類は拒否する）。
-- ``EV``: proposal に証拠があり（証拠は proposal だけが持ち、digest に入る）、producer の失敗が無く、
-  関数の identity と P-code の写しの digest が **現在の解析** と一致する（別の解析の証拠を使わない）。
+- ``EV``: proposal に証拠があり、その digest が中身から作り直した digest と一致し（作成後・コピー後に
+  中身が変わっていない）、producer の失敗が無く、関数の identity と P-code の写しの digest が
+  **現在の解析** と一致する（別の解析・入力だけが違う解析の証拠を使わない）。
 - ``R-census``: 写しの op の key・block の辺・RETURN の集合が、同じ HighFunction を別に数えた census
   （control profile）と一致する。census の key は full で、重複が無い。
 - ``B5``: 証拠の accumulator PHI・header が、transition の key と同じ。
@@ -13,34 +18,36 @@ counted scalar loop の summary だけを受理する。規則（すべて成り
 - ``B2``: RETURN の入力の幅 = PHI の幅 = 候補の幅 = summary の ``result_size``。
 - ``X2`` / ``T6``: header の強連結成分から出る辺はちょうど 1 本で header から出る。header を除くと循環が無い。
 - ``T``: header の比較は帰納変数 PHI に直接かかる strict な大小比較で、step は ±1 と向きが合う。比較の
-  両辺と帰納変数は同じ幅で、limit はループ不変（外で決まるか、不変な入力の純粋な整数演算。wrap も
-  非停止も起きない形だけ）。
-- ``C``: 候補は base と loop の 2 つ。loop の値の step・符号・start・limit・初期値が P-code の事実と一致し、
-  base の値は初期値と一致する。``E``: 閉じた式（exact lowering）がある。
-- ``G``: loop の guard ⇔ ``start REL limit``、base の guard ⇔ その否定（SMT）。
-- ``U``: 更新 case の抽出が何も落としておらず、各 case が「accumulator + 候補の residue の affine」と
-  SMT で等しく、候補の residue がすべて使われ、case の条件の論理和が恒真。
+  両辺と帰納変数は同じ幅で、limit はループ不変（wrap も非停止も起きない形だけ）。
+- ``C``: 候補は base と loop の 2 つ。loop の値の step・符号が P-code の事実と一致し、start・limit・
+  初期値・base の値が、写しから作った start・limit・初期値と SMT で等しい。``E``: 閉じた式がある。
+- ``G``: loop の guard ⇔ ``start REL limit``、base の guard ⇔ その否定（写しから作った式との SMT）。
+- ``U``: 写しから作った 1 回分の更新（header の比較が続ける側のとき、body の全経路を経路条件で
+  選ぶ式）が、候補の residue / bias から作る更新 ``acc + Σ[iv ≡ r (mod m)]·(c·iv + b + bias)`` と
+  SMT で等しい。経路・条件・入力のどれか 1 つでも式にできなければ成り立たない（経路を落とさない）。
 - ``Z``: base の値が、guard の同値な raw の exact return と、その guard の下で SMT で等しい（1 つ以上）。
 
-SMT は局所の z3 で、#298 の UB の前提を加えない。UNSAT だけを成立とし、timeout・unknown・
-query を作れないときは成立しない。どれか 1 つでも成り立たなければ ``ValueError`` で拒否する
-（呼び出し側は promotion を ABORTED にし、元の解析の判定を使う）。
+SMT は ``analysis.recurrence.value_queries``（局所の z3、#298 の UB の前提を加えない）。UNSAT だけを
+成立とし、timeout・unknown・query を作れないときは成立しない。どれか 1 つでも成り立たなければ
+:class:`ReturnBindingUnproven`（``ValueError``）で拒否する（呼び出し側は promotion を ABORTED にし、
+元の解析の判定を使う）。
 """
 
 from __future__ import annotations
 
 from typing import Any, List, Optional, Sequence, Tuple
 
-from scripts.function_tracer_pcode.analysis.recurrence import return_binding as _binding_smt
-from scripts.function_tracer_pcode.analysis.recurrence.models import ResidueLoopCase
-from scripts.function_tracer_pcode.analysis.recurrence._shared import (
-    _runtime_expression_signature,
-)
+from scripts.function_tracer_pcode.analysis.recurrence import value_queries
 from scripts.function_tracer_pcode.core import COUNTED_LOOP_SUM_OPCODE, Condition, Expression
 from scripts.function_tracer_pcode.core.expression import ExpressionType
-from scripts.function_tracer_pcode.core.loop_lowering_semantics import _counted_loop_sum_semantics
+from scripts.function_tracer_pcode.core.loop_lowering_semantics import project_loop_lowering
+from scripts.function_tracer_pcode.core.recurrence_contracts import (
+    RETURN_BINDING_PROPOSITION,
+    RETURN_BINDING_RULES,
+)
 from scripts.function_tracer_pcode.core.recurrence_return_binding import (
     CountedLoopReturnBindingEvidence,
+    return_binding_proposition,
     header_guard,
     induction_steps,
     input_is_loop_invariant,
@@ -49,15 +56,22 @@ from scripts.function_tracer_pcode.core.recurrence_return_binding import (
     region_exit_edges,
     region_is_acyclic_without_header,
     return_chains,
+    split_phi_inputs,
 )
 from scripts.function_tracer_pcode.core.runtime_refs import CountedLoopSummaryRef
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import PCODE_OPCODE_BY_MNEMONIC
+from scripts.function_tracer_pcode.proof.recurrence_pcode_semantics import LoweringFailure, SnapshotLowering
 
-RETURN_BINDING_PROPOSITION = "return_binding_v1"
-RETURN_BINDING_RULES = (
-    "KIND", "EV", "R-census", "B5", "R", "B2", "X2", "T6", "T", "C", "E", "G", "U", "Z",
+__all__ = (
+    "RETURN_BINDING_PROPOSITION", "RETURN_BINDING_RULES", "ReturnBindingUnproven",
+    "return_binding_proposition", "validated_return_binding",
 )
+
 _COUNTED_TRANSITION_TAG = "counted_loop_transition_evidence"
+#: proof が写しの値を式にするときの、帰納変数・accumulator の placeholder（候補の式の placeholder とは
+#: 別の symbol。SMT の symbol は parameter の番号で決まり、負の番号は合成の symbol）。
+_INDUCTION_INDEX = -20_001
+_ACCUMULATOR_INDEX = -20_002
 
 
 class ReturnBindingUnproven(ValueError):
@@ -73,20 +87,12 @@ def validated_return_binding(analysis: Any, proposal: Any, candidates: Sequence[
 
     ids = {item.candidate_id for item in proposal.new_returns}
     members = [candidate for candidate in candidates if candidate.candidate_id in ids]
+    if {member.candidate_id for member in members} != ids or len(members) != len(ids):
+        raise ReturnBindingUnproven(["KIND:candidates_not_bound_to_proposal"])
     failures = _check(analysis, proposal, members)
     if failures:
         raise ReturnBindingUnproven(failures)
-    evidence = proposal.return_binding_evidence
-    return (
-        RETURN_BINDING_PROPOSITION,
-        proposal.digest,
-        evidence.digest,
-        tuple(sorted(
-            (member.candidate_id for member in members),
-            key=lambda value: repr(value),
-        )),
-        RETURN_BINDING_RULES,
-    )
+    return return_binding_proposition(proposal)
 
 
 def _check(analysis: Any, proposal: Any, members: List[Any]) -> List[str]:
@@ -102,23 +108,32 @@ def _check(analysis: Any, proposal: Any, members: List[Any]) -> List[str]:
     evidence = proposal.return_binding_evidence
     if not isinstance(evidence, CountedLoopReturnBindingEvidence):
         return ["EV:missing"]
+    # 証拠の digest は proposal の digest に入る。中身から作り直した digest と一致しなければ、作った後に
+    # 中身が変わっている（proposal の digest はもう中身を表さない）。
+    if evidence.recomputed_digest() != evidence.digest:
+        return ["EV:evidence_digest_stale"]
     failures.extend(f"EV:producer:{item}" for item in evidence.producer_failures)
-    snapshot = evidence.snapshot
-    if snapshot is None:
+    if evidence.snapshot is None:
         return failures or ["EV:no_snapshot"]
+    # proof は field から作り直した写しだけを読む（索引・digest が field と食い違わない）
+    snapshot = evidence.snapshot.rebuilt()
     if tuple(evidence.function_identity) != tuple(analysis.outcome_function_identity()):
         failures.append("EV:function_identity")
+    if tuple(snapshot.function_identity) != tuple(evidence.function_identity):
+        failures.append("EV:snapshot_function_identity")
     if getattr(analysis, "pcode_dataflow_digest", None) != snapshot.digest:
         failures.append("EV:pcode_source")
-    # 候補は proposal に束縛済み（``_bind_accepted_candidates_to_proposal``）。証拠は proposal だけが持ち、
-    # その digest は proposal の digest に入るので、別の proposal の証拠は使えない。
     if failures:
         return failures
 
     failures.extend(_census_failures(analysis, snapshot))
     acc_key, iv_key = evidence.accumulator_phi_key, evidence.induction_phi_key
     acc_phi, iv_phi = snapshot.op(acc_key), snapshot.op(iv_key)
-    if acc_phi is None or iv_phi is None or acc_phi.block_index != iv_phi.block_index:
+    if (
+        acc_phi is None or iv_phi is None or acc_phi.key == iv_phi.key
+        or acc_phi.block_index != iv_phi.block_index
+        or acc_phi.mnemonic != "MULTIEQUAL" or iv_phi.mnemonic != "MULTIEQUAL"
+    ):
         return failures + ["B5:loop_phis"]
     header_index = iv_phi.block_index
     fields = _transition_fields(members[0].transition_evidence_key)
@@ -165,41 +180,108 @@ def _check(analysis: Any, proposal: Any, members: List[Any]) -> List[str]:
         compare = snapshot.op(guard.compare_key)
         if not input_is_loop_invariant(snapshot, compare.inputs[guard.limit_operand], region):
             failures.append("T:limit_not_loop_invariant")
+    if failures:
+        return failures
 
-    # C / E / G / U / Z（候補の値の意味）
+    # C / E / G / U / Z（候補の値の意味。写しから作った式と照合する）
     base, loop = _split_members(members)
     if base is None or loop is None:
-        return failures + ["C:members"]
+        return ["C:members"]
     loop_value = loop.return_info.value
     ref = getattr(loop_value, "runtime_ref", None)
     operands = list(getattr(loop_value, "operands", None) or ())
     if not isinstance(ref, CountedLoopSummaryRef) or len(operands) != 3:
-        return failures + ["C:not_counted_sum"]
-    if step is not None and int(ref.induction_step) != step:
+        return ["C:not_counted_sum"]
+    if int(ref.induction_step) != step:
         failures.append("C:step")
-    if guard is not None and bool(ref.signed_loop) != guard.compare_mnemonic.startswith("INT_S"):
+    if bool(ref.signed_loop) != guard.compare_mnemonic.startswith("INT_S"):
         failures.append("C:signed")
     widths = {int(ref.result_size or 0), int(loop_value.size or 0),
               int(base.return_info.value.size or 0), int(acc_phi.output_size or 0)}
     if len(widths) != 1:
         failures.append("B2:candidate_width")
-    if _runtime_expression_signature(operands[1]) != evidence.start_signature:
-        failures.append("C:start")
-    if _runtime_expression_signature(operands[2]) != evidence.limit_signature:
-        failures.append("C:limit")
-    if _runtime_expression_signature(operands[0]) != evidence.initial_signature:
-        failures.append("C:loop_base")
-    if _runtime_expression_signature(base.return_info.value) != evidence.initial_signature:
-        failures.append("C:base_value")
-    if not _counted_loop_sum_semantics(loop_value, ref, None).exact_lowering_available:
+    if not project_loop_lowering(loop_value, ref, identity=None).exact_lowering_available:
         failures.append("E:not_exact")
-    if guard is not None and not failures:
-        failures.extend(_guard_failures(evidence, guard, base, loop))
+    if failures:
+        return failures
+    facts, fact_failure = _loop_facts(snapshot, header_index, region, iv_phi, acc_phi, guard)
+    if fact_failure is not None:
+        return [fact_failure]
+    # 引数は番号で同じ symbol になる。番号が同じで幅が違う出現は同じ値として比べない
+    widths_by_parameter = _parameter_widths(
+        facts.start, facts.limit, facts.initial, facts.next_value, facts.continue_condition.expression,
+        loop_value, base.return_info.value,
+        *(item.expression for member in (base, loop) for item in member.return_info.conditions or ()),
+        *(term[2] for term in tuple(ref.residue_bias_terms or ())),
+    )
+    if any(len(sizes) != 1 for sizes in widths_by_parameter.values()):
+        return ["C:parameter_width"]
+    for rule, candidate_value, fact in (
+        ("C:start", operands[1], facts.start), ("C:limit", operands[2], facts.limit),
+        ("C:loop_base", operands[0], facts.initial), ("C:base_value", base.return_info.value, facts.initial),
+    ):
+        if not value_queries.prove_values_equal_under(candidate_value, fact, ()):
+            failures.append(rule)
+    if failures:
+        return failures
+    failures.extend(_guard_failures(facts, guard, base, loop))
     if not failures:
-        failures.extend(_update_failures(evidence, ref))
+        failures.extend(_update_failures(facts, ref))
     if not failures:
         failures.extend(_zero_trip_failures(analysis, base))
     return failures
+
+
+class _LoopFacts:
+    """写しから作ったループの値（start・limit・初期値・1 回分の更新・続ける条件）。"""
+
+    __slots__ = ("start", "limit", "initial", "next_value", "continue_condition", "induction", "accumulator")
+
+    def __init__(self, **values: Any) -> None:
+        for name, value in values.items():
+            setattr(self, name, value)
+
+
+def _loop_facts(snapshot, header_index, region, iv_phi, acc_phi, guard) -> Tuple[Optional[_LoopFacts], Optional[str]]:
+    induction = Expression.parameter("__return_binding_iv", index=_INDUCTION_INDEX, size=int(iv_phi.output_size))
+    accumulator = Expression.parameter(
+        "__return_binding_acc", index=_ACCUMULATOR_INDEX, size=int(acc_phi.output_size),
+    )
+    iv_split = split_phi_inputs(snapshot, iv_phi, header_index, region)
+    acc_split = split_phi_inputs(snapshot, acc_phi, header_index, region)
+    if iv_split is None or acc_split is None or len(iv_split[0]) != 1 or len(acc_split[0]) != 1:
+        return None, "C:entry_edge"
+    if not acc_split[1]:
+        return None, "U:no_backedge"
+    # ループに入る前の値（帰納変数・accumulator に着いたら作れない: 入る前の値ではない）
+    entry = SnapshotLowering(snapshot, header_index=header_index, region=region)
+    # 1 回分の反復の値（header の PHI を placeholder にする）
+    iteration = SnapshotLowering(
+        snapshot, header_index=header_index, region=region,
+        leaves={iv_phi.key: induction, acc_phi.key: accumulator},
+    )
+    cbranch = snapshot.op(guard.cbranch_key)
+    block = snapshot.block(header_index)
+    try:
+        start = entry.value(iv_phi.inputs[iv_split[0][0]])
+        initial = entry.value(acc_phi.inputs[acc_split[0][0]])
+        limit = entry.value(snapshot.op(guard.compare_key).inputs[guard.limit_operand])
+    except LoweringFailure as exc:
+        return None, f"C:entry_value:{exc.reason}"
+    try:
+        condition = iteration.value(cbranch.inputs[1])
+        continue_condition = Condition(condition, block.true_successor not in region)
+        backedges = [
+            (iteration.edge_condition(block.predecessors[index], header_index), iteration.value(acc_phi.inputs[index]))
+            for index in acc_split[1]
+        ]
+        next_value = iteration.select(backedges, int(acc_phi.output_size))
+    except LoweringFailure as exc:
+        return None, f"U:update_not_lowerable:{exc.reason}"
+    return _LoopFacts(
+        start=start, limit=limit, initial=initial, next_value=next_value,
+        continue_condition=continue_condition, induction=induction, accumulator=accumulator,
+    ), None
 
 
 def _census_failures(analysis: Any, snapshot: Any) -> List[str]:
@@ -256,110 +338,131 @@ def _split_members(members: List[Any]) -> Tuple[Optional[Any], Optional[Any]]:
     return bases[0], loops[0]
 
 
-def _guard_failures(evidence: Any, guard: Any, base: Any, loop: Any) -> List[str]:
+def _guard_failures(facts: _LoopFacts, guard: Any, base: Any, loop: Any) -> List[str]:
     operator = "INT_SLESS" if guard.compare_mnemonic.startswith("INT_S") else "INT_LESS"
-    start, limit = evidence.start_expression, evidence.limit_expression
     entry = (
-        Expression.binary_op(operator, start, limit) if guard.continue_relation == "iv<L"
-        else Expression.binary_op(operator, limit, start)
+        Expression.binary_op(operator, facts.start, facts.limit) if guard.continue_relation == "iv<L"
+        else Expression.binary_op(operator, facts.limit, facts.start)
     )
     entry.size = 1
     out = []
-    if not _binding_smt.condition_sets_equivalent(list(loop.return_info.conditions or ()), [Condition(entry, False)]):
+    if not value_queries.condition_sets_equivalent(list(loop.return_info.conditions or ()), [Condition(entry, False)]):
         out.append("G:loop_guard")
-    if not _binding_smt.condition_sets_equivalent(list(base.return_info.conditions or ()), [Condition(entry, True)]):
+    if not value_queries.condition_sets_equivalent(list(base.return_info.conditions or ()), [Condition(entry, True)]):
         out.append("G:base_guard")
     return out
 
 
-def _loop_variables(expr: Any) -> bool:
+def _parameter_widths(*exprs: Any) -> dict:
+    """式に現れる関数の引数（番号 0 以上）ごとの幅の集合。"""
+
+    out: dict = {}
+    stack = list(exprs)
+    seen = set()
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if getattr(current, "expr_type", None) == ExpressionType.PARAMETER:
+            index = getattr(current, "value", None)
+            if isinstance(index, int) and index >= 0:
+                out.setdefault(index, set()).add(int(getattr(current, "size", 0) or 0))
+        if getattr(current, "expr_type", None) == ExpressionType.PHI:
+            for condition, value in getattr(current, "value", None) or ():
+                stack.extend((getattr(condition, "expression", None), value))
+        stack.extend(list(getattr(current, "operands", None) or ()))
+    return out
+
+
+def _mentions_loop_placeholder(expr: Any) -> bool:
     stack = [expr]
     while stack:
         current = stack.pop()
         if current is None:
             continue
-        if str(getattr(current, "name", "") or "").startswith("__loop"):
+        name = str(getattr(current, "name", "") or "")
+        if name.startswith("__loop") or name.startswith("__return_binding"):
+            return True
+        if getattr(current, "expr_type", None) == ExpressionType.PARAMETER and int(getattr(current, "value", 0) or 0) < -1:
             return True
         stack.extend(list(getattr(current, "operands", None) or ()))
     return False
 
 
-def _update_failures(evidence: Any, ref: Any) -> List[str]:
-    """更新 case の完全性と、候補の residue / bias の field を P-code の更新 case で検査する。"""
+def _update_failures(facts: _LoopFacts, ref: Any) -> List[str]:
+    """写しの 1 回分の更新が、候補の residue / bias から作る更新と等しいこと（続ける条件の下で）。"""
 
-    out = [f"U:{item}" for item in evidence.completeness.failures()]
-    cases = tuple(evidence.update_cases)
-    if not cases:
-        out.append("U:no_cases")
-    if out:
-        return out
+    model, failure = _candidate_update(facts, ref)
+    if failure is not None:
+        return [failure]
+    if not value_queries.prove_values_equal_under(facts.next_value, model, [facts.continue_condition]):
+        return ["U:update_mismatch"]
+    return []
+
+
+def _candidate_update(facts: _LoopFacts, ref: Any) -> Tuple[Optional[Expression], Optional[str]]:
+    """``acc + Σ[iv & (m-1) == r]·(c·iv + b + bias)``（候補の summary が仮定する 1 回分の更新）。"""
+
+    size = int(facts.accumulator.size)
     biases = {}
     for modulus, residue, bias_expr in tuple(ref.residue_bias_terms or ()):
-        if (int(modulus), int(residue)) in biases:
-            return ["U:bias_term_duplicate"]
-        if _loop_variables(bias_expr):
-            return ["U:bias_term_not_loop_invariant"]
-        biases[(int(modulus), int(residue))] = bias_expr
-    residue_cases = []
+        key = (int(modulus), int(residue))
+        if key in biases:
+            return None, "U:bias_term_duplicate"
+        if bias_expr is None or _mentions_loop_placeholder(bias_expr) or int(getattr(bias_expr, "size", 0) or 0) != size:
+            return None, "U:bias_term_shape"
+        biases[key] = bias_expr
+    cases = []
     for modulus, residue, coefficient, bias in tuple(ref.residue_cases or ()):
-        residue_cases.append(ResidueLoopCase(
-            int(modulus), int(residue), (int(coefficient), int(bias)),
-            bias_expr=biases.pop((int(modulus), int(residue)), None),
-        ))
+        cases.append((int(modulus), int(residue), int(coefficient), int(bias), biases.pop((int(modulus), int(residue)), None)))
     if biases:
-        return ["U:bias_term_without_residue"]
-    counter_name = getattr(evidence.induction_placeholder, "name", None) or "__loop_iv"
-    observed = _binding_smt.case_residues([case.conditions for case in cases], counter_name)
-    declared = {(case.modulus, case.residue) for case in residue_cases}
-    used = set()
-    for residue in observed:
-        if residue is None:
-            if declared != {(1, 0)}:
-                return ["U:case_residue_unknown"]
-            used.add((1, 0))
-        elif (int(residue[0]), int(residue[1])) not in declared:
-            return [f"U:case_residue_missing:{tuple(residue)}"]
-        else:
-            used.add((int(residue[0]), int(residue[1])))
-    if used != declared:
-        out.append("U:residue_unused")
-    model_cases = [
-        _UpdateCaseView(tuple(case.conditions), case.update_expression,
-                        _delta_view(case.update_expression, evidence.accumulator_placeholder))
-        for case in cases
-    ]
-    if any(item.delta_expr is None for item in model_cases):
-        return out + ["U:delta_unavailable"]
-    if not _binding_smt.update_cases_match_residues(
-        model_cases, residue_cases,
-        induction_placeholder=evidence.induction_placeholder,
-        accumulator_placeholder=evidence.accumulator_placeholder,
-    ):
-        out.append("U:update_mismatch")
-    if not _binding_smt.case_guards_are_total([case.conditions for case in cases]):
-        out.append("U:cases_not_total")
-    return out
+        return None, "U:bias_term_without_residue"
+    moduli = {case[0] for case in cases}
+    if len(moduli) != 1:
+        return None, "U:residue_moduli"
+    modulus = moduli.pop()
+    if modulus <= 0 or (modulus & (modulus - 1)) != 0:
+        return None, "U:residue_modulus"
+    if sorted(case[1] for case in cases) != list(range(modulus)):
+        return None, "U:residue_partition"
+    if any(case[2] != 0 for case in cases) and int(facts.induction.size) != size:
+        return None, "U:counter_width"
+    branches = []
+    for _modulus, residue, coefficient, bias, bias_expr in sorted(cases, key=lambda item: item[1]):
+        delta = _affine(facts.induction, coefficient, bias, bias_expr, size)
+        value = _binary("INT_ADD", facts.accumulator, delta, size)
+        if modulus == 1:
+            branches.append((None, value))
+            continue
+        mask = _binary("INT_AND", facts.induction, Expression.constant(modulus - 1, size=int(facts.induction.size)),
+                       int(facts.induction.size))
+        test = _binary("INT_EQUAL", mask, Expression.constant(residue, size=int(facts.induction.size)), 1)
+        branches.append((Condition(test, False), value))
+    if len(branches) == 1:
+        return branches[0][1], None
+    phi = Expression.phi(branches)
+    phi.size = size
+    return phi, None
 
 
-class _UpdateCaseView:
-    """builder の ``CountedLoopUpdateCase`` と同じ属性の読み取り専用の view。"""
+def _affine(counter: Expression, coefficient: int, bias: int, bias_expr: Optional[Expression], size: int) -> Expression:
+    mask = (1 << (8 * size)) - 1
+    total: Optional[Expression] = None
+    if coefficient:
+        total = _binary("INT_MULT", counter, Expression.constant(coefficient & mask, size=size), size)
+    if bias:
+        constant = Expression.constant(bias & mask, size=size)
+        total = constant if total is None else _binary("INT_ADD", total, constant, size)
+    if bias_expr is not None:
+        total = bias_expr if total is None else _binary("INT_ADD", total, bias_expr, size)
+    return total if total is not None else Expression.constant(0, size=size)
 
-    __slots__ = ("conditions", "update_expr", "delta_expr")
 
-    def __init__(self, conditions, update_expr, delta_expr) -> None:
-        self.conditions = conditions
-        self.update_expr = update_expr
-        self.delta_expr = delta_expr
-
-
-def _delta_view(update_expr: Any, accumulator_placeholder: Any) -> Optional[Any]:
-    """``update - acc``（builder の検査は delta と update の両方を見るので、update から作る）。"""
-
-    if update_expr is None or accumulator_placeholder is None:
-        return None
-    delta = Expression.binary_op("INT_SUB", update_expr, accumulator_placeholder)
-    delta.size = int(getattr(update_expr, "size", 0) or getattr(accumulator_placeholder, "size", 0) or 4)
-    return delta
+def _binary(operator: str, left: Expression, right: Expression, size: int) -> Expression:
+    expr = Expression.binary_op(operator, left, right)
+    expr.size = size
+    return expr
 
 
 def _has_unknown(expr: Any) -> bool:
@@ -382,9 +485,9 @@ def _zero_trip_failures(analysis: Any, base: Any) -> List[str]:
     for raw in tuple(getattr(analysis, "returns", ()) or ()):
         if raw.value is None or _has_unknown(raw.value):
             continue
-        if not _binding_smt.condition_sets_equivalent(list(raw.conditions or ()), conditions):
+        if not value_queries.condition_sets_equivalent(list(raw.conditions or ()), conditions):
             continue
-        if not _binding_smt.prove_values_equal_under(base.return_info.value, raw.value, conditions):
+        if not value_queries.prove_values_equal_under(base.return_info.value, raw.value, conditions):
             return ["Z:refuted_or_unknown"]
         used += 1
     return [] if used else ["Z:no_equivalent_exact_raw_return"]

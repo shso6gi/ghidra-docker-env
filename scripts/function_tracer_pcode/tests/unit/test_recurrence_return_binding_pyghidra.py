@@ -7,13 +7,15 @@
   結び付かない。修正前は promotion が成立して偽 NOT_EQ の根拠になった。修正後は拒否され、元の解析・
   proposal・process 全体の artifact cache は変わらず、pair は ABORTED で元の解析を返す。
 - loop2 の Eq ``newV``（``return`` が accumulator そのもの）の O0: promotion が成立し、artifact の
-  検証の証拠に ``return_binding`` の subproof が入る。
+  検証の証拠に ``return_binding`` の subproof が入る。写しの ``free`` な入力は引数の番号を持つ。
+- 別の解析の証拠を差し替えた proposal は、本物の promotion で拒否される（EV）。
 """
 
 from __future__ import annotations
 
 import copy
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -111,3 +113,22 @@ def test_accumulator_return_summary_is_promoted_with_a_return_binding_subproof(a
     kinds = [item["proof_kind"] for item in validation["subproofs"]]
     assert kinds[-1] == "return_binding"
     assert validation["schema_version"] == "recurrence_validation_evidence_v3"
+    rules = [item["proposition_key"] for item in validation["subproofs"] if item["proof_kind"] == "return_binding"]
+    from scripts.function_tracer_pcode.core.recurrence_contracts import RETURN_BINDING_RULES
+
+    assert tuple(rules[0][4]) == RETURN_BINDING_RULES
+    snapshot = proposal.return_binding_evidence.snapshot
+    parameters = {item.parameter_index for op in snapshot.ops for item in op.inputs if item.kind == "free"}
+    assert 0 in parameters  # limit `n` は引数 0
+
+
+def test_evidence_of_another_analysis_is_rejected_by_the_real_promotion(analyses):
+    from scripts.function_tracer_pcode.proof import recurrence_promotion as promotion
+
+    loop2, unchloop = analyses["loop2"], analyses["unchloop"]
+    swapped = replace(
+        _counted_proposal(loop2), return_binding_evidence=_counted_proposal(unchloop).return_binding_evidence,
+    )
+    with pytest.raises(ValueError, match="recurrence return binding unproven") as info:
+        promotion._prepare_side_for_proposal(loop2, "left", swapped)
+    assert "EV:" in str(info.value)

@@ -6,9 +6,11 @@ from typing import Any, Mapping, Tuple
 
 from scripts.function_tracer_pcode.core.recurrence_contracts import (
     RECURRENCE_UNARY_DOMAIN,
+    QuarantinedRecurrenceProposal,
     RecurrenceValidationEvidence,
     semantic_recurrence_closure_digest,
 )
+from scripts.function_tracer_pcode.core.recurrence_return_binding import validate_return_binding_subproof
 from scripts.function_tracer_pcode.proof.obligations.model import ProofArtifact
 from scripts.function_tracer_pcode.proof.cause_identity import (
     ProofRequirementContract,
@@ -136,8 +138,17 @@ def validate_recurrence_artifact_content(
     seed_core_digest: str,
     proposal_digest: str,
     function_recurrence_binding_digest: str,
+    proposal: QuarantinedRecurrenceProposal,
 ) -> RecurrenceValidationEvidence:
-    """Recompute the complete typed proof closure carried by an artifact."""
+    """Recompute the complete typed proof closure carried by an artifact.
+
+    ``proposal`` is the selected proposal object itself: the return binding
+    subproof (Issue #297) must bind exactly this proposal, its evidence and its
+    candidates, with every rule, at publication, storage and reuse alike.
+    """
+
+    if type(proposal) is not QuarantinedRecurrenceProposal or proposal.digest != proposal_digest:
+        raise ValueError("recurrence artifact validation needs the selected proposal")
 
     payload = artifact.payload
     if not isinstance(payload, Mapping):
@@ -159,6 +170,7 @@ def validate_recurrence_artifact_content(
         != function_recurrence_binding_digest
     ):
         raise ValueError("recurrence proof evidence binding mismatch")
+    validate_return_binding_subproof(evidence.subproofs, proposal)
     for key, expected in (
         ("seed_core_digest", seed_core_digest),
         ("proposal_digest", proposal_digest),
