@@ -578,7 +578,7 @@ def test_incomplete_residue_partition_is_rejected():
 
 
 @pytest.mark.parametrize("loop,reason", [
-    (_Loop(update="residue_load"), "U:update_not_lowerable:non_boolean_condition"),  # 分岐の条件が比較でない
+    (_Loop(update="residue_load"), "U:update_not_lowerable:unsupported:LOAD"),   # 分岐の条件を memory から読む
     (_Loop(update="load"), "U:update_not_lowerable:unsupported:LOAD"),           # 更新の入力を作れない
     (_Loop(update="nonparam"), "U:update_not_lowerable:free_input_not_parameter:register"),
     (_Loop(update="lzcount"), "U:update_not_lowerable:unsupported:LZCOUNT"),     # #300 の op は式にしない
@@ -839,8 +839,8 @@ def test_bias_made_of_values_that_may_change_in_the_loop_is_rejected(make):
     assert _Case(loop_value=_loop_value(bias=bias)).failures() == ("U:bias_term_shape",)
 
 
-def test_branch_condition_must_be_a_comparison():
-    # 1 byte の整数（INT_AND の結果）を分岐の条件として読まない
+def test_branch_on_a_byte_computation_uses_its_nonzero_value():
+    # 分岐の条件が 1 byte の整数の計算（`1 & 1`）でも、CBRANCH の定義どおり非ゼロで分岐する（常に偶数側）
     loop = _Loop(update="residue")
     ops = tuple(
         replace(op, opcode=OPC["INT_AND"], mnemonic="INT_AND", key=op.key[:6] + (OPC["INT_AND"],) + op.key[7:],
@@ -854,7 +854,233 @@ def test_branch_condition_must_be_a_comparison():
         for item in op.inputs)) for op in ops)
     blocks = tuple(replace(block, op_keys=tuple(renamed.get(key, key) for key in block.op_keys)) for block in loop.snapshot.blocks)
     loop.snapshot = PcodeDataflowSnapshot(FUNCTION, blocks, ops, parameters=loop.snapshot.parameters)
+    assert "U:update_mismatch" in _Case(loop, loop_value=_residue_value((1, None), (0, B))).failures()
+    assert _Case(loop, loop_value=_loop_value(bias=Expression.constant(1, size=4))).run()[0] == RETURN_BINDING_PROPOSITION
+
+
+# ---------------------------------------------------------------------------
+# PR #303 レビュー 3: 比較・bool の結果（P-code では size byte の 0 / 1）を整数として使う式、
+# CBRANCH の非ゼロ判定、COPY の循環
+# ---------------------------------------------------------------------------
+
+
+def _bool_byte_loop(build):
+    """``c += build(t)``（``t = (b == 0)`` は 1 byte の 0 / 1）。``build(t_input)`` は (ops, addend) を返す。"""
+
+    test = _key(0x70, 40, OPC["INT_EQUAL"], 5)
+    t_op = PcodeFactOp(test, OPC["INT_EQUAL"], "INT_EQUAL", 2, 1, (_param(1), _const(0)))
+    ops, addend = build(_op(test, 1))
+    return _Loop(addend=addend, body_prefix=(t_op,) + tuple(ops))
+
+
+def _seq(prefix):
+    counter = {"n": 0}
+
+    def make(mnemonic, size, *inputs):
+        counter["n"] += 1
+        key = _key(0x80 + counter["n"], 50 + counter["n"], OPC[mnemonic], 6 + counter["n"])
+        return PcodeFactOp(key, OPC[mnemonic], mnemonic, 2, size, tuple(inputs)), _op(key, size)
+
+    return make
+
+
+def _zext_of(make, inner_op, inner_item):
+    widened, item = make("INT_ZEXT", 4, inner_item)
+    return [inner_op, widened], item
+
+
+def _b_is_zero():
+    test = Expression.binary_op("INT_EQUAL", B, ZERO)
+    test.size = 1
+    return test
+
+
+def _bias(operator, *operands, size=4):
+    expr = Expression.binary_op(operator, *operands) if len(operands) == 2 else Expression.unary_op(operator, operands[0])
+    expr.size = size
+    return expr
+
+
+def test_comparison_shifted_as_a_byte_is_not_a_one_bit_value():
+    # 指摘 1 の例: `t = (b == 0); acc += zext(t << 1)`。b == 0 のとき加算値は 2（1 bit で計算すると 0）
+    make = _seq("shift")
+    loop = _bool_byte_loop(lambda t: _zext_of(make, *make("INT_LEFT", 1, t, _const(1))))
+    assert "U:update_mismatch" in _Case(loop, loop_value=_loop_value(bias=ZERO)).failures()
+    shifted = _bias("INT_ZEXT", _bias("INT_LEFT", _b_is_zero(), Expression.constant(1, size=4), size=1))
+    assert _Case(loop, loop_value=_loop_value(bias=shifted)).run()[0] == RETURN_BINDING_PROPOSITION
+    doubled = _bias("INT_MULT", _bias("INT_ZEXT", _b_is_zero()), Expression.constant(2, size=4))
+    assert _Case(loop, loop_value=_loop_value(bias=doubled)).run()[0] == RETURN_BINDING_PROPOSITION
+
+
+def test_sum_of_two_comparisons_is_two_not_zero():
+    make = _seq("add")
+    loop = _bool_byte_loop(lambda t: _zext_of(make, *make("INT_ADD", 1, t, t)))
+    assert "U:update_mismatch" in _Case(loop, loop_value=_loop_value(bias=ZERO)).failures()
+    doubled = _bias("INT_MULT", _bias("INT_ZEXT", _b_is_zero()), Expression.constant(2, size=4))
+    assert _Case(loop, loop_value=_loop_value(bias=doubled)).run()[0] == RETURN_BINDING_PROPOSITION
+
+
+def test_signed_comparison_reads_a_comparison_as_a_non_negative_byte():
+    # 1 byte の 1 は符号付きでも 1（1 bit の 1 は -1 なので `1 <s 0` が真になっていた）
+    make = _seq("slt")
+    loop = _bool_byte_loop(lambda t: _zext_of(make, *make("INT_SLESS", 1, t, _const(0, 1))))
+    assert _Case(loop, loop_value=_loop_value(bias=ZERO)).run()[0] == RETURN_BINDING_PROPOSITION
+    assert "U:update_mismatch" in _Case(loop, loop_value=_loop_value(bias=_bias("INT_ZEXT", _b_is_zero()))).failures()
+
+
+def test_comparison_as_the_high_half_of_a_piece_is_a_byte():
+    # PIECE(t, 0xff): t は上位の 1 byte（256 * t + 0xff）
+    make = _seq("piece")
+    loop = _bool_byte_loop(lambda t: _zext_of(make, *make("PIECE", 2, t, _const(0xFF, 1))))
+    expected = _bias("INT_ADD", _bias("INT_MULT", _bias("INT_ZEXT", _b_is_zero()), Expression.constant(256, size=4)),
+                     Expression.constant(0xFF, size=4))
+    assert _Case(loop, loop_value=_loop_value(bias=expected)).run()[0] == RETURN_BINDING_PROPOSITION
+    assert "U:update_mismatch" in _Case(loop, loop_value=_loop_value(bias=Expression.constant(0xFF, size=4))).failures()
+
+
+def test_widened_comparison_keeps_its_zero_one_value():
+    # 正例の維持: zext(t) は 0 / 1（修正の前後で同じ）
+    make = _seq("zext")
+
+    def build(t):
+        widened, item = make("INT_ZEXT", 4, t)
+        return [widened], item
+
+    loop = _bool_byte_loop(build)
+    assert _Case(loop, loop_value=_loop_value(bias=_bias("INT_ZEXT", _b_is_zero()))).run()[0] == RETURN_BINDING_PROPOSITION
+
+
+def _branch_loop(condition_input, extra_ops=(), parameters=None):
+    """``if (cond) c += 1; else c += b;``（residue の形の body の分岐の条件だけを差し替える）。"""
+
+    loop = _Loop(update="residue")
+    ops = []
+    for op in loop.snapshot.ops:
+        if op.key == loop.bcb:
+            op = replace(op, inputs=(op.inputs[0], condition_input))
+        if op.key in (loop.mask, loop.test):
+            continue
+        ops.append(op)
+    blocks = tuple(replace(block, op_keys=tuple(k for k in block.op_keys if k not in (loop.mask, loop.test))
+                           + ((tuple(o.key for o in extra_ops)) if block.index == 2 else ()))
+                   for block in loop.snapshot.blocks)
+    blocks = tuple(replace(block, op_keys=tuple(op.key for op in extra_ops) + block.op_keys) if block.index == 2
+                   and not any(op.key in block.op_keys for op in extra_ops) else block for block in blocks)
+    loop.snapshot = PcodeDataflowSnapshot(
+        FUNCTION, blocks, tuple(extra_ops) + tuple(ops),
+        parameters=parameters if parameters is not None else loop.snapshot.parameters,
+    )
+    return loop
+
+
+def _with_byte_parameter():
+    return _prototype() + (PcodeParameterFact(3, 1, (("register", 0x4018, 1),)),)
+
+
+K = Expression.parameter("param_4", index=3, size=1, storage_info=_storage(3, 1))
+
+
+def test_branch_on_a_one_byte_parameter_tests_it_against_zero():
+    # 指摘 2: CBRANCH は非ゼロで分岐する。1 byte の引数を直接条件にする分岐を `k != 0` として扱う
+    loop = _branch_loop(_param(3, 1), parameters=_with_byte_parameter())
+    nonzero = Expression.binary_op("INT_NOTEQUAL", K, Expression.constant(0, size=1))
+    nonzero.size = 1
+    selected = _phi(Condition(nonzero, False), Expression.constant(1, size=4), B)
+    assert _Case(loop, loop_value=_loop_value(bias=selected)).run()[0] == RETURN_BINDING_PROPOSITION
+    # k の最下位 bit だけで選ぶ候補（k == 2 で違う）は拒否する
+    low_bit = Expression.binary_op("INT_AND", K, Expression.constant(1, size=1))
+    low_bit.size = 1
+    odd = Expression.binary_op("INT_EQUAL", low_bit, Expression.constant(1, size=1))
+    odd.size = 1
+    wrong = _phi(Condition(odd, False), Expression.constant(1, size=4), B)
+    assert "U:update_mismatch" in _Case(loop, loop_value=_loop_value(bias=wrong)).failures()
+
+
+def test_bool_operations_still_need_zero_one_inputs():
+    # BOOL_* は byte の bit 演算（Ghidra）。1 byte の引数（0 / 1 とは限らない）を被演算子にしない
+    both = _key(0x90, 60, OPC["BOOL_AND"], 9)
+    op = PcodeFactOp(both, OPC["BOOL_AND"], "BOOL_AND", 2, 1, (_param(3, 1), _param(3, 1)))
+    loop = _branch_loop(_op(both, 1), extra_ops=(op,), parameters=_with_byte_parameter())
     assert "U:update_not_lowerable:non_boolean_condition" in _Case(loop, loop_value=_residue_value((1, None), (0, B))).failures()
+
+
+def test_self_referential_copy_stops_and_is_not_proved():
+    # 指摘 3: 自己参照の COPY（不正な SSA）を辿る検査が止まり、証明できないとして扱う
+    self_copy = _key(0x94, 61, OPC["COPY"], 10)
+    op = PcodeFactOp(self_copy, OPC["COPY"], "COPY", 2, 1, (_op(self_copy, 1),))
+    loop = _branch_loop(_op(self_copy, 1), extra_ops=(op,))
+    lowering = _lowering(loop.snapshot)
+    assert not lowering._is_boolean(_op(self_copy, 1))
+    with pytest.raises(LoweringFailure, match="cycle"):
+        lowering.branch_test(_op(self_copy, 1))
+    assert "U:update_not_lowerable:cycle" in _Case(loop, loop_value=_residue_value((1, None), (0, B))).failures()
+
+
+def test_copy_chain_of_a_comparison_is_still_a_boolean():
+    # 正例の維持: COPY を通った比較の結果は 0 / 1 のまま
+    loop = _Loop(update="residue")
+    copy_key = _key(0x96, 62, OPC["COPY"], 11)
+    op = PcodeFactOp(copy_key, OPC["COPY"], "COPY", 2, 1, (_op(loop.test, 1),))
+    ops = tuple(replace(o, inputs=(o.inputs[0], _op(copy_key, 1))) if o.key == loop.bcb else o for o in loop.snapshot.ops)
+    blocks = tuple(replace(b, op_keys=b.op_keys[:-1] + (copy_key, b.op_keys[-1])) if b.index == 2 else b
+                   for b in loop.snapshot.blocks)
+    loop.snapshot = PcodeDataflowSnapshot(FUNCTION, blocks, ops + (op,), parameters=loop.snapshot.parameters)
+    assert _lowering(loop.snapshot)._is_boolean(_op(copy_key, 1))
+    assert _Case(loop, loop_value=_residue_value((1, None), (0, B))).run()[0] == RETURN_BINDING_PROPOSITION
+
+
+def _bool_producer_cases():
+    for operator, left, right in (("INT_EQUAL", 0, 0), ("INT_SLESS", 0x80, 0x7F), ("INT_LESS", 1, 0), ("INT_NOTEQUAL", 2, 2)):
+        yield operator, left, right, _reference(operator, ((left, 1), (right, 1)), 1)
+
+
+def _combination_consumers():
+    out = []
+    for operator in ("INT_ADD", "INT_SUB", "INT_MULT", "INT_XOR"):
+        for constant in (1, 0x7F, 0x80, 0xFF):
+            out.append((operator, ("t", constant), 1))
+        out.append((operator, ("t", "t"), 1))
+    for operator in ("INT_LEFT", "INT_RIGHT", "INT_SRIGHT"):
+        for amount, amount_size in ((1, 1), (7, 4), (8, 8)):
+            out.append((operator, ("t", (amount, amount_size)), 1))
+        out.append((operator, ((0x80, 1), "t"), 1))
+    for operator in ("INT_SLESS", "INT_SLESSEQUAL", "INT_LESS", "INT_EQUAL"):
+        out.append((operator, ("t", 0), 1))
+        out.append((operator, ("t", "t"), 1))
+    out.append(("PIECE", ("t", (0xFF, 1)), 2))
+    out.append(("PIECE", ((0x81, 1), "t"), 2))
+    return out
+
+
+def test_comparison_results_used_as_integers_match_the_pcode_reference_semantics():
+    # 独立の参照（P-code の定義、比較の出力は 1 byte の 0 / 1）と、lowering + 共有の SMT 描画を、比較の
+    # 結果を算術・シフト（値・量）・符号付き / 符号なし比較・結合に渡す組み合わせで照合する
+    mismatches = []
+    for producer, left, right, truth in _bool_producer_cases():
+        for consumer, operands, out in _combination_consumers():
+            key = _key(0x10, 0, OPC[producer])
+            ops = [PcodeFactOp(key, OPC[producer], producer, 0, 1, (_const(left, 1), _const(right, 1)))]
+            inputs, reference = [], []
+            for operand in operands:
+                if operand == "t":
+                    inputs.append(_op(key, 1))
+                    reference.append((truth, 1))
+                elif isinstance(operand, tuple):
+                    inputs.append(_const(*operand))
+                    reference.append(operand)
+                else:
+                    inputs.append(_const(operand, 1))
+                    reference.append((operand, 1))
+            outer = _key(0x20, 1, OPC[consumer])
+            ops.append(PcodeFactOp(outer, OPC[consumer], consumer, 0, out, tuple(inputs)))
+            snapshot = PcodeDataflowSnapshot(
+                FUNCTION, (PcodeFactBlock(0, _block_key(0), (), (), None, None, tuple(op.key for op in ops)),), tuple(ops),
+            )
+            lowered = SnapshotLowering(snapshot, header_index=9, region=frozenset()).value(_op(outer, out))
+            expected = _reference(consumer, tuple(reference), out)
+            if not value_queries.prove_values_equal_under(lowered, Expression.constant(expected, size=out), ()):
+                mismatches.append((producer, left, right, consumer, operands, expected))
+    assert mismatches == []
 
 
 def test_every_lowered_mnemonic_is_in_the_opcode_table():

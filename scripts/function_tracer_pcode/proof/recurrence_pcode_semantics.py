@@ -12,8 +12,11 @@ return binding の proof は、producer（builder・tracer）が作った式を�
   storage の引数の ``free`` な入力は作れない。
 - シフトは量の幅が値と違ってもよい（量が値の bit 数以上なら 0、算術右シフトは符号で埋める）。この意味は
   共有の SMT 描画（``core.render_smt``）が持つ。
-- 分岐の条件と bool 演算の入力は、比較・bool 演算の結果（と 0 / 1 の定数）に限る（1 byte の整数を
-  真偽として読む規則を持ち込まない）。
+- 分岐（``CBRANCH``）の条件は 1 byte の値で、非ゼロなら分岐する（比較・bool 演算の結果はそのまま、
+  それ以外の値は ``value != 0``）。bool 演算（``BOOL_*``）の入力は 0 / 1（比較・bool 演算の結果）に限る
+  （Ghidra の bool 演算は byte の bit 演算なので、0 / 1 以外では非ゼロを真とする論理演算と一致しない）。
+- 比較・bool 演算の結果を整数として使う式（算術・シフト・結合・符号付き比較）の意味は、共有の SMT
+  描画の ``boolean_value_bits``（size byte の 0 / 1）が持つ。
 - ループの値: header の帰納変数・accumulator の PHI は呼び出し側が渡す placeholder にする。header の
   他の PHI（別のループ運搬値）は作れない。header を除いた region は循環が無い（呼び出し側が T6 で
   確かめる）ので、body の MULTIEQUAL は、入辺の **経路条件**（header からその辺までの分岐条件の論理積の
@@ -94,13 +97,38 @@ class SnapshotLowering:
         return self._op_value(item.producer_key, item.size)
 
     def condition(self, item: PcodeFactInput) -> Expression:
-        """真偽として読む入力（分岐の条件・bool 演算の被演算子）。比較・bool 演算の結果に限る。"""
+        """bool 演算（``BOOL_*``）の被演算子。値が 0 / 1 であること（比較・bool 演算の結果）を要求する。
+
+        Ghidra の ``BOOL_AND`` / ``BOOL_OR`` / ``BOOL_XOR`` / ``BOOL_NEGATE`` は byte の値の bit 演算で、
+        0 / 1 以外の入力では「非ゼロを真」と読んだ論理演算と一致しない。分岐の条件（非ゼロを真と読む）は
+        :meth:`branch_test` で別に扱う。
+        """
 
         if not self._is_boolean(item):
             raise LoweringFailure("non_boolean_condition")
         return self.value(item)
 
+    def branch_test(self, item: PcodeFactInput) -> Expression:
+        """``CBRANCH`` の条件（1 byte の値で、**非ゼロ** なら分岐する）を真偽の式にする。
+
+        比較・bool 演算の結果（0 / 1）はそのまま使う。それ以外の 1 byte の値（例: 1 byte の引数）は
+        ``value != 0`` にする（P-code の CBRANCH の定義どおり）。
+        """
+
+        if item.size != 1:
+            raise LoweringFailure("branch_condition_width")
+        if self._is_boolean(item):
+            return self.value(item)
+        test = Expression.binary_op("INT_NOTEQUAL", self.value(item), Expression.constant(0, size=1))
+        test.size = 1
+        return test
+
     def _is_boolean(self, item: PcodeFactInput) -> bool:
+        """値が 0 / 1 に限られる 1 byte の入力か（比較・bool 演算の結果、COPY を辿る。0 / 1 の定数）。
+
+        COPY は上限（``max_ops``）まで辿り、循環（不正な SSA）や上限超過は 0 / 1 と言えないので偽にする。
+        """
+
         if item.size != 1:
             return False
         if item.kind == "constant":
@@ -108,7 +136,11 @@ class SnapshotLowering:
         if item.kind != "op":
             return False
         op = self._snapshot.op(item.producer_key)
+        visited = set()
         while op is not None and op.mnemonic == "COPY" and len(op.inputs) == 1 and op.inputs[0].kind == "op":
+            if op.key in visited or len(visited) >= self._max_ops:
+                return False
+            visited.add(op.key)
             op = self._snapshot.op(op.inputs[0].producer_key)
         return op is not None and op.mnemonic in _BOOLEAN_RESULT
 
@@ -282,9 +314,9 @@ class SnapshotLowering:
             self._snapshot.op(key) for key in block.op_keys
             if self._snapshot.op(key).mnemonic == "CBRANCH"
         ]
-        if len(cbranches) != 1 or len(cbranches[0].inputs) < 2 or cbranches[0].inputs[1].size != 1:
+        if len(cbranches) != 1 or len(cbranches[0].inputs) < 2:
             raise LoweringFailure("branch_condition_shape")
-        condition = self.condition(cbranches[0].inputs[1])
+        condition = self.branch_test(cbranches[0].inputs[1])
         if target == block.true_successor:
             return condition
         negated = Expression.unary_op("BOOL_NEGATE", condition)

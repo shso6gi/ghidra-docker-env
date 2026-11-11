@@ -276,7 +276,7 @@ def _loop_facts(snapshot, header_index, region, iv_phi, acc_phi, guard) -> Tuple
     except LoweringFailure as exc:
         return None, f"C:entry_value:{exc.reason}"
     try:
-        condition = iteration.condition(cbranch.inputs[1])
+        condition = iteration.branch_test(cbranch.inputs[1])
         continue_condition = Condition(condition, block.true_successor not in region)
         backedges = [
             (iteration.edge_condition(block.predecessors[index], header_index), iteration.value(acc_phi.inputs[index]))
