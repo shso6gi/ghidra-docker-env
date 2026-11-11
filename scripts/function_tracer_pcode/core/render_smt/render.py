@@ -1117,8 +1117,9 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
         left = operands[0]
         right = operands[1]
 
-        left_bits = expression_smt_bit_width(left)
-        right_bits = expression_smt_bit_width(right)
+        # 被演算子は P-code の値の幅で読む（比較・bool の結果は size byte の 0 / 1。`boolean_value_bits`）
+        left_bits = expression_value_bit_width(left)
+        right_bits = expression_value_bit_width(right)
 
         if expr.operator in [
             "INT_EQUAL",
@@ -1612,4 +1613,5 @@ from scripts.function_tracer_pcode.core.render_smt.widths import (
     _piece_subpiece_width_issue,
     _preferred_arithmetic_width,
     expression_smt_bit_width,
+    expression_value_bit_width,
 )
