@@ -979,6 +979,10 @@ def solve_query_after_guard(
     )
     stage2_result.last_query = full_query
     stage2_result.pair_stage = "with-ineq"
+    if stage2_result.is_equivalent is False:
+        stage2_result = resolve_witness_in_ub_domain(
+            strategy, base_ctx, full_query, stage2_result, pair_id,
+        )
 
     if (
         stage2_result.is_equivalent is None
@@ -1041,6 +1045,55 @@ def solve_query_after_guard(
     # semantic blocker, when present, was established independently above.
 
     return stage2_result
+
+
+def resolve_witness_in_ub_domain(
+    strategy,
+    base_ctx: Dict[str, Any],
+    value_query: str,
+    sat_result: QueryResult,
+    pair_id: str,
+) -> QueryResult:
+    """SAT の model が反例の領域の外なら、領域の中の model を探し直す（Issue #298）。
+
+    value query は比べる case の演算の UB 除外だけを課すので、model が他の演算の UB を
+    起こす入力になることがある。そのまま捨てると、領域の中に正しい witness があっても
+    NOT_EQ を失う。value query に反例の領域（両方の関数の全ての演算の制約）を足して
+    解き直し、SAT ならその model を witness の候補にする（呼び手は改めて領域・他の検証を
+    確かめる）。UNSAT・決まらないときは元の結果を返す（呼び手が witness にしない）。
+    UNSAT は EQ の証拠に使わない（制約を上から近似した query なので）。
+    """
+    if counterexample_ub_domain_status(
+        strategy, base_ctx, sat_result.counterexample_raw,
+    ) is not False:
+        return sat_result
+    premise = base_ctx.get(UB_PREMISE_KEY)
+    domain_lines = tuple(premise.witness_domain_lines()) if premise is not None else ()
+    head, sep, tail = value_query.rpartition("(check-sat)")
+    if not sep or not domain_lines:
+        return sat_result
+    domain_query = "\n".join((
+        head.rstrip("\n"),
+        "; Counterexample domain: no undefined behaviour in either function (Issue #298)",
+        *domain_lines,
+        sep + tail,
+    ))
+    stats = getattr(strategy, "_active_normalization_stats", None)
+    retried = strategy._solve_query_internal(
+        domain_query,
+        pair_id,
+        stage="with-ineq-ub-domain",
+        use_hard_timeout=True,
+    )
+    found = retried.is_equivalent is False and bool(retried.counterexample_raw)
+    if stats is not None:
+        key = "ub_witness_domain_resolved" if found else "ub_witness_domain_unresolved"
+        stats[key] = stats.get(key, 0) + 1
+    if not found:
+        return sat_result
+    retried.last_query = domain_query
+    retried.pair_stage = "with-ineq-ub-domain"
+    return retried
 
 
 def decide_pair_ub_obligations(

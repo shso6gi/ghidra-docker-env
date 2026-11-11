@@ -116,7 +116,11 @@ def _fg(name, zero_value):
 def test_constraint_of_another_path_does_not_exclude_a_legal_counterexample():
     result = run_production_check("i298-fg", _fg("f", 0), _fg("g", 1))
 
-    assert _outcome(result) != "EQUIVALENT"
+    # x = 0 は正しい反例だが、反例の領域は関数全体の UB 除外を無条件に課す（どの演算が
+    # 実行されるかを binary の経路から示せない）ので、x = 0 を witness にできない。
+    # EQ にも NOT_EQ にもせず、理由つきの UNKNOWN にする。
+    assert _outcome(result) == "UNKNOWN"
+    assert "counterexample_ub_domain_violated" in _reason_ids(result)
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +158,7 @@ def test_hashcode_shape_is_not_equivalent_through_a_vacuous_premise():
         "i298-hash", _hash("left", mix_high=True), _hash("right", mix_high=False),
     )
 
-    assert _outcome(result) != "EQUIVALENT"
+    assert _outcome(result) == "NOT_EQ"
 
 
 def test_hashcode_shape_against_itself_stays_equivalent():
@@ -189,8 +193,8 @@ def test_unsatisfiable_ub_premise_is_not_equivalence_evidence():
     )
 
     assert (result.get("solver_results") or {}).get("is_equivalent") is not True
-    assert _outcome(result) != "EQUIVALENT"
-    assert _outcome(result) != "NOT_EQUIVALENT"
+    assert _outcome(result) == "UNKNOWN"
+    assert "counterexample_ub_domain_violated" in _reason_ids(result)
 
 
 # ---------------------------------------------------------------------------
@@ -281,8 +285,41 @@ def _always_ub(name, *, shifted):
 def test_ub_alone_emptying_a_reachable_case_pair_is_not_equivalence_evidence():
     result = run_production_check("i298-always-ub", _always_ub("f", shifted=True), _always_ub("g", shifted=False))
 
-    assert _outcome(result) != "EQUIVALENT"
-    assert _outcome(result) != "NOT_EQUIVALENT"
+    assert _outcome(result) == "UNKNOWN"
+    assert "counterexample_ub_domain_violated" in _reason_ids(result)
+
+
+def _narrow_domain(name, *, low_value):
+    """``name(n) = n >= 10 ? n + low_value : 1u << (n ^ 0x12340)``（unsigned）。
+
+    shift の UB 除外 ``(n ^ 0x12340) < 32`` は n を 0x12340..0x1235f に限る。f（low_value=0）と
+    g（low_value=1）は n >= 10 の経路で常に違う。この経路は shift を実行しないので、n = 10 も
+    正しい反例だが、反例の領域（両方の関数の全ての演算の制約を無条件に課す）は
+    n = 0x12340..0x1235f の witness だけを認める。value query の model が領域の外に出ても、
+    領域の中で解き直せば witness が見つかる（base では UB 除外が全ての query の前提に入り
+    NOT_EQUIVALENT）。
+    """
+
+    n = _param("n", 4, "uint", 0)
+    big = Condition(_bin("INT_LESS", n, _const(10, 4)), True)
+    shift = _bin("INT_LEFT", _const(1, 4), _bin("INT_XOR", n, _const(0x12340, 4)))
+    return _analysis(
+        name,
+        [_descriptor("n", 4, "uint", False, 0)],
+        [
+            ReturnInfo("0x10", _bin("INT_ADD", n, _const(low_value, 4)), [big]),
+            ReturnInfo("0x20", shift, [Condition(big.expression, False)]),
+        ],
+        return_type="uint",
+    )
+
+
+def test_witness_outside_the_ub_domain_is_searched_again_inside_it():
+    result = run_production_check(
+        "i298-narrow-domain", _narrow_domain("f", low_value=0), _narrow_domain("g", low_value=1),
+    )
+
+    assert _outcome(result) == "NOT_EQ"
 
 
 # ---------------------------------------------------------------------------
