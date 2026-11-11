@@ -2495,6 +2495,7 @@ def test_real_checker_recurrence_blocker_uses_exact_v2_reason():
 
 def _validated_side_promotion():
     from scripts.function_tracer_pcode.tests.unit.test_recurrence_proof_contract import (
+        _bound_proposal,
         _content_bound_artifact,
     )
 
@@ -2502,7 +2503,8 @@ def _validated_side_promotion():
     seed = RecurrenceSeedCore(
         source.outcome_function_identity(), ("active",), (), ("pure",)
     )
-    proposal = _proposal(seed.digest, "unit-step")
+    # Issue #297: 完了の検査は artifact の return binding の subproof を proposal の証拠と照合する
+    proposal = _bound_proposal(seed, "unit-step")
     premise = "a" * 64
     target = (
         "function_recurrence_promotion_v1",
@@ -2544,6 +2546,21 @@ def _validated_side_promotion():
     return RecurrenceSidePromotion(
         "left", source, successor, proposal, seed, entry
     )
+
+
+def test_recurrence_completion_rechecks_the_return_binding_evidence():
+    # Issue #297: proof の後に証拠の中身が変わった proposal の promotion は、完了の signal にならない
+    from scripts.function_tracer_pcode.tests.unit.test_recurrence_proof_contract import (
+        _return_binding_evidence,
+    )
+
+    side = _validated_side_promotion()
+    RecurrenceValidationCompletionSignal.from_side_promotion(side)
+    object.__setattr__(
+        side.proposal.return_binding_evidence, "snapshot", _return_binding_evidence(7).snapshot,
+    )
+    with pytest.raises(ValueError, match="changed after"):
+        RecurrenceValidationCompletionSignal.from_side_promotion(side)
 
 
 def test_recurrence_completion_signal_requires_exact_validated_promotion():

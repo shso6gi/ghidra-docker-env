@@ -24,6 +24,7 @@ from scripts.function_tracer_pcode.analysis.recurrence import (
     proof_utils as _svc_proof_utils,
     readonly_reduction as _svc_readonly_reduction,
     return_region as _svc_return_region,
+    return_binding as _svc_return_binding,
     state_transition as _svc_state_transition,
     unrolled_tail as _svc_unrolled_tail,
     vectorized_reduction as _svc_vectorized_reduction,
@@ -260,6 +261,13 @@ class StructuralRecurrenceSummarizer:
     _try_summarize_counted_scalar_loop = _svc_counted_loop._impl__try_summarize_counted_scalar_loop
     _unique_multiequal_accumulator_update_input = _svc_counted_loop._impl__unique_multiequal_accumulator_update_input
     _validate_counted_loop_update_cases = _svc_counted_loop._impl__validate_counted_loop_update_cases
+    # recurrence.return_binding (Issue #297)
+    _capture_pcode_dataflow_snapshot = _svc_return_binding._impl__capture_pcode_dataflow_snapshot
+    _counted_loop_return_binding_evidence = _svc_return_binding._impl__counted_loop_return_binding_evidence
+    # 式の SMT の query（P-code を読まない）の公開の service（Issue #297）。``value_queries`` だけが使う
+    # 入口で、builder の内部の検査と同じ実装を共有する（同じ意味の query を 2 つ持たない）
+    expression_query_symbols = _svc_return_region._impl__collect_summary_parameter_specs
+    prove_expressions_equal_under_conditions = _svc_guard_proof._impl__prove_expression_equivalence_under_conditions
     _varnode_aliases_accumulator_object = _svc_counted_loop._impl__varnode_aliases_accumulator_object
     _varnode_is_accumulator_update_for_phi = _svc_counted_loop._impl__varnode_is_accumulator_update_for_phi
     try_summarize_pre_return_counted_scalar_loop = _svc_counted_loop._impl_try_summarize_pre_return_counted_scalar_loop

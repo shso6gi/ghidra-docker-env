@@ -40,6 +40,7 @@ from scripts.function_tracer_pcode.proof.obligations.model import ProofArtifact,
 from scripts.function_tracer_pcode.proof.obligations.recurrence import recurrence_proof_requirement
 from scripts.function_tracer_pcode.proof.obligations.runtime import ObligationRuntimeSession
 from scripts.function_tracer_pcode.proof.obligations.snapshot import AnalysisSnapshot
+from scripts.function_tracer_pcode.proof.recurrence_return_binding import validated_return_binding
 
 
 RECURRENCE_DOMAIN_CONTRACT = (
@@ -838,6 +839,11 @@ def _prepare_side_for_proposal(
             "recurrence acceptance failed:" + ",".join(accepted.blockers)
         )
     accepted = _bind_accepted_candidates_to_proposal(accepted, proposal)
+    # Issue #297: summary が関数の RETURN の値を表すこと（遷移の正しさとは別の命題）。successor・
+    # seed・artifact を作る前に検査し、示せなければ ValueError で ABORTED にする（元の解析は変えない）。
+    return_binding_proposition = validated_return_binding(
+        analysis, proposal, tuple(accepted.candidates)
+    )
     seed = _seed_core(analysis, proposal, tuple(accepted.candidates))
     successor = analysis.with_accepted_return_partition(
         list(accepted.accepted_returns),
@@ -961,13 +967,19 @@ def _prepare_side_for_proposal(
         "recurrence_effect_surface_validator_v2",
         dependencies=(candidate_proof.digest,),
     )
+    return_binding_proof = RecurrenceSubproofEvidence(
+        "return_binding",
+        return_binding_proposition,
+        "recurrence_return_binding_validator_v2",
+        dependencies=(candidate_proof.digest, transition_proof.digest),
+    )
     validation_evidence = RecurrenceValidationEvidence(
         seed.digest,
         proposal.digest,
         binding,
         (
             candidate_proof, transition_proof, overlap_proof,
-            coverage_proof, effect_proof,
+            coverage_proof, effect_proof, return_binding_proof,
         ),
     )
     closure = semantic_recurrence_closure_digest(

@@ -1117,8 +1117,9 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
         left = operands[0]
         right = operands[1]
 
-        left_bits = expression_smt_bit_width(left)
-        right_bits = expression_smt_bit_width(right)
+        # 被演算子は P-code の値の幅で読む（比較・bool の結果は size byte の 0 / 1。`boolean_value_bits`）
+        left_bits = expression_value_bit_width(left)
+        right_bits = expression_value_bit_width(right)
 
         if expr.operator in [
             "INT_EQUAL",
@@ -1210,10 +1211,27 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
             left_smt = _coerce_bool_to_bitvec(left, left_smt, left_bits)
             right_smt = _coerce_bool_to_bitvec(right, right_smt, right_bits)
             shift_bits = left_bits
-            if right_bits != shift_bits:
-                right_smt = _coerce_smt_bitvec_width(right_smt, right_bits, shift_bits)
             op = expr._get_smt_operator(expr.operator)
-            shifted_smt = f"({op} {left_smt} {right_smt})"
+            if right_bits > shift_bits > 0:
+                # P-code のシフト量は被演算子と幅が違ってよく、量が被演算子の bit 数以上なら
+                # 結果は 0（INT_SRIGHT は符号の bit で埋める）。量を被演算子の幅へ切り詰めると
+                # 上位の bit が消え、例えば 32 bit の値の 2^32 bit のシフトが 0 bit のシフトに
+                # なる。量を元の幅のまま比べ、範囲内のときだけ切り詰めた量でシフトする。
+                limit = f"(_ bv{shift_bits} {right_bits})"
+                in_range = (
+                    f"({op} {left_smt} "
+                    f"{_coerce_smt_bitvec_width(right_smt, right_bits, shift_bits)})"
+                )
+                overflow = (
+                    f"(bvashr {left_smt} (_ bv{shift_bits - 1} {shift_bits}))"
+                    if expr.operator == "INT_SRIGHT"
+                    else f"(_ bv0 {shift_bits})"
+                )
+                shifted_smt = f"(ite (bvuge {right_smt} {limit}) {overflow} {in_range})"
+            else:
+                if right_bits != shift_bits:
+                    right_smt = _coerce_smt_bitvec_width(right_smt, right_bits, shift_bits)
+                shifted_smt = f"({op} {left_smt} {right_smt})"
             return _coerce_smt_bitvec_width(
                 shifted_smt,
                 shift_bits,
@@ -1595,4 +1613,5 @@ from scripts.function_tracer_pcode.core.render_smt.widths import (
     _piece_subpiece_width_issue,
     _preferred_arithmetic_width,
     expression_smt_bit_width,
+    expression_value_bit_width,
 )

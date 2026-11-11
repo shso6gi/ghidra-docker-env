@@ -350,6 +350,7 @@ class ObligationRuntimeSession:
             seed_core_digest=semantic_seed.digest,
             proposal_digest=proposal_digest,
             function_recurrence_binding_digest=binding_digest,
+            proposal=selected_proposal,
         )
         source_record = self.view_records.get(artifact.produced_from_view_id)
         if source_record is None:
@@ -376,7 +377,7 @@ class ObligationRuntimeSession:
             proposal_digest=proposal_digest,
             function_recurrence_binding_digest=binding_digest,
         )
-        self.unary_artifact_cache.put_recurrence(entry)
+        self.unary_artifact_cache.put_recurrence(entry, proposal=selected_proposal)
         return entry
 
     def import_unary_artifact_for_analysis(
@@ -462,6 +463,7 @@ class ObligationRuntimeSession:
                 seed_core_digest=seed.digest,
                 proposal_digest=proposal_digest,
                 function_recurrence_binding_digest=binding_digest,
+                proposal=selected_recurrence_proposal,
             )
             cached = self.unary_artifact_cache.get_recurrence(
                 entry.artifact.requirement_id.to_key(),

@@ -202,6 +202,13 @@ class ValidatedUnaryArtifactCache:
         )
 
     def put(self, entry: ValidatedUnaryArtifactEntry) -> None:
+        if UnaryArtifactDomain.normalize(entry.domain) == UnaryArtifactDomain.RECURRENCE_SUMMARY_V1.value:
+            # Issue #297: a recurrence artifact is stored only with the proposal it
+            # proves (``put_recurrence`` re-validates the return binding subproof).
+            raise ValueError("recurrence artifacts must be stored with their selected proposal")
+        self._store(entry)
+
+    def _store(self, entry: ValidatedUnaryArtifactEntry) -> None:
         if not entry.artifact.is_validated:
             raise ValueError("unary cache accepts only validated artifacts")
         if not entry.attempt_candidate_independent:
@@ -302,7 +309,7 @@ class ValidatedUnaryArtifactCache:
             self._entries.move_to_end(key)
             return entry
 
-    def put_recurrence(self, entry: ValidatedUnaryArtifactEntry) -> None:
+    def put_recurrence(self, entry: ValidatedUnaryArtifactEntry, *, proposal: Any) -> None:
         if entry.domain != UnaryArtifactDomain.RECURRENCE_SUMMARY_V1.value:
             raise ValueError("put_recurrence requires the recurrence domain")
         validate_recurrence_artifact_content(
@@ -312,8 +319,9 @@ class ValidatedUnaryArtifactCache:
             function_recurrence_binding_digest=str(
                 entry.function_recurrence_binding_digest or ""
             ),
+            proposal=proposal,
         )
-        self.put(entry)
+        self._store(entry)
 
     def get_recurrence(
         self,

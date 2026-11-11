@@ -475,6 +475,17 @@ def _impl__build_counted_scalar_loop_summary(
         f"step={induction.step}, "
         f"cases={[(case.modulus, case.residue, case.affine) for case in residue_cases]})"
     )
+    # Issue #297: summary が RETURN の値を表すことの証拠（P-code の写しと、ループの PHI の key）を
+    # 両 member に付ける。判定は promotion の proof が、写しから作った値と候補を照合して行う。
+    binding_evidence = self._counted_loop_return_binding_evidence(
+        high_function=high_function,
+        analysis=analysis,
+        induction=induction,
+        accumulator=accumulator,
+    )
+    summarized = [
+        replace(item, summary_return_binding_evidence=binding_evidence) for item in summarized
+    ]
     return summarized, "counted_scalar_loop_summary"
 
 

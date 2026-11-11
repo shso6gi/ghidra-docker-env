@@ -24,6 +24,38 @@ def expression_smt_bit_width(expr) -> int:
     return evaluate_attribute(expr, _node_smt_bit_width, attribute_cache("smt_bit_width"))
 
 
+def boolean_value_bits(expr) -> int:
+    """比較・bool 演算の結果を **整数として** 読むときの bit 幅。
+
+    P-code では、比較・bool 演算の出力は ``size`` byte（通常 1 byte）の varnode で、値は 0 / 1 である。
+    SMT ではこの式を Bool sort で描くので、Bool の幅（1 bit）のまま算術・シフト・結合・符号付き比較に
+    使うと、1 bit の値として計算してしまう（例: ``(b == 0) << 1`` が 2 でなく 0、``1 <s 0`` が真）。
+    整数として使う所は、この幅の 0 / 1 として読む（Bool の意味と P-code の byte の意味の境界の唯一の owner）。
+    """
+
+    size_bytes = _safe_size_bytes(expr)
+    return 8 * (size_bytes if size_bytes is not None and size_bytes > 0 else 1)
+
+
+def expression_value_bit_width(expr) -> int:
+    """式の **P-code の値** の bit 幅（整数の被演算子として読む幅）。
+
+    Bool sort の式は :func:`boolean_value_bits`、それ以外は :func:`expression_smt_bit_width` と同じ。
+    """
+
+    if expr is None:
+        return 0
+    if expression_returns_bool(expr):
+        return boolean_value_bits(expr)
+    return expression_smt_bit_width(expr)
+
+
+def _child_value_bits(expr, child) -> int:
+    if expr is None:
+        return 0
+    return boolean_value_bits(expr) if expression_returns_bool(expr) else child(expr)
+
+
 def _node_smt_bit_width(expr, child) -> int:
     if expr is None:
         return 0
@@ -70,8 +102,9 @@ def _node_smt_bit_width(expr, child) -> int:
     if expr_type == expr_kind.BINARY_OP:
         left = expr.operands[0] if len(getattr(expr, "operands", [])) >= 1 else None
         right = expr.operands[1] if len(getattr(expr, "operands", [])) >= 2 else None
-        left_bits = 0 if left is None else child(left)
-        right_bits = 0 if right is None else child(right)
+        # 被演算子の幅は P-code の値の幅（比較・bool の結果は size byte の 0 / 1）
+        left_bits = _child_value_bits(left, child)
+        right_bits = _child_value_bits(right, child)
 
         if expr.operator == "PIECE":
             explicit_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
@@ -96,7 +129,7 @@ def _node_smt_bit_width(expr, child) -> int:
         branches = expr.value or []
         explicit_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
         branch_bits = max(
-            (0 if branch_value is None else child(branch_value) for _, branch_value in branches),
+            (_child_value_bits(branch_value, child) for _, branch_value in branches),
             default=0,
         )
         return max(explicit_bits, branch_bits)
@@ -187,23 +220,23 @@ def _node_smt_width_if_known(expr, child) -> int:
     if expr_type == expr_kind.BINARY_OP:
         operator = getattr(expr, "operator", None)
         if operator == "PIECE" and len(operands) == 2:
-            left_bits = 0 if operands[0] is None else child(operands[0])
-            right_bits = 0 if operands[1] is None else child(operands[1])
+            left_bits = _child_value_bits(operands[0], child)
+            right_bits = _child_value_bits(operands[1], child)
             return left_bits + right_bits if left_bits > 0 and right_bits > 0 else 0
         if operator == "SUBPIECE":
             return 0
         if operator in _BOOLEAN_BINARY_OPERATORS:
             return 1
         if len(operands) == 2:
-            left_bits = 0 if operands[0] is None else child(operands[0])
-            right_bits = 0 if operands[1] is None else child(operands[1])
+            left_bits = _child_value_bits(operands[0], child)
+            right_bits = _child_value_bits(operands[1], child)
             if left_bits > 0 and right_bits > 0:
                 return max(left_bits, right_bits)
         return 0
     if expr_type == expr_kind.PHI:
         branches = getattr(expr, "value", None) or ()
         branch_widths = tuple(
-            0 if branch_value is None else child(branch_value)
+            _child_value_bits(branch_value, child)
             for _condition, branch_value in branches
         )
         if not branch_widths or any(width <= 0 for width in branch_widths):
@@ -223,8 +256,9 @@ def _piece_subpiece_contract(
         return f"{operator} requires exactly two operands", 0, 0, 0, None
 
     left, right = operands
-    left_bits = _smt_width_if_known(left)
-    right_bits = _smt_width_if_known(right)
+    # 結合・切り出しは被演算子を整数として読む（比較・bool の結果は size byte の 0 / 1）
+    left_bits = boolean_value_bits(left) if expression_returns_bool(left) else _smt_width_if_known(left)
+    right_bits = boolean_value_bits(right) if expression_returns_bool(right) else _smt_width_if_known(right)
     size_bytes = _safe_size_bytes(expr)
     if size_bytes is None:
         return f"{operator} result width is invalid", left_bits, right_bits, 0, None

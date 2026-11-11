@@ -56,6 +56,8 @@ from scripts.function_tracer_pcode.core.runtime_refs.loops import (  # noqa: F40
     loop_summary_method_b_key_at_result_size,
 )
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import (  # noqa: F401
+    PCODE_MNEMONIC_BY_OPCODE,
+    PCODE_OPCODE_BY_MNEMONIC,
     PcodeBlockRef,
     PcodeOpRef,
     _MAX_PARENT_PCODE_OP_SCAN,
