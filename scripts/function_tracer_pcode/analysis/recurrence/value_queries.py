@@ -1,8 +1,9 @@
 """Recurrence の式を SMT で比べる公開の入口（Issue #297）。
 
-recurrence の builder が候補の検査に使う query（式の同値・条件の集合の同値）を、P-code を読まない
-呼び出し側（promotion の proof）にも同じ形で出す。builder の内部の method 名・引数に呼び出し側を
-依存させないための境界で、ここが唯一の入口である。
+recurrence の builder が候補の検査に使う query（式の同値）を、P-code を読まない呼び出し側（promotion の
+proof）にも同じ形で出す。builder の host（``StructuralRecurrenceSummarizer``）が公開の service として
+宣言した 2 つ（``expression_query_symbols``・``prove_expressions_equal_under_conditions``）だけを使い、
+private な method には触れない。proof にとってはここが唯一の入口である。
 
 - 局所の z3 で、#298 の UB の前提を加えない。UNSAT だけを成立とし、timeout・unknown・query を
   作れないとき・式の symbol を識別できないときは成立しない（``False``）。
@@ -37,12 +38,12 @@ def prove_values_equal_under(left: Any, right: Any, conditions: Sequence[Any] = 
         return False
     host = _host()
     conditions = [item for item in conditions or () if item is not None]
-    parameters = host._collect_summary_parameter_specs(
+    parameters = host.expression_query_symbols(
         left, right, *(item.expression for item in conditions),
     )
     if parameters is None:
         return False
-    return bool(host._prove_expression_equivalence_under_conditions(left, right, conditions, parameters))
+    return bool(host.prove_expressions_equal_under_conditions(left, right, conditions, parameters))
 
 
 def condition_sets_equivalent(left: Sequence[Any], right: Sequence[Any]) -> bool:

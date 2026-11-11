@@ -22,6 +22,7 @@ from scripts.function_tracer_pcode.core.recurrence_return_binding import (
     PcodeFactBlock,
     PcodeFactInput,
     PcodeFactOp,
+    PcodeParameterFact,
 )
 from scripts.function_tracer_pcode.core.runtime_refs.pcode import PcodeBlockRef, PcodeOpRef
 
@@ -38,6 +39,49 @@ class _FreeInputUnidentified(Exception):
 
 
 _U64 = (1 << 64) - 1
+#: prototype の引数の数の上限（関数の引数は少ない。超えたら表を作らない）。
+_MAX_PARAMETERS = 64
+
+
+class _ParameterStorageUnavailable(Exception):
+    """Ghidra の prototype の引数の置き場所を読めない。"""
+
+
+def _parameter_facts(high_function) -> Tuple[Tuple[PcodeParameterFact, ...], bool]:
+    """HighFunction の引数（local symbol map の parameter）の番号・幅・storage と、program の byte order。"""
+
+    symbols = high_function.getLocalSymbolMap()
+    count = int(symbols.getNumParams())
+    if count < 0 or count > _MAX_PARAMETERS:
+        raise _ParameterStorageUnavailable()
+    facts = []
+    for position in range(count):
+        symbol = symbols.getParamSymbol(position)
+        if symbol is None:
+            raise _ParameterStorageUnavailable()
+        storage = symbol.getStorage()
+        varnodes = list(storage.getVarnodes()) if storage is not None else []
+        if not varnodes:
+            raise _ParameterStorageUnavailable()
+        pieces = []
+        for varnode in varnodes:
+            space = varnode.getAddress().getAddressSpace()
+            pieces.append((str(space.getName()), int(varnode.getOffset()) & _U64, int(varnode.getSize())))
+        try:
+            facts.append(PcodeParameterFact(
+                index=int(symbol.getCategoryIndex()), size=int(symbol.getSize()), pieces=tuple(pieces),
+            ))
+        except ValueError as exc:
+            raise _ParameterStorageUnavailable() from exc
+    language = high_function.getFunction().getProgram().getLanguage()
+    return tuple(facts), bool(language.isBigEndian())
+
+
+def _parameter_slice(parameters, item: PcodeFactInput, big_endian: bool) -> Optional[int]:
+    for fact in parameters:
+        if fact.index == item.parameter_index:
+            return fact.value_slice(item.storage, item.size, big_endian=big_endian)
+    return None
 
 
 def _free_input(varnode, size: int) -> PcodeFactInput:
@@ -194,15 +238,25 @@ def _impl__capture_pcode_dataflow_snapshot(
                 false_successor=None if false_out is None else int(false_out.getIndex()),
                 op_keys=tuple(key for key, _op in listed),
             ))
+        parameters, big_endian = _parameter_facts(high_function)
+        for op in fact_ops:
+            for item in op.inputs:
+                if item.parameter_index is not None and _parameter_slice(parameters, item, big_endian) is None:
+                    # HighSymbol は引数と言うが、prototype の置き場所に収まらない入力
+                    return None, {}, "parameter_input_outside_prototype_storage"
         snapshot = PcodeDataflowSnapshot(
             function_identity=tuple(function_identity),
             blocks=tuple(fact_blocks),
             ops=tuple(fact_ops),
+            parameters=parameters,
+            big_endian=big_endian,
         )
     except _SnapshotBoundExceeded:
         return None, {}, "scan_bound_exceeded"
     except _FreeInputUnidentified:
         return None, {}, "free_input_identity_unavailable"
+    except _ParameterStorageUnavailable:
+        return None, {}, "parameter_storage_unavailable"
     except _READ_FAILURES as exc:
         return None, {}, f"snapshot_read_failed:{type(exc).__name__}"
     return snapshot, live_ops, None

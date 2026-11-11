@@ -264,6 +264,10 @@ class StructuralRecurrenceSummarizer:
     # recurrence.return_binding (Issue #297)
     _capture_pcode_dataflow_snapshot = _svc_return_binding._impl__capture_pcode_dataflow_snapshot
     _counted_loop_return_binding_evidence = _svc_return_binding._impl__counted_loop_return_binding_evidence
+    # 式の SMT の query（P-code を読まない）の公開の service（Issue #297）。``value_queries`` だけが使う
+    # 入口で、builder の内部の検査と同じ実装を共有する（同じ意味の query を 2 つ持たない）
+    expression_query_symbols = _svc_return_region._impl__collect_summary_parameter_specs
+    prove_expressions_equal_under_conditions = _svc_guard_proof._impl__prove_expression_equivalence_under_conditions
     _varnode_aliases_accumulator_object = _svc_counted_loop._impl__varnode_aliases_accumulator_object
     _varnode_is_accumulator_update_for_phi = _svc_counted_loop._impl__varnode_is_accumulator_update_for_phi
     try_summarize_pre_return_counted_scalar_loop = _svc_counted_loop._impl_try_summarize_pre_return_counted_scalar_loop

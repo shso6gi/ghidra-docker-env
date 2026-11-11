@@ -26,8 +26,8 @@ from scripts.function_tracer_pcode.core.runtime_refs.pcode import (
     PCODE_OPCODE_BY_MNEMONIC,
 )
 
-PCODE_DATAFLOW_SNAPSHOT_SCHEMA = "pcode_dataflow_snapshot_v2"
-COUNTED_LOOP_RETURN_BINDING_SCHEMA = "counted_loop_return_binding_evidence_v2"
+PCODE_DATAFLOW_SNAPSHOT_SCHEMA = "pcode_dataflow_snapshot_v3"
+COUNTED_LOOP_RETURN_BINDING_SCHEMA = "counted_loop_return_binding_evidence_v3"
 
 #: 入力の種類。``op`` は P-code op の出力（``producer_key`` がその op の key）、``constant`` は定数、
 #: ``free`` はどの op も定義しない入力（関数の入力・分岐先の address など。置き場所で識別する）。
@@ -198,12 +198,60 @@ class PcodeFactBlock:
 
 
 @dataclass(frozen=True)
+class PcodeParameterFact:
+    """関数の引数 1 つの、Ghidra の prototype の置き場所（HighFunction の parameter の storage）。
+
+    ``pieces`` は storage の varnode ``(空間, offset, 幅)`` の列（Ghidra の ``VariableStorage`` の順）。
+    写しの ``free`` な入力は、この表の置き場所と照合できたときだけ引数の値として読む（番号だけで
+    同じ値と見なさない）。
+    """
+
+    index: int
+    size: int
+    pieces: Tuple[Tuple[str, int, int], ...]
+
+    def __post_init__(self) -> None:
+        if not _is_int(self.index) or self.index < 0 or not _is_int(self.size) or self.size <= 0:
+            raise ValueError("P-code parameter fact needs a non-negative index and a positive size")
+        if type(self.pieces) is not tuple or not self.pieces or not all(
+            isinstance(piece, tuple) and len(piece) == 3
+            and isinstance(piece[0], str) and piece[0] and piece[0] not in UNIDENTIFIED_STORAGE_SPACES
+            and _is_int(piece[1]) and piece[1] >= 0 and _is_int(piece[2]) and piece[2] > 0
+            for piece in self.pieces
+        ):
+            raise ValueError("P-code parameter storage pieces are not identified")
+        if sum(piece[2] for piece in self.pieces) != self.size:
+            raise ValueError("P-code parameter storage pieces do not cover its size")
+
+    def stable_key(self) -> Tuple[Any, ...]:
+        return ("pcode_parameter_fact_v1", self.index, self.size, self.pieces)
+
+    def value_slice(self, storage: Tuple[str, int], size: int, *, big_endian: bool) -> Optional[int]:
+        """置き場所 ``storage``・幅 ``size`` の入力が、この引数の値のどの byte からの切り出しか。
+
+        引数の storage が 1 つの varnode で、入力がその範囲に収まるときだけ、値の最下位からの byte の
+        位置を返す（little endian は低い address が下位、big endian は高い address が下位）。
+        storage が複数の varnode の引数は、各 piece と値の位置の対応を示せないので ``None``。
+        """
+
+        if len(self.pieces) != 1:
+            return None
+        space, offset, width = self.pieces[0]
+        if storage[0] != space or storage[1] < offset or storage[1] + size > offset + width:
+            return None
+        return (offset + width) - (storage[1] + size) if big_endian else storage[1] - offset
+
+
+@dataclass(frozen=True)
 class PcodeDataflowSnapshot:
     """1 つの HighFunction の P-code の事実の写し。作ったときに形を検査する（不整合なら ValueError）。"""
 
     function_identity: Tuple[Any, ...]
     blocks: Tuple[PcodeFactBlock, ...]
     ops: Tuple[PcodeFactOp, ...]
+    #: 関数の引数の置き場所（Ghidra の prototype）と、program の byte order。
+    parameters: Tuple[PcodeParameterFact, ...] = ()
+    big_endian: bool = False
     schema_version: str = PCODE_DATAFLOW_SNAPSHOT_SCHEMA
     # 索引（``_ops_by_key`` / ``_blocks_by_index``）と digest は dataclass の field にしない。解析の
     # successor は dataclass を ``replace`` で field ごとに写す（``core.analysis._semantic_copy``）ので、
@@ -220,6 +268,13 @@ class PcodeDataflowSnapshot:
             type(item) is PcodeFactOp for item in self.ops
         ):
             raise ValueError("P-code dataflow snapshot facts must be fact records")
+        if type(self.parameters) is not tuple or not all(
+            type(item) is PcodeParameterFact for item in self.parameters
+        ) or type(self.big_endian) is not bool:
+            raise ValueError("P-code dataflow snapshot parameters must be parameter facts")
+        parameters_by_index = {item.index: item for item in self.parameters}
+        if len(parameters_by_index) != len(self.parameters):
+            raise ValueError("P-code dataflow snapshot has a duplicate parameter index")
         ops_by_key: Dict[Tuple[Any, ...], PcodeFactOp] = {}
         for op in self.ops:
             if op.key in ops_by_key:
@@ -249,6 +304,7 @@ class PcodeDataflowSnapshot:
             for item in op.inputs:
                 if item.kind == "op" and item.producer_key not in ops_by_key:
                     raise ValueError("P-code dataflow snapshot input refers to an unknown op")
+        object.__setattr__(self, "_parameters_by_index", parameters_by_index)
         object.__setattr__(self, "_ops_by_key", ops_by_key)
         object.__setattr__(self, "_blocks_by_index", blocks_by_index)
         object.__setattr__(
@@ -260,6 +316,7 @@ class PcodeDataflowSnapshot:
             self.schema_version, self.function_identity,
             tuple(item.stable_key() for item in self.blocks),
             tuple(item.stable_key() for item in self.ops),
+            tuple(item.stable_key() for item in self.parameters), self.big_endian,
         )
 
     @property
@@ -275,8 +332,11 @@ class PcodeDataflowSnapshot:
 
         return PcodeDataflowSnapshot(
             function_identity=self.function_identity, blocks=self.blocks, ops=self.ops,
-            schema_version=self.schema_version,
+            parameters=self.parameters, big_endian=self.big_endian, schema_version=self.schema_version,
         )
+
+    def parameter(self, index: int) -> Optional[PcodeParameterFact]:
+        return self._parameters_by_index.get(index)
 
     def op(self, key: Tuple[Any, ...]) -> Optional[PcodeFactOp]:
         return self._ops_by_key.get(key)
@@ -337,6 +397,31 @@ class CountedLoopReturnBindingEvidence:
 
         snapshot_digest = None if self.snapshot is None else self.snapshot.rebuilt().digest
         return RecurrenceDigestCodec.digest(self.schema_version, self.stable_key(snapshot_digest))
+
+
+def parameter_leaf_mismatch(snapshot: PcodeDataflowSnapshot, expr: Any) -> Optional[str]:
+    """候補の式の引数 ``expr``（番号 0 以上の ``PARAMETER``）が、写しの引数の表のその番号の値そのものか。
+
+    SMT の symbol は引数の番号で決まる。番号が同じでも置き場所・幅が違う値を同じ symbol にしないよう、
+    候補の引数の ``storage_info``（空間・offset・幅）と幅が、表の 1 つの piece と全幅で一致することを
+    要求する。一致すれば ``None``、しなければ理由。複数の piece の引数は対応を示せないので受け付けない。
+    """
+
+    index = getattr(expr, "value", None)
+    if not _is_int(index) or index < 0:
+        return "synthetic_parameter"
+    fact = snapshot.parameter(index)
+    if fact is None:
+        return f"parameter_{index}_not_in_prototype"
+    if len(fact.pieces) != 1:
+        return f"parameter_{index}_multi_storage"
+    storage = getattr(expr, "storage_info", None)
+    observed = (
+        getattr(storage, "space_name", None), getattr(storage, "offset", None), getattr(storage, "size", None),
+    )
+    if observed != fact.pieces[0] or int(getattr(expr, "size", 0) or 0) != fact.size:
+        return f"parameter_{index}_storage"
+    return None
 
 
 def return_binding_proposition(proposal: Any) -> Tuple[Any, ...]:

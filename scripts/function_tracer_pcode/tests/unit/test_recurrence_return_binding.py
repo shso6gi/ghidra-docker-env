@@ -23,6 +23,7 @@ from scripts.function_tracer_pcode.analysis.recurrence.models import ResidueLoop
 from scripts.function_tracer_pcode.analysis.recurrence.summarizer import StructuralRecurrenceSummarizer
 from scripts.function_tracer_pcode.core import Condition, Expression, LoopSideEffectProfileRef
 from scripts.function_tracer_pcode.core.analysis import ReturnInfo
+from scripts.function_tracer_pcode.core.storage import StorageInfo
 from scripts.function_tracer_pcode.core.recurrence_contracts import (
     RETURN_BINDING_PROPOSITION,
     QuarantinedRecurrenceProposal,
@@ -34,6 +35,7 @@ from scripts.function_tracer_pcode.core.recurrence_return_binding import (
     PcodeFactBlock,
     PcodeFactInput,
     PcodeFactOp,
+    PcodeParameterFact,
     is_full_pcode_op_key,
     loop_region,
     pcode_opcode_is_consistent,
@@ -116,6 +118,21 @@ def _target(address: int) -> PcodeFactInput:
     return PcodeFactInput("free", 8, storage=("ram", address))
 
 
+def _prototype(width: int = 4):
+    """``foo(n, b, p)`` の prototype: 引数 0・1 は ``width`` byte、引数 2 は 8 byte（arm64 の引数 register）。"""
+
+    return tuple(
+        PcodeParameterFact(index, size, (("register", 0x4000 + 8 * index, size),))
+        for index, size in ((0, width), (1, width), (2, 8))
+    )
+
+
+def _storage(index: int, size: int = 4) -> StorageInfo:
+    """tracer の引数の式が持つ置き場所（`_param` と同じ register）。"""
+
+    return StorageInfo(is_register=True, space_name="register", offset=0x4000 + 8 * index, size=size, size_bits=8 * size)
+
+
 def _const(value: int, size: int = 4) -> PcodeFactInput:
     return PcodeFactInput("constant", size, constant=value % (1 << (8 * size)))
 
@@ -137,7 +154,8 @@ class _Loop:
         self, *, step: int = 1, compare: str = "INT_SLESS", return_op: Optional[str] = None,
         counter_via: Optional[str] = None, limit: str = "free", extra_exit: bool = False,
         inner_cycle: bool = False, width: int = 4, update: str = "param", init: str = "zero",
-        start: int = 0, b_parameter: int = 1,
+        start: int = 0, b_parameter: int = 1, parameters=None, big_endian: bool = False, addend=None,
+        body_prefix=(),
     ) -> None:
         w = width
         self.iv = _key(0x20, 0, OPC["MULTIEQUAL"])
@@ -218,7 +236,7 @@ class _Loop:
             acc_back = self.join
             latch = 6
         else:
-            addend = {
+            addend = addend if addend is not None else {
                 "param": b, "const7": _const(7, w), "nonparam": PcodeFactInput("free", w, storage=("register", 0x5000)),
             }.get(update)
             extra = []
@@ -229,7 +247,7 @@ class _Loop:
                     else PcodeFactOp(self.addend_def, OPC["LOAD"], "LOAD", 2, w, (_const(0, 8), _param(2, 8)))
                 ]
                 addend = _op(self.addend_def, w)
-            body_ops = extra + [
+            body_ops = list(body_prefix) + extra + [
                 PcodeFactOp(self.inext, OPC["INT_ADD"], "INT_ADD", 2, w, (_op(self.iv, w), _const(step, w))),
                 PcodeFactOp(self.anext, OPC["INT_ADD"], "INT_ADD", 2, w, (_op(self.acc, w), addend)),
             ]
@@ -263,6 +281,7 @@ class _Loop:
         ]
         self.snapshot = PcodeDataflowSnapshot(
             FUNCTION, tuple(blocks), tuple(init_ops + header_ops + body_ops + ret_ops),
+            parameters=_prototype(w) if parameters is None else parameters, big_endian=big_endian,
         )
 
 
@@ -270,8 +289,8 @@ def _summarizer():
     return StructuralRecurrenceSummarizer(None)
 
 
-N = Expression.parameter("param_1", index=0, size=4)
-B = Expression.parameter("param_2", index=1, size=4)
+N = Expression.parameter("param_1", index=0, size=4, storage_info=_storage(0))
+B = Expression.parameter("param_2", index=1, size=4, storage_info=_storage(1))
 ZERO = Expression.constant(0, size=4)
 
 
@@ -496,8 +515,9 @@ def test_guard_parameter_built_by_the_tracer_is_the_snapshot_parameter():
 
 def test_parameter_with_two_widths_is_not_compared():
     # 写しの引数 0 は 4 byte。候補の guard が引数 0 を 8 byte で使うなら、同じ値として照合しない
-    wide = Expression.parameter("param_1", index=0, size=8)
-    assert "C:parameter_width" in _Case(loop_guard=_cond(False, Expression.constant(0, size=8), wide)).failures()
+    wide = Expression.parameter("param_1", index=0, size=8, storage_info=_storage(0, 8))
+    assert "C:parameter_identity:parameter_0_storage" in _Case(
+        loop_guard=_cond(False, Expression.constant(0, size=8), wide)).failures()
 
 
 def test_guards_must_be_the_entry_comparison():
@@ -558,7 +578,7 @@ def test_incomplete_residue_partition_is_rejected():
 
 
 @pytest.mark.parametrize("loop,reason", [
-    (_Loop(update="residue_load"), "U:update_not_lowerable:unsupported:LOAD"),   # 分岐の条件を作れない
+    (_Loop(update="residue_load"), "U:update_not_lowerable:non_boolean_condition"),  # 分岐の条件が比較でない
     (_Loop(update="load"), "U:update_not_lowerable:unsupported:LOAD"),           # 更新の入力を作れない
     (_Loop(update="nonparam"), "U:update_not_lowerable:free_input_not_parameter:register"),
     (_Loop(update="lzcount"), "U:update_not_lowerable:unsupported:LZCOUNT"),     # #300 の op は式にしない
@@ -572,6 +592,291 @@ def test_update_that_cannot_be_lowered_is_rejected(loop, reason):
 def test_lzcount_in_the_initial_value_is_not_lowered():
     # #300: LZCOUNT は式にしないので、初期値に LZCOUNT がある summary は（tracer の式が何であれ）使わない
     assert "C:entry_value:unsupported:LZCOUNT" in _Case(_Loop(init="lzcount")).failures()
+
+
+# ---------------------------------------------------------------------------
+# PR #303 レビュー 2: シフト・入力の identity・PHI の中のループ依存
+# ---------------------------------------------------------------------------
+
+
+def _shift_loop(amount_size: int, amount: int, operator: str = "INT_LEFT") -> _Loop:
+    """``c += b <op> amount``（量は ``amount_size`` byte の定数）。"""
+
+    shift = _key(0x31, 30, OPC[operator], 3)
+    op = PcodeFactOp(shift, OPC[operator], operator, 2, 4, (_param(1), _const(amount, amount_size)))
+    return _Loop(addend=_op(shift), body_prefix=(op,))
+
+
+def _shifted_b(operator: str, amount: int, amount_size: int) -> Expression:
+    expr = Expression.binary_op(operator, B, Expression.constant(amount, size=amount_size))
+    expr.size = 4
+    return expr
+
+
+@pytest.mark.parametrize("amount_size,amount", [(8, 1 << 32), (8, (1 << 32) + 1), (4, 32), (8, 32), (2, 1 << 15)])
+def test_shift_by_at_least_the_value_width_is_zero_not_a_truncated_amount(amount_size, amount):
+    # 指摘 1: 32 bit の b を 2^32 bit 左シフトした値は 0。量を 32 bit に切り詰めると b（0 bit のシフト）になる
+    loop = _shift_loop(amount_size, amount)
+    assert "U:update_mismatch" in _Case(loop, loop_value=_loop_value(bias=B)).failures()
+    assert _Case(loop, loop_value=_loop_value(bias=Expression.constant(0, size=4))).run()[0] == RETURN_BINDING_PROPOSITION
+
+
+@pytest.mark.parametrize("amount_size", [1, 4, 8])
+def test_shift_inside_the_value_width_keeps_its_amount(amount_size):
+    # 境界の内側（31 bit）は、量の幅が違っても同じシフト
+    loop = _shift_loop(amount_size, 31 % (1 << (8 * amount_size)))
+    bias = _shifted_b("INT_LEFT", 31, amount_size)
+    assert _Case(loop, loop_value=_loop_value(bias=bias)).run()[0] == RETURN_BINDING_PROPOSITION
+    assert "U:update_mismatch" in _Case(loop, loop_value=_loop_value(bias=B)).failures()
+
+
+def test_arithmetic_right_shift_past_the_width_fills_with_the_sign():
+    loop = _shift_loop(8, 1 << 32, "INT_SRIGHT")
+    sign = Expression.binary_op("INT_SRIGHT", B, Expression.constant(31, size=4))
+    sign.size = 4
+    assert _Case(loop, loop_value=_loop_value(bias=sign)).run()[0] == RETURN_BINDING_PROPOSITION
+    assert "U:update_mismatch" in _Case(loop, loop_value=_loop_value(bias=B)).failures()
+
+
+def _reference(op, ins, out):
+    """P-code の定義どおりの値（Ghidra の P-code reference の意味。test の独立の oracle）。"""
+
+    def mask(value, size):
+        return value & ((1 << (8 * size)) - 1)
+
+    def signed(value, size):
+        value = mask(value, size)
+        return value - (1 << (8 * size)) if value >> (8 * size - 1) else value
+
+    (a, sa), *rest = ins
+    b, sb = rest[0] if rest else (None, None)
+    bits = 8 * sa
+    table = {
+        "INT_ZEXT": lambda: a, "INT_SEXT": lambda: mask(signed(a, sa), out),
+        "INT_NEGATE": lambda: mask(~a, out), "INT_2COMP": lambda: mask(-a, out),
+        "SUBPIECE": lambda: mask(a >> (8 * b), out), "PIECE": lambda: mask((a << (8 * sb)) | b, out),
+        "INT_ADD": lambda: mask(a + b, out), "INT_SUB": lambda: mask(a - b, out), "INT_MULT": lambda: mask(a * b, out),
+        "INT_AND": lambda: a & b, "INT_OR": lambda: a | b, "INT_XOR": lambda: a ^ b,
+        "INT_LEFT": lambda: 0 if b >= bits else mask(a << b, out),
+        "INT_RIGHT": lambda: 0 if b >= bits else a >> b,
+        "INT_SRIGHT": lambda: mask(signed(a, sa) >> min(b, bits - 1), out),
+        "INT_EQUAL": lambda: int(a == b), "INT_NOTEQUAL": lambda: int(a != b),
+        "INT_LESS": lambda: int(a < b), "INT_LESSEQUAL": lambda: int(a <= b),
+        "INT_SLESS": lambda: int(signed(a, sa) < signed(b, sb)),
+        "INT_SLESSEQUAL": lambda: int(signed(a, sa) <= signed(b, sb)),
+    }
+    return table[op]()
+
+
+def _lower_constants(op, ins, out):
+    key = _key(0x10, 0, OPC[op])
+    fact = PcodeFactOp(key, OPC[op], op, 0, out, tuple(_const(value, size) for value, size in ins))
+    snapshot = PcodeDataflowSnapshot(FUNCTION, (PcodeFactBlock(0, _block_key(0), (), (), None, None, (key,)),), (fact,))
+    return SnapshotLowering(snapshot, header_index=9, region=frozenset()).value(_op(key, out))
+
+
+def _oracle_cases():
+    cases = []
+    for size in (1, 4, 8):
+        top = (1 << (8 * size)) - 1
+        edge = (0, 1, (top >> 1), (top >> 1) + 1, top)
+        cases += [(op, ((a, size),), wide) for a in edge for op in ("INT_ZEXT", "INT_SEXT")
+                  for wide in (2 * size,) if wide <= 16]
+        cases += [(op, ((a, size),), size) for a in edge for op in ("INT_NEGATE", "INT_2COMP")]
+        for op in ("INT_ADD", "INT_SUB", "INT_MULT", "INT_AND", "INT_OR", "INT_XOR"):
+            cases += [(op, ((a, size), (b, size)), size) for a in edge for b in edge[1::2]]
+        for op in ("INT_EQUAL", "INT_NOTEQUAL", "INT_LESS", "INT_LESSEQUAL", "INT_SLESS", "INT_SLESSEQUAL"):
+            cases += [(op, ((a, size), (b, size)), 1) for a in edge for b in edge]
+        for op in ("INT_LEFT", "INT_RIGHT", "INT_SRIGHT"):
+            for amount_size in (1, 4, 8):
+                amount_top = (1 << (8 * amount_size)) - 1
+                for amount in {0, 1, 8 * size - 1, 8 * size, 8 * size + 1, 1 << (8 * amount_size - 1), amount_top}:
+                    if amount <= amount_top:
+                        cases.append((op, (((top >> 1) + 1, size), (amount, amount_size)), size))
+        cases += [("SUBPIECE", ((top - 2, size), (offset, 4)), width)
+                  for offset in range(size) for width in (1, size - offset) if width > 0]
+        cases += [("PIECE", ((0x81 & top, size), ((1 << (8 * other)) - 2, other)), size + other)
+                  for other in (1, 4) if size + other <= 8]
+    return cases
+
+
+def test_lowering_and_the_shared_smt_rendering_match_the_pcode_reference_semantics():
+    # 指摘の同型の確認: lowering が受け入れる演算を、定数の入力で P-code の定義どおりの値と照合する
+    # （COPY / CAST は同幅の写し。拡張・切り出し・結合、算術・bit 演算、比較、シフトの境界と幅の違い）
+    mismatches = []
+    for op, ins, out in _oracle_cases():
+        expected = _reference(op, ins, out)
+        if not value_queries.prove_values_equal_under(_lower_constants(op, ins, out), Expression.constant(expected, size=out), ()):
+            mismatches.append((op, ins, out, expected))
+    assert mismatches == []
+
+
+def _with_free_inputs(loop: _Loop, addend_input: PcodeFactInput, *, parameters=None, big_endian=False) -> _Loop:
+    target = _Loop(addend=addend_input, parameters=parameters, big_endian=big_endian)
+    return target
+
+
+def test_inputs_with_the_same_parameter_number_but_other_storage_are_not_the_parameter():
+    # 指摘 2: 番号 1・幅 4 で置き場所だけが違う入力は、引数 1 ではない（表の置き場所と照合する）
+    forged = PcodeFactInput("free", 4, storage=("register", 0x5000), parameter_index=1)
+    assert "U:update_not_lowerable:parameter_storage_mismatch" in _Case(_with_free_inputs(_Loop(), forged)).failures()
+
+
+def test_candidate_parameter_with_other_storage_is_not_the_snapshot_parameter():
+    other = Expression.parameter("param_2", index=1, size=4, storage_info=StorageInfo(
+        is_register=True, space_name="register", offset=0x5000, size=4, size_bits=32))
+    failures = _Case(loop_value=_loop_value(bias=other)).failures()
+    assert failures == ("C:parameter_identity:parameter_1_storage",)
+    no_storage = Expression.parameter("param_2", index=1, size=4)
+    assert _Case(loop_value=_loop_value(bias=no_storage)).failures() == ("C:parameter_identity:parameter_1_storage",)
+
+
+def test_aliases_of_one_parameter_are_the_same_value():
+    # 同じ引数の置き場所を 2 つの op の入力が読む（alias）: 同じ値として扱う
+    twice = _key(0x33, 31, OPC["INT_ADD"], 3)
+    op = PcodeFactOp(twice, OPC["INT_ADD"], "INT_ADD", 2, 4, (_param(1), _param(1)))
+    loop = _Loop(addend=_op(twice), body_prefix=(op,))
+    doubled = Expression.binary_op("INT_ADD", B, B)
+    doubled.size = 4
+    assert _Case(loop, loop_value=_loop_value(bias=doubled)).run()[0] == RETURN_BINDING_PROPOSITION
+    assert "U:update_mismatch" in _Case(loop).failures()
+
+
+def _wide_b_prototype():
+    # 引数 1 は 8 byte（`long b`）。更新はその下位 4 byte だけを読む
+    return (
+        PcodeParameterFact(0, 4, (("register", 0x4000, 4),)),
+        PcodeParameterFact(1, 8, (("register", 0x4008, 8),)),
+        PcodeParameterFact(2, 8, (("register", 0x4010, 8),)),
+    )
+
+
+def _low_half_of_wide_b():
+    wide = Expression.parameter("param_2", index=1, size=8, storage_info=_storage(1, 8))
+    low = Expression.binary_op("SUBPIECE", wide, Expression.constant(0, size=4))
+    low.size = 4
+    return low
+
+
+@pytest.mark.parametrize("big_endian,offset", [(False, 0x4008), (True, 0x400c)])
+def test_partial_value_of_a_parameter_is_the_byte_order_slice(big_endian, offset):
+    # 部分値: 8 byte の引数の下位 4 byte は、little endian では低い address、big endian では高い address
+    low = PcodeFactInput("free", 4, storage=("register", offset), parameter_index=1)
+    loop = _with_free_inputs(_Loop(), low, parameters=_wide_b_prototype(), big_endian=big_endian)
+    assert _Case(loop, loop_value=_loop_value(bias=_low_half_of_wide_b())).run()[0] == RETURN_BINDING_PROPOSITION
+
+
+@pytest.mark.parametrize("big_endian,offset", [(False, 0x400c), (True, 0x4008)])
+def test_the_other_half_of_a_parameter_is_not_its_low_half(big_endian, offset):
+    high = PcodeFactInput("free", 4, storage=("register", offset), parameter_index=1)
+    loop = _with_free_inputs(_Loop(), high, parameters=_wide_b_prototype(), big_endian=big_endian)
+    assert "U:update_mismatch" in _Case(loop, loop_value=_loop_value(bias=_low_half_of_wide_b())).failures()
+
+
+def test_parameter_split_over_several_storages_is_not_lowered():
+    # 複数の piece の引数（例: 2 つの register の構造体）は、piece と値の位置の対応を示せないので拒否する
+    split = (
+        PcodeParameterFact(0, 4, (("register", 0x4000, 4),)),
+        PcodeParameterFact(1, 8, (("register", 0x4008, 4), ("register", 0x4010, 4))),
+        PcodeParameterFact(2, 8, (("register", 0x4018, 8),)),
+    )
+    piece = PcodeFactInput("free", 4, storage=("register", 0x4008), parameter_index=1)
+    loop = _with_free_inputs(_Loop(), piece, parameters=split)
+    assert "U:update_not_lowerable:parameter_multi_storage" in _Case(loop).failures()
+
+
+def test_parameter_table_needs_identified_storage_covering_the_size():
+    with pytest.raises(ValueError, match="cover"):
+        PcodeParameterFact(0, 8, (("register", 0x4000, 4),))
+    with pytest.raises(ValueError, match="not identified"):
+        PcodeParameterFact(0, 4, (("unique", 0x10, 4),))
+    with pytest.raises(ValueError, match="duplicate parameter"):
+        PcodeDataflowSnapshot(FUNCTION, (), (), parameters=_prototype() + _prototype()[:1])
+
+
+def test_snapshots_that_differ_only_in_the_prototype_have_different_digests():
+    assert _Loop().snapshot.digest != _Loop(parameters=_wide_b_prototype()).snapshot.digest
+    assert _Loop().snapshot.digest != _Loop(big_endian=True).snapshot.digest
+
+
+def _phi(condition, value, default):
+    phi = Expression.phi([(condition, value), (None, default)])
+    phi.size = 4
+    return phi
+
+
+def _placeholder_in_phi(where):
+    counter = Expression.parameter("__return_binding_iv", index=-20_001, size=4)
+    test = Expression.binary_op("INT_SLESS", counter, N)
+    test.size = 1
+    return _phi(Condition(test, False), B, B) if where == "condition" else _phi(_cond(False), counter, B)
+
+
+@pytest.mark.parametrize("where", ["condition", "value"])
+def test_loop_placeholder_inside_a_phi_of_the_bias_is_not_loop_invariant(where):
+    # 指摘 3: bias の PHI の分岐条件・値に置いたループの placeholder を見落とさない。走査は PHI の
+    # 分岐条件・値を含む全 node を辿る（`core.semantic_snapshot` の辺の分解を共有する）
+    from scripts.function_tracer_pcode.proof.recurrence_return_binding import _is_loop_invariant
+
+    bias = _placeholder_in_phi(where)
+    assert not _is_loop_invariant(bias)
+    # 証明の全体では、候補の引数の identity の規則（同じ走査）が先に拒否する
+    assert _Case(loop_value=_loop_value(bias=bias)).failures() == ("C:parameter_identity:synthetic_parameter",)
+
+
+def test_phi_over_parameters_is_a_loop_invariant_bias():
+    bias = _phi(_cond(False), B, B)
+    assert _Case(loop_value=_loop_value(bias=bias)).run()[0] == RETURN_BINDING_PROPOSITION
+
+
+@pytest.mark.parametrize("make", [
+    lambda: Expression.unknown("opaque"),
+    lambda: Expression.variable("local_1", size=4),
+])
+def test_bias_made_of_values_that_may_change_in_the_loop_is_rejected(make):
+    bias = Expression.binary_op("INT_ADD", B, make())
+    bias.size = 4
+    assert _Case(loop_value=_loop_value(bias=bias)).failures() == ("U:bias_term_shape",)
+
+
+def test_branch_condition_must_be_a_comparison():
+    # 1 byte の整数（INT_AND の結果）を分岐の条件として読まない
+    loop = _Loop(update="residue")
+    ops = tuple(
+        replace(op, opcode=OPC["INT_AND"], mnemonic="INT_AND", key=op.key[:6] + (OPC["INT_AND"],) + op.key[7:],
+                inputs=(_const(1, 1), _const(1, 1)))
+        if op.key == loop.test else op for op in loop.snapshot.ops
+    )
+    assert any(op.mnemonic == "INT_AND" and op.output_size == 1 for op in ops)
+    renamed = {loop.test: ops[[o.key for o in loop.snapshot.ops].index(loop.test)].key}
+    ops = tuple(replace(op, inputs=tuple(
+        replace(item, producer_key=renamed.get(item.producer_key, item.producer_key)) if item.kind == "op" else item
+        for item in op.inputs)) for op in ops)
+    blocks = tuple(replace(block, op_keys=tuple(renamed.get(key, key) for key in block.op_keys)) for block in loop.snapshot.blocks)
+    loop.snapshot = PcodeDataflowSnapshot(FUNCTION, blocks, ops, parameters=loop.snapshot.parameters)
+    assert "U:update_not_lowerable:non_boolean_condition" in _Case(loop, loop_value=_residue_value((1, None), (0, B))).failures()
+
+
+def test_every_lowered_mnemonic_is_in_the_opcode_table():
+    # mnemonic と opcode の照合（写しの作成時）が、lowering の受け入れる全 op に効く
+    from scripts.function_tracer_pcode.proof.recurrence_pcode_semantics import LOWERABLE_MNEMONICS
+
+    assert LOWERABLE_MNEMONICS <= set(OPC)
+    assert {OPC["BOOL_XOR"], OPC["BOOL_AND"], OPC["BOOL_OR"]} == {38, 39, 40}
+
+
+def test_value_queries_use_only_the_public_query_services():
+    # proof → builder の依存は、host が公開した service だけ（private な method に触れない）
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(value_queries))
+    private = [node.attr for node in ast.walk(tree)
+               if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+               and node.value.id == "host" and node.attr.startswith("_")]
+    assert private == []
+    assert callable(StructuralRecurrenceSummarizer.expression_query_symbols)
+    assert callable(StructuralRecurrenceSummarizer.prove_expressions_equal_under_conditions)
 
 
 # ---------------------------------------------------------------------------
@@ -601,6 +906,7 @@ def test_lowering_does_not_drop_an_unbuildable_phi_input():
     bad = replace(loop.snapshot.op(loop.odd), inputs=(_op(loop.acc), PcodeFactInput("free", 4, storage=("register", 0x5000))))
     snapshot = PcodeDataflowSnapshot(
         FUNCTION, loop.snapshot.blocks, tuple(bad if op.key == loop.odd else op for op in loop.snapshot.ops),
+        parameters=loop.snapshot.parameters,
     )
     lowering = _lowering(snapshot, leaves={loop.iv: ZERO, loop.acc: ZERO})
     with pytest.raises(LoweringFailure, match="free_input_not_parameter"):
@@ -765,6 +1071,69 @@ def test_producer_identifies_a_free_input_by_storage_and_parameter_number():
     assert item.storage == ("register", 0x4008) and item.parameter_index == 1
     assert producer._free_input(_FreeVarnode(is_input=False), 4).parameter_index is None
     assert producer._free_input(_FreeVarnode(space="ram", offset=-8), 8).storage == ("ram", (1 << 64) - 8)
+
+
+class _Storage:
+    def __init__(self, varnodes):
+        self._varnodes = varnodes
+
+    def getVarnodes(self):
+        return self._varnodes
+
+
+class _StorageVarnode:
+    def __init__(self, space, offset, size):
+        self._address = _Address(space, offset)
+        self._size = size
+
+    def getAddress(self):
+        return self._address
+
+    def getOffset(self):
+        return self._address.getOffset()
+
+    def getSize(self):
+        return self._size
+
+
+class _ParamSymbol:
+    def __init__(self, index, size, varnodes):
+        self._index, self._size, self._storage = index, size, _Storage(varnodes)
+
+    def getCategoryIndex(self):
+        return self._index
+
+    def getSize(self):
+        return self._size
+
+    def getStorage(self):
+        return self._storage
+
+
+def _high_function(symbols, *, big_endian=False):
+    language = SimpleNamespace(isBigEndian=lambda: big_endian)
+    return SimpleNamespace(
+        getLocalSymbolMap=lambda: SimpleNamespace(getNumParams=lambda: len(symbols), getParamSymbol=lambda i: symbols[i]),
+        getFunction=lambda: SimpleNamespace(getProgram=lambda: SimpleNamespace(getLanguage=lambda: language)),
+    )
+
+
+def test_producer_reads_the_prototype_storage_and_byte_order():
+    symbols = [_ParamSymbol(0, 4, [_StorageVarnode("register", 0x24, 4)]),
+               _ParamSymbol(1, 16, [_StorageVarnode("register", 0x28, 8), _StorageVarnode("register", 0x30, 8)])]
+    facts, big_endian = producer._parameter_facts(_high_function(symbols, big_endian=True))
+    assert big_endian is True
+    assert facts == (
+        PcodeParameterFact(0, 4, (("register", 0x24, 4),)),
+        PcodeParameterFact(1, 16, (("register", 0x28, 8), ("register", 0x30, 8))),
+    )
+
+
+def test_producer_refuses_a_prototype_without_storage():
+    with pytest.raises(producer._ParameterStorageUnavailable):
+        producer._parameter_facts(_high_function([_ParamSymbol(0, 4, [])]))
+    with pytest.raises(producer._ParameterStorageUnavailable):
+        producer._parameter_facts(_high_function([_ParamSymbol(0, 8, [_StorageVarnode("register", 0x24, 4)])]))
 
 
 def test_producer_refuses_a_free_input_without_a_storage_identity():

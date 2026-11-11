@@ -20,11 +20,15 @@ counted scalar loop の summary だけを受理する。
 - ``T``: header の比較は帰納変数 PHI に直接かかる strict な大小比較で、step は ±1 と向きが合う。比較の
   両辺と帰納変数は同じ幅で、limit はループ不変（wrap も非停止も起きない形だけ）。
 - ``C``: 候補は base と loop の 2 つ。loop の値の step・符号が P-code の事実と一致し、start・limit・
-  初期値・base の値が、写しから作った start・limit・初期値と SMT で等しい。``E``: 閉じた式がある。
+  初期値・base の値が、写しから作った start・limit・初期値と SMT で等しい。候補の式の引数は、写しの
+  引数の表（Ghidra の prototype の置き場所）のその番号の値そのもの（置き場所・幅が一致）に限る
+  （``C:parameter_identity``。SMT の symbol は番号で決まるので、番号だけでは同じ値と言えない）。
+  ``E``: 閉じた式がある。
 - ``G``: loop の guard ⇔ ``start REL limit``、base の guard ⇔ その否定（写しから作った式との SMT）。
 - ``U``: 写しから作った 1 回分の更新（header の比較が続ける側のとき、body の全経路を経路条件で
   選ぶ式）が、候補の residue / bias から作る更新 ``acc + Σ[iv ≡ r (mod m)]·(c·iv + b + bias)`` と
   SMT で等しい。経路・条件・入力のどれか 1 つでも式にできなければ成り立たない（経路を落とさない）。
+  bias はループ不変（PHI の分岐条件・値を含む全 node が定数・関数の引数とその純粋な演算・選択）。
 - ``Z``: base の値が、guard の同値な raw の exact return と、その guard の下で SMT で等しい（1 つ以上）。
 
 SMT は ``analysis.recurrence.value_queries``（局所の z3、#298 の UB の前提を加えない）。UNSAT だけを
@@ -45,8 +49,10 @@ from scripts.function_tracer_pcode.core.recurrence_contracts import (
     RETURN_BINDING_PROPOSITION,
     RETURN_BINDING_RULES,
 )
+from scripts.function_tracer_pcode.core.semantic_snapshot import traverse_semantic_graph
 from scripts.function_tracer_pcode.core.recurrence_return_binding import (
     CountedLoopReturnBindingEvidence,
+    parameter_leaf_mismatch,
     return_binding_proposition,
     header_guard,
     induction_steps,
@@ -207,15 +213,16 @@ def _check(analysis: Any, proposal: Any, members: List[Any]) -> List[str]:
     facts, fact_failure = _loop_facts(snapshot, header_index, region, iv_phi, acc_phi, guard)
     if fact_failure is not None:
         return [fact_failure]
-    # 引数は番号で同じ symbol になる。番号が同じで幅が違う出現は同じ値として比べない
-    widths_by_parameter = _parameter_widths(
-        facts.start, facts.limit, facts.initial, facts.next_value, facts.continue_condition.expression,
+    # 引数は番号で同じ symbol になる。候補の引数が、写しの引数の表のその番号の値そのもの（置き場所・幅が
+    # 一致する）でなければ照合しない（写しの側は表と照合した入力だけを引数にする）
+    candidate_roots = (
         loop_value, base.return_info.value,
         *(item.expression for member in (base, loop) for item in member.return_info.conditions or ()),
         *(term[2] for term in tuple(ref.residue_bias_terms or ())),
     )
-    if any(len(sizes) != 1 for sizes in widths_by_parameter.values()):
-        return ["C:parameter_width"]
+    identity = _parameter_identity_failure(snapshot, candidate_roots)
+    if identity is not None:
+        return [f"C:parameter_identity:{identity}"]
     for rule, candidate_value, fact in (
         ("C:start", operands[1], facts.start), ("C:limit", operands[2], facts.limit),
         ("C:loop_base", operands[0], facts.initial), ("C:base_value", base.return_info.value, facts.initial),
@@ -228,7 +235,7 @@ def _check(analysis: Any, proposal: Any, members: List[Any]) -> List[str]:
     if not failures:
         failures.extend(_update_failures(facts, ref))
     if not failures:
-        failures.extend(_zero_trip_failures(analysis, base))
+        failures.extend(_zero_trip_failures(analysis, base, snapshot))
     return failures
 
 
@@ -269,7 +276,7 @@ def _loop_facts(snapshot, header_index, region, iv_phi, acc_phi, guard) -> Tuple
     except LoweringFailure as exc:
         return None, f"C:entry_value:{exc.reason}"
     try:
-        condition = iteration.value(cbranch.inputs[1])
+        condition = iteration.condition(cbranch.inputs[1])
         continue_condition = Condition(condition, block.true_successor not in region)
         backedges = [
             (iteration.edge_condition(block.predecessors[index], header_index), iteration.value(acc_phi.inputs[index]))
@@ -353,41 +360,49 @@ def _guard_failures(facts: _LoopFacts, guard: Any, base: Any, loop: Any) -> List
     return out
 
 
-def _parameter_widths(*exprs: Any) -> dict:
-    """式に現れる関数の引数（番号 0 以上）ごとの幅の集合。"""
+def _nodes(*roots: Any) -> List[Any]:
+    """式の DAG の全 node（PHI の分岐条件・値を含む。辺の分解は ``core.semantic_snapshot`` が唯一の owner）。"""
 
-    out: dict = {}
-    stack = list(exprs)
+    out: List[Any] = []
     seen = set()
-    while stack:
-        current = stack.pop()
-        if current is None or id(current) in seen:
-            continue
-        seen.add(id(current))
-        if getattr(current, "expr_type", None) == ExpressionType.PARAMETER:
-            index = getattr(current, "value", None)
-            if isinstance(index, int) and index >= 0:
-                out.setdefault(index, set()).add(int(getattr(current, "size", 0) or 0))
-        if getattr(current, "expr_type", None) == ExpressionType.PHI:
-            for condition, value in getattr(current, "value", None) or ():
-                stack.extend((getattr(condition, "expression", None), value))
-        stack.extend(list(getattr(current, "operands", None) or ()))
+    for root in roots:
+        for node in traverse_semantic_graph(root).entry_order:
+            if id(node) not in seen:
+                seen.add(id(node))
+                out.append(node)
     return out
 
 
-def _mentions_loop_placeholder(expr: Any) -> bool:
-    stack = [expr]
-    while stack:
-        current = stack.pop()
-        if current is None:
-            continue
-        name = str(getattr(current, "name", "") or "")
-        if name.startswith("__loop") or name.startswith("__return_binding"):
-            return True
-        if getattr(current, "expr_type", None) == ExpressionType.PARAMETER and int(getattr(current, "value", 0) or 0) < -1:
-            return True
-        stack.extend(list(getattr(current, "operands", None) or ()))
-    return False
+def _parameter_identity_failure(snapshot: Any, roots: Sequence[Any]) -> Optional[str]:
+    for node in _nodes(*roots):
+        if getattr(node, "expr_type", None) == ExpressionType.PARAMETER:
+            mismatch = parameter_leaf_mismatch(snapshot, node)
+            if mismatch is not None:
+                return mismatch
+    return None
+
+
+#: ループ不変と言える式の node の種類（定数・関数の引数と、その純粋な演算・選択）。memory の読み取り・
+#: call・変数・unknown は、ループの中で値が変わり得るので含めない。
+_LOOP_INVARIANT_KINDS = frozenset({
+    ExpressionType.CONSTANT, ExpressionType.PARAMETER, ExpressionType.BINARY_OP,
+    ExpressionType.UNARY_OP, ExpressionType.PHI,
+})
+
+
+def _is_loop_invariant(expr: Any) -> bool:
+    """bias の式がループ不変であること（PHI の分岐条件・値を含む全 node を辿る）。
+
+    引数は番号 0 以上（関数の引数）だけを認める。負の番号は placeholder（帰納変数・accumulator）である。
+    """
+
+    for node in _nodes(expr):
+        kind = getattr(node, "expr_type", None)
+        if kind not in _LOOP_INVARIANT_KINDS:
+            return False
+        if kind == ExpressionType.PARAMETER and not (isinstance(node.value, int) and node.value >= 0):
+            return False
+    return True
 
 
 def _update_failures(facts: _LoopFacts, ref: Any) -> List[str]:
@@ -410,7 +425,7 @@ def _candidate_update(facts: _LoopFacts, ref: Any) -> Tuple[Optional[Expression]
         key = (int(modulus), int(residue))
         if key in biases:
             return None, "U:bias_term_duplicate"
-        if bias_expr is None or _mentions_loop_placeholder(bias_expr) or int(getattr(bias_expr, "size", 0) or 0) != size:
+        if bias_expr is None or not _is_loop_invariant(bias_expr) or int(getattr(bias_expr, "size", 0) or 0) != size:
             return None, "U:bias_term_shape"
         biases[key] = bias_expr
     cases = []
@@ -466,24 +481,22 @@ def _binary(operator: str, left: Expression, right: Expression, size: int) -> Ex
 
 
 def _has_unknown(expr: Any) -> bool:
-    stack = [expr]
-    while stack:
-        current = stack.pop()
-        if current is None:
-            continue
-        if getattr(current, "expr_type", None) == ExpressionType.UNKNOWN:
-            return True
-        stack.extend(list(getattr(current, "operands", None) or ()))
-    return False
+    return any(getattr(node, "expr_type", None) == ExpressionType.UNKNOWN for node in _nodes(expr))
 
 
-def _zero_trip_failures(analysis: Any, base: Any) -> List[str]:
-    """base の値を、guard の同値な raw の exact return と照合する（1 つ以上、すべて等しい）。"""
+def _zero_trip_failures(analysis: Any, base: Any, snapshot: Any) -> List[str]:
+    """base の値を、guard の同値な raw の exact return と照合する（1 つ以上、すべて等しい）。
+
+    raw の return の引数も、写しの引数の表と置き場所が一致するものだけを照合に使う。
+    """
 
     conditions = list(base.return_info.conditions or ())
     used = 0
     for raw in tuple(getattr(analysis, "returns", ()) or ()):
         if raw.value is None or _has_unknown(raw.value):
+            continue
+        raw_roots = (raw.value, *(item.expression for item in raw.conditions or () if item is not None))
+        if _parameter_identity_failure(snapshot, raw_roots) is not None:
             continue
         if not value_queries.condition_sets_equivalent(list(raw.conditions or ()), conditions):
             continue

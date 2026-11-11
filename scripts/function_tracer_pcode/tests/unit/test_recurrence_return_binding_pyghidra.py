@@ -120,6 +120,12 @@ def test_accumulator_return_summary_is_promoted_with_a_return_binding_subproof(a
     snapshot = proposal.return_binding_evidence.snapshot
     parameters = {item.parameter_index for op in snapshot.ops for item in op.inputs if item.kind == "free"}
     assert 0 in parameters  # limit `n` は引数 0
+    # 引数の表は Ghidra の prototype の置き場所で、写しの引数の入力はその置き場所と一致する
+    fact = snapshot.parameter(0)
+    assert fact is not None and len(fact.pieces) == 1
+    inputs = {(item.storage, item.size) for op in snapshot.ops for item in op.inputs
+              if item.kind == "free" and item.parameter_index == 0}
+    assert inputs == {(fact.pieces[0][:2], fact.size)}
 
 
 def test_evidence_of_another_analysis_is_rejected_by_the_real_promotion(analyses):
