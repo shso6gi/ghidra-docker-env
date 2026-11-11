@@ -71,6 +71,7 @@ from scripts.function_tracer_pcode.analysis.memory_resolver import (
 )
 
 from scripts.function_tracer_pcode.proof.ub.constraints import UbConstraintBuilder
+from scripts.function_tracer_pcode.proof.ub.premise import UB_PREMISE_KEY, UbPremise
 
 
 # Re-exports kept for callers that import these names from this module.
@@ -601,6 +602,9 @@ class FormulaBuilder:
             runtime_unknown_declarations=runtime_unknown_declarations,
             constrained_fragments=constrained_fragments,
             param_fragment_constrained=param_fragment_constrained,
+            ub_premise=self.build_ub_premise(
+                analysis1, analysis2, params1, params2, extra_vars1, extra_vars2,
+            ),
         )
 
     def _normalize_analyses(
@@ -790,17 +794,10 @@ class FormulaBuilder:
         constrained_fragments: List[str] = []
         param_fragment_constrained: List[str] = []
 
-        if self.exclude_ub:
-            ub_lines = self._build_ub_constraints_section(
-                analysis1,
-                analysis2,
-                params1,
-                params2,
-                extra_vars1,
-                extra_vars2,
-            )
-            if ub_lines:
-                lines.extend(ub_lines)
+        # Issue #298: UB 除外の制約は共通の前提に入れない。経路に結び付けずに全ての query
+        # へ入れると、別の経路の演算の制約が正当な入力（反例）を除き、恒偽なら全ての query
+        # を UNSAT にする。どこに課すかは ``proof/ub/premise.py`` が決める
+        # （``build_ub_premise`` / base_ctx の ``ub_premise``）。
 
         fp_non_nan_lines = self._build_fp_non_nan_assumptions_section(
             analysis1,
@@ -934,10 +931,7 @@ class FormulaBuilder:
             return 11, 53
         return None
     
-    # ============================================
-    # NEW: UB制約セクション構築
-    # ============================================
-    def _build_ub_constraints_section(
+    def build_ub_premise(
         self,
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
@@ -945,43 +939,24 @@ class FormulaBuilder:
         params2: List[ParameterInfo],
         extra_vars1: List[ExtraVariableInfo],
         extra_vars2: List[ExtraVariableInfo],
-    ) -> List[str]:
-        """UB除外制約セクションを構築"""
-        lines = []
+    ) -> Optional[UbPremise]:
+        """比較の UB 除外（Issue #298）。``exclude_ub`` が無効なら None。
 
-        symbol_replace_fn1 = build_symbol_replacer(params1, extra_vars1, side=1)
-        symbol_replace_fn2 = build_symbol_replacer(params2, extra_vars2, side=2)
-        
-        ub1_constraints = self.ub_constraint_builder.build_constraints(
-            analysis1,
-            params1,
-            symbol_replace_fn=symbol_replace_fn1,
+        制約の行は作らない。比べる case の guard に結び付けた EQ の前提と、反例の領域
+        （関数全体の無条件の制約）は ``UbPremise`` が必要になったときに作る。
+        """
+        if not self.exclude_ub:
+            return None
+        return UbPremise(
+            builder=self.ub_constraint_builder,
+            analyses={1: analysis1, 2: analysis2},
+            param_infos={1: list(params1), 2: list(params2)},
+            symbol_replacers={
+                1: build_symbol_replacer(params1, extra_vars1, side=1),
+                2: build_symbol_replacer(params2, extra_vars2, side=2),
+            },
         )
-        
-        ub2_constraints = self.ub_constraint_builder.build_constraints(
-            analysis2,
-            params2,
-            symbol_replace_fn=symbol_replace_fn2,
-        )
-        
-        if ub1_constraints or ub2_constraints:
-            lines.append("; " + "-" * 40)
-            lines.append("; UB Exclusion Constraints (C semantics)")
-            lines.append("; Exclude undefined behavior inputs")
-            lines.append("; " + "-" * 40)
-            
-            if ub1_constraints:
-                lines.append(f"; Function 1: {analysis1.function_name}")
-                lines.extend(ub1_constraints)
-            
-            if ub2_constraints:
-                lines.append(f"; Function 2: {analysis2.function_name}")
-                lines.extend(ub2_constraints)
-            
-            lines.append("")
-        
-        return lines
-    
+
     def _build_extra_variable_infos(
         self,
         analyses: Dict[str, ExtraVariableAnalysis],
@@ -2112,6 +2087,8 @@ class FormulaBuilder:
 
         return {
             'header_lines': context.header_lines,
+            # Issue #298: UB 除外は共通の前提でなく、比べる case に結び付けて課す
+            UB_PREMISE_KEY: context.ub_premise,
             # Issue #282: query が読む側ごとの memory の配列（閉じた式の即時合格を止める判定に使う）
             'side_memory_arrays': tuple(
                 self._collect_side_memory_arrays((analysis1, analysis2), (1, 2))

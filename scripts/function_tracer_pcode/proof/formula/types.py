@@ -92,3 +92,5 @@ class FormulaBuildContext:
     runtime_unknown_declarations: List[Tuple[str, int]]
     constrained_fragments: List[str]
     param_fragment_constrained: List[str]
+    #: Issue #298: 比較の UB 除外（``proof.ub.premise.UbPremise``。無効なら None）
+    ub_premise: Any = None

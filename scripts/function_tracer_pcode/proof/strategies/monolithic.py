@@ -850,6 +850,7 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                         ),
                     )
                     self._monolithic_replay_execution_collector = replay_collector
+                self._last_counterexample_rejection_kind = None
                 try:
                     counterexample_is_decisive = self._dispatch_counterexample_decisiveness(
                         analysis1,
@@ -885,9 +886,16 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                         global_result.is_equivalent is False
                     )
             if final_is_equivalent is False and not counterexample_is_decisive:
+                # Issue #298: model が UB を起こす入力なら、曖昧さでなくその理由で残す
+                if getattr(self, "_last_counterexample_rejection_kind", None) == "ub_domain":
+                    reject_reason_maker = self._make_sat_counterexample_ub_domain_unknown_reason
+                    reject_refs = ("ub_witness_domain", "monolithic")
+                else:
+                    reject_reason_maker = self._make_sat_counterexample_ambiguous_unknown_reason
+                    reject_refs = ("monolithic_case_partition_replay",)
                 unknown_reasons.append(
-                    self._make_sat_counterexample_ambiguous_unknown_reason(
-                        ("monolithic_case_partition_replay",),
+                    reject_reason_maker(
+                        reject_refs,
                         analysis1,
                         analysis2,
                         case1=None,

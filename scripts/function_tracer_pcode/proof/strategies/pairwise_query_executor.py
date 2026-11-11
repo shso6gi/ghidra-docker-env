@@ -45,7 +45,13 @@ from scripts.function_tracer_pcode.proof.cause_identity import (
 )
 from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
     build_case_symbol_declarations,
+    build_ub_region_query,
     build_void_return_disequivalence_query,
+)
+from scripts.function_tracer_pcode.proof.ub.premise import (
+    UB_PAIR_LINES_KEY,
+    UB_PREMISE_KEY,
+    admissible_pair_obligations,
 )
 
 
@@ -932,6 +938,9 @@ def solve_query_after_guard(
         _record_return_width_block(strategy, exc)
         return result
 
+    decide_pair_ub_obligations(
+        strategy, base_ctx, case1, case2, param_replace_fn1, param_replace_fn2, pair_id,
+    )
     full_query = strategy._build_pair_query(
         base_ctx,
         case1,
@@ -1032,6 +1041,62 @@ def solve_query_after_guard(
     # semantic blocker, when present, was established independently above.
 
     return stage2_result
+
+
+def decide_pair_ub_obligations(
+    strategy,
+    base_ctx: Dict[str, Any],
+    case1,
+    case2,
+    param_replace_fn1,
+    param_replace_fn2,
+    pair_id: str,
+):
+    """比べる組の value query に課す UB 除外を決めて base_ctx に記録する（Issue #298）。
+
+    候補は 2 つの case の値と条件の中の演算の obligation だけ（他の case・経路の制約は
+    EQ の前提にしない）。候補が組の領域（guard ∧ 入力対応 ∧ pair の仮定）を空にするなら
+    課さない（UB 制約だけが入力を除いた UNSAT を EQ の根拠にしない）。判断は同じ候補に
+    ついて 1 回で、replanner が query を組み直しても同じ行を使う。同じ pair id で別の
+    case を比べるとき（候補が変わる）は判断し直す。
+    """
+    decisions = base_ctx.setdefault(UB_PAIR_LINES_KEY, {})
+    premise = base_ctx.get(UB_PREMISE_KEY)
+    if premise is None:
+        decisions[pair_id] = ()
+        return None
+    candidates = premise.pair_candidate_lines(
+        case1, case2, param_replace_fn1, param_replace_fn2,
+    )
+    decided_for = base_ctx.setdefault(UB_PAIR_LINES_KEY + "_candidates", {})
+    if pair_id in decisions and decided_for.get(pair_id) == candidates:
+        return None
+    decided_for[pair_id] = candidates
+
+    def region_status(lines):
+        query = build_ub_region_query(
+            base_ctx, case1, case2, param_replace_fn1, param_replace_fn2, pair_id,
+            tuple(lines),
+        )
+        result = strategy._solve_query_internal(query, pair_id, stage="ub-region")
+        if result.is_equivalent is False:
+            return True
+        if result.is_equivalent is True:
+            return False
+        return None
+
+    decision = admissible_pair_obligations(candidates, region_status)
+    decisions[pair_id] = decision.lines
+    stats = getattr(strategy, "_active_normalization_stats", None)
+    if stats is not None and decision.verdict != "none":
+        key = f"ub_obligations_{decision.verdict}"
+        stats[key] = int(stats.get(key, 0) or 0) + 1
+    if decision.verdict != "none":
+        strategy._debug_print(
+            f"  Pair {pair_id}: UB exclusion obligations {decision.verdict} "
+            f"({sum(1 for line in candidates if line.lstrip().startswith('(assert'))} candidate(s))"
+        )
+    return decision
 
 
 def solve_query_twostage(
@@ -1216,6 +1281,45 @@ def build_counterexample_model_assertions(
     return tuple(_build_model_assertions(base_ctx, counterexample_raw))
 
 
+def counterexample_ub_domain_status(
+    strategy,
+    base_ctx: Dict[str, Any],
+    counterexample_raw: Optional[Dict[str, Any]],
+) -> Optional[bool]:
+    """SAT の model が反例の領域（UB を起こさない入力）に入るか（Issue #298）。
+
+    value query は比べる case の演算の UB 除外だけを課す（EQ の前提は実行を下から近似
+    する）。NOT_EQ の witness は、その経路で実行される演算の UB を起こしてはならないが、
+    どの演算が実行されるかを経路から示せないので、両方の関数の全ての演算の制約を無条件に
+    課す（実行を上から近似。変更前の query と同じ領域）。
+
+    True: 領域に入る（制約が無いときも）。False: 外れる。None: 決まらない（model が無い・
+    solver が答えない）。呼び手は True 以外を witness にしない。
+    """
+    premise = base_ctx.get(UB_PREMISE_KEY)
+    domain_lines = tuple(premise.witness_domain_lines()) if premise is not None else ()
+    if not any(line.lstrip().startswith("(assert") for line in domain_lines):
+        return True
+    if counterexample_raw:
+        model_assertions = _build_model_assertions(base_ctx, counterexample_raw)
+        if not model_assertions:
+            return None
+    elif closed_formula_needs_no_replay(base_ctx):
+        model_assertions = []
+    else:
+        return None
+    lines: List[str] = [
+        f"(set-logic {base_ctx.get('smt_logic', 'QF_BV')})",
+        "",
+    ]
+    lines.extend(base_ctx["header_lines"])
+    lines.extend(model_assertions)
+    lines.append("; Counterexample domain: no undefined behaviour in either function (Issue #298)")
+    lines.extend(domain_lines)
+    lines.append("(check-sat)")
+    return _run_validation_query(strategy, "\n".join(lines), "ub-witness-domain")
+
+
 def _validate_counterexample_model(
     strategy,
     base_ctx: Dict[str, Any],
@@ -1226,6 +1330,15 @@ def _validate_counterexample_model(
     counterexample_raw: Optional[Dict[str, Any]],
     decisive_pairs: Optional[Sequence[Tuple[int, int]]],
 ) -> bool:
+    strategy._last_counterexample_rejection_kind = None
+    if counterexample_ub_domain_status(strategy, base_ctx, counterexample_raw) is not True:
+        # model を NOT_EQ の witness にする経路は全てこの検証を通る（最後の砦）。呼び手は
+        # 棄却の種類（``_last_counterexample_rejection_kind``）で理由を選ぶ。
+        strategy._last_counterexample_rejection_kind = "ub_domain"
+        strategy._debug_print(
+            "  Counterexample rejected: model is outside the UB-free input domain"
+        )
+        return False
     if not counterexample_raw:
         if closed_formula_needs_no_replay(base_ctx):
             # A closed formula (no parameters, no extra or runtime symbols)

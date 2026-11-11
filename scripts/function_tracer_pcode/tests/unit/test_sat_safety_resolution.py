@@ -59,6 +59,8 @@ def test_every_typed_sat_reason_has_exactly_one_resolution_type():
         "counterexample_replay_unproven": SatSafetyResolution.REPLAY,
         "counterexample_analysis_safety_unproven": SatSafetyResolution.ANALYSIS_UNSAFETY,
         "counterexample_partition_replay_ambiguous": SatSafetyResolution.PARTITION_AMBIGUITY,
+        # Issue #298: UB を起こす model（witness に固有。別の witness の検証で退く）
+        "counterexample_ub_domain_violated": SatSafetyResolution.PARTITION_AMBIGUITY,
     }
 
 

@@ -523,6 +523,8 @@ CAUSE_SLOTS_ADDED_AFTER_ISSUE125 = {
     NEW_PRODUCER_SITE_ID: ("expression_size_budget_exceeded", "comparison_undecidable"),
     # Issue #257: 制御フローの不完全さで monolithic fallback を止めた比較。return-coverage の site を共有する。
     "return-coverage-final-terminal": ("return_partition_control_flow_incomplete",),
+    # Issue #298: UB を起こす model の witness の棄却。partition の曖昧さと同じ site を共有する。
+    "sat-safety-ambiguity-observed": ("counterexample_ub_domain_violated",),
 }
 
 #: PR-125-A の後に別 Issue が **既存 site** へ足した producer（site は増えない）。
