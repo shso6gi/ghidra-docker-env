@@ -52,16 +52,9 @@ def try_normalization_equivalence(
         result.blocking_detail = str(exc)
         return result
 
-    # Issue #298: UB 除外から読む事実（上限・INT_MIN の除外）は、比べる組に許可した
-    # obligation だけから取る（共通の前提には UB 除外を入れない。別の経路の制約を事実に
-    # しない）。
-    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
-        pair_ub_obligation_lines,
-    )
-
-    header_lines = list(base_ctx.get("header_lines", [])) + list(
-        pair_ub_obligation_lines(base_ctx, pair_id)
-    )
+    # Issue #298: 事実（上限・INT_MIN の除外）は共通の前提からだけ読む。UB の制約は前提に
+    # 入らない（EQ の根拠にしない）ので、UB 由来の事実で式を書き換えることもない。
+    header_lines = base_ctx.get("header_lines", [])
     if norm_settings is not None and not norm_settings.enable_division_normalization:
         min_excluded_smt = set()
     else:

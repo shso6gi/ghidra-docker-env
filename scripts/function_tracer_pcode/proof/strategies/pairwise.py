@@ -125,6 +125,7 @@ class PairwiseStrategy(CheckStrategy):
     _return_cases_have_smt_total_coverage = _svc_auxiliary_smt._impl__return_cases_have_smt_total_coverage
     _save_unknown_query = _svc_auxiliary_smt._impl__save_unknown_query
     _solve_query_internal = _svc_auxiliary_smt._impl__solve_query_internal
+    _solve_premise_query = _svc_auxiliary_smt._impl__solve_premise_query
     _solve_query_twostage = _svc_auxiliary_smt._impl__solve_query_twostage
     _solver_rewrite_candidate_object_target_key = _svc_auxiliary_smt._impl__solver_rewrite_candidate_object_target_key
     _solver_rewrite_proof_object_target_key = _svc_auxiliary_smt._impl__solver_rewrite_proof_object_target_key

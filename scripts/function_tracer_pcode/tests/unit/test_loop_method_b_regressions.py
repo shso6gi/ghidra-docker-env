@@ -71,6 +71,7 @@ from scripts.function_tracer_pcode.semantics.rewrite_contract import (
     RewriteAssumption,
 )
 from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
+from scripts.function_tracer_pcode.tests.unit._premise_support import assume_satisfiable_premise
 
 
 #: 最終 relation が ``param_1 == sext64(low32(param_1))`` を含意した、という合成入力。
@@ -5282,6 +5283,7 @@ def test_pure_counted_loop_with_total_return_coverage_can_be_closed_by_method_b(
     right_value = _counted_loop(_pure_counted_summary())
     non_positive = _count_gt(0).negate()
     strategy = _pairwise_strategy()
+    assume_satisfiable_premise(strategy)
     strategy.formula_builder.build_base_context.return_value = _shared_input_base_context()
 
     result = strategy.check(

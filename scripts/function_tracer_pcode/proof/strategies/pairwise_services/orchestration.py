@@ -691,6 +691,7 @@ def _impl_check(
         counterexample_ub_domain_status,
         counterexample_replay_targets,
         execute_guard_overlap,
+        require_satisfiable_pair_premises,
     )
 
     runtime = getattr(self, "_obligation_runtime_session", None)
@@ -1670,9 +1671,10 @@ def _impl_check(
                         continue
                     analysis_safety_validated = True
 
-                # Issue #298: value query は比べる case の演算の UB 除外だけを課す。witness は
-                # 両方の関数の全ての演算が UB を起こさない入力でなければならない（実行を上から
-                # 近似した反例の領域）。外れる model はその組の witness にしない。
+                # Issue #298: query は UB の制約を課さない（EQ の前提にしない）。witness は両方の
+                # 関数の全ての演算が UB を起こさない入力でなければならない（UB を上から近似した
+                # 反例の領域）。外れる model はその組の witness にしない（executor が領域の中で
+                # 解き直した後でも外れるとき）。
                 if counterexample_ub_domain_status(
                     self, base_ctx, result.counterexample_raw,
                 ) is not True:
@@ -2217,6 +2219,13 @@ def _impl_check(
             f"{', '.join(blocking_reasons)})"
         )
     elif unsat_count == total_pairs:
+        # Issue #298: 組の UNSAT を EQ の根拠にする前に、各組の前提（header ∧ 組の追加の
+        # assert）が SAT であることを確かめる。前提が矛盾する比較の UNSAT は空虚で、限界
+        # ``proof_premise_unsatisfiable`` を記録して送出する（guard だけで到達不能な組とは
+        # 区別する: そちらは前提が SAT）。
+        require_satisfiable_pair_premises(
+            self, base_ctx, cases1, cases2, symbol_replace_fn1, symbol_replace_fn2,
+        )
         final_is_equiv = True
         self._debug_print("=" * 60)
         self._debug_print("Result: EQUIVALENT (all pairs UNSAT)")

@@ -35,7 +35,6 @@ from scripts.function_tracer_pcode.proof.formula.returns import (
     require_equal_return_bit_widths,
 )
 from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
-from scripts.function_tracer_pcode.proof.ub.premise import UB_PAIR_LINES_KEY
 from scripts.function_tracer_pcode.proof.return_width.surface import (
     ConsumerBindingReceipt,
     PairReturnObservationView,
@@ -591,7 +590,6 @@ def build_pair_query(
         lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
         lines.extend(_build_loop_summary_case_comments(case1.value_expr, "Case1"))
         lines.extend(_build_loop_summary_case_comments(case2.value_expr, "Case2"))
-        lines.extend(_build_pair_ub_obligations(base_ctx, pair_id))
         lines.extend(_build_pairwise_extra_assertions(base_ctx, pair_id))
         lines.extend(
             _build_value_inequality_section(
@@ -617,45 +615,24 @@ def build_pair_query(
         return "\n".join(lines)
 
 
-def pair_ub_obligation_lines(base_ctx: Dict[str, Any], pair_id: str) -> Tuple[str, ...]:
-    """value query に課す UB 除外（executor が比べる組について許可したものだけ。Issue #298）。
-
-    許可の判断（``proof.ub.premise.admissible_pair_obligations``）が済んでいない組・
-    executor を通らない query には何も課さない（前提を弱める側。EQ に対して安全）。
-    """
-    return tuple((base_ctx.get(UB_PAIR_LINES_KEY) or {}).get(pair_id, ()) or ())
-
-
-def _build_pair_ub_obligations(base_ctx: Dict[str, Any], pair_id: str) -> List[str]:
-    lines = pair_ub_obligation_lines(base_ctx, pair_id)
-    if not lines:
-        return []
-    return [
-        "",
-        "; " + "-" * 40,
-        "; UB exclusion of the operations in the compared cases (Issue #298)",
-        "; (bound to the cases' guards asserted above)",
-        "; " + "-" * 40,
-        *lines,
-    ]
-
-
-def build_ub_region_query(
+def build_pair_premise_query(
     base_ctx: Dict[str, Any],
     case1: ReturnCase,
     case2: ReturnCase,
     param_replace_fn1,
     param_replace_fn2,
     pair_id: str,
-    obligation_lines: Tuple[str, ...],
 ) -> str:
-    """value query の前提（値の不等式を除く）に UB 除外の候補を足した充足可能性の query。
+    """組の query が共有する前提だけ（guard・値の不等式を除く）の充足可能性の query（Issue #298）。
 
-    Issue #298: 候補の obligation が比べる組の領域を空にしないかを確かめる
-    （``proof.ub.premise.admissible_pair_obligations``）。
+    前提は header（入力対応・型の仮説・FP の仮定・readonly の公理など）と、その組の
+    追加の assert（guard の query と value query のものの和）。これが UNSAT なら、その組の
+    UNSAT は guard・値と無関係に起きる（空虚）ので、EQ の根拠にしない
+    （``proof.obligations.premise``）。前提が SAT で guard を足して UNSAT になる組は、正当に
+    到達不能な組。
     """
     lines = _build_query_header(
-        f"; UB Exclusion Region Check: Pair {pair_id}",
+        f"; Proof Premise Satisfiability: Pair {pair_id}",
         f"; Case1[{case1.index}]: {case1.get_condition_summary()}",
         f"; Case2[{case2.index}]: {case2.get_condition_summary()}",
         logic=base_ctx.get("smt_logic", "QF_BV"),
@@ -664,10 +641,14 @@ def build_ub_region_query(
     lines.extend(build_case_symbol_declarations(
         base_ctx, ((case1, param_replace_fn1), (case2, param_replace_fn2)),
     ))
-    lines.extend(_build_case_conditions(case1, param_replace_fn1, "Case1"))
-    lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
-    lines.extend(["", "; UB exclusion candidates", *obligation_lines])
-    lines.extend(_build_pairwise_extra_assertions(base_ctx, pair_id))
+    extra: List[str] = []
+    for line in (
+        *_build_pairwise_extra_assertions(base_ctx, pair_id, guard_only=True),
+        *_build_pairwise_extra_assertions(base_ctx, pair_id),
+    ):
+        if line not in extra or not line.lstrip().startswith("(assert"):
+            extra.append(line)
+    lines.extend(extra)
     lines.append("(check-sat)")
     return "\n".join(lines)
 
@@ -733,7 +714,6 @@ def build_normalized_inequality_query(
     lines.extend(_build_case_conditions(case2, param_replace_fn2, "Case2"))
     lines.extend(_build_loop_summary_case_comments(case1.value_expr, "Case1"))
     lines.extend(_build_loop_summary_case_comments(case2.value_expr, "Case2"))
-    lines.extend(_build_pair_ub_obligations(base_ctx, pair_id))
     return_size1 = base_ctx.get("return_size1", 32)
     return_size2 = base_ctx.get("return_size2", 32)
     value1_smt_norm = coerce_value_to_bitvec_width(

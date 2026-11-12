@@ -87,11 +87,12 @@ def _loc(name: str, offset: int, size: int) -> CanonicalLocation:
 
 
 def _neg(expr: Expression) -> Expression:
+    # P-code の INT_2COMP は出力と入力の大きさが同じ（Issue #298: 広げる形は描画が拒否する）
     return Expression(
         ExpressionType.UNARY_OP,
         operator="INT_2COMP",
         operands=[expr],
-        size=8,
+        size=expr.size or 8,
     )
 
 

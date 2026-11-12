@@ -39,6 +39,7 @@ from scripts.function_tracer_pcode.proof.obligations import (
 from scripts.function_tracer_pcode.proof.obligations.snapshot import (
     FUNCTION_ANALYSIS_FIELD_CLASSIFICATION,
 )
+from scripts.function_tracer_pcode.tests.unit._premise_support import assume_satisfiable_premise
 
 
 @pytest.fixture(autouse=True)
@@ -805,6 +806,7 @@ def test_typed_query_reuse_reexecutes_only_changed_semantic_pair():
         solver,
         enable_completed_recovery_proofs=False,
     )
+    assume_satisfiable_premise(strategy)
     left = create_mock_analysis(
         "left", returns=[ReturnInfo("0x1000", Expression.constant(1, 4), [])]
     )

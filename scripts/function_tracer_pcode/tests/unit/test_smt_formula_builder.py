@@ -11,7 +11,7 @@ from scripts.function_tracer_pcode.core import (
     Condition,
 )
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
-from scripts.function_tracer_pcode.proof.ub.premise import UB_PREMISE_KEY
+from scripts.function_tracer_pcode.proof.ub.domain import UB_WITNESS_DOMAIN_KEY
 
 
 def _ub_witness_domain(builder, analysis1, analysis2):
@@ -28,7 +28,7 @@ def _ub_witness_domain(builder, analysis1, analysis2):
         analysis1, analysis2, input_correspondence=correspondence,
     )
     assert not any("Exclude UB" in line for line in base_ctx["header_lines"])
-    return "\n".join(base_ctx[UB_PREMISE_KEY].witness_domain_lines())
+    return "\n".join(base_ctx[UB_WITNESS_DOMAIN_KEY].lines())
 
 
 class TestIntegration:
@@ -260,8 +260,12 @@ class TestIntegration:
 
         print("\n[TEST] signed left shift overflow constraints emitted for signed context")
 
-    def test_signed_left_shift_overflow_constraints_are_not_emitted_for_unsigned_context(self):
-        """unsigned 文脈では追加の signed overflow 制約を入れないことを確認"""
+    def test_signed_left_shift_overflow_constraints_are_emitted_for_unsigned_context_too(self):
+        """unsigned 文脈でも signed overflow の制約を反例の領域に入れる（Issue #298）。
+
+        binary の左シフトから source の演算の符号は示せない。反例の領域は UB を上から近似
+        するので、文脈の符号で除外しない（EQ の前提には入らない）。
+        """
         builder = FormulaBuilder(debug=False, exclude_ub=True)
 
         shift1 = Expression(ExpressionType.PARAMETER, name="shift", size=4)
@@ -319,10 +323,10 @@ class TestIntegration:
 
         formula = _ub_witness_domain(builder, analysis1, analysis2)
 
-        assert "signed left shift overflow requires shift < 63" not in formula
+        assert "signed left shift overflow requires shift < 63" in formula
+        assert "(assert (bvult shift_1 (_ bv63 32)))" in formula
+        assert "(assert (bvult shift_2 (_ bv63 32)))" in formula
         assert "(assert (bvult shift_1 (_ bv64 32)))" in formula
         assert "(assert (bvult shift_2 (_ bv64 32)))" in formula
-
-        print("\n[TEST] no signed overflow constraints emitted for unsigned context")
 
 
