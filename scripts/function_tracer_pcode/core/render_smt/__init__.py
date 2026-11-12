@@ -139,6 +139,7 @@ from scripts.function_tracer_pcode.core.render_smt.widths import (  # noqa: F401
     _smt_scale_term,
     _smt_width_if_known,
     boolean_value_bits,
+    constant_value_at_width,
     expression_smt_bit_width,
     expression_value_bit_width,
 )

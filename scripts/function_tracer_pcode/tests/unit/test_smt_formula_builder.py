@@ -254,9 +254,13 @@ class TestIntegration:
 
         formula = _ub_witness_domain(builder, analysis1, analysis2)
 
-        assert "signed left shift overflow requires shift < 63" in formula
-        assert "(assert (bvult shift_1 (_ bv63 32)))" in formula
-        assert "(assert (bvult shift_2 (_ bv63 32)))" in formula
+        # 1 << shift が符号付きの 64 bit で表せる（1 <u 2^63 >> shift、つまり shift < 63。Issue #298）
+        assert "signed left shift of a negative or overflowing 64-bit value" in formula
+        for name in ("shift_1", "shift_2"):
+            assert (
+                f"(assert (bvult (_ bv1 64) (bvlshr (_ bv9223372036854775808 64) ((_ zero_extend 32) {name}))))"
+                in formula
+            )
 
         print("\n[TEST] signed left shift overflow constraints emitted for signed context")
 
@@ -323,9 +327,13 @@ class TestIntegration:
 
         formula = _ub_witness_domain(builder, analysis1, analysis2)
 
-        assert "signed left shift overflow requires shift < 63" in formula
-        assert "(assert (bvult shift_1 (_ bv63 32)))" in formula
-        assert "(assert (bvult shift_2 (_ bv63 32)))" in formula
+        # 1 << shift が符号付きの 64 bit で表せる（1 <u 2^63 >> shift、つまり shift < 63。Issue #298）
+        assert "signed left shift of a negative or overflowing 64-bit value" in formula
+        for name in ("shift_1", "shift_2"):
+            assert (
+                f"(assert (bvult (_ bv1 64) (bvlshr (_ bv9223372036854775808 64) ((_ zero_extend 32) {name}))))"
+                in formula
+            )
         assert "(assert (bvult shift_1 (_ bv64 32)))" in formula
         assert "(assert (bvult shift_2 (_ bv64 32)))" in formula
 

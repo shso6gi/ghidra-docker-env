@@ -448,7 +448,8 @@ def test_obligations_cover_phi_conditions_and_values():
 
     assert "(bvult n (_ bv32 32))" in terms  # 条件と値の両方の shift（同じ制約は 1 つ）
     assert "(not (= m (_ bv2147483648 32)))" in terms  # 値の中の負号
-    assert "(bvult n (_ bv31 32))" in terms  # 条件の中の 1 << n の符号付きの表現範囲
+    # 条件の中の 1 << n の符号付きの表現範囲（1 <u 2^31 >> n、つまり n < 31）
+    assert "(bvult (_ bv1 32) (bvlshr (_ bv2147483648 32) n))" in terms
 
 
 # ---------------------------------------------------------------------------
@@ -788,3 +789,219 @@ def test_operations_on_the_store_observation_index_are_not_program_operations():
     terms = {o.term for o in UbConstraintBuilder().collect_obligations([published(surface)], [])}
 
     assert terms == {"(not (= m (_ bv9223372036854775808 64)))"}
+
+
+# ---------------------------------------------------------------------------
+# レビュー 2 回目 指摘 1: 定数の量は描画の値（8 bit の 256 は 0）で判断する
+# ---------------------------------------------------------------------------
+
+
+def test_shift_count_constant_is_judged_by_its_rendered_value():
+    """``INT_LEFT(x32, 256:8) -> 64`` の量は 0。伸ばし方で値が変わる（x = INT_MIN）ので拒否する。
+
+    レビュー時の head（``977aa229``）は生の 256 を「伸ばした bit を押し出す」と読み、zero 拡張で
+    描いた（``ZEXT(x)`` と EQ）。``288:8``（= 32）は押し出すので正確に描く。
+    """
+    x = Expression(ExpressionType.PARAMETER, name="x", size=4)
+    assert _pcode_shift("INT_LEFT", _zext(INT32_MIN, 32), 256 % 256, 64) != _pcode_shift(
+        "INT_LEFT", _sext(INT32_MIN, 32, 64), 256 % 256, 64,
+    )
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        published(_bin("INT_LEFT", x, _const(256, 1), size=8)).to_smt()
+    smt = published(_bin("INT_LEFT", x, _const(288, 1), size=8)).to_smt()
+    for value in (1, INT32_MIN, 0xFFFFFFFF):
+        assert _z3_value(smt, {"x": (32, value)}) == _pcode_shift("INT_LEFT", _zext(value, 32), 32, 64)
+
+
+def test_wide_shift_by_a_count_that_wraps_to_zero_is_not_equivalent_to_zext():
+    def shifted(x):
+        return _bin("INT_LEFT", x, _const(256, 1), size=8)
+
+    def widened(x):
+        expr = Expression.unary_op("INT_ZEXT", x)
+        expr.size = 8
+        return expr
+
+    left = _unary_fn("f", shifted, return_type="ulong", return_size=8)
+    right = _unary_fn("g", widened, return_type="ulong", return_size=8)
+    result = run_production_check("i298-count-wrap", left, right)
+
+    assert _outcome(result) != "EQUIVALENT"
+
+
+def test_ub_constraints_read_constants_at_their_rendered_width():
+    x = Expression(ExpressionType.PARAMETER, name="x", size=4)
+    builder = UbConstraintBuilder()
+    # 量 288:8 は 32（= 幅）: UB の量
+    (wide,) = builder.collect_obligations(
+        [published(_bin("INT_LEFT", x, _const(288, 1), size=4))], [], constraint_types={"shift_count"},
+    )
+    assert wide.term == "(bvult (_ bv288 8) (_ bv32 8))"
+    # 量 256:8 は 0: UB にならない
+    assert builder.collect_obligations(
+        [published(_bin("INT_LEFT", x, _const(256, 1), size=4))], [], constraint_types={"shift_count"},
+    ) == []
+
+
+# ---------------------------------------------------------------------------
+# レビュー 2 回目 指摘 3: 変数の左シフトの符号付きの UB と反例の領域
+# ---------------------------------------------------------------------------
+
+
+def _shift_one_fn(name, *, flip_sign):
+    """``f(x) = x << 1`` / ``g(x) = (x << 1) ^ (x < 0)``（x は int）。
+
+    違いは x < 0 だけで、そこは符号付きの左シフトが UB（負の値の左シフト）。NOT_EQ の witness に
+    しない。レビュー時の head は正の定数の左シフトだけを制約し、x = INT_MIN を反例にした（NOT_EQ）。
+    """
+    x = _param("x", 4, "int", 0)
+    value = _bin("INT_LEFT", x, _const(1, 4))
+    if flip_sign:
+        negative = Expression.unary_op("INT_ZEXT", _bin("INT_SLESS", x, _const(0, 4)))
+        negative.size = 4
+        value = _bin("INT_XOR", value, negative)
+    return _analysis(name, [_descriptor("x", 4, "int", True, 0)], [ReturnInfo("0x10", value, [])])
+
+
+def test_variable_left_shift_ub_excludes_its_inputs_from_the_witness():
+    result = run_production_check(
+        "i298-shl-var", _shift_one_fn("f", flip_sign=False), _shift_one_fn("g", flip_sign=True),
+    )
+
+    assert _outcome(result) == "UNKNOWN"
+    assert "counterexample_ub_domain_violated" in _reason_ids(result)
+
+
+def test_variable_left_shift_keeps_a_counterexample_inside_the_domain():
+    """``f(x) = x << 1`` / ``g(x) = (x << 1) + 1``: x = 0 で 0 と 1（UB 無し）。"""
+    def plus_one(name):
+        x = _param("x", 4, "int", 0)
+        return _analysis(
+            name, [_descriptor("x", 4, "int", True, 0)],
+            [ReturnInfo("0x10", _bin("INT_ADD", _bin("INT_LEFT", x, _const(1, 4)), _const(1, 4)), [])],
+        )
+
+    result = run_production_check("i298-shl-neq", _shift_one_fn("f", flip_sign=False), plus_one("g"))
+
+    assert _outcome(result) == "NOT_EQ"
+
+
+def test_variable_left_shift_against_itself_stays_equivalent():
+    result = run_production_check(
+        "i298-shl-eq", _shift_one_fn("f", flip_sign=True), _shift_one_fn("g", flip_sign=True),
+    )
+
+    assert _outcome(result) == "EQUIVALENT"
+
+
+@pytest.mark.parametrize("value,count,ok", [
+    (0, 31, True), (1, 30, True), (1, 31, False), (0x3FFFFFFF, 1, True), (0x40000000, 1, False),
+    (INT32_MIN, 0, False), (0xFFFFFFFF, 1, False), (5, 0, True),
+])
+def test_signed_left_shift_obligation_matches_the_c_rule(value, count, ok):
+    """E1 << E2（符号付き 32 bit）が定義される ⇔ 0 <= E1 かつ E1·2^E2 <= INT_MAX（C11 6.5.7）。"""
+    x = Expression(ExpressionType.PARAMETER, name="x", size=4)
+    n = Expression(ExpressionType.PARAMETER, name="n", size=4)
+    (obligation,) = UbConstraintBuilder().collect_obligations(
+        [published(_bin("INT_LEFT", x, n))], [], constraint_types={"signed_left_shift_overflow"},
+    )
+    signed = value - (1 << 32) if value >> 31 else value
+    assert ok == (signed >= 0 and signed * (1 << count) <= 0x7FFFFFFF)
+    assert _z3_value(f"(ite {obligation.term} (_ bv1 1) (_ bv0 1))", {"x": (32, value), "n": (32, count)}) == int(ok)
+
+
+# ---------------------------------------------------------------------------
+# レビュー 2 回目 指摘 4: 同じ前提は同じ query（共有する）
+# ---------------------------------------------------------------------------
+
+
+def test_identical_pair_premises_share_one_query_and_different_ones_do_not():
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import build_pair_premise_query
+
+    def case(index, value):
+        return ReturnCase(
+            index=index, conditions=[], value_expr=published(_const(value, 4)), return_info=None,
+            return_type="int", parameters=[],
+        )
+
+    base_ctx = {
+        "header_lines": ["(declare-const p (_ BitVec 32))", "(assert (bvult p (_ bv9 32)))"],
+        "smt_logic": "QF_BV",
+        "pairwise_extra_assertions_by_pair": {
+            "(1,0)": ["(assert (= p (_ bv1 32)))", "(assert (bvugt p (_ bv0 32)))"],
+            "(1,1)": ["(assert (bvugt p (_ bv0 32)))", "(assert (= p (_ bv1 32)))"],
+            "(2,0)": ["(assert (= p (_ bv2 32)))"],
+        },
+    }
+    queries = {
+        pair: build_pair_premise_query(base_ctx, case(i, i), case(j, j + 7), None, None, pair)
+        for pair, (i, j) in {"(0,0)": (0, 0), "(0,1)": (0, 1), "(1,0)": (1, 0), "(1,1)": (1, 1), "(2,0)": (2, 0)}.items()
+    }
+
+    assert queries["(0,0)"] == queries["(0,1)"]  # 追加の assert の無い組は header だけ
+    assert queries["(1,0)"] == queries["(1,1)"]  # 同じ追加の assert（順が違う）
+    assert len({queries["(0,0)"], queries["(1,0)"], queries["(2,0)"]}) == 3
+    assert "(assert (= p (_ bv2 32)))" in queries["(2,0)"]
+
+
+# ---------------------------------------------------------------------------
+# レビュー 2 回目 指摘 2: 宣言が被演算子より広い算術（#313 と shift の保護の接点）
+# ---------------------------------------------------------------------------
+
+
+def _zext64(x):
+    expr = Expression.unary_op("INT_ZEXT", x)
+    expr.size = 8
+    return expr
+
+
+def _mul_high_fn(name, *, form):
+    """``(x * y) >> 32``（64 bit）。``narrow``: 乗算の被演算子が 32 bit（宣言 64 bit）、``wide``: ZEXT で
+    64 bit にした well-formed な形、``zero``: 定数 0。
+
+    レビュー時の head は ``narrow`` の乗算を 32 bit で描き（宣言より狭い。#313）、その上の 64 bit の
+    shift の被演算子は宣言どうしでは 64 bit なので shift の保護も通り、``x * y >> 32`` を 0 にした
+    （x = y = 65536 で 64 bit の値は 1）。
+    """
+    x = _param("x", 4, "uint", 0)
+    y = _param("y", 4, "uint", 1)
+    if form == "zero":
+        value = _const(0, 8)
+    else:
+        left, right = (x, y) if form == "narrow" else (_zext64(x), _zext64(y))
+        value = _bin("INT_RIGHT", _bin("INT_MULT", left, right, size=8), _const(32, 4), size=8)
+    return _analysis(
+        name,
+        [_descriptor("x", 4, "uint", False, 0), _descriptor("y", 4, "uint", False, 1)],
+        [ReturnInfo("0x10", value, [])],
+        return_type="ulong", return_size=8,
+    )
+
+
+def test_arithmetic_declared_wider_than_its_operands_is_not_computed_narrow():
+    x = Expression(ExpressionType.PARAMETER, name="x", size=4)
+    y = Expression(ExpressionType.PARAMETER, name="y", size=4)
+    narrow = _bin("INT_RIGHT", _bin("INT_MULT", x, y, size=8), _const(32, 4), size=8)
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        published(narrow).to_smt()
+    wide = _bin("INT_RIGHT", _bin("INT_MULT", _zext64(x), _zext64(y), size=8), _const(32, 4), size=8)
+    smt = published(wide).to_smt()
+    for a, b in ((65536, 65536), (0xFFFFFFFF, 0xFFFFFFFF), (3, 5)):
+        assert _z3_value(smt, {"x": (32, a), "y": (32, b)}) == (a * b) >> 32
+    # 伸ばし方が決まる被演算子（最上位 bit が 0 の定数どうし）は宣言の幅で正確に描く
+    product = _bin("INT_MULT", _const(0x10000, 4), _const(0x10000, 4), size=8)
+    assert _z3_value(published(product).to_smt(), {}) == 0x100000000
+
+
+def test_wide_product_of_narrow_operands_is_not_equivalent_to_zero():
+    result = run_production_check("i298-mul-narrow", _mul_high_fn("f", form="narrow"), _mul_high_fn("g", form="zero"))
+
+    assert _outcome(result) not in {"EQUIVALENT", "NOT_EQ"}
+
+
+def test_well_formed_wide_product_keeps_its_counterexample():
+    """x = y = 65536 で ``(zext(x) * zext(y)) >> 32`` は 1、定数 0 と違う（UB 無し）。"""
+    result = run_production_check("i298-mul-wide", _mul_high_fn("f", form="wide"), _mul_high_fn("g", form="zero"))
+
+    assert _outcome(result) == "NOT_EQ"

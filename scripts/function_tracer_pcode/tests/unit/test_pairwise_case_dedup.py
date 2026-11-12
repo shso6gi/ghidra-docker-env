@@ -74,8 +74,8 @@ def _param(name: str) -> Expression:
     return published(Expression(ExpressionType.PARAMETER, name=name, size=8))
 
 
-def _const(value: int) -> Expression:
-    return published(Expression(ExpressionType.CONSTANT, value=value, size=8))
+def _const(value: int, size: int = 8) -> Expression:
+    return published(Expression(ExpressionType.CONSTANT, value=value, size=size))
 
 
 def _loc(name: str, offset: int, size: int) -> CanonicalLocation:
@@ -803,11 +803,11 @@ def test_return_case_value_smt_does_not_replay_explicit_prestate_expression_agai
 
     trace_nonnull = _cond("INT_NOTEQUAL", trace, _const(0))
     loop_active = _cond("INT_SLESS", start, limit)
-    final_iter = _cond("INT_EQUAL", limit, Expression.binary_op("INT_ADD", start, _const(1)))
+    final_iter = _cond("INT_EQUAL", limit, Expression.binary_op("INT_ADD", start, _const(1, 4)))
     odd_iteration = _cond(
         "INT_NOTEQUAL",
-        Expression.binary_op("INT_AND", start, _const(1)),
-        _const(0),
+        Expression.binary_op("INT_AND", start, _const(1, 4)),
+        _const(0, 4),
     )
 
     params = [
@@ -818,7 +818,7 @@ def test_return_case_value_smt_does_not_replay_explicit_prestate_expression_agai
     steps_addr = Expression.binary_op("INT_ADD", trace, _const(4))
     explicit_expr = Expression.binary_op(
         "INT_ADD",
-        Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), _const(1)),
+        Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), _const(1, 4)),
         Expression.binary_op("INT_ADD", _neg(start), Expression.memory(trace, size=4)),
     )
     effects = [
@@ -830,7 +830,7 @@ def test_return_case_value_smt_does_not_replay_explicit_prestate_expression_agai
         ),
         StoreEffect(
             location=_loc("param_1", 4, 4),
-            value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), _const(1)),
+            value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), _const(1, 4)),
             conditions=[trace_nonnull, loop_active, final_iter],
             order_key=6,
         ),

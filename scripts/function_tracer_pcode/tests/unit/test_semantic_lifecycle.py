@@ -265,14 +265,16 @@ def test_deepcopy_does_not_inherit_publication():
 
 def test_republishing_a_refined_value_makes_it_usable_again():
     published = publish(_sum())
-    refined = published.derive_with(size=8)
+    # 精緻化は operator を変える（Issue #298: 被演算子より広い宣言の算術は、伸ばし方が決まらなければ
+    # 描画が拒否するので、幅を変える精緻化では描ける値にならない）
+    refined = published.derive_with(operator="INT_SUB")
 
     publish(refined)
 
     assert refined.is_published is True
     assert refined.to_smt()
     # 元の値は別物のまま（精緻化は複製なので元へ波及しない）。
-    assert published.size == 4
+    assert published.operator == "INT_ADD"
 
 
 # ---------------------------------------------------------------------------

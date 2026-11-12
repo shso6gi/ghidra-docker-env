@@ -5,7 +5,7 @@ C の未定義動作（UB）を起こし得る入力を表す SMT 制約（oblig
 扱う UB の種類:
 1. 負号の -INT_MIN オーバーフロー（INT_2COMP の被演算子が最小値）
 2. シフト量が演算の幅以上のシフト
-3. 正の定数の左シフトの表現不能（signed left shift overflow）
+3. 符号付きの左シフト（被演算子が負、または結果が表せない。signed left shift overflow）
 
 Issue #298: obligation の使い道は **反例の領域** だけ（:mod:`proof.ub.domain`）。
 NOT_EQ の witness は、どちらの関数の source でも UB を起こさない入力でなければならない。
@@ -17,6 +17,10 @@ binary の演算から source の演算・その符号・実行条件は示せ�
   付けない（どの演算がどの入力で実行されるかを binary から示せない）。
 - 符号を推測で除外しない。引数が unsigned と宣言されていても ``-(int)x`` はあり得るので、
   負号・左シフトは被演算子の型・文脈に依らず制約にする（#31 の保護を包む）。
+
+扱わない UB（反例の領域に入らない）: 整数の加算・減算・乗算の符号付き overflow、除算の
+0 除算・INT_MIN / -1、ポインタ演算。これらの UB だけで違う関数は NOT_EQ になり得る
+（既知の制約。PR #312 の本文と Issue に記録）。
 - 幅は演算と被演算子の小さい方（被演算子の幅が演算と違う形は描画が拒否する:
   ``core.render_smt`` の ``UnsupportedSmtOperatorError``）。
 
@@ -35,6 +39,7 @@ from scripts.function_tracer_pcode.core import (
     Expression,
     ExpressionType,
 )
+from scripts.function_tracer_pcode.core.render_smt.widths import constant_value_at_width
 from scripts.function_tracer_pcode.core.semantic_snapshot import traverse_semantic_graph
 
 if TYPE_CHECKING:
@@ -249,28 +254,48 @@ class UbConstraintBuilder:
         )]
 
     def _signed_left_shift(self, node, left, right, symbol_replace_fn) -> List[UbObligation]:
-        """正の定数の左シフトが符号付きで表せる範囲（符号は推測しない: 上から近似）。"""
-        if getattr(left, "expr_type", None) != ExpressionType.CONSTANT:
-            return []
-        value = getattr(left, "value", None)
-        result_bits = operation_bits(node, left)
-        if not isinstance(value, int) or value <= 0 or result_bits <= 1:
-            return []
-        if value > (1 << (result_bits - 1)) - 1:
-            return []
-        bound = result_bits - value.bit_length()
+        """符号付きの左シフトの UB（C: E1 が負、または E1·2^E2 が表せない）を除く（上から近似）。
+
+        binary の左シフトから source の符号は示せない（unsigned なら定義済み、source の乗算
+        ``x * 2`` の符号付きの overflow でもあり得る）ので、被演算子の型・文脈に依らず課す:
+        ``E1 <u 2^(w-1) >> E2``（E1 が非負で、E1 << E2 が符号付きで表せる）。量 E2 >= w は
+        ``shift_count`` の制約が除く。E1 が定数 0 なら UB は無い。
+        """
+        width = operation_bits(node, left)
         right_bits = _bits(right)
-        if bound <= 0 or right_bits <= 0 or bound >= (1 << right_bits):
+        if width <= 1 or right_bits <= 0:
             return []
-        if self._constant_below(right, bound):
+        lhs_value = constant_value_at_width(left, width)
+        if lhs_value == 0:
             return []
-        right_smt = self._render(right, symbol_replace_fn, right_bits)
-        self._debug_print(f"signed-left-shift obligation: {right_smt} < {bound}")
+        count_value = constant_value_at_width(right, right_bits)
+        if count_value is not None and count_value >= width:
+            return []  # 量が幅以上（shift_count の制約が除く）
+        if lhs_value is not None and count_value is not None:
+            if lhs_value < (1 << (width - 1)) >> count_value:
+                return []  # 定数どうしで表せる
+            term = "false"
+        elif count_value is not None:
+            bound = (1 << (width - 1)) >> count_value
+            lhs_smt = self._render(left, symbol_replace_fn, width)
+            term = f"(bvult {lhs_smt} (_ bv{bound} {width}))"
+        else:
+            lhs_smt = (
+                f"(_ bv{lhs_value} {width})" if lhs_value is not None
+                else self._render(left, symbol_replace_fn, width)
+            )
+            count_smt = self._render(right, symbol_replace_fn, right_bits)
+            if right_bits < width:
+                count_smt = f"((_ zero_extend {width - right_bits}) {count_smt})"
+            elif right_bits > width:
+                count_smt = f"((_ extract {width - 1} 0) {count_smt})"
+            term = f"(bvult {lhs_smt} (bvlshr (_ bv{1 << (width - 1)} {width}) {count_smt}))"
+        self._debug_print(f"signed-left-shift obligation: {term}")
         return [UbObligation(
             kind="signed_left_shift_overflow",
             operator="INT_LEFT",
-            term=f"(bvult {right_smt} (_ bv{bound} {right_bits}))",
-            comment=f"Exclude UB: signed left shift overflow requires shift < {bound}",
+            term=term,
+            comment=f"Exclude UB: signed left shift of a negative or overflowing {width}-bit value",
         )]
 
     def _negate_min(self, node, operand, symbol_replace_fn) -> List[UbObligation]:
@@ -279,10 +304,9 @@ class UbConstraintBuilder:
         if width <= 1:
             return []
         min_val = 1 << (width - 1)
-        if getattr(operand, "expr_type", None) == ExpressionType.CONSTANT:
-            value = getattr(operand, "value", None)
-            if isinstance(value, int) and (value % (1 << width)) != min_val:
-                return []
+        operand_value = constant_value_at_width(operand, width)
+        if operand_value is not None and operand_value != min_val:
+            return []
         operand_smt = self._render(operand, symbol_replace_fn, width)
         self._debug_print(f"negation obligation: {operand_smt} != {min_val} ({width} bits)")
         return [UbObligation(
@@ -294,7 +318,6 @@ class UbConstraintBuilder:
 
     @staticmethod
     def _constant_below(expr: Expression, bound: int) -> bool:
-        if getattr(expr, "expr_type", None) != ExpressionType.CONSTANT:
-            return False
-        value = getattr(expr, "value", None)
-        return isinstance(value, int) and 0 <= value < bound
+        """定数が描画で表す値（幅の剰余）が ``bound`` 未満か。"""
+        value = constant_value_at_width(expr)
+        return value is not None and value < bound

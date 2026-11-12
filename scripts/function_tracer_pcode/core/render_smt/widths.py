@@ -122,6 +122,11 @@ def _node_smt_bit_width(expr, child) -> int:
                 explicit_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
                 if explicit_bits > 0:
                     return explicit_bits
+            # Issue #298: 宣言（P-code の出力）が被演算子のどちらより広いなら宣言の幅で計算する
+            # （``render._fit_arithmetic_operand`` が被演算子を合わせるか拒否する）
+            declared_bits = int(getattr(expr, "size", 0) or 0) * 8
+            if declared_bits > max(left_bits, right_bits):
+                return declared_bits
             return _preferred_arithmetic_width(left, right, left_bits, right_bits)
         return max(left_bits, right_bits)
 
@@ -399,6 +404,32 @@ def _coerce_expr_to_bitvec_width(
         target_bits,
         prefer_sign_extension=prefer_sign_extension,
     )
+
+
+def constant_value_at_width(expr, bits: Optional[int] = None) -> Optional[int]:
+    """CONSTANT の node が描画で表す値（``bits`` 幅の unsigned。2^bits の剰余。Issue #298）。
+
+    ``(_ bvV W)`` は V mod 2^W を表すので、8 bit の 256 は 0。幅の判断（shift の量・拡張の要否・
+    UB の制約）は生の ``value`` ではなくこの値を使う。``bits`` を省くと node の描画の幅。
+    番地の定数（image・global の object の番地）は描画で記号になり、数値を持たないので None。
+    """
+
+    if expr is None or getattr(getattr(expr, "expr_type", None), "name", None) != "CONSTANT":
+        return None
+    value = getattr(expr, "value", None)
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    from scripts.function_tracer_pcode.core.render_smt.unknowns import (
+        expression_addresses_image,
+        global_address_smt,
+    )
+
+    width = int(bits if bits is not None else (expr.get_bit_width() or 0))
+    if width <= 0:
+        return None
+    if expression_addresses_image(expr) or global_address_smt(expr, width) is not None:
+        return None
+    return value % (1 << width)
 
 
 def _constant_fits_width(expr, target_bits: int) -> bool:
