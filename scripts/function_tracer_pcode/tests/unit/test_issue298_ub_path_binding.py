@@ -1005,3 +1005,243 @@ def test_well_formed_wide_product_keeps_its_counterexample():
     result = run_production_check("i298-mul-wide", _mul_high_fn("f", form="wide"), _mul_high_fn("g", form="zero"))
 
     assert _outcome(result) == "NOT_EQ"
+
+
+# ---------------------------------------------------------------------------
+# レビュー 3 回目 指摘 1: 片方だけが狭い混合幅の算術（伸ばし方を推測しない）
+# ---------------------------------------------------------------------------
+
+
+def _mixed_add_fn(name, *, form):
+    """``x + y``（y は 64 bit）。``narrow``: 32 bit の x をそのまま 64 bit の INT_ADD に置く（伸ばし方が式に
+    無い）、``zext`` / ``sext``: x を明示的に伸ばす well-formed な形。
+
+    レビュー時の head（``f709de03``）は narrow を宣言の符号で伸ばし（unsigned → zero）、zext と EQ にした。
+    元の式が sign 拡張なら x = 0x80000000、y = 0 で違う。
+    """
+    x = _param("x", 4, "uint", 0)
+    y = _param("y", 8, "ulong", 1)
+    left = x
+    if form != "narrow":
+        left = Expression.unary_op("INT_ZEXT" if form == "zext" else "INT_SEXT", x)
+        left.size = 8
+    return _analysis(
+        name,
+        [_descriptor("x", 4, "uint", False, 0), _descriptor("y", 8, "ulong", False, 1)],
+        [ReturnInfo("0x10", _bin("INT_ADD", left, y, size=8), [])],
+        return_type="ulong", return_size=8,
+    )
+
+
+def test_one_sided_narrow_operand_is_not_extended_by_a_guess():
+    x = Expression(ExpressionType.PARAMETER, name="x", size=4)
+    y = Expression(ExpressionType.PARAMETER, name="y", size=8)
+    by_zero = (_zext(INT32_MIN, 32) + 0) & ((1 << 64) - 1)
+    by_sign = (_sext(INT32_MIN, 32, 64) + 0) & ((1 << 64) - 1)
+    assert by_zero != by_sign  # 参照値: 伸ばし方で値が変わる
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        published(_bin("INT_ADD", x, y, size=8)).to_smt()
+    # 伸ばし方で値が変わらない被演算子（最上位 bit が 0 の定数）は伸ばして計算する
+    smt = published(_bin("INT_ADD", _const(5, 4), y, size=8)).to_smt()
+    assert _z3_value(smt, {"y": (64, 7)}) == 12
+
+
+def test_mixed_width_sum_is_not_equivalent_to_the_zero_extended_sum():
+    result = run_production_check("i298-mixed", _mixed_add_fn("f", form="narrow"), _mixed_add_fn("g", form="zext"))
+
+    assert _outcome(result) not in {"EQUIVALENT", "NOT_EQ"}
+
+
+def test_explicit_extensions_keep_their_counterexample_and_equivalence():
+    differ = run_production_check("i298-mixed-neq", _mixed_add_fn("f", form="sext"), _mixed_add_fn("g", form="zext"))
+    same = run_production_check("i298-mixed-eq", _mixed_add_fn("f", form="zext"), _mixed_add_fn("g", form="zext"))
+
+    assert _outcome(differ) == "NOT_EQ"
+    assert _outcome(same) == "EQUIVALENT"
+
+
+# ---------------------------------------------------------------------------
+# レビュー 3 回目 指摘 2: Bool の SMT の幅は演算の幅ではない
+# ---------------------------------------------------------------------------
+
+
+def _bool_shift_fn(name, *, constant):
+    """``(x != 0) << 1``（比較の結果は 1 byte の 0 / 1、shift は 4 byte）/ 定数 0。x = 1 で 2 と 0。
+
+    レビュー時の head は比較の Bool sort の 1 bit を演算の幅として ``1 < 1`` の UB の制約を作り、正当な
+    反例を除いて UNKNOWN にした（``0eaef1f8`` は NOT_EQ）。
+    """
+    x = _param("x", 4, "uint", 0)
+    value = _const(0, 4) if constant else _bin(
+        "INT_LEFT", _bin("INT_NOTEQUAL", x, _const(0, 4), size=1), _const(1, 4), size=4,
+    )
+    return _analysis(name, [_descriptor("x", 4, "uint", False, 0)], [ReturnInfo("0x10", value, [])], return_type="uint")
+
+
+def test_comparison_result_shift_keeps_its_counterexample():
+    result = run_production_check("i298-bool-shift", _bool_shift_fn("f", constant=False), _bool_shift_fn("g", constant=True))
+
+    assert _outcome(result) == "NOT_EQ"
+
+
+def test_ub_width_of_a_comparison_operand_is_its_value_width():
+    x = Expression(ExpressionType.PARAMETER, name="x", size=4)
+    shifted = _bin("INT_LEFT", _bin("INT_NOTEQUAL", x, _const(0, 4), size=1), _const(1, 4), size=4)
+    terms = {o.term for o in UbConstraintBuilder().collect_obligations([published(shifted)], [])}
+
+    assert "false" not in terms
+    assert not any("(_ bv1 1)" in term for term in terms)
+    assert _z3_value(published(shifted).to_smt(), {"x": (32, 1)}) == 2
+
+
+# ---------------------------------------------------------------------------
+# レビュー 3 回目 指摘 3: 描画の拒否を確定の証明・solver の query へ流さない
+# ---------------------------------------------------------------------------
+
+
+def test_loop_template_does_not_identify_values_whose_extension_is_unknown():
+    from scripts.function_tracer_pcode.proof.loop_template_abstraction import prove_template_equivalence
+
+    x = Expression(ExpressionType.PARAMETER, name="x", size=4)
+    shift_by_zero = _bin("INT_LEFT", x, _const(0, 4), size=8)
+    zext = Expression.unary_op("INT_ZEXT", x)
+    zext.size = 8
+    sext = Expression.unary_op("INT_SEXT", x)
+    sext.size = 8
+
+    assert prove_template_equivalence(published(shift_by_zero), published(zext), target_bits=64)[0] is False
+    assert prove_template_equivalence(published(sext), published(zext), target_bits=64)[0] is False
+    # 正例: 同じ拡張どうし、下位 32 bit だけを比べるなら sext と zext は等しい
+    assert prove_template_equivalence(published(zext), published(zext.derive_with()), target_bits=64)[0] is True
+    assert prove_template_equivalence(published(sext), published(zext), target_bits=32)[0] is True
+
+
+def test_shift_by_zero_is_not_removed_when_the_operand_is_narrower():
+    from scripts.function_tracer_pcode.semantics.normalize import NormalizationContext, normalize_expression
+
+    x = Expression(ExpressionType.PARAMETER, name="x", size=4)
+    narrow = published(_bin("INT_LEFT", x, _const(0, 4), size=8))
+    same = published(_bin("INT_LEFT", x, _const(0, 4), size=4))
+
+    assert normalize_expression(narrow, NormalizationContext()).operator == "INT_LEFT"
+    assert normalize_expression(same, NormalizationContext()) is x
+
+
+def test_division_guard_does_not_send_unrenderable_operands_to_the_solver():
+    from unittest.mock import Mock
+
+    from scripts.function_tracer_pcode.semantics.normalize import NormalizationContext
+    from scripts.function_tracer_pcode.semantics.normalize.division_signedness_guarded import (
+        normalize_udiv_with_guard,
+    )
+
+    p = Expression(ExpressionType.PARAMETER, name="p", size=4)
+    q = Expression(ExpressionType.PARAMETER, name="q", size=8)
+    division = published(_bin("INT_DIV", _neg(p, size=8), q, size=8))
+    solver = Mock()
+
+    result = normalize_udiv_with_guard(division, {}, [], [], solver, NormalizationContext(), lambda text: text)
+
+    assert result.operator == "INT_DIV"  # 書き換えない（SDIV にしない）
+    solver.assert_not_called()
+
+
+def test_evidence_rendering_records_a_refusal_without_raising():
+    from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
+
+    x = Expression(ExpressionType.PARAMETER, name="x", size=4)
+    text = render_expression_smt_evidence(_bin("INT_LEFT", x, _const(0, 4), size=8))
+
+    assert text.startswith("(unrendered ")
+
+
+# ---------------------------------------------------------------------------
+# レビュー 3 回目 指摘 4: comment だけが違う前提は 1 回だけ解く
+# ---------------------------------------------------------------------------
+
+
+def test_pair_premises_that_differ_only_in_comments_are_solved_once():
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_models import ReturnCase
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
+        require_satisfiable_pair_premises,
+    )
+
+    def case(index):
+        return ReturnCase(
+            index=index, conditions=[], value_expr=published(_const(index, 4)), return_info=None,
+            return_type="int", parameters=[],
+        )
+
+    cases1 = [case(i) for i in range(3)]
+    cases2 = [case(j) for j in range(4)]
+    base_ctx = {
+        "header_lines": ["(declare-const p (_ BitVec 32))"],
+        "smt_logic": "QF_BV",
+        "call_projection_assertions_by_pair": {
+            f"({i},{j})": [f"; call projection for pair ({i},{j})\n(assert (bvult p (_ bv9 32)))"]
+            for i in range(3) for j in range(4)
+        },
+    }
+    calls = []
+
+    class _Strategy:
+        _active_normalization_stats = {}
+
+        def _solve_premise_query(self, scope, query):
+            calls.append(scope)
+            return True
+
+    require_satisfiable_pair_premises(_Strategy(), base_ctx, cases1, cases2, None, None)
+
+    assert len(calls) == 1
+    # 制約が違えば別の前提
+    base_ctx["call_projection_assertions_by_pair"]["(2,3)"] = ["(assert (= p (_ bv1 32)))"]
+    base_ctx.pop("proof_premise_status", None)
+    calls.clear()
+    require_satisfiable_pair_premises(_Strategy(), base_ctx, cases1, cases2, None, None)
+    assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# レビュー 3 回目（同種）: 幅の違う比較も伸ばし方を推測しない
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("operator,constant", [
+    ("INT_EQUAL", 4), ("INT_NOTEQUAL", 0x7FFFFFFF), ("INT_LESS", 4), ("INT_LESSEQUAL", 0x7FFFFFFF),
+])
+def test_unsigned_comparison_with_a_sign_clear_constant_does_not_depend_on_the_extension(operator, constant):
+    """``ext(x) op c``（c は狭い幅で最上位 bit が 0）は zero・sign どちらでも同じ値。参照値と照合する。"""
+    x = Expression(ExpressionType.PARAMETER, name="x", size=4)
+    smt = published(_bin(operator, x, _const(constant, 8), size=1)).to_smt()
+    ops = {
+        "INT_EQUAL": lambda a, b: a == b, "INT_NOTEQUAL": lambda a, b: a != b,
+        "INT_LESS": lambda a, b: a < b, "INT_LESSEQUAL": lambda a, b: a <= b,
+    }
+    for value in (0, 4, 5, 0x7FFFFFFF, INT32_MIN, 0xFFFFFFFF):
+        by_zero = ops[operator](_zext(value, 32), constant)
+        by_sign = ops[operator](_sext(value, 32, 64), constant)
+        assert by_zero == by_sign
+        assert _z3_value(f"(ite {smt} (_ bv1 1) (_ bv0 1))", {"x": (32, value)}) == int(by_zero)
+
+
+@pytest.mark.parametrize("operator,constant", [
+    ("INT_SLESS", 4), ("INT_SLESSEQUAL", 0), ("INT_LESS", 0xFFFFFFFF), ("INT_EQUAL", 0xFFFFFFFF80000000),
+])
+def test_comparison_whose_value_depends_on_the_extension_is_refused(operator, constant):
+    x = Expression(ExpressionType.PARAMETER, name="x", size=4)
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        published(_bin(operator, x, _const(constant, 8), size=1)).to_smt()
+
+
+def test_zero_constant_is_not_narrowed_under_a_signed_ordering():
+    from scripts.function_tracer_pcode.semantics.semantic_width import SemanticWidthNormalizer
+    from scripts.function_tracer_pcode.semantics.rewrite_contract import EMPTY_REWRITE_AUTHORIZATION
+
+    x = Expression(ExpressionType.PARAMETER, name="x", size=4)
+    normalizer = SemanticWidthNormalizer({}, EMPTY_REWRITE_AUTHORIZATION)
+    signed = normalizer.rewrite_expression(published(_bin("INT_SLESS", x, _const(0, 8), size=1)))
+    unsigned = normalizer.rewrite_expression(published(_bin("INT_EQUAL", x, _const(0, 8), size=1)))
+
+    assert signed.operands[1].size == 8  # 狭めない（x の伸ばし方を決めない）
+    assert unsigned.operands[1].size == 4  # 等値は伸ばし方に依らない

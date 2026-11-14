@@ -98,6 +98,7 @@ from scripts.function_tracer_pcode.core.render_smt.render import (  # noqa: F401
     expression_node_has_unsupported_smt_ops,
     expression_returns_bool,
     expression_to_smt,
+    render_expression_smt_for_query,
     condition_to_smt,
     render_condition_smt_evidence,
     render_expression_smt_evidence,

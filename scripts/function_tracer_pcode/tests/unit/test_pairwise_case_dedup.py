@@ -421,11 +421,11 @@ def test_return_case_value_smt_lowers_symbolic_post_state_reads_with_effect_summ
 
     trace_nonnull = _cond("INT_NOTEQUAL", trace, _const(0))
     loop_active = _cond("INT_SLESS", start, limit)
-    final_iter = _cond("INT_EQUAL", limit, Expression.binary_op("INT_ADD", start, _const(1)))
+    final_iter = _cond("INT_EQUAL", limit, Expression.binary_op("INT_ADD", start, _const(1, 4)))
     odd_iteration = _cond(
         "INT_NOTEQUAL",
-        Expression.binary_op("INT_AND", start, _const(1)),
-        _const(0),
+        Expression.binary_op("INT_AND", start, _const(1, 4)),
+        _const(0, 4),
     )
     even_iteration = odd_iteration.negate()
 
@@ -463,7 +463,7 @@ def test_return_case_value_smt_lowers_symbolic_post_state_reads_with_effect_summ
         ),
         StoreEffect(
             location=CanonicalLocation(base_ref=LocationBaseRef.parameter("trace", index=0), offset=4, size=4),
-            value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), _const(1)),
+            value=Expression.binary_op("INT_ADD", Expression.memory(steps_addr, size=4), _const(1, 4)),
             conditions=[trace_nonnull, loop_active, final_iter],
             order_key=6,
         ),
@@ -502,11 +502,11 @@ def test_return_case_value_smt_lowers_object_centric_post_state_memory_with_effe
 
     trace_nonnull = _cond("INT_NOTEQUAL", trace, _const(0))
     loop_active = _cond("INT_SLESS", start, limit)
-    final_iter = _cond("INT_EQUAL", limit, Expression.binary_op("INT_ADD", start, _const(1)))
+    final_iter = _cond("INT_EQUAL", limit, Expression.binary_op("INT_ADD", start, _const(1, 4)))
     odd_iteration = _cond(
         "INT_NOTEQUAL",
-        Expression.binary_op("INT_AND", start, _const(1)),
-        _const(0),
+        Expression.binary_op("INT_AND", start, _const(1, 4)),
+        _const(0, 4),
     )
     even_iteration = odd_iteration.negate()
 
@@ -1287,8 +1287,14 @@ def test_nested_zero_extend_uses_rendered_operand_width_without_double_extension
 
     smt = published(outer_zext).to_smt()
 
-    assert "((_ zero_extend 32) (bvmul" not in smt
-    assert smt == "(bvmul (_ bv2 64) ((_ zero_extend 32) (bvadd param_1 (_ bv7 32))))"
+    # Issue #298: 乗算は宣言（4 byte）の幅で計算し、外側の ZEXT がそれを 64 bit へ伸ばす（P-code の
+    # 意味）。以前の描画は宣言を無視して 64 bit で掛けていた（2·v が 32 bit を溢れると値が違う）。
+    # 内側の ZEXT は 8 byte の被演算子を下位 32 bit へ切り詰める（加減乗の下位は下位だけで決まる）。
+    assert smt == (
+        "((_ zero_extend 32) (bvmul (_ bv2 32) ((_ extract 31 0) "
+        "((_ zero_extend 32) (bvadd param_1 (_ bv7 32))))))"
+    )
+    assert smt.count("((_ zero_extend 32) (bvadd") == 1
 
 
 @pytest.fixture

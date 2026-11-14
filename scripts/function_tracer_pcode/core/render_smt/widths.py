@@ -118,16 +118,12 @@ def _node_smt_bit_width(expr, child) -> int:
         if expr.operator in _BOOLEAN_BINARY_OPERATORS:
             return 1
         if expr.operator in _ARITHMETIC_BINARY_OPERATORS:
-            if expr.operator in _BITWISE_BINARY_OPERATORS:
-                explicit_bits = expr.get_bit_width() if hasattr(expr, "get_bit_width") else 0
-                if explicit_bits > 0:
-                    return explicit_bits
-            # Issue #298: 宣言（P-code の出力）が被演算子のどちらより広いなら宣言の幅で計算する
+            # Issue #298: 演算の幅は宣言の大きさ（P-code の出力）。宣言が無ければ広い方の被演算子
             # （``render._fit_arithmetic_operand`` が被演算子を合わせるか拒否する）
             declared_bits = int(getattr(expr, "size", 0) or 0) * 8
-            if declared_bits > max(left_bits, right_bits):
+            if declared_bits > 0:
                 return declared_bits
-            return _preferred_arithmetic_width(left, right, left_bits, right_bits)
+            return max(left_bits, right_bits)
         return max(left_bits, right_bits)
 
     if expr_type == expr_kind.PHI:

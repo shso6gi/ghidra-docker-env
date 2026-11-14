@@ -513,9 +513,14 @@ def test_extract_return_cases_normalizes_reinjected_summary_guard_widths():
         for cond in cases[0].conditions
         if cond.expression.operator == "INT_SLESS"
     )
-    assert guard.expression.operands[1].get_bit_width() == 32
-    assert "(_ bv4 32)" in guard.to_smt()
-    assert "(_ bv4 64)" not in guard.to_smt()
+    # Issue #298: 32 bit の count と 64 bit の定数の符号付きの比較は、count の伸ばし方で値が変わる。
+    # 比較の符号で伸ばし方を決めて定数を狭めず（以前は sign と推測して 32 bit にしていた）、描画も
+    # 拒否する。case の抽出は止まらない（条件の oracle は判定しない側に倒れる）
+    from scripts.function_tracer_pcode.core.render_smt import SMT_SEMANTICS_REFUSALS
+
+    assert guard.expression.operands[1].get_bit_width() == 64
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        guard.to_smt()
 
 
 def test_extract_return_cases_normalizes_return_condition_parameter_metadata():
@@ -543,9 +548,13 @@ def test_extract_return_cases_normalizes_return_condition_parameter_metadata():
     assert len(cases) == 1
     condition = cases[0].conditions[0]
     assert condition.expression.operands[0].get_bit_width() == 32
-    assert condition.expression.operands[1].get_bit_width() == 32
-    assert "(_ bv4 32)" in condition.to_smt()
-    assert "(_ bv4 64)" not in condition.to_smt()
+    # Issue #298: 引数の宣言の幅へ狭めた count（32 bit）と 64 bit の定数の符号付きの比較は、count の
+    # 伸ばし方で値が変わる。定数を比較の符号で狭めず（以前は sign と推測）、描画も拒否する
+    from scripts.function_tracer_pcode.core.render_smt import SMT_SEMANTICS_REFUSALS
+
+    assert condition.expression.operands[1].get_bit_width() == 64
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        condition.to_smt()
 
 
 def test_pairwise_object_condition_coverage_proves_total_binary_partition_without_base_context():

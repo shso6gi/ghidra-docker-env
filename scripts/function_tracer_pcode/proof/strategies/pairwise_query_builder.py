@@ -632,15 +632,20 @@ def build_pair_premise_query(
     到達不能な組。
 
     同じ前提は同じ文字列にする（``require_satisfiable_premises`` は文字列で共有する）:
-    組の番号・case の要約を書かず、追加の assert は重複を除いて並べ替える（assert の順は
-    充足可能性を変えない）。追加の assert が無い組は header だけ（制約の無い記号の宣言は
+    組の番号・case の要約を書かず、追加の assert の項目からも comment の行（組の番号を含む
+    出自の説明）を除き、重複を除いて並べ替える（comment・assert の順は充足可能性を変えない）。追加の assert が無い組は header だけ（制約の無い記号の宣言は
     充足可能性を変えない）。追加の assert がある組だけ、その記号を宣言する case の宣言を
     並べ替えて含める。
     """
-    extra = sorted(set(
-        _pairwise_extra_assertion_items(base_ctx, pair_id, guard_only=True)
-        + _pairwise_extra_assertion_items(base_ctx, pair_id)
-    ))
+    extra = sorted({
+        content
+        for item in (
+            _pairwise_extra_assertion_items(base_ctx, pair_id, guard_only=True)
+            + _pairwise_extra_assertion_items(base_ctx, pair_id)
+        )
+        for content in (_premise_item_content(item),)
+        if content
+    })
     lines = _build_query_header(
         "; Proof Premise Satisfiability",
         logic=base_ctx.get("smt_logic", "QF_BV"),
@@ -654,6 +659,14 @@ def build_pair_premise_query(
         lines.extend(extra)
     lines.append("(check-sat)")
     return "\n".join(lines)
+
+
+def _premise_item_content(item: str) -> str:
+    """追加の assert の項目から comment の行を除いた内容（前提の文字列の共有に使う）。"""
+    return "\n".join(
+        line.rstrip() for line in str(item).splitlines()
+        if line.strip() and not line.strip().startswith(";")
+    )
 
 
 def _pairwise_extra_assertion_items(

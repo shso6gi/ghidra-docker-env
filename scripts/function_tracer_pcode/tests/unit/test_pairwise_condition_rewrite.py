@@ -221,6 +221,12 @@ def test_pairwise_strategy_marks_contradictory_signed_modulo_pair_unsat_without_
     solver_runner.run_sequential.assert_called()
 
 
+def _sized_unknown(description, peer):
+    unknown = Expression.unknown(description)
+    unknown.size = peer.size
+    return unknown
+
+
 def test_pairwise_strategy_marks_unresolved_cases_unknown_without_invoking_solver():
     analysis1 = raw_function_analysis(
         function_name="f1",
@@ -232,7 +238,9 @@ def test_pairwise_strategy_marks_unresolved_cases_unknown_without_invoking_solve
                 value=_const(1),
                 conditions=[
                     Condition(
-                        _binary("INT_SLESS", _param("param_1"), Expression.unknown("call_out_of_scope:callee")),
+                        # Issue #298: 比較の両辺を同じ大きさにする（幅の違う比較は描画が拒否するので、
+                        # この test が見る「未解決の値の組」より先に止まってしまう）
+                        _binary("INT_SLESS", _param("param_1"), _sized_unknown("call_out_of_scope:callee", _param("param_1"))),
                         False,
                     )
                 ],
@@ -308,7 +316,8 @@ def test_pairwise_strategy_reduces_phi_unknown_under_pair_conditions():
     phi_value = Expression.phi(
         [
             (selector, _const(1)),
-            (other_selector, Expression.unknown("phi_circular")),
+            # Issue #298: PHI の枝は同じ大きさ（狭い枝の伸ばし方を描画は推測しない）
+            (other_selector, _sized_unknown("phi_circular", _const(1))),
         ]
     )
     phi_value.size = 8

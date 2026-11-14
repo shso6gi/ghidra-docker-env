@@ -26,6 +26,7 @@ import z3
 
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
 from scripts.function_tracer_pcode.core.render_smt import (
+    SMT_SEMANTICS_REFUSALS,
     expression_returns_bool,
     expression_smt_bit_width,
 )
@@ -326,8 +327,13 @@ def test_mask_rewrite_preserves_the_parent_sort_and_value():
     hints = _hints(i0=ParameterSemanticHint(32, "unsigned"))
     certify("mask_to_zero_extension", original, [("p", 64)], hints=hints)
 
+    # 素朴な書き換え（下位 32 bit の否定を 64 bit の定数と比べる）は幅の違う比較で、伸ばし方が値を
+    # 変えるので描画が拒否する（Issue #298: 以前は zero 拡張と推測し、反例で違いを示していた）
     naive = _bin("INT_EQUAL", _un("INT_NEGATE", _low(p64, 4), 4), _const(0xFFFFFFFF00000000, 8), 1)
-    assert counterexample_exists(original, naive, [("p", 64)])
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        publish(naive).to_smt()
+    widened = _un("INT_ZEXT", _un("INT_NEGATE", _low(p64, 4), 4), 8)
+    assert counterexample_exists(original, _bin("INT_EQUAL", widened, _const(0xFFFFFFFF00000000, 8), 1), [("p", 64)])
 
 
 # ---------------------------------------------------------------------------
@@ -337,24 +343,40 @@ def test_mask_rewrite_preserves_the_parent_sort_and_value():
 
 @certifies("comparison_constant_width_alignment")
 @pytest.mark.parametrize(("op", "constant"), [
-    ("INT_SLESS", 4), ("INT_SLESS", 0xFFFFFFFFFFFFFFFC), ("INT_SLESSEQUAL", 0xFFFFFFFF80000000),
-    ("INT_LESS", 0xFFFFFFFF), ("INT_LESSEQUAL", 4), ("INT_EQUAL", 0x80000000), ("INT_NOTEQUAL", 7),
+    ("INT_EQUAL", 4), ("INT_NOTEQUAL", 7), ("INT_EQUAL", 0x7FFFFFFF), ("INT_LESSEQUAL", 4), ("INT_LESS", 0x7FFFFFFF),
 ])
 def test_comparison_constant_is_aligned_to_the_narrow_operand(op, constant):
-    """lowering は狭い側を signed 比較なら sext、それ以外は zext で揃える。その像の定数だけ。"""
+    """符号なしの比較で、定数が zero・sign どちらの拡張の像にも入る（狭い幅で最上位 bit が 0）ときだけ揃える。
+
+    Issue #298: 描画は幅の違う比較の狭い側を比較の符号で伸ばさない。揃えも、伸ばし方に依らず
+    ``a op low_N(c)`` と同値な形に限る。
+    """
 
     original = _bin(op, a32, _const(constant, 8), 1)
-    certify("comparison_constant_width_alignment", original, [("a", 32)])
+    rewritten, applied = _normalize(original)
+    assert set(applied) == {"comparison_constant_width_alignment"}, applied
+    assert rewritten.operands[1].size == 4  # 定数を狭い側の幅へ揃えた
+    # 描画も伸ばし方に依らない同じ形で比べる（揃える前後で同じ意味）
+    declarations = _declarations([("a", 32)])
+    assert _check(declarations + _differs(original, rewritten)) == z3.unsat
 
 
 @pytest.mark.parametrize(("op", "constant"), [
+    ("INT_SLESS", 4), ("INT_SLESS", 0xFFFFFFFFFFFFFFFC), ("INT_SLESSEQUAL", 0xFFFFFFFF80000000),
+    ("INT_LESS", 0xFFFFFFFF), ("INT_EQUAL", 0x80000000),
     ("INT_LESS", 0xFFFFFFFFFFFFFFFF), ("INT_EQUAL", 0xFFFFFFFF80000000), ("INT_SLESS", 0x80000000),
 ])
-def test_comparison_constant_outside_the_lowering_image_is_kept(op, constant):
+def test_comparison_constant_whose_meaning_depends_on_the_extension_is_kept(op, constant):
+    """符号付きの順序の比較・狭い幅で最上位 bit が 1 の定数は、狭い側の伸ばし方で意味が変わる。揃えず、描画も拒否する。"""
+
     original = _bin(op, a32, _const(constant, 8), 1)
-    assert _rewrite(original).to_smt() == original.to_smt()
-    naive = _bin(op, a32, _const(constant & 0xFFFFFFFF, 4), 1)
-    assert counterexample_exists(original, naive, [("a", 32)])
+    rewritten = _rewrite(original)
+    assert rewritten.operands[1].size == 8  # 定数を狭めていない
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        publish(original).to_smt()
+    by_zero = _bin(op, _un("INT_ZEXT", a32, 8), _const(constant, 8), 1)
+    by_sign = _bin(op, _un("INT_SEXT", a32, 8), _const(constant, 8), 1)
+    assert counterexample_exists(by_zero, by_sign, [("a", 32)])
 
 
 # ---------------------------------------------------------------------------

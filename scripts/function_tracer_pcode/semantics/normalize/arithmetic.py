@@ -64,7 +64,13 @@ def _rewrite_sub_as_add_neg(expr: Expression) -> Expression:
 
 
 def _canonicalize_add(expr: Expression) -> Expression:
-    terms = _collect_add_terms(expr)
+    # Issue #298: 宣言の大きさの違う加算を平らにすると、狭い加算の桁あふれ（wrap）を失い、
+    # 項を 1 つにすると伸ばし方の分からない狭い値に置き換わる。全ての項と入れ子の加算が
+    # 同じ大きさのときだけ並べ替える
+    width = int(expr.size or 0)
+    terms = _collect_add_terms(expr, width)
+    if width <= 0 or any(int(term.size or 0) != width for term in terms):
+        return expr
     original_terms = list(terms)
 
     terms = [term for term in terms if not _is_zero_constant(term)]
@@ -74,8 +80,7 @@ def _canonicalize_add(expr: Expression) -> Expression:
         return zero
 
     if len(terms) == 1:
-        only = terms[0]
-        return only.clone_with(size=only.size or expr.size)
+        return terms[0]
 
     sorted_terms = sorted(terms, key=_term_sort_key)
     if sorted_terms == original_terms and len(sorted_terms) == 2:
@@ -86,9 +91,15 @@ def _canonicalize_add(expr: Expression) -> Expression:
     return rebuilt
 
 
-def _collect_add_terms(expr: Expression):
-    if expr.expr_type == ExpressionType.BINARY_OP and expr.operator == "INT_ADD" and len(expr.operands) == 2:
-        return _collect_add_terms(expr.operands[0]) + _collect_add_terms(expr.operands[1])
+def _collect_add_terms(expr: Expression, width: int):
+    """同じ大きさ（``width`` byte）の入れ子の加算だけを平らにした項。"""
+    if (
+        expr.expr_type == ExpressionType.BINARY_OP
+        and expr.operator == "INT_ADD"
+        and len(expr.operands) == 2
+        and int(expr.size or 0) == width
+    ):
+        return _collect_add_terms(expr.operands[0], width) + _collect_add_terms(expr.operands[1], width)
     return [expr]
 
 
@@ -99,12 +110,18 @@ def _build_add_tree(terms):
     return current
 
 
+def _constant_value(expr: Expression):
+    from scripts.function_tracer_pcode.core.render_smt.widths import constant_value_at_width
+
+    return constant_value_at_width(expr)
+
+
 def _is_zero_constant(expr: Expression) -> bool:
-    return expr.expr_type == ExpressionType.CONSTANT and expr.value == 0
+    return _constant_value(expr) == 0
 
 
 def _is_one_constant(expr: Expression) -> bool:
-    return expr.expr_type == ExpressionType.CONSTANT and expr.value == 1
+    return _constant_value(expr) == 1
 
 
 def _simplify_mult_identities(expr: Expression) -> Expression:
@@ -116,10 +133,12 @@ def _simplify_mult_identities(expr: Expression) -> Expression:
         zero = Expression.constant(0, size=expr.size or max(left.size, right.size))
         zero.size = expr.size or zero.size
         return zero
-    if _is_one_constant(left):
-        return right.derive_with(size=expr.size or right.size)
-    if _is_one_constant(right):
-        return left.derive_with(size=expr.size or left.size)
+    # Issue #298: 残す被演算子が乗算と同じ大きさのときだけ外す（大きさを付け替えると、狭い値を
+    # 広い値と読み替える）
+    width = int(expr.size or 0)
+    if _is_one_constant(left) and width > 0 and int(right.size or 0) == width:
+        return right
+    if _is_one_constant(right) and width > 0 and int(left.size or 0) == width:
         return left
     return expr
 

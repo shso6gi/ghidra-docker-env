@@ -128,18 +128,32 @@ def iter_operation_nodes(roots: Iterable[Optional[Expression]]) -> List[Expressi
 
 
 def _bits(expr: Optional[Expression]) -> int:
-    """描画での値の幅（``core.render_smt`` と同じ規則。比較・bool は size byte の 0 / 1）。"""
+    """P-code の **値** の幅（SMT の sort の幅ではない。比較・bool は size byte の 0 / 1）。
+
+    比較の結果を Bool sort の 1 bit として読むと、``(x != 0) << 1`` の UB の幅が 1 になり、
+    ``1 < 1`` の恒偽の制約で正当な反例を除く（Issue #298 review 3）。値の幅の owner は
+    ``core.render_smt.expression_value_bit_width``。
+    """
     if expr is None:
         return 0
-    from scripts.function_tracer_pcode.core.render_smt import expression_smt_bit_width
+    from scripts.function_tracer_pcode.core.render_smt import expression_value_bit_width
 
-    return int(expression_smt_bit_width(expr) or 0)
+    return int(expression_value_bit_width(expr) or 0)
 
 
 def operation_bits(op_expr: Expression, operand: Expression) -> int:
-    """演算の UB の幅: 演算（P-code の出力）と第 1 被演算子の幅の小さい方（上から近似）。"""
+    """演算の UB の幅。
+
+    演算（P-code の出力）と第 1 被演算子の値の幅が同じならその幅。被演算子が狭く、伸ばし方で
+    値が変わらない（0 / 1・最上位 bit が 0 の定数。描画もその形だけを演算の幅で計算する）なら
+    演算の幅。それ以外は小さい方（上から近似: どちらの幅の演算だったかを示せない）。
+    """
+    from scripts.function_tracer_pcode.core.render_smt.render import _extension_is_determined
+
     op_bits = int(getattr(op_expr, "size", 0) or 0) * 8
     operand_bits = _bits(operand)
+    if op_bits > operand_bits > 0 and _extension_is_determined(operand, operand_bits):
+        return op_bits
     widths = [bits for bits in (op_bits, operand_bits) if bits > 0]
     return min(widths) if widths else 0
 
