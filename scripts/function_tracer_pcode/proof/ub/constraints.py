@@ -1,489 +1,337 @@
 # -*- coding: utf-8 -*-
 """
-C言語の未定義動作（UB）を除外するSMT制約を生成するモジュール
+C の未定義動作（UB）を起こし得る入力を表す SMT 制約（obligation）を作るモジュール
 
-現在サポートされているUB:
-1. 符号付き整数の -MIN_INT オーバーフロー (bvneg on INT_MIN)
-2. シフト量がビット幅以上になるシフト演算
-3. signed left shift の表現不能オーバーフロー（guarded subset）
+扱う UB の種類:
+1. 負号の -INT_MIN オーバーフロー（INT_2COMP の被演算子が最小値）
+2. シフト量が演算の幅以上のシフト
+3. 符号付きの左シフト（被演算子が負、または結果が表せない。signed left shift overflow）
 
-将来拡張予定:
-- INT_MIN / -1 オーバーフロー
-- signed left shift の表現不能オーバーフロー
-- ポインタ演算のUB
+Issue #298: obligation の使い道は **反例の領域** だけ（:mod:`proof.ub.domain`）。
+NOT_EQ の witness は、どちらの関数の source でも UB を起こさない入力でなければならない。
+binary の演算から source の演算・その符号・実行条件は示せないので、ここは UB を起こし得る
+入力を **上から近似** する:
+
+- 式の graph の全ての node（被演算子・PHI の条件と値・call / memory の被演算子）を、
+  共有の走査（``core.semantic_snapshot.traverse_semantic_graph``）で辿る。経路の条件は
+  付けない（どの演算がどの入力で実行されるかを binary から示せない）。
+- 符号を推測で除外しない。引数が unsigned と宣言されていても ``-(int)x`` はあり得るので、
+  負号・左シフトは被演算子の型・文脈に依らず制約にする（#31 の保護を包む）。
+
+扱わない UB（反例の領域に入らない）: 整数の加算・減算・乗算の符号付き overflow、除算の
+0 除算・INT_MIN / -1、ポインタ演算。これらの UB だけで違う関数は NOT_EQ になり得る
+（既知の制約。PR #312 の本文と Issue に記録）。
+- 幅は演算と被演算子の小さい方（被演算子の幅が演算と違う形は描画が拒否する:
+  ``core.render_smt`` の ``UnsupportedSmtOperatorError``）。
+
+EQ の前提には使わない。P-code の演算は全ての入力で定義されていて、binary の演算 1 つは
+source の UB の根拠にならない（UB 制約を EQ の前提に課すと、正当な入力を除き得る）。
+
+runtime ref（loop summary など）の内部の演算は、式の graph の辺に現れないのでここでは
+数えない（整数の加算・乗算の overflow と同じく、この model の範囲外。Issue #309）。
 """
 
-from typing import Callable, Set, List, Optional, TYPE_CHECKING, Tuple
+from dataclasses import dataclass
+from typing import Callable, Iterable, List, Optional, Set, TYPE_CHECKING, Tuple
 
 from scripts.function_tracer_pcode.core import (
     FunctionReturnAnalysis,
     Expression,
     ExpressionType,
-    Condition,
 )
-from scripts.function_tracer_pcode.analysis.debug import summarize_expression
+from scripts.function_tracer_pcode.core.render_smt.widths import constant_value_at_width
+from scripts.function_tracer_pcode.core.semantic_snapshot import traverse_semantic_graph
 
-# 型チェック用のインポート（循環参照を避けるため）
 if TYPE_CHECKING:
     from scripts.function_tracer_pcode.proof.formula.builder import ParameterInfo
 
 
+ALL_UB_CONSTRAINT_TYPES = frozenset({
+    "negate_min",
+    "shift_count",
+    "signed_left_shift_overflow",
+})
+
+_SHIFT_OPERATORS = frozenset({"INT_LEFT", "INT_RIGHT", "INT_SRIGHT"})
+
+
+@dataclass(frozen=True)
+class UbObligation:
+    """演算 1 つについて「UB を起こさない」ことの SMT の Bool 項 ``ok(o)``。"""
+
+    kind: str
+    operator: str
+    term: str
+    comment: str
+
+    def assertion_lines(self) -> Tuple[str, str]:
+        return (f"; {self.comment}", f"(assert {self.term})")
+
+
+def obligation_lines(obligations: Iterable[UbObligation]) -> List[str]:
+    """obligation を SMT の行（comment + assert）に並べる。"""
+    lines: List[str] = []
+    for obligation in obligations:
+        lines.extend(obligation.assertion_lines())
+    return lines
+
+
+def analysis_expressions(analysis: FunctionReturnAnalysis) -> List[Expression]:
+    """解析の全 return の値と条件の式（関数全体の obligation を集める根）。"""
+    expressions: List[Expression] = []
+    for ret in analysis.returns or ():
+        if ret.value is not None:
+            expressions.append(ret.value)
+        for cond in ret.conditions or ():
+            expr = getattr(cond, "expression", None)
+            if expr is not None:
+                expressions.append(expr)
+    return expressions
+
+
+def iter_operation_nodes(roots: Iterable[Optional[Expression]]) -> List[Expression]:
+    """根から辿れる **program の演算** の node（共有は 1 回、決定的な順）。
+
+    走査は ``traverse_semantic_graph``（PHI の条件と値・call / memory の被演算子を含む
+    唯一の実装）に任せ、ここで辺の種類を選ばない。
+
+    store の観測の番地（``core.observation_index``）に依存する node は除く。観測の番地は
+    入力ではなく、左右の書き込みを同じ番地で比べるための記号で、それに依存する演算（書いた
+    値の byte を取り出す shift など）は解析が作った比べる面の一部で、program の演算ではない
+    （``analysis.effects.observation_surface``。範囲の判定の下でだけ使う）。書いた値そのものの
+    演算は番地に依存しないので残る。
+    """
+    from scripts.function_tracer_pcode.core.observation_index import is_observation_index
+    from scripts.function_tracer_pcode.core.semantic_snapshot import ordered_semantic_edges
+
+    nodes: List[Expression] = []
+    seen: Set[int] = set()
+    depends_on_index: dict = {}
+    for root in roots:
+        if root is None:
+            continue
+        traversal = traverse_semantic_graph(root)
+        for node in traversal.post_order:
+            if id(node) in depends_on_index:
+                continue
+            depends_on_index[id(node)] = is_observation_index(node) or any(
+                depends_on_index.get(id(edge.child), False)
+                for edge in ordered_semantic_edges(node)
+                if edge.child is not None
+            )
+        for node in traversal.entry_order:
+            if id(node) in seen or depends_on_index.get(id(node), False):
+                continue
+            seen.add(id(node))
+            nodes.append(node)
+    return nodes
+
+
+def _bits(expr: Optional[Expression]) -> int:
+    """P-code の **値** の幅（SMT の sort の幅ではない。比較・bool は size byte の 0 / 1）。
+
+    比較の結果を Bool sort の 1 bit として読むと、``(x != 0) << 1`` の UB の幅が 1 になり、
+    ``1 < 1`` の恒偽の制約で正当な反例を除く（Issue #298 review 3）。値の幅の owner は
+    ``core.render_smt.expression_value_bit_width``。
+    """
+    if expr is None:
+        return 0
+    from scripts.function_tracer_pcode.core.render_smt import expression_value_bit_width
+
+    return int(expression_value_bit_width(expr) or 0)
+
+
+def operation_bits(op_expr: Expression, operand: Expression) -> int:
+    """演算の UB の幅。
+
+    演算（P-code の出力）と第 1 被演算子の値の幅が同じならその幅。被演算子が狭く、伸ばし方で
+    値が変わらない（0 / 1・最上位 bit が 0 の定数。描画もその形だけを演算の幅で計算する）なら
+    演算の幅。それ以外は小さい方（上から近似: どちらの幅の演算だったかを示せない）。
+    """
+    from scripts.function_tracer_pcode.core.render_smt.render import _extension_is_determined
+
+    op_bits = int(getattr(op_expr, "size", 0) or 0) * 8
+    operand_bits = _bits(operand)
+    if op_bits > operand_bits > 0 and _extension_is_determined(operand, operand_bits):
+        return op_bits
+    widths = [bits for bits in (op_bits, operand_bits) if bits > 0]
+    return min(widths) if widths else 0
+
+
 class UbConstraintBuilder:
-    """未定義動作（UB）を除外するSMT制約を生成するクラス"""
-    
+    """UB を起こし得る入力を除く obligation を作るクラス"""
+
     def __init__(self, debug: bool = False):
         self.debug = debug
-    
+
     def _debug_print(self, msg: str):
         if self.debug:
             print(f"[UbConstraintBuilder] {msg}")
-    
+
     def build_constraints(
         self,
         analysis: FunctionReturnAnalysis,
         param_infos: List['ParameterInfo'],
         constraint_types: Optional[Set[str]] = None,
-        symbol_replace_fn: Optional[Callable[[str], str]] = None,
+        symbol_replace_fn: Optional[Callable] = None,
     ) -> List[str]:
-        """
-        UB除外制約を生成
-        
-        Args:
-            analysis: 関数解析結果
-            param_infos: パラメータ情報（SMT名・ビット幅付き）
-            constraint_types: 生成する制約タイプのセット
-                None の場合は全タイプを生成
-                例: {"negate_min", "shift_count", "signed_left_shift_overflow"}
-            symbol_replace_fn: Expression.to_smt() で得た元名を
-                SMT変数名へ置換する関数
-        
-        Returns:
-            SMT-LIB形式の制約行のリスト
-        """
-        if constraint_types is None:
-            constraint_types = {
-                "negate_min",
-                "shift_count",
-                "signed_left_shift_overflow",
-            }
-        
-        all_constraints = []
-        
-        # 1. -MIN_INT 制約
-        if "negate_min" in constraint_types:
-            negate_min_constraints = self._build_negate_min_constraints(
-                analysis,
+        """関数全体の obligation を SMT の行で返す（反例の領域の片側）。"""
+        return obligation_lines(
+            self.collect_obligations(
+                analysis_expressions(analysis),
                 param_infos,
+                constraint_types=constraint_types,
                 symbol_replace_fn=symbol_replace_fn,
             )
-            if negate_min_constraints:
-                all_constraints.extend(negate_min_constraints)
+        )
 
-        if "shift_count" in constraint_types:
-            shift_constraints = self._build_shift_count_constraints(
-                analysis,
-                symbol_replace_fn=symbol_replace_fn,
-            )
-            if shift_constraints:
-                all_constraints.extend(shift_constraints)
-
-        if "signed_left_shift_overflow" in constraint_types:
-            signed_shift_constraints = self._build_signed_left_shift_constraints(
-                analysis,
-                symbol_replace_fn=symbol_replace_fn,
-            )
-            if signed_shift_constraints:
-                all_constraints.extend(signed_shift_constraints)
-
-        return all_constraints
-
-    def _build_shift_count_constraints(
+    def collect_obligations(
         self,
-        analysis: FunctionReturnAnalysis,
-        symbol_replace_fn: Optional[Callable[[str], str]] = None,
-    ) -> List[str]:
-        """
-        シフト量がビット幅未満であることを要求する制約を生成
-
-        Cでは左右シフトともに、shift count が負または
-        左オペランドのビット幅以上だと未定義動作。
-        BV上では負値も大きな unsigned 値として表現されるため、
-        `bvult rhs width` を課すことで両方を除外できる。
-        """
-        shift_sites = self._collect_shift_sites(analysis)
-        if not shift_sites:
-            self._debug_print("No shift operations found for UB constraints")
-            return []
-
-        constraints: List[str] = []
-        seen: Set[Tuple[str, int, int, str]] = set()
-
-        for operator, shift_expr in shift_sites:
-            if len(shift_expr.operands) < 2:
-                continue
-
-            left = shift_expr.operands[0]
-            right = shift_expr.operands[1]
-            left_bits = left.get_bit_width()
-            right_bits = right.get_bit_width()
-
-            if left_bits <= 0 or right_bits <= 0:
-                continue
-
-            if self._is_shift_count_statically_safe(right, left_bits):
-                continue
-
-            right_smt = right.to_smt()
-            if symbol_replace_fn is not None:
-                try:
-                    right_smt = symbol_replace_fn(right)
-                except TypeError:
-                    right_smt = symbol_replace_fn(right_smt)
-
-            key = (right_smt, left_bits, right_bits, operator)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            comment = (
-                f"; Exclude UB: {operator} shift amount must be < {left_bits} bits"
-            )
-            constraint = (
-                f"(assert (bvult {right_smt} (_ bv{left_bits} {right_bits})))"
-            )
-            constraints.append(comment)
-            constraints.append(constraint)
-
-            self._debug_print(
-                f"Added shift-count UB constraint for {operator}: {right_smt} < {left_bits}"
-            )
-
-        return constraints
-
-    def _build_signed_left_shift_constraints(
-        self,
-        analysis: FunctionReturnAnalysis,
-        symbol_replace_fn: Optional[Callable[[str], str]] = None,
-    ) -> List[str]:
-        """
-        signed left shift overflow を guarded に除外する制約を生成
-
-        対象は次の保守的 subset のみ:
-        - INT_LEFT(lhs, rhs)
-        - lhs が正の定数
-        - shift 結果が signed 演算文脈で使われている
-
-        これにより unsigned left shift まで誤って制約しないようにする。
-        """
-        signed_shift_sites = self._collect_signed_left_shift_sites(analysis)
-        if not signed_shift_sites:
-            self._debug_print("No guarded signed-left-shift sites found")
-            return []
-
-        constraints: List[str] = []
-        seen: Set[Tuple[str, int, int]] = set()
-
-        for shift_expr in signed_shift_sites:
-            if len(shift_expr.operands) < 2:
-                continue
-
-            left = shift_expr.operands[0]
-            right = shift_expr.operands[1]
-            bound = self._get_signed_left_shift_safe_bound(left, shift_expr.get_bit_width())
-            if bound is None:
-                continue
-
-            if self._is_shift_count_statically_safe(right, bound):
-                continue
-
-            right_smt = right.to_smt()
-            if symbol_replace_fn is not None:
-                try:
-                    right_smt = symbol_replace_fn(right)
-                except TypeError:
-                    right_smt = symbol_replace_fn(right_smt)
-
-            right_bits = right.get_bit_width()
-            key = (right_smt, right_bits, bound)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            comment = (
-                "; Exclude UB: signed left shift overflow requires "
-                f"shift < {bound}"
-            )
-            constraint = (
-                f"(assert (bvult {right_smt} (_ bv{bound} {right_bits})))"
-            )
-            constraints.append(comment)
-            constraints.append(constraint)
-            self._debug_print(
-                f"Added signed-left-shift UB constraint: {right_smt} < {bound}"
-            )
-
-        return constraints
-    
-    def _build_negate_min_constraints(
-        self,
-        analysis: FunctionReturnAnalysis,
+        expressions: Iterable[Optional[Expression]],
         param_infos: List['ParameterInfo'],
-        symbol_replace_fn: Optional[Callable[[str], str]] = None,
-    ) -> List[str]:
-        """
-        -INT_MIN オーバーフローを除外する制約を生成
+        *,
+        constraint_types: Optional[Set[str]] = None,
+        symbol_replace_fn: Optional[Callable] = None,
+    ) -> List[UbObligation]:
+        """与えた式から辿れる全ての演算の obligation（同じ条件は 1 つにまとめる）。
 
-        検出対象:
-        - 戻り値式・ケース条件式の中の INT_2COMP (bvneg)
-        - オペランドがパラメータなら、そのパラメータが signed のとき
-        - オペランドが任意の式なら、signed 演算文脈（INT_SLESS 等）の下にあるとき
-          （unsigned の負号は C で定義済みなので除外しない）
-
-        生成制約:
-        - (assert (not (= <operand> (_ bvINT_MIN WIDTH))))
+        ``param_infos`` は互換のために受け取るだけで使わない（引数の宣言の符号では除外しない）。
+        描画が拒否する式（``SMT_SEMANTICS_REFUSALS``）はそのまま送出する。呼び手は領域を
+        作れなかったものとして扱う（witness にしない）。
         """
-        negation_sites = self._collect_negation_sites(analysis)
-        if not negation_sites:
-            self._debug_print("No negation sites found")
+        del param_infos
+        if constraint_types is None:
+            constraint_types = set(ALL_UB_CONSTRAINT_TYPES)
+        unique: List[UbObligation] = []
+        seen: Set[str] = set()
+        for node in iter_operation_nodes(expressions):
+            for obligation in self._node_obligations(node, constraint_types, symbol_replace_fn):
+                if obligation.term in seen:
+                    continue
+                seen.add(obligation.term)
+                unique.append(obligation)
+        return unique
+
+    @staticmethod
+    def _render(expr: Expression, symbol_replace_fn: Optional[Callable], bits: int) -> str:
+        """``bits`` 幅の bitvector として描く（bool は 0 / 1、広い値は下位を取る）。"""
+        from scripts.function_tracer_pcode.proof.formula.returns import coerce_value_to_bitvec_width
+
+        if symbol_replace_fn is None:
+            rendered = expr.to_smt()
+        else:
+            try:
+                rendered = symbol_replace_fn(expr)
+            except TypeError:
+                rendered = symbol_replace_fn(expr.to_smt())
+        return coerce_value_to_bitvec_width(expr, rendered, bits)
+
+    def _node_obligations(
+        self,
+        node: Expression,
+        constraint_types: Set[str],
+        symbol_replace_fn: Optional[Callable],
+    ) -> List[UbObligation]:
+        expr_type = getattr(node, "expr_type", None)
+        operator = getattr(node, "operator", None)
+        operands = list(getattr(node, "operands", None) or ())
+        if expr_type == ExpressionType.UNARY_OP and operator == "INT_2COMP" and operands:
+            if "negate_min" in constraint_types:
+                return self._negate_min(node, operands[0], symbol_replace_fn)
             return []
-
-        constraints: List[str] = []
-        seen: Set[Tuple[str, int]] = set()
-
-        for site, signed_context in negation_sites:
-            operand = site.operands[0] if getattr(site, "operands", None) else None
-            if operand is None or operand.expr_type == ExpressionType.CONSTANT:
-                continue
-
-            if operand.expr_type == ExpressionType.PARAMETER:
-                param_info = self._find_param_info(getattr(operand, "name", None), param_infos)
-                if param_info is None:
-                    self._debug_print(
-                        f"Warning: Parameter '{getattr(operand, 'name', None)}' not found in param_infos"
-                    )
-                    continue
-                if not getattr(param_info, "is_signed", True):
-                    self._debug_print(
-                        f"Skipping unsigned negation of {param_info.smt_name} (defined behaviour)"
-                    )
-                    continue
-                operand_smt = param_info.smt_name
-                width = int(param_info.bit_width)
-            else:
-                if not signed_context:
-                    if self.debug:
-                        self._debug_print(
-                            "Skipping negation outside signed context: "
-                            f"{summarize_expression(operand)}"
-                        )
-                    continue
-                width = int(operand.get_bit_width() or 0)
-                if width <= 0:
-                    continue
-                operand_smt = operand.to_smt()
-                if symbol_replace_fn is not None:
-                    try:
-                        operand_smt = symbol_replace_fn(operand)
-                    except TypeError:
-                        operand_smt = symbol_replace_fn(operand_smt)
-
-            key = (operand_smt, width)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            min_val = 2 ** (width - 1)
-            comment = (
-                f"; Exclude UB: -({operand_smt}) when {operand_smt} = INT{width}_MIN"
-            )
-            constraint = (
-                f"(assert (not (= {operand_smt} (_ bv{min_val} {width}))))"
-            )
-            constraints.append(comment)
-            constraints.append(constraint)
-            self._debug_print(
-                f"Added constraint: {operand_smt} != {min_val} ({width}bit MIN)"
-            )
-
-        return constraints
-
-    def _collect_negation_sites(
-        self,
-        analysis: FunctionReturnAnalysis,
-    ) -> List[Tuple[Expression, bool]]:
-        """戻り値式とケース条件式から INT_2COMP サイトを (式, signed文脈) で収集"""
-        sites: List[Tuple[Expression, bool]] = []
-        for ret in analysis.returns:
-            self._walk_expression_for_negation(ret.value, sites, signed_context=False)
-            for cond in ret.conditions:
-                self._walk_expression_for_negation(
-                    getattr(cond, "expression", None),
-                    sites,
-                    signed_context=False,
+        if expr_type == ExpressionType.BINARY_OP and operator in _SHIFT_OPERATORS and len(operands) >= 2:
+            result: List[UbObligation] = []
+            if "shift_count" in constraint_types:
+                result.extend(self._shift_count(node, operands[0], operands[1], symbol_replace_fn))
+            if operator == "INT_LEFT" and "signed_left_shift_overflow" in constraint_types:
+                result.extend(
+                    self._signed_left_shift(node, operands[0], operands[1], symbol_replace_fn)
                 )
-        return sites
+            return result
+        return []
 
-    def _walk_expression_for_negation(
-        self,
-        expr: Optional[Expression],
-        sites: List[Tuple[Expression, bool]],
-        signed_context: bool,
-    ) -> None:
-        if expr is None:
-            return
-        next_signed_context = signed_context or self._is_signed_operation(expr)
-        if (
-            getattr(expr, "expr_type", None) == ExpressionType.UNARY_OP
-            and getattr(expr, "operator", None) == "INT_2COMP"
-        ):
-            sites.append((expr, next_signed_context))
-        if hasattr(expr, "operands") and expr.operands:
-            for operand in expr.operands:
-                if operand is not None:
-                    self._walk_expression_for_negation(operand, sites, next_signed_context)
+    def _shift_count(self, node, left, right, symbol_replace_fn) -> List[UbObligation]:
+        """シフト量が演算の幅未満（C では左右とも、量が負・幅以上なら UB）。"""
+        op_bits = operation_bits(node, left)
+        right_bits = _bits(right)
+        if op_bits <= 0 or right_bits <= 0 or op_bits >= (1 << right_bits):
+            return []  # 量の幅で表せる値は全て上限未満（制約は真）
+        if self._constant_below(right, op_bits):
+            return []
+        right_smt = self._render(right, symbol_replace_fn, right_bits)
+        self._debug_print(f"shift-count obligation for {node.operator}: {right_smt} < {op_bits}")
+        return [UbObligation(
+            kind="shift_count",
+            operator=str(node.operator),
+            term=f"(bvult {right_smt} (_ bv{op_bits} {right_bits}))",
+            comment=f"Exclude UB: {node.operator} shift amount must be < {op_bits} bits",
+        )]
 
-    def _collect_shift_sites(
-        self,
-        analysis: FunctionReturnAnalysis
-    ) -> List[Tuple[str, Expression]]:
-        """Expression中のシフト演算を収集"""
-        shift_sites: List[Tuple[str, Expression]] = []
+    def _signed_left_shift(self, node, left, right, symbol_replace_fn) -> List[UbObligation]:
+        """符号付きの左シフトの UB（C: E1 が負、または E1·2^E2 が表せない）を除く（上から近似）。
 
-        for ret in analysis.returns:
-            self._walk_expression_for_shift(ret.value, shift_sites)
-            for cond in ret.conditions:
-                self._walk_expression_for_shift(cond.expression, shift_sites)
-
-        return shift_sites
-
-    def _collect_signed_left_shift_sites(
-        self,
-        analysis: FunctionReturnAnalysis
-    ) -> List[Expression]:
-        """signed 演算文脈で使われる INT_LEFT を収集"""
-        shift_sites: List[Expression] = []
-        for ret in analysis.returns:
-            self._walk_expression_for_signed_left_shift(ret.value, shift_sites, signed_context=False)
-            for cond in ret.conditions:
-                self._walk_expression_for_signed_left_shift(
-                    cond.expression,
-                    shift_sites,
-                    signed_context=False,
-                )
-        return shift_sites
-
-    def _walk_expression_for_shift(
-        self,
-        expr: Optional[Expression],
-        shift_sites: List[Tuple[str, Expression]]
-    ) -> None:
-        """Expressionツリーを再帰走査してシフト演算を収集"""
-        if expr is None:
-            return
-
-        if (
-            expr.expr_type == ExpressionType.BINARY_OP
-            and expr.operator in {"INT_LEFT", "INT_RIGHT", "INT_SRIGHT"}
-        ):
-            shift_sites.append((expr.operator, expr))
-
-        if hasattr(expr, "operands") and expr.operands:
-            for operand in expr.operands:
-                self._walk_expression_for_shift(operand, shift_sites)
-
-    def _walk_expression_for_signed_left_shift(
-        self,
-        expr: Optional[Expression],
-        shift_sites: List[Expression],
-        signed_context: bool
-    ) -> None:
-        """signed 文脈を伝播しながら INT_LEFT を収集"""
-        if expr is None:
-            return
-
-        next_signed_context = signed_context or self._is_signed_operation(expr)
-
-        if (
-            expr.expr_type == ExpressionType.BINARY_OP
-            and expr.operator == "INT_LEFT"
-            and next_signed_context
-        ):
-            shift_sites.append(expr)
-
-        if hasattr(expr, "operands") and expr.operands:
-            for operand in expr.operands:
-                self._walk_expression_for_signed_left_shift(
-                    operand,
-                    shift_sites,
-                    signed_context=next_signed_context,
-                )
-
-    def _is_shift_count_statically_safe(
-        self,
-        expr: Expression,
-        width_bits: int
-    ) -> bool:
-        """定数シフト量が自明に安全かチェック"""
-        if expr.expr_type != ExpressionType.CONSTANT:
-            return False
-
-        return 0 <= expr.value < width_bits
-
-    def _get_signed_left_shift_safe_bound(
-        self,
-        left: Expression,
-        result_bits: int
-    ) -> Optional[int]:
-        """正の定数 lhs に対して overflow しない shift 上限（排他的）を返す"""
-        if left.expr_type != ExpressionType.CONSTANT:
-            return None
-
-        value = left.value
-        if not isinstance(value, int) or value <= 0:
-            return None
-
-        if result_bits <= 1:
-            return None
-
-        signed_max = (1 << (result_bits - 1)) - 1
-        if value > signed_max:
-            return None
-
-        bound = result_bits - value.bit_length()
-        if bound <= 0:
-            return None
-
-        return bound
-
-    def _is_signed_operation(self, expr: Expression) -> bool:
-        """式ノードが signed 演算文脈を作るか"""
-        if expr.expr_type != ExpressionType.BINARY_OP:
-            return False
-
-        return expr.operator in {
-            "INT_SDIV",
-            "INT_SREM",
-            "INT_SLESS",
-            "INT_SLESSEQUAL",
-            "INT_SRIGHT",
-        }
-    
-    def _find_param_info(
-        self,
-        param_name: str,
-        param_infos: List['ParameterInfo']
-    ) -> Optional['ParameterInfo']:
+        binary の左シフトから source の符号は示せない（unsigned なら定義済み、source の乗算
+        ``x * 2`` の符号付きの overflow でもあり得る）ので、被演算子の型・文脈に依らず課す:
+        ``E1 <u 2^(w-1) >> E2``（E1 が非負で、E1 << E2 が符号付きで表せる）。量 E2 >= w は
+        ``shift_count`` の制約が除く。E1 が定数 0 なら UB は無い。
         """
-        パラメータ名からParameterInfoを検索
-        
-        Args:
-            param_name: 元のパラメータ名（"param_1" など）
-            param_infos: ParameterInfoのリスト
-        
-        Returns:
-            見つかったParameterInfo、見つからなければNone
-        """
-        for info in param_infos:
-            if info.original_name == param_name:
-                return info
-        return None
+        width = operation_bits(node, left)
+        right_bits = _bits(right)
+        if width <= 1 or right_bits <= 0:
+            return []
+        lhs_value = constant_value_at_width(left, width)
+        if lhs_value == 0:
+            return []
+        count_value = constant_value_at_width(right, right_bits)
+        if count_value is not None and count_value >= width:
+            return []  # 量が幅以上（shift_count の制約が除く）
+        if lhs_value is not None and count_value is not None:
+            if lhs_value < (1 << (width - 1)) >> count_value:
+                return []  # 定数どうしで表せる
+            term = "false"
+        elif count_value is not None:
+            bound = (1 << (width - 1)) >> count_value
+            lhs_smt = self._render(left, symbol_replace_fn, width)
+            term = f"(bvult {lhs_smt} (_ bv{bound} {width}))"
+        else:
+            lhs_smt = (
+                f"(_ bv{lhs_value} {width})" if lhs_value is not None
+                else self._render(left, symbol_replace_fn, width)
+            )
+            count_smt = self._render(right, symbol_replace_fn, right_bits)
+            if right_bits < width:
+                count_smt = f"((_ zero_extend {width - right_bits}) {count_smt})"
+            elif right_bits > width:
+                count_smt = f"((_ extract {width - 1} 0) {count_smt})"
+            term = f"(bvult {lhs_smt} (bvlshr (_ bv{1 << (width - 1)} {width}) {count_smt}))"
+        self._debug_print(f"signed-left-shift obligation: {term}")
+        return [UbObligation(
+            kind="signed_left_shift_overflow",
+            operator="INT_LEFT",
+            term=term,
+            comment=f"Exclude UB: signed left shift of a negative or overflowing {width}-bit value",
+        )]
+
+    def _negate_min(self, node, operand, symbol_replace_fn) -> List[UbObligation]:
+        """負号の被演算子が最小値でない（被演算子の符号・文脈では除外しない）。"""
+        width = operation_bits(node, operand)
+        if width <= 1:
+            return []
+        min_val = 1 << (width - 1)
+        operand_value = constant_value_at_width(operand, width)
+        if operand_value is not None and operand_value != min_val:
+            return []
+        operand_smt = self._render(operand, symbol_replace_fn, width)
+        self._debug_print(f"negation obligation: {operand_smt} != {min_val} ({width} bits)")
+        return [UbObligation(
+            kind="negate_min",
+            operator="INT_2COMP",
+            term=f"(not (= {operand_smt} (_ bv{min_val} {width})))",
+            comment=f"Exclude UB: -({operand_smt}) when {operand_smt} = INT{width}_MIN",
+        )]
+
+    @staticmethod
+    def _constant_below(expr: Expression, bound: int) -> bool:
+        """定数が描画で表す値（幅の剰余）が ``bound`` 未満か。"""
+        value = constant_value_at_width(expr)
+        return value is not None and value < bound

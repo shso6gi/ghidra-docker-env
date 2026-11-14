@@ -52,6 +52,8 @@ def try_normalization_equivalence(
         result.blocking_detail = str(exc)
         return result
 
+    # Issue #298: 事実（上限・INT_MIN の除外）は共通の前提からだけ読む。UB の制約は前提に
+    # 入らない（EQ の根拠にしない）ので、UB 由来の事実で式を書き換えることもない。
     header_lines = base_ctx.get("header_lines", [])
     if norm_settings is not None and not norm_settings.enable_division_normalization:
         min_excluded_smt = set()

@@ -340,6 +340,7 @@ def implementations() -> dict[str, Callable[..., Any]]:
         "_semantic_recurrence_query_plan": _loop_summary._impl__semantic_recurrence_query_plan,
         "_solve_affine_equality": _case_conditions._impl__solve_affine_equality,
         "_solve_canonical_return_observation": _pair_cases._impl__solve_canonical_return_observation,
+        "_solve_premise_query": _auxiliary_smt._impl__solve_premise_query,
         "_solve_query_internal": _auxiliary_smt._impl__solve_query_internal,
         "_solve_query_twostage": _auxiliary_smt._impl__solve_query_twostage,
         "_solve_reduction_count_affine_equality": _readonly_reduction._impl__solve_reduction_count_affine_equality,

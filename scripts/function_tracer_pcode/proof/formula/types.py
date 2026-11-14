@@ -72,6 +72,9 @@ class FormulaBuilderResult:
     #: 式の parameter premise を決めた最終 ``InputCorrespondenceSet``（Issue #167）。
     #: decisive gate が dispatch frame の relation と同一かを照合する。
     input_correspondence: Any = None
+    #: Issue #298: 同じ式から等価性の否定だけを除いた前提の query（header・return の定義・
+    #: 追加の assert）。UNSAT を EQ の根拠にする前に、これが SAT であることを確かめる。
+    premise_formula: str = ""
 
 
 @dataclass
@@ -92,3 +95,5 @@ class FormulaBuildContext:
     runtime_unknown_declarations: List[Tuple[str, int]]
     constrained_fragments: List[str]
     param_fragment_constrained: List[str]
+    #: Issue #298: 比較の反例の領域（``proof.ub.domain.UbWitnessDomain``。無効なら None）
+    ub_witness_domain: Any = None

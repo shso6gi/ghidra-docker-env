@@ -11,6 +11,24 @@ from scripts.function_tracer_pcode.core import (
     Condition,
 )
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
+from scripts.function_tracer_pcode.proof.ub.domain import UB_WITNESS_DOMAIN_KEY
+
+
+def _ub_witness_domain(builder, analysis1, analysis2):
+    """Issue #298: UB 除外は共通の前提に入らず、比較の ``UbPremise`` が持つ。
+
+    ここでは反例の領域（両関数の全ての演算の制約を無条件に）を文字列で返す。
+    """
+    correspondence = build_input_correspondence_set(analysis1, analysis2)
+    formula = builder.build_equivalence_formula_extended(
+        analysis1, analysis2, input_correspondence=correspondence,
+    ).formula
+    assert "Exclude UB" not in formula
+    base_ctx = builder.build_base_context(
+        analysis1, analysis2, input_correspondence=correspondence,
+    )
+    assert not any("Exclude UB" in line for line in base_ctx["header_lines"])
+    return "\n".join(base_ctx[UB_WITNESS_DOMAIN_KEY].lines())
 
 
 class TestIntegration:
@@ -76,7 +94,11 @@ class TestIntegration:
         
         formula = result.formula
         
-        assert "UB Exclusion Constraints" in formula
+        # Issue #298: UB 除外は共通の前提（式全体）に入らない。比較の UbPremise が持つ
+        assert "Exclude UB" not in formula
+        assert "(assert (not (= x_1 (_ bv2147483648 32))))" in _ub_witness_domain(
+            builder, analysis1, analysis2,
+        )
         assert "Additional constraint" in formula
         assert "(assert (bvugt x_1 (_ bv10 32)))" in formula
         
@@ -90,7 +112,6 @@ class TestIntegration:
         assert check_sat_index >= 0
         
         before_check_sat = '\n'.join(lines[:check_sat_index])
-        assert "UB Exclusion Constraints" in before_check_sat
         assert "Additional constraint" in before_check_sat
         
         print("\n[TEST] UB constraints (negate_min) and extra_assertions coexist correctly")
@@ -166,8 +187,7 @@ class TestIntegration:
             ],
         )
 
-        result = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2))
-        formula = result.formula
+        formula = _ub_witness_domain(builder, analysis1, analysis2)
 
         assert "Exclude UB: INT_LEFT shift amount must be < 64 bits" in formula
         assert "(assert (bvult shift_1 (_ bv64 32)))" in formula
@@ -232,16 +252,24 @@ class TestIntegration:
             returns=[ReturnInfo(address="0x00402000", conditions=[], value=value2)],
         )
 
-        formula = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2)).formula
+        formula = _ub_witness_domain(builder, analysis1, analysis2)
 
-        assert "signed left shift overflow requires shift < 63" in formula
-        assert "(assert (bvult shift_1 (_ bv63 32)))" in formula
-        assert "(assert (bvult shift_2 (_ bv63 32)))" in formula
+        # 1 << shift が符号付きの 64 bit で表せる（1 <u 2^63 >> shift、つまり shift < 63。Issue #298）
+        assert "signed left shift of a negative or overflowing 64-bit value" in formula
+        for name in ("shift_1", "shift_2"):
+            assert (
+                f"(assert (bvult (_ bv1 64) (bvlshr (_ bv9223372036854775808 64) ((_ zero_extend 32) {name}))))"
+                in formula
+            )
 
         print("\n[TEST] signed left shift overflow constraints emitted for signed context")
 
-    def test_signed_left_shift_overflow_constraints_are_not_emitted_for_unsigned_context(self):
-        """unsigned 文脈では追加の signed overflow 制約を入れないことを確認"""
+    def test_signed_left_shift_overflow_constraints_are_emitted_for_unsigned_context_too(self):
+        """unsigned 文脈でも signed overflow の制約を反例の領域に入れる（Issue #298）。
+
+        binary の左シフトから source の演算の符号は示せない。反例の領域は UB を上から近似
+        するので、文脈の符号で除外しない（EQ の前提には入らない）。
+        """
         builder = FormulaBuilder(debug=False, exclude_ub=True)
 
         shift1 = Expression(ExpressionType.PARAMETER, name="shift", size=4)
@@ -297,12 +325,16 @@ class TestIntegration:
             returns=[ReturnInfo(address="0x00402000", conditions=[], value=value2)],
         )
 
-        formula = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2)).formula
+        formula = _ub_witness_domain(builder, analysis1, analysis2)
 
-        assert "signed left shift overflow requires shift < 63" not in formula
+        # 1 << shift が符号付きの 64 bit で表せる（1 <u 2^63 >> shift、つまり shift < 63。Issue #298）
+        assert "signed left shift of a negative or overflowing 64-bit value" in formula
+        for name in ("shift_1", "shift_2"):
+            assert (
+                f"(assert (bvult (_ bv1 64) (bvlshr (_ bv9223372036854775808 64) ((_ zero_extend 32) {name}))))"
+                in formula
+            )
         assert "(assert (bvult shift_1 (_ bv64 32)))" in formula
         assert "(assert (bvult shift_2 (_ bv64 32)))" in formula
-
-        print("\n[TEST] no signed overflow constraints emitted for unsigned context")
 
 

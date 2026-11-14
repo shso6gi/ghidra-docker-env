@@ -3,6 +3,7 @@ from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import 
 
 import pytest
 from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
+from scripts.function_tracer_pcode.tests.unit._premise_support import assume_satisfiable_premise
 
 
 @pytest.fixture(autouse=True)
@@ -142,6 +143,7 @@ def test_pairwise_call_argument_evidence_recovers_with_matching_completed_proof(
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    assume_satisfiable_premise(strategy)
     analysis1 = _analysis_with_effect_call_argument_evidence()
     analysis2 = raw_function_analysis(
         function_name="func2",
@@ -299,6 +301,7 @@ def test_pairwise_call_target_resolution_recovers_with_matching_completed_proof(
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    assume_satisfiable_premise(strategy)
     analysis1 = _analysis_with_effect_call_target_resolution_evidence()
     analysis2 = raw_function_analysis(
         function_name="func2",
@@ -655,6 +658,7 @@ def test_monolithic_call_effect_summary_proof_complete_allows_recovery():
     )
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     strategy = MonolithicStrategy(formula_builder, _UnsatSolverRunner(), debug=False)
+    assume_satisfiable_premise(strategy)
     completed_reason = strategy._make_blocking_unsafety_unknown_reason(
         "function1:unsupported_call_effect_summary",
         analysis1,
@@ -706,6 +710,7 @@ def test_monolithic_call_effect_summary_bare_completed_proof_id_does_not_recover
     )
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     strategy = MonolithicStrategy(formula_builder, _UnsatSolverRunner(), debug=False)
+    assume_satisfiable_premise(strategy)
     completed_reason = strategy._make_blocking_unsafety_unknown_reason(
         "function1:unsupported_call_effect_summary",
         analysis1,
@@ -751,6 +756,7 @@ def test_monolithic_call_effect_summary_missing_completed_proof_id_does_not_reco
     )
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     strategy = MonolithicStrategy(formula_builder, _UnsatSolverRunner(), debug=False)
+    assume_satisfiable_premise(strategy)
     completed_reason = strategy._make_blocking_unsafety_unknown_reason(
         "function1:unsupported_call_effect_summary",
         analysis1,

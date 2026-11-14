@@ -561,13 +561,21 @@ class Expression:
         return cls(expr_type=ExpressionType.PHI, value=coerce_phi_branches(branches))
     
     @classmethod
-    def unknown(cls, description: str = "unknown", runtime_ref: Any = None) -> 'Expression':
+    def unknown(cls, description: str = "unknown", runtime_ref: Any = None, size: int = 0) -> 'Expression':
+        """不明な値の節点。``size`` は、この値が表す varnode の大きさ（byte）。
+
+        P-code の出力の代わりに置く節点は、その出力の大きさを持つ（Issue #298）。大きさの無い
+        節点は描画で既定の幅になり、宣言のある演算の被演算子になると伸ばし方を推測するしかない。
+        """
         if runtime_ref is None:
             runtime_ref = UnknownValueRef.opaque(
                 reason=description,
                 display_hint=description,
             )
-        return cls(expr_type=ExpressionType.UNKNOWN, name=description, runtime_ref=runtime_ref)
+        expr = cls(expr_type=ExpressionType.UNKNOWN, name=description, runtime_ref=runtime_ref)
+        if size and int(size) > 0:
+            expr.size = int(size)
+        return expr
 
     def semantic_key(self):
         """Return an explicitly attached canonical semantic identity when present."""

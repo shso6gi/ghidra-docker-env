@@ -179,8 +179,75 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
     def _solve_query_internal(self, *args, **kwargs):
         return solve_query_internal(self, *args, **kwargs)
 
+    def _solve_premise_query(self, scope: str, query: str):
+        """前提だけの query を解く（Issue #298）: SAT なら True、UNSAT なら False、決まらなければ None。"""
+        from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
+            solve_premise_query,
+        )
+
+        return solve_premise_query(self, scope, query)
+
     def _save_unknown_query(self, query: str, pair_id: str, stage: str) -> None:
         del query, pair_id, stage
+
+    def _require_satisfiable_monolithic_premise(
+        self,
+        legacy_result,
+        region_base_ctx,
+        analysis1,
+        analysis2,
+        input_correspondence,
+        call_projection_assertions,
+    ) -> None:
+        """monolithic の UNSAT の前提が SAT であることを確かめる（Issue #298）。
+
+        legacy の式は、同じ builder が作った「等価性の否定を除いた式」を前提にする。それが無い
+        とき（と region 実行）は、query が共有する header（call projection の assert を含む）を
+        前提にする。どちらも作れなければ前提の充足可能性を示せないので fail-closed。
+        """
+        from scripts.function_tracer_pcode.proof.obligations.premise import (
+            require_satisfiable_premises,
+        )
+
+        premise = str(getattr(legacy_result, "premise_formula", "") or "")
+        if not premise:
+            premise = self._monolithic_header_premise(
+                region_base_ctx, analysis1, analysis2, input_correspondence,
+                call_projection_assertions,
+            )
+        solve = self._solve_premise_query if premise else (lambda scope, query: None)
+        require_satisfiable_premises(solve, (("monolithic", premise),))
+
+    def _monolithic_header_premise(
+        self,
+        region_base_ctx,
+        analysis1,
+        analysis2,
+        input_correspondence,
+        call_projection_assertions,
+    ) -> str:
+        """query が共有する header だけの前提の query（作れなければ空文字列）。"""
+        base_ctx = region_base_ctx
+        if base_ctx is None:
+            try:
+                base_ctx = dict(
+                    self.formula_builder.build_base_context(
+                        analysis1, analysis2, input_correspondence=input_correspondence
+                    )
+                )
+            except (TypeError, ValueError, KeyError, AttributeError):
+                return ""
+        header = list(base_ctx.get("header_lines", ()) or ())
+        if not header:
+            return ""
+        if region_base_ctx is None and call_projection_assertions:
+            header.extend(call_projection_assertions)
+        return "\n".join([
+            "; Monolithic proof premise",
+            f"(set-logic {base_ctx.get('smt_logic', 'QF_BV')})",
+            *header,
+            "(check-sat)",
+        ])
 
     def _smt_semantics_refusal_result(
         self,
@@ -561,6 +628,18 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                 )
 
             final_is_equivalent = parallel_result.is_equivalent
+            if final_is_equivalent is True:
+                # Issue #298: UNSAT を EQ の根拠にする前に、その query の前提（等価性の否定を
+                # 除いた式。region 実行では共有の header）が SAT であることを確かめる。矛盾する
+                # 前提は限界 ``proof_premise_unsatisfiable`` を記録して送出する。
+                self._require_satisfiable_monolithic_premise(
+                    result if region_execution is None else None,
+                    region_base_ctx,
+                    analysis1,
+                    analysis2,
+                    input_correspondence,
+                    call_projection_assertions,
+                )
             global_replay_receipts = []
             counterexample_safety_receipt = None
             typed_counterexample_evidence = None
@@ -850,6 +929,7 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                         ),
                     )
                     self._monolithic_replay_execution_collector = replay_collector
+                self._last_counterexample_rejection_kind = None
                 try:
                     counterexample_is_decisive = self._dispatch_counterexample_decisiveness(
                         analysis1,
@@ -885,9 +965,16 @@ class MonolithicStrategy(RegionExecutionMixin, ReturnWidthObservationMixin, Coun
                         global_result.is_equivalent is False
                     )
             if final_is_equivalent is False and not counterexample_is_decisive:
+                # Issue #298: model が UB を起こす入力なら、曖昧さでなくその理由で残す
+                if getattr(self, "_last_counterexample_rejection_kind", None) == "ub_domain":
+                    reject_reason_maker = self._make_sat_counterexample_ub_domain_unknown_reason
+                    reject_refs = ("ub_witness_domain", "monolithic")
+                else:
+                    reject_reason_maker = self._make_sat_counterexample_ambiguous_unknown_reason
+                    reject_refs = ("monolithic_case_partition_replay",)
                 unknown_reasons.append(
-                    self._make_sat_counterexample_ambiguous_unknown_reason(
-                        ("monolithic_case_partition_replay",),
+                    reject_reason_maker(
+                        reject_refs,
                         analysis1,
                         analysis2,
                         case1=None,

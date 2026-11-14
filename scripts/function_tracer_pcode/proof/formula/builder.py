@@ -71,6 +71,7 @@ from scripts.function_tracer_pcode.analysis.memory_resolver import (
 )
 
 from scripts.function_tracer_pcode.proof.ub.constraints import UbConstraintBuilder
+from scripts.function_tracer_pcode.proof.ub.domain import UB_WITNESS_DOMAIN_KEY, UbWitnessDomain
 
 
 # Re-exports kept for callers that import these names from this module.
@@ -497,6 +498,13 @@ class FormulaBuilder:
             lines.extend(return_def2)
             lines.append("")
         
+            # Issue #298: 等価性の否定を除いた前提（UNSAT を EQ の根拠にする前に充足可能性を確かめる）
+            premise_lines = list(lines)
+            if extra_assertions:
+                premise_lines.append("")
+                premise_lines.extend(extra_assertions)
+            premise_lines.extend(["", "(check-sat)"])
+
             # 等価性の否定をアサート
             lines.extend(
                 self._build_equivalence_assertion(
@@ -526,6 +534,7 @@ class FormulaBuilder:
                 constrained_fragments=context.constrained_fragments,
                 param_fragment_constrained=context.param_fragment_constrained,
                 input_correspondence=correspondence,
+                premise_formula="\n".join(premise_lines),
             )
 
     def _prepare_formula_context(
@@ -601,6 +610,9 @@ class FormulaBuilder:
             runtime_unknown_declarations=runtime_unknown_declarations,
             constrained_fragments=constrained_fragments,
             param_fragment_constrained=param_fragment_constrained,
+            ub_witness_domain=self.build_ub_witness_domain(
+                analysis1, analysis2, params1, params2, extra_vars1, extra_vars2,
+            ),
         )
 
     def _normalize_analyses(
@@ -627,18 +639,29 @@ class FormulaBuilder:
         uses_arrays = any(collect_memory_bit_widths_from_analysis(analysis) for analysis in analyses)
         uses_float_theory = False
         uses_uf = False
+        # 判定はどちらも節点ごとに閉じた性質の「どれかの節点で成り立つか」なので、同じ根（PHI の
+        # 枝の条件・return の条件は、値の部分式ごとに同じ object が渡る）を 2 回見ても、既に成り
+        # 立った性質をもう一度見ても答えは変わらない。走査は根ごとに 1 回、未確定の性質だけにする
+        # （以前は部分式の数 × 条件の数だけ全体を辿り、早く両方が成り立たない式で時間を使った）。
+        examined_roots: set = set()
+        pinned_roots: list = []  # id を比べる間、根を生かしておく（id の再利用で取り違えない）
+
+        def examine(root) -> None:
+            nonlocal uses_float_theory, uses_uf
+            if root is None or id(root) in examined_roots:
+                return
+            examined_roots.add(id(root))
+            pinned_roots.append(root)
+            if not uses_float_theory and expression_uses_smt_float_theory(root):
+                uses_float_theory = True
+            if not uses_uf and expression_uses_smt_uf(root, float_mode="fp"):
+                uses_uf = True
+
         for analysis in analyses:
             for expr, guards in self._iter_analysis_expressions_with_guards(analysis):
-                if expression_uses_smt_float_theory(expr):
-                    uses_float_theory = True
-                if expression_uses_smt_uf(expr, float_mode="fp"):
-                    uses_uf = True
+                examine(expr)
                 for guard in guards or ():
-                    guard_expr = getattr(guard, "expression", guard)
-                    if expression_uses_smt_float_theory(guard_expr):
-                        uses_float_theory = True
-                    if expression_uses_smt_uf(guard_expr, float_mode="fp"):
-                        uses_uf = True
+                    examine(getattr(guard, "expression", guard))
                 if uses_float_theory and uses_uf:
                     break
             if uses_float_theory and uses_uf:
@@ -790,17 +813,10 @@ class FormulaBuilder:
         constrained_fragments: List[str] = []
         param_fragment_constrained: List[str] = []
 
-        if self.exclude_ub:
-            ub_lines = self._build_ub_constraints_section(
-                analysis1,
-                analysis2,
-                params1,
-                params2,
-                extra_vars1,
-                extra_vars2,
-            )
-            if ub_lines:
-                lines.extend(ub_lines)
+        # Issue #298: UB の制約は前提に入れない（EQ の根拠にしない）。P-code の演算は全ての
+        # 入力で定義されていて、binary の演算は source の UB の根拠にならない。経路に結び
+        # 付けずに入れると正当な入力（反例）を除き、恒偽なら全ての query を UNSAT にする。
+        # NOT_EQ の witness だけが反例の領域（``proof/ub/domain.py``）に入ることを求める。
 
         fp_non_nan_lines = self._build_fp_non_nan_assumptions_section(
             analysis1,
@@ -934,10 +950,7 @@ class FormulaBuilder:
             return 11, 53
         return None
     
-    # ============================================
-    # NEW: UB制約セクション構築
-    # ============================================
-    def _build_ub_constraints_section(
+    def build_ub_witness_domain(
         self,
         analysis1: FunctionReturnAnalysis,
         analysis2: FunctionReturnAnalysis,
@@ -945,43 +958,24 @@ class FormulaBuilder:
         params2: List[ParameterInfo],
         extra_vars1: List[ExtraVariableInfo],
         extra_vars2: List[ExtraVariableInfo],
-    ) -> List[str]:
-        """UB除外制約セクションを構築"""
-        lines = []
+    ) -> Optional[UbWitnessDomain]:
+        """比較の反例の領域（Issue #298）。``exclude_ub`` が無効なら None。
 
-        symbol_replace_fn1 = build_symbol_replacer(params1, extra_vars1, side=1)
-        symbol_replace_fn2 = build_symbol_replacer(params2, extra_vars2, side=2)
-        
-        ub1_constraints = self.ub_constraint_builder.build_constraints(
-            analysis1,
-            params1,
-            symbol_replace_fn=symbol_replace_fn1,
+        行は ``UbWitnessDomain.lines`` が必要になったとき（SAT の model を witness にするか
+        決めるとき）に作る。
+        """
+        if not self.exclude_ub:
+            return None
+        return UbWitnessDomain(
+            builder=self.ub_constraint_builder,
+            analyses={1: analysis1, 2: analysis2},
+            param_infos={1: list(params1), 2: list(params2)},
+            symbol_replacers={
+                1: build_symbol_replacer(params1, extra_vars1, side=1),
+                2: build_symbol_replacer(params2, extra_vars2, side=2),
+            },
         )
-        
-        ub2_constraints = self.ub_constraint_builder.build_constraints(
-            analysis2,
-            params2,
-            symbol_replace_fn=symbol_replace_fn2,
-        )
-        
-        if ub1_constraints or ub2_constraints:
-            lines.append("; " + "-" * 40)
-            lines.append("; UB Exclusion Constraints (C semantics)")
-            lines.append("; Exclude undefined behavior inputs")
-            lines.append("; " + "-" * 40)
-            
-            if ub1_constraints:
-                lines.append(f"; Function 1: {analysis1.function_name}")
-                lines.extend(ub1_constraints)
-            
-            if ub2_constraints:
-                lines.append(f"; Function 2: {analysis2.function_name}")
-                lines.extend(ub2_constraints)
-            
-            lines.append("")
-        
-        return lines
-    
+
     def _build_extra_variable_infos(
         self,
         analyses: Dict[str, ExtraVariableAnalysis],
@@ -2112,6 +2106,8 @@ class FormulaBuilder:
 
         return {
             'header_lines': context.header_lines,
+            # Issue #298: UB の制約は前提に入れず、NOT_EQ の witness の反例の領域にだけ使う
+            UB_WITNESS_DOMAIN_KEY: context.ub_witness_domain,
             # Issue #282: query が読む側ごとの memory の配列（閉じた式の即時合格を止める判定に使う）
             'side_memory_arrays': tuple(
                 self._collect_side_memory_arrays((analysis1, analysis2), (1, 2))

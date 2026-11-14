@@ -97,6 +97,7 @@ class RootCauseMixin:
         side = cls._root_cause_side(target)
         relational_reasons = {
             "sat_counterexample_ambiguous",
+            "sat_counterexample_ub_domain_violated",
             "return_width_bridge_missing",
         }
         unary_reasons = {

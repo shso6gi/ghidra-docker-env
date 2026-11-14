@@ -693,6 +693,8 @@ def test_expression_to_smt_respects_explicit_shift_width_inside_piece():
 
 
 def test_expression_to_smt_handles_bool_phi_compared_against_zero():
+    # Issue #298: 定数の大きさを演算と揃える（8 byte の定数との混合幅の算術は、32 bit の被演算子の
+    # 伸ばし方が決まらないので描画が拒否する。`test_issue298_ub_path_binding.py` の混合幅の test）
     selector = _binary("INT_SLESS", _param("param_2"), _param("param_1"))
     selector_is_zero = _binary("INT_EQUAL", selector, _const(0, 4))
     neg_selector_is_zero = Condition(selector_is_zero, True)
@@ -705,7 +707,7 @@ def test_expression_to_smt_handles_bool_phi_compared_against_zero():
                 _binary(
                     "INT_SLESS",
                     _param("param_3"),
-                    _binary("INT_ADD", _param("param_1"), _const(10, 8)),
+                    _binary("INT_ADD", _param("param_1"), _const(10, 4)),
                 ),
             ),
             (
@@ -715,8 +717,8 @@ def test_expression_to_smt_handles_bool_phi_compared_against_zero():
                     _param("param_3"),
                     _binary(
                         "INT_ADD",
-                        _binary("INT_MULT", _param("param_2"), _const(3, 8)),
-                        _const(1, 8),
+                        _binary("INT_MULT", _param("param_2"), _const(3, 4)),
+                        _const(1, 4),
                     ),
                 ),
             ),
@@ -748,10 +750,12 @@ def test_expression_to_smt_collapses_unconditional_phi_branch():
 
 
 def test_expression_to_smt_sign_extends_narrow_operand_for_signed_width_mismatch_compare():
+    # Issue #298: 定数の大きさを演算と揃える（8 byte の定数との混合幅の算術は、32 bit の被演算子の
+    # 伸ばし方が決まらないので描画が拒否する。`test_issue298_ub_path_binding.py` の混合幅の test）
     expr = _binary(
         "INT_SLESS",
         _param("param_3", size=4, data_type="int"),
-        _binary("INT_ADD", _param("param_1", size=4, data_type="int"), _const(10, size=8)),
+        _binary("INT_ADD", _param("param_1", size=4, data_type="int"), _const(10, size=4)),
     )
 
     smt = expression_to_smt(published(expr))
@@ -763,6 +767,8 @@ def test_expression_to_smt_sign_extends_narrow_operand_for_signed_width_mismatch
 
 
 def test_expression_to_smt_sign_extends_signed_operands_inside_nested_signed_compare_arithmetic():
+    # Issue #298: 定数の大きさを演算と揃える（8 byte の定数との混合幅の算術は、32 bit の被演算子の
+    # 伸ばし方が決まらないので描画が拒否する。`test_issue298_ub_path_binding.py` の混合幅の test）
     selector = _binary(
         "INT_SLESS",
         _param("param_2", size=4, data_type="int"),
@@ -776,7 +782,7 @@ def test_expression_to_smt_sign_extends_signed_operands_inside_nested_signed_com
                 _binary(
                     "INT_SLESS",
                     _param("param_3", size=4, data_type="int"),
-                    _binary("INT_ADD", _param("param_1", size=4, data_type="int"), _const(10, size=8)),
+                    _binary("INT_ADD", _param("param_1", size=4, data_type="int"), _const(10, size=4)),
                 ),
             ),
             (
@@ -786,8 +792,8 @@ def test_expression_to_smt_sign_extends_signed_operands_inside_nested_signed_com
                     _param("param_3", size=4, data_type="int"),
                     _binary(
                         "INT_ADD",
-                        _binary("INT_MULT", _param("param_2", size=4, data_type="int"), _const(3, size=8)),
-                        _const(1, size=8),
+                        _binary("INT_MULT", _param("param_2", size=4, data_type="int"), _const(3, size=4)),
+                        _const(1, size=4),
                     ),
                 ),
             ),
@@ -802,13 +808,15 @@ def test_expression_to_smt_sign_extends_signed_operands_inside_nested_signed_com
 
 
 def test_expression_to_smt_preserves_32bit_wrap_before_signed_compare_extension():
+    # Issue #298: 定数の大きさを演算と揃える（8 byte の定数との混合幅の算術は、32 bit の被演算子の
+    # 伸ばし方が決まらないので描画が拒否する。`test_issue298_ub_path_binding.py` の混合幅の test）
     expr = _binary(
         "INT_SLESS",
         _param("param_3", size=4, data_type="int"),
         _binary(
             "INT_ADD",
-            _const(1, size=8),
-            _binary("INT_MULT", _const(3, size=8), _param("param_2", size=4, data_type="int")),
+            _const(1, size=4),
+            _binary("INT_MULT", _const(3, size=4), _param("param_2", size=4, data_type="int")),
         ),
     )
 
@@ -819,7 +827,11 @@ def test_expression_to_smt_preserves_32bit_wrap_before_signed_compare_extension(
     assert "(bvmul (_ bv3 64) ((_ sign_extend 32) param_2))" not in smt
 
 
-def test_expression_to_smt_prefers_signed_extension_from_datatype_object_not_name():
+def test_expression_to_smt_does_not_extend_a_narrow_comparison_operand_by_its_declared_type():
+    """Issue #298: 幅の違う符号付きの順序の比較は、狭い側の伸ばし方で値が変わる。宣言の型（data type
+    object の符号）から伸ばし方を推測せず、描画が拒否する（以前は sign 拡張を選んでいた）。"""
+    from scripts.function_tracer_pcode.core.render_smt import SMT_SEMANTICS_REFUSALS
+
     expr = _binary(
         "INT_SLESS",
         Expression.parameter(
@@ -831,9 +843,8 @@ def test_expression_to_smt_prefers_signed_extension_from_datatype_object_not_nam
         _const(0, size=8),
     )
 
-    smt = expression_to_smt(published(expr))
-
-    assert "((_ sign_extend 32) param_1)" in smt
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        expression_to_smt(published(expr))
 
 
 def test_expression_to_smt_coerces_constant_zero_inside_bool_or():

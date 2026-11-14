@@ -280,7 +280,15 @@ class ConditionSMTOracle:
             )
             return None
 
-        usable, script = cls._build_script(conditions, query=query, use_cache=use_cache)
+        from scripts.function_tracer_pcode.core.render_smt import SMT_SEMANTICS_REFUSALS
+
+        try:
+            usable, script = cls._build_script(conditions, query=query, use_cache=use_cache)
+        except SMT_SEMANTICS_REFUSALS:
+            # Issue #298: 正確な意味の無い条件（伸ばし方の分からない幅の違いなど）は判定しない
+            # （充足不能と答えない: 枝を刈らない側）
+            note("oracle.unrenderable")
+            return None
         if not usable or script is None:
             return None
 

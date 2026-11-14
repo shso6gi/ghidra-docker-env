@@ -280,6 +280,210 @@ class UndeclaredSmtSymbolError(UnsupportedSmtSemanticsError):
         return (self.refusal_evidence_ref, self.symbol_kind, self.symbol)
 
 
+def _extension_is_determined(expr: Any, operand_bits: int) -> bool:
+    """zero / sign のどちらで伸ばしても同じ値になる被演算子か。
+
+    比較・bool の結果（0 / 1）と、被演算子の幅で最上位 bit が 0 の定数。
+    """
+
+    if expr is None:
+        return False
+    if expression_returns_bool(expr):
+        return True
+    operator = getattr(expr, "operator", None)
+    if operator in _BOOLEAN_BINARY_OPERATORS or operator == "BOOL_NEGATE":
+        return True
+    if _kind_name_is(expr, "CONSTANT") and operand_bits > 0:
+        from scripts.function_tracer_pcode.core.render_smt.widths import constant_value_at_width
+
+        value = constant_value_at_width(expr, operand_bits)
+        return value is not None and not (value >> (operand_bits - 1)) & 1
+    return False
+
+
+def _declared_operand_bits(operand: Any, rendered_bits: int) -> int:
+    """被演算子が宣言する幅（P-code の varnode の大きさ）。宣言が無ければ描画の幅。
+
+    演算と被演算子の幅の契約は宣言（``size``）どうしで比べる。描画が算術の node を宣言より
+    狭く計算する既存の規則は、この契約の外（ここでは扱わない）。
+    """
+
+    declared = int(getattr(operand, "size", 0) or 0) * 8
+    return declared if declared > 0 else rendered_bits
+
+
+def _shift_operand_width(expr: Any, left: Any, right: Any, left_bits: int) -> int:
+    """shift を計算する幅（Issue #298）。演算が第 1 被演算子より広い形の扱いを決める。
+
+    P-code の shift は出力と第 1 入力の大きさが同じ。被演算子だけが狭い形（型の仮説・式の
+    変換・register の断片の再構成）では、元の入力の上位 bit（zero / sign のどちらで伸ばした
+    か）を式から示せない。ただし定数 c の左シフトで ``c >= 演算の幅 - 被演算子の幅`` なら、
+    伸ばした bit は全て押し出されるので結果は伸ばし方に依らない（例: 32 bit の x の 64 bit の
+    ``x << 32`` は x · 2^32）。この形は演算の幅で計算する（返り値が演算の幅）。被演算子の
+    伸ばし方で値が変わらないときも同じ。それ以外の広げる形は拒否する
+    （``_require_operand_width_of_operation``）。
+    """
+
+    result_bits = int(getattr(expr, "size", 0) or 0) * 8
+    declared_bits = _declared_operand_bits(left, left_bits)
+    if result_bits <= declared_bits or left_bits <= 0 or declared_bits <= 0:
+        return left_bits
+    if _extension_is_determined(left, declared_bits):
+        return result_bits
+    from scripts.function_tracer_pcode.core.render_smt.widths import constant_value_at_width
+
+    # 量は描画が表す値（8 bit の 256 は 0）で判断する。生の値で判断すると、量 0（伸ばし方で
+    # 値が変わる）を「伸ばした bit を全て押し出す」と誤る
+    count = constant_value_at_width(right)
+    if (
+        getattr(expr, "operator", None) == "INT_LEFT"
+        and count is not None
+        and count >= result_bits - declared_bits
+        and left_bits == declared_bits
+    ):
+        return result_bits
+    _require_operand_width_of_operation(expr, declared_bits, operand=left)
+    return left_bits
+
+
+def _kind_name_is(expr: Any, name: str) -> bool:
+    expr_type = getattr(expr, "expr_type", None)
+    return getattr(expr_type, "name", None) == name
+
+
+_LOW_BITS_CLOSED_OPERATORS = frozenset({"INT_ADD", "INT_SUB", "INT_MULT", "INT_AND", "INT_OR", "INT_XOR"})
+
+
+def _fit_arithmetic_operand(
+    expr: Any,
+    operand: Any,
+    operand_smt: str,
+    operand_bits: int,
+    target_bits: int,
+    *,
+    other: Any,
+    float_mode: str,
+) -> str:
+    """算術・bitwise の node の被演算子を、宣言の大きさ ``target_bits`` に合わせる（Issue #298）。
+
+    P-code の算術は、出力と入力の大きさが同じ。宣言と違う幅の被演算子（型の仮説・式の変換・
+    trace の簡約で幅が変わった）は、値を変えないと示せるときだけ合わせる:
+
+    * 被演算子が広い: 下位の bit の結果が下位の bit だけで決まる演算（加減乗・bitwise）は
+      下位を取る。除算・剰余は上位の bit が結果を変えるので拒否する。
+    * 被演算子が狭い: 伸ばし方で値が変わらない（``_extension_is_determined``）か、INT_AND の
+      相手が伸ばした bit を全て 0 にする定数の mask なら zero 拡張する。それ以外は推測になる
+      ので拒否する（``UnsupportedSmtOperatorError`` → UNKNOWN）。
+    """
+
+    if operand_bits == target_bits or operand_bits <= 0:
+        return operand_smt
+    operator = getattr(expr, "operator", None)
+    if operand_bits > target_bits:
+        if operator not in _LOW_BITS_CLOSED_OPERATORS:
+            raise UnsupportedSmtOperatorError(
+                operator=operator,
+                reason="operand wider than the operation (high bits change the result)",
+                operand_bits=operand_bits,
+                result_bits=target_bits,
+            )
+        return _coerce_expr_to_bitvec_width(
+            operand, operand_smt, target_bits, prefer_sign_extension=False, float_mode=float_mode,
+        )
+    if _extension_is_determined(operand, operand_bits) or (
+        operator == "INT_AND" and _mask_clears_bits_above(other, operand_bits, target_bits)
+    ):
+        return f"((_ zero_extend {target_bits - operand_bits}) {operand_smt})"
+    raise UnsupportedSmtOperatorError(
+        operator=operator,
+        reason="operand narrower than the operation (extension is not determined)",
+        operand_bits=operand_bits,
+        result_bits=target_bits,
+    )
+
+
+_EXTENSION_FREE_COMPARISONS = frozenset({"INT_EQUAL", "INT_NOTEQUAL", "INT_LESS", "INT_LESSEQUAL"})
+
+
+def _fit_comparison_operands(
+    expr: Any,
+    left: Any,
+    right: Any,
+    left_smt: str,
+    right_smt: str,
+    left_bits: int,
+    right_bits: int,
+) -> tuple:
+    """幅の違う比較の両辺を揃える（Issue #298）。推測で伸ばさない。
+
+    * 狭い側の伸ばし方で値が変わらない（``_extension_is_determined``）: 広い幅で比べる。
+    * 符号なしの比較（等値・不等・``<u``・``<=u``）で、広い側が狭い幅で最上位 bit が 0 の定数:
+      zero / sign のどちらで伸ばしても ``ext(x) op c`` ⇔ ``x op low(c)``（x の最上位 bit が 1 なら
+      どちらの拡張も c より大きい）なので、狭い幅で比べる。符号付きの順序の比較は伸ばし方で変わる。
+    * それ以外（順序の比較で狭い側が負になり得る、など）: 拒否（→ UNKNOWN）。
+    """
+
+    from scripts.function_tracer_pcode.core.render_smt.widths import constant_value_at_width
+
+    narrow_is_left = left_bits < right_bits
+    narrow, wide = (left, right) if narrow_is_left else (right, left)
+    narrow_bits, wide_bits = (left_bits, right_bits) if narrow_is_left else (right_bits, left_bits)
+    narrow_smt, wide_smt = (left_smt, right_smt) if narrow_is_left else (right_smt, left_smt)
+    if _extension_is_determined(narrow, narrow_bits):
+        narrow_smt = f"((_ zero_extend {wide_bits - narrow_bits}) {narrow_smt})"
+    else:
+        wide_value = constant_value_at_width(wide, wide_bits)
+        if (
+            getattr(expr, "operator", None) in _EXTENSION_FREE_COMPARISONS
+            and wide_value is not None
+            and wide_value >> (narrow_bits - 1) == 0
+        ):
+            wide_smt = f"(_ bv{wide_value} {narrow_bits})"
+        else:
+            raise UnsupportedSmtOperatorError(
+                operator=getattr(expr, "operator", None),
+                reason="comparison operand narrower than its peer (extension is not determined)",
+                operand_bits=narrow_bits,
+                result_bits=wide_bits,
+            )
+    return (narrow_smt, wide_smt) if narrow_is_left else (wide_smt, narrow_smt)
+
+
+def _mask_clears_bits_above(mask: Any, low_bits: int, target_bits: int) -> bool:
+    """``mask`` が ``low_bits`` 以上の bit を全て 0 にする定数か（INT_AND の相手）。"""
+
+    from scripts.function_tracer_pcode.core.render_smt.widths import constant_value_at_width
+
+    value = constant_value_at_width(mask, target_bits)
+    return value is not None and value >> low_bits == 0
+
+
+def _require_operand_width_of_operation(expr: Any, operand_bits: int, *, operand: Any = None) -> None:
+    """P-code の shift・負号は出力と第 1 入力の大きさが同じ（Issue #298）。
+
+    演算が被演算子より **広い** 形（型の仮説・式の変換が被演算子だけを狭めた）では、元の
+    演算が被演算子をどう伸ばしたか（zero / sign）を式から示せない。被演算子の幅で計算して
+    結果を伸ばすと元の演算と違う値になり得る（例: 32 bit の x の 64 bit の ``x << 32``）。
+    推測で拡張を決めず、正確な意味が無いものとして拒否する（strategy は UNKNOWN にする）。
+
+    演算が被演算子より **狭い** 形は、全幅の演算の下位 byte（``SUBPIECE(op(x), 0)``）を表す
+    既存の表現で、被演算子の幅で計算して切り詰めるのが正確なので拒否しない。被演算子の
+    伸ばし方で値が変わらない（``_extension_is_determined``）ときも拒否しない。
+    """
+
+    result_bits = int(getattr(expr, "size", 0) or 0) * 8
+    if result_bits <= 0 or operand_bits <= 0 or result_bits <= operand_bits:
+        return
+    if _extension_is_determined(operand, operand_bits):
+        return
+    raise UnsupportedSmtOperatorError(
+        operator=getattr(expr, "operator", None),
+        reason="operand narrower than the operation (extension is not determined)",
+        operand_bits=operand_bits,
+        result_bits=result_bits,
+    )
+
+
 #: 正確な SMT の意味が無いことを示す型つきの拒否の全て（strategy が UNKNOWN にする族）。
 #: ``UnknownSmtExtensionWidthError`` は歴史的に ``UnsupportedSmtSemanticsError`` の外にあるので並べる。
 SMT_SEMANTICS_REFUSALS = (UnsupportedSmtSemanticsError, UnknownSmtExtensionWidthError)
@@ -351,12 +555,68 @@ def render_expression_smt_evidence(
     consumer か」が call site で分かる方が後から追いやすいため。
     """
 
+    try:
+        return _to_smt_internal(
+            expr,
+            symbol_name_mapping=symbol_name_mapping,
+            float_mode=float_mode,
+            shared=shared,
+        )
+    except SMT_SEMANTICS_REFUSALS as refusal:
+        # 証拠・表示の文字列は solver へ渡さない。正確な意味が無い式（Issue #298 の幅の拒否など）
+        # も、その事実と式の形を残して記録を続ける（判定の経路は ``expression_to_smt`` が拒否する）
+        return f"(unrendered {_evidence_refusal_tag(refusal)} {_evidence_structure(expr)})"
+
+
+def render_expression_smt_for_query(
+    expr,
+    *,
+    symbol_name_mapping: Optional[Mapping[str, str]] = None,
+    float_mode: str = "uf",
+) -> str:
+    """組み立て中の中間値を **solver へ渡す** 文字列にする（Issue #298）。
+
+    ``render_expression_smt_evidence`` と同じく検証済みを要求しないが、正確な意味が無い式は
+    拒否する（``SMT_SEMANTICS_REFUSALS`` を送出する）。表示用の文字列を solver の query に
+    使わないための入口で、呼び手は拒否を「その書き換え・検査をしない」として扱う。
+    """
+
     return _to_smt_internal(
         expr,
         symbol_name_mapping=symbol_name_mapping,
         float_mode=float_mode,
-        shared=shared,
+        shared=True,
     )
+
+
+def _evidence_refusal_tag(refusal: BaseException) -> str:
+    fields = getattr(refusal, "refusal_target_fields", None)
+    parts = fields() if callable(fields) else (type(refusal).__name__,)
+    return "|".join(str(part) for part in parts).replace(" ", "_")
+
+
+def _evidence_structure(expr: Any, budget: int = 64) -> str:
+    """描けない式の形（表示用。演算子・名前・値・大きさ。node 数に上限）。"""
+
+    remaining = [budget]
+
+    def walk(node: Any) -> str:
+        if node is None:
+            return "_"
+        if remaining[0] <= 0:
+            return "..."
+        remaining[0] -= 1
+        kind = getattr(getattr(node, "expr_type", None), "name", "?")
+        label = getattr(node, "operator", None) or getattr(node, "name", None)
+        if label is None:
+            label = getattr(node, "value", None)
+        head = f"{kind}:{label}:{int(getattr(node, 'size', 0) or 0)}"
+        children = list(getattr(node, "operands", None) or ())
+        if not children:
+            return head
+        return "(" + " ".join([head, *(walk(child) for child in children)]) + ")"
+
+    return walk(expr)
 
 
 def condition_to_smt(
@@ -1164,13 +1424,11 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
                         float_mode=float_mode,
                     )
             elif left_bits != right_bits:
-                target_bits = max(left_bits, right_bits)
-                if left_bits < target_bits:
-                    op = "sign_extend" if prefer_sign_extension else "zero_extend"
-                    left_smt = f"((_ {op} {target_bits - left_bits}) {left_smt})"
-                if right_bits < target_bits:
-                    op = "sign_extend" if prefer_sign_extension else "zero_extend"
-                    right_smt = f"((_ {op} {target_bits - right_bits}) {right_smt})"
+                # Issue #298: P-code の比較は両辺が同じ大きさ。狭い側の伸ばし方を比較の符号で推測
+                # しない（``_fit_comparison_operands``: 値を変えないと示せる形だけ揃え、他は拒否）
+                left_smt, right_smt = _fit_comparison_operands(
+                    expr, left, right, left_smt, right_smt, left_bits, right_bits,
+                )
             op = expr._get_smt_operator(expr.operator)
             return f"({op} {left_smt} {right_smt})"
 
@@ -1208,8 +1466,13 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
                 return float_arith_smt
 
         if expr.operator in ["INT_LEFT", "INT_RIGHT", "INT_SRIGHT"]:
+            widened_bits = _shift_operand_width(expr, left, right, left_bits)
             left_smt = _coerce_bool_to_bitvec(left, left_smt, left_bits)
             right_smt = _coerce_bool_to_bitvec(right, right_smt, right_bits)
+            if widened_bits > left_bits:
+                # 伸ばし方に依らない形（``_shift_operand_width``）: 演算の幅で計算する
+                left_smt = f"((_ zero_extend {widened_bits - left_bits}) {left_smt})"
+                left_bits = widened_bits
             shift_bits = left_bits
             op = expr._get_smt_operator(expr.operator)
             if right_bits > shift_bits > 0:
@@ -1241,6 +1504,22 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
         if expr.operator in _ARITHMETIC_BINARY_OPERATORS:
             left_smt = _coerce_bool_to_bitvec(left, left_smt, left_bits)
             right_smt = _coerce_bool_to_bitvec(right, right_smt, right_bits)
+            declared_bits = int(getattr(expr, "size", 0) or 0) * 8
+            if declared_bits > 0 or left_bits != right_bits:
+                # Issue #298: P-code の算術は出力と入力の大きさが同じ。演算は宣言の大きさ
+                # （宣言が無ければ広い方の被演算子の幅）で計算し、被演算子は値を変えないと示せる
+                # ときだけ合わせる（``_fit_arithmetic_operand``）。被演算子の宣言の符号で伸ばし方を
+                # 推測しない: 片方だけが狭い形（``INT_ADD(x32, y64) -> 64``）も、伸ばし方が値を変える
+                # なら拒否する（→ UNKNOWN）
+                target = declared_bits if declared_bits > 0 else max(left_bits, right_bits)
+                left_smt = _fit_arithmetic_operand(
+                    expr, left, left_smt, left_bits, target, other=right, float_mode=float_mode,
+                )
+                right_smt = _fit_arithmetic_operand(
+                    expr, right, right_smt, right_bits, target, other=left, float_mode=float_mode,
+                )
+                op = expr._get_smt_operator(expr.operator)
+                return f"({op} {left_smt} {right_smt})"
             target_bits = (
                 expression_smt_bit_width(expr)
                 if expr.operator in _BITWISE_BINARY_OPERATORS
@@ -1368,8 +1647,15 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
             return f"(bvnot {operand_smt})"
 
         if expr.operator == "INT_2COMP":
+            declared_bits = _declared_operand_bits(operand, operand_bits)
+            _require_operand_width_of_operation(expr, declared_bits, operand=operand)
             target_bits = expression_smt_bit_width(expr) or operand_bits
-            operand_smt = _coerce_bool_to_bitvec(operand, operand_smt, target_bits)
+            if expression_returns_bool(operand):
+                operand_smt = _coerce_bool_to_bitvec(operand, operand_smt, target_bits)
+            elif 0 < operand_bits == declared_bits < target_bits:
+                # 宣言が演算より狭く、伸ばし方で値が変わらない被演算子
+                # （``_require_operand_width_of_operation`` が確認済み）: 演算の幅で計算する
+                operand_smt = f"((_ zero_extend {target_bits - operand_bits}) {operand_smt})"
             return f"(bvneg {operand_smt})"
 
         if expr.operator == "BOOL_NEGATE":
@@ -1480,6 +1766,20 @@ def _render_expression_node(expr, context: SmtRenderContext, render_child) -> st
             if phi_returns_bool or not hasattr(branch_expr, "get_bit_width"):
                 return branch_smt
 
+            # Issue #298: P-code の MULTIEQUAL の入力は同じ大きさ。狭い枝の伸ばし方を推測しない
+            # （伸ばし方で値が変わらない枝だけを zero 拡張し、他は拒否する）
+            branch_bits = expression_value_bit_width(branch_expr)
+            if (
+                0 < branch_bits < target_bits
+                and not expression_returns_bool(branch_expr)
+                and not _extension_is_determined(branch_expr, branch_bits)
+            ):
+                raise UnsupportedSmtOperatorError(
+                    operator="MULTIEQUAL",
+                    reason="PHI branch narrower than the PHI (extension is not determined)",
+                    operand_bits=branch_bits,
+                    result_bits=target_bits,
+                )
             return _coerce_expr_to_bitvec_width(
                 branch_expr,
                 branch_smt,

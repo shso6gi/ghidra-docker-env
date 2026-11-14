@@ -853,6 +853,14 @@ def _impl__solve_query_internal(
         use_hard_timeout=use_hard_timeout,
     )
 
+def _impl__solve_premise_query(self, scope: str, query: str) -> Optional[bool]:
+    """前提だけの query を解く（Issue #298）: SAT なら True、UNSAT なら False、決まらなければ None。"""
+    from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
+        solve_premise_query,
+    )
+
+    return solve_premise_query(self, scope, query)
+
 def _impl__build_condition_only_query(
     self,
     base_ctx: Dict[str, Any],

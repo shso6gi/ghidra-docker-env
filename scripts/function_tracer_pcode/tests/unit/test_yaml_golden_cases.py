@@ -6,6 +6,7 @@ from conftest import load_golden_cases, create_mock_result, create_mock_analysis
 
 from scripts.function_tracer_pcode.checker.phases.handler import PhaseHandler
 from scripts.function_tracer_pcode.semantics.typing.fixer import TypeFixerConfig
+from scripts.function_tracer_pcode.tests.unit._premise_support import assume_satisfiable_premise
 
 
 class TestYAMLGoldenCases:
@@ -313,6 +314,7 @@ class TestMonolithicStrategyBackwardCompatibility:
             extra_vars2=[],
             constrained_fragments=["param_2_hi"],
             param_fragment_constrained=["param_2_hi"],
+            premise_formula="(set-logic QF_BV)\n(check-sat)",
         )
         solver_runner = Mock()
         solver_runner.run_parallel.return_value = ParallelResult(
@@ -328,6 +330,7 @@ class TestMonolithicStrategyBackwardCompatibility:
         from scripts.function_tracer_pcode.core import Expression, ReturnInfo
 
         strategy = MonolithicStrategy(formula_builder, solver_runner, debug=False)
+        assume_satisfiable_premise(strategy)
         # 両側 0 parameter（入力を読まない戻り値）。
         constant_return = [ReturnInfo(address="0x00401000", conditions=[], value=Expression.constant(0, 4))]
         analysis1 = create_mock_analysis(function_name="func1", parameters=[], returns=constant_return)
