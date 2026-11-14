@@ -639,18 +639,29 @@ class FormulaBuilder:
         uses_arrays = any(collect_memory_bit_widths_from_analysis(analysis) for analysis in analyses)
         uses_float_theory = False
         uses_uf = False
+        # 判定はどちらも節点ごとに閉じた性質の「どれかの節点で成り立つか」なので、同じ根（PHI の
+        # 枝の条件・return の条件は、値の部分式ごとに同じ object が渡る）を 2 回見ても、既に成り
+        # 立った性質をもう一度見ても答えは変わらない。走査は根ごとに 1 回、未確定の性質だけにする
+        # （以前は部分式の数 × 条件の数だけ全体を辿り、早く両方が成り立たない式で時間を使った）。
+        examined_roots: set = set()
+        pinned_roots: list = []  # id を比べる間、根を生かしておく（id の再利用で取り違えない）
+
+        def examine(root) -> None:
+            nonlocal uses_float_theory, uses_uf
+            if root is None or id(root) in examined_roots:
+                return
+            examined_roots.add(id(root))
+            pinned_roots.append(root)
+            if not uses_float_theory and expression_uses_smt_float_theory(root):
+                uses_float_theory = True
+            if not uses_uf and expression_uses_smt_uf(root, float_mode="fp"):
+                uses_uf = True
+
         for analysis in analyses:
             for expr, guards in self._iter_analysis_expressions_with_guards(analysis):
-                if expression_uses_smt_float_theory(expr):
-                    uses_float_theory = True
-                if expression_uses_smt_uf(expr, float_mode="fp"):
-                    uses_uf = True
+                examine(expr)
                 for guard in guards or ():
-                    guard_expr = getattr(guard, "expression", guard)
-                    if expression_uses_smt_float_theory(guard_expr):
-                        uses_float_theory = True
-                    if expression_uses_smt_uf(guard_expr, float_mode="fp"):
-                        uses_uf = True
+                    examine(getattr(guard, "expression", guard))
                 if uses_float_theory and uses_uf:
                     break
             if uses_float_theory and uses_uf:

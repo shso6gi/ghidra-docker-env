@@ -85,6 +85,7 @@ class MultiequalExpansionMixin:
                         runtime_ref=UnknownValueRef.phi_circular(
                             pcode_op_ref=_pcode_op_ref_from_tracer(self.tracer, multiequal_op),
                         ),
+                        size=_pcode_output_size(multiequal_op),
                     ),
                     list(base_conditions),
                 )
@@ -110,7 +111,7 @@ class MultiequalExpansionMixin:
         """
         phi_parent = multiequal_op.getParent()
         if not phi_parent:
-            return [ExpandedValue(Expression.unknown("phi_no_parent"), list(base_conditions))]
+            return [ExpandedValue(Expression.unknown("phi_no_parent", size=_pcode_output_size(multiequal_op)), list(base_conditions))]
         
         num_inputs = multiequal_op.getNumInputs()
         in_size = phi_parent.getInSize()
@@ -272,7 +273,7 @@ class MultiequalExpansionMixin:
         self._debug_print("=" * 50, depth)
         self._debug_print("MULTIEQUAL -> 0 branches (no valid branches)", depth)
         self._debug_print("=" * 50, depth)
-        return [ExpandedValue(Expression.unknown("phi_no_valid_branch"), list(base_conditions))]
+        return [ExpandedValue(Expression.unknown("phi_no_valid_branch", size=_pcode_output_size(multiequal_op)), list(base_conditions))]
 
     def _checkpoint_expansion_size(
         self,
@@ -774,3 +775,13 @@ class MultiequalExpansionMixin:
             self.parameters,
             size=expr.size,
         )
+
+
+def _pcode_output_size(pcode_op) -> int:
+    """P-code の演算の出力の大きさ（byte）。分からなければ 0（Issue #298: 置き換える不明値の幅）。"""
+
+    get_output = getattr(pcode_op, "getOutput", None)
+    output = get_output() if callable(get_output) else None
+    get_size = getattr(output, "getSize", None)
+    size = get_size() if callable(get_size) else None
+    return size if isinstance(size, int) and not isinstance(size, bool) and size > 0 else 0

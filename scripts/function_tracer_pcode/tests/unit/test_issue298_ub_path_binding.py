@@ -1245,3 +1245,149 @@ def test_zero_constant_is_not_narrowed_under_a_signed_ordering():
 
     assert signed.operands[1].size == 8  # 狭めない（x の伸ばし方を決めない）
     assert unsigned.operands[1].size == 4  # 等値は伸ばし方に依らない
+
+
+# --- review 3 follow-up: 置き換える不明値は P-code の出力の大きさを持つ（beschb の再現）---------------
+
+
+class _SizedOutput:
+    def __init__(self, size):
+        self._size = size
+
+    def getSize(self):
+        return self._size
+
+
+class _CircularMultiequal:
+    """自分の展開中に再び現れる MULTIEQUAL（出力 8 byte）。"""
+
+    def __init__(self, size=8):
+        self._output = _SizedOutput(size)
+
+    def getOutput(self):
+        return self._output
+
+    def getParent(self):
+        return None
+
+
+def _circular_placeholder_from_phi_handler(op):
+    from unittest.mock import Mock
+    from scripts.function_tracer_pcode.analysis.phi_resolver import PhiHandler, _pcode_op_stable_key
+
+    handler = PhiHandler(type("Tracer", (), {"debug": False})(), Mock())
+    handler._expanding_ops.add(_pcode_op_stable_key(op))
+    (branch,) = handler.expand_multiequal(op)
+    return branch.value
+
+
+def _circular_placeholder_from_expander(op):
+    from unittest.mock import Mock
+    from scripts.function_tracer_pcode.semantics.transform import ExpressionExpander
+    from scripts.function_tracer_pcode.semantics.transform.expander_multiequal import _pcode_op_stable_key
+
+    expander = ExpressionExpander(Mock(), Mock(), debug=False)
+    expander._expanding_ops.add(_pcode_op_stable_key(op))
+    (expanded,) = expander._expand_multiequal(op, [], 0)
+    return expanded.value
+
+
+@pytest.mark.parametrize("produce", [_circular_placeholder_from_phi_handler, _circular_placeholder_from_expander])
+def test_circular_phi_placeholder_carries_the_multiequal_output_size(produce):
+    value = produce(_CircularMultiequal(8))
+
+    assert value.expr_type == ExpressionType.UNKNOWN
+    assert value.size == 8
+    # 8 byte の算術の被演算子として、伸ばし方を推測せずにそのまま描ける
+    smt = published(_bin("INT_ADD", value, _const(0xFFFFFFFFFFFFFFFF, 8), size=8)).to_smt()
+    assert re.fullmatch(r"\(bvadd rtunk_[0-9a-f]+_64 \(_ bv18446744073709551615 64\)\)", smt)
+
+
+@pytest.mark.parametrize("produce", [_circular_placeholder_from_phi_handler, _circular_placeholder_from_expander])
+def test_no_parent_phi_placeholder_carries_the_multiequal_output_size(produce):
+    from scripts.function_tracer_pcode.analysis.phi_resolver import PhiHandler
+    from unittest.mock import Mock
+
+    op = _CircularMultiequal(4)
+    if produce is _circular_placeholder_from_phi_handler:
+        handler = PhiHandler(type("Tracer", (), {"debug": False, "emit_unknown_event": lambda *a, **k: None})(), Mock())
+        (branch,) = handler.expand_multiequal(op)
+        value = branch.value
+    else:
+        from scripts.function_tracer_pcode.semantics.transform import ExpressionExpander
+
+        (expanded,) = ExpressionExpander(Mock(), Mock(), debug=False)._expand_multiequal(op, [], 0)
+        value = expanded.value
+    assert value.expr_type == ExpressionType.UNKNOWN and value.size == 4
+
+
+def test_unsized_placeholder_in_a_declared_operation_is_still_refused():
+    # 大きさの分からない不明値は、宣言のある演算の被演算子で伸ばし方を推測しない（契約は変えない）
+    unknown = Expression.unknown("opaque")
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        published(_bin("INT_ADD", unknown, _const(0xFFFFFFFFFFFFFFFF, 8), size=8)).to_smt()
+
+
+def test_unknown_constructor_records_the_size_only_when_positive():
+    assert Expression.unknown("a", size=8).size == 8
+    assert Expression.unknown("b").size == Expression.unknown("c", size=0).size
+
+
+# --- review 3 follow-up: SMT logic の選択は、同じ根を 1 回だけ見る（beschb の時間の回帰）---------
+
+
+def _logic_selection_analysis(value_count=6):
+    """条件を共有する多数の部分式（PHI の枝の条件・return の条件は同じ object が渡る）。"""
+    x = Expression(ExpressionType.PARAMETER, name="x", size=8)
+    guard = Condition(_bin("INT_SLESS", x, _const(3, 8), size=1), False)
+    value = x
+    for index in range(value_count):
+        value = _bin("INT_ADD", value, _const(index + 1, 8), size=8)
+    fvalue = _bin("FLOAT_ADD", x, x, size=8)
+    returns = [
+        ReturnInfo(address="0x1010", value=value, conditions=[guard]),
+        ReturnInfo(address="0x1020", value=fvalue, conditions=[guard]),
+    ]
+    return _analysis("f", [], returns, return_size=8)
+
+
+def test_smt_logic_selection_examines_each_root_once_and_keeps_the_answer(monkeypatch):
+    from scripts.function_tracer_pcode.proof.formula import builder as builder_module
+    from scripts.function_tracer_pcode.proof.formula.builder import FormulaBuilder
+    from scripts.function_tracer_pcode.core.render_smt import (
+        expression_uses_smt_float_theory,
+        expression_uses_smt_uf,
+    )
+
+    analysis = published(_logic_selection_analysis())
+    roots = []
+    for expr, guards in FormulaBuilder(debug=False)._iter_analysis_expressions_with_guards(analysis):
+        roots.append(expr)
+        roots.extend(getattr(guard, "expression", guard) for guard in guards)
+    distinct = {id(root) for root in roots}
+    assert len(roots) > len(distinct)  # 同じ条件が部分式ごとに渡る形
+
+    # 参照: 全ての根を素朴に辿った答え
+    expected_float = any(expression_uses_smt_float_theory(root) for root in roots)
+    expected_uf = any(expression_uses_smt_uf(root, float_mode="fp") for root in roots)
+
+    calls = {"float": [], "uf": []}
+
+    def counting_float(root):
+        calls["float"].append(id(root))
+        return expression_uses_smt_float_theory(root)
+
+    def counting_uf(root, float_mode="fp"):
+        calls["uf"].append(id(root))
+        return expression_uses_smt_uf(root, float_mode=float_mode)
+
+    monkeypatch.setattr(builder_module, "expression_uses_smt_float_theory", counting_float)
+    monkeypatch.setattr(builder_module, "expression_uses_smt_uf", counting_uf)
+    logic = FormulaBuilder(debug=False)._select_smt_logic(analysis)
+
+    from scripts.function_tracer_pcode.core.render_smt import smt_logic_name
+
+    assert logic == smt_logic_name(uses_float_theory=expected_float, uses_arrays=False, uses_uf=expected_uf)
+    for name in ("float", "uf"):
+        assert len(calls[name]) == len(set(calls[name]))  # 同じ根を 2 回見ない
+        assert set(calls[name]) <= distinct

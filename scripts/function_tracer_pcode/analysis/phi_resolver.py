@@ -228,6 +228,7 @@ class PhiHandler:
                         runtime_ref=UnknownValueRef.phi_circular(
                             pcode_op_ref=_pcode_op_ref_from_tracer(self.tracer, multiequal_op),
                         ),
+                        size=_pcode_output_size(multiequal_op),
                     ),
                 )
             ]
@@ -268,7 +269,7 @@ class PhiHandler:
                 def_op=multiequal_op, depth=depth,
                 note="MULTIEQUAL has no parent block", context="phi_handler"
             )
-            return [ExpandedBranch(base_conditions, Expression.unknown("phi_no_parent"))]
+            return [ExpandedBranch(base_conditions, Expression.unknown("phi_no_parent", size=_pcode_output_size(multiequal_op)))]
         
         phi_index = phi_parent.getIndex()
         self._debug_print(f"PHI block index: {phi_index}", depth)
@@ -387,7 +388,7 @@ class PhiHandler:
             note=f"self_refs={self_ref_count}/{num_inputs}",
             context="phi_handler"
         )
-        return [ExpandedBranch(base_conditions, Expression.unknown("phi_no_valid_branch"))]
+        return [ExpandedBranch(base_conditions, Expression.unknown("phi_no_valid_branch", size=_pcode_output_size(multiequal_op)))]
     
     def _trace_input_value(
         self,
@@ -735,3 +736,13 @@ class PhiHandler:
             ))
         
         return result
+
+
+def _pcode_output_size(pcode_op) -> int:
+    """P-code の演算の出力の大きさ（byte）。分からなければ 0（Issue #298: 置き換える不明値の幅）。"""
+
+    get_output = getattr(pcode_op, "getOutput", None)
+    output = get_output() if callable(get_output) else None
+    get_size = getattr(output, "getSize", None)
+    size = get_size() if callable(get_size) else None
+    return size if isinstance(size, int) and not isinstance(size, bool) and size > 0 else 0
