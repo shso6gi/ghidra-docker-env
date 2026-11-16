@@ -11,6 +11,7 @@ import struct
 import pytest
 
 from scripts.function_tracer_pcode.concrete.abi import (
+    ELF_FORMAT,
     AbiId,
     ArgClass,
     ArgumentSlot,
@@ -36,7 +37,6 @@ from scripts.function_tracer_pcode.concrete.executor import (
 from scripts.function_tracer_pcode.concrete.input_surface import (
     InputCorrespondence,
     InputSurfaceRefusal,
-    ParameterStorage,
     SideInputSurface,
     bind_arguments,
     correspond_inputs,
@@ -45,31 +45,34 @@ from scripts.function_tracer_pcode.concrete.input_surface import (
 from scripts.function_tracer_pcode.concrete.observation import (
     ObservationRefusal,
     ObservationRelation,
+    ObservedRegister,
     ReturnStorage,
     compare_return_values,
     plan_return_observation,
     return_location,
 )
+from scripts.function_tracer_pcode.concrete.storage import StorageLocation
 
 ARM = abi_model(AbiId.AARCH64_AAPCS64)
 MIPS = abi_model(AbiId.MIPS_N64)
 
 
 def _arm_int(n, size=4):
-    return ParameterStorage(True, f"x{n}", 64, 0, size)
+    return StorageLocation(True, f"w{n}" if size < 8 else f"x{n}", f"x{n}", 8, 0, size)
 
 
 def _arm_fp(n, size=8):
-    return ParameterStorage(True, f"z{n}", 256, 0, size)
+    return StorageLocation(True, {4: "s", 8: "d", 16: "q"}[size] + str(n), f"z{n}", 32, 0, size)
 
 
-def _mips_int(n, size=4):
-    # Big-endian: the low 32 bits of a 64-bit register start at address-bit 32.
-    return ParameterStorage(True, f"a{n}", 64, 64 - size * 8, size)
+def _mips_int(n, size=4, name=None):
+    # Big-endian: the low-order bytes of a register are at its highest addresses.
+    register = f"a{n}" if n < 4 else f"t{n - 4}"
+    return StorageLocation(True, name or (register if size == 8 else register + "_lo"), register, 8, 8 - size, size)
 
 
 def _mips_fp(n, size=8):
-    return ParameterStorage(True, f"f{12 + n}", 64, 64 - size * 8, size)
+    return StorageLocation(True, f"f{12 + n}", f"f{12 + n}", 8, 8 - size, size)
 
 
 def _surface(abi, *parameters) -> SideInputSurface:
@@ -84,12 +87,47 @@ def _double_bits(value: float) -> int:
 
 # ---------------------------------------------------------------- ABI models
 
-def test_select_abi_knows_only_the_modelled_programs():
-    assert select_abi("AARCH64", 8, False) is ARM
-    assert select_abi("MIPS", 8, True) is MIPS
-    assert select_abi("MIPS", 4, True) is None        # o32 / n32
-    assert select_abi("MIPS", 8, False) is None       # mips64el: not modelled
-    assert select_abi("x86", 8, False) is None
+def test_select_abi_is_exact_on_language_compiler_spec_and_format():
+    assert select_abi("AARCH64:LE:64:v8A", "default", ELF_FORMAT) is ARM
+    assert select_abi("MIPS:BE:64:default", "default", ELF_FORMAT) is MIPS
+    # The same processors under other conventions are not the modelled ABI.
+    for language, spec, fmt in [
+        ("AARCH64:LE:64:v8A", "golang", ELF_FORMAT),
+        ("AARCH64:LE:64:v8A", "windows", "Portable Executable (PE)"),
+        ("AARCH64:LE:64:AppleSilicon", "default", "Mac OS X Mach-O"),
+        ("AARCH64:LE:64:v8A", "default", "Mac OS X Mach-O"),
+        ("AARCH64:BE:64:v8A", "default", ELF_FORMAT),
+        ("AARCH64:LE:32:ilp32", "default", ELF_FORMAT),
+        ("MIPS:BE:64:64-32addr", "n32", ELF_FORMAT),
+        ("MIPS:BE:64:64-32addr", "default", ELF_FORMAT),
+        ("MIPS:LE:64:default", "default", ELF_FORMAT),
+        ("MIPS:LE:64:default", "windows", ELF_FORMAT),
+        ("MIPS:BE:64:micro", "default", ELF_FORMAT),
+        ("MIPS:BE:64:R6", "default", ELF_FORMAT),
+        ("MIPS:BE:64:default", "default", "Raw Binary"),
+        ("x86:LE:64:default", "gcc", ELF_FORMAT),
+    ]:
+        assert select_abi(language, spec, fmt) is None, (language, spec, fmt)
+
+
+def test_select_abi_refuses_a_function_marked_with_another_convention():
+    arm = ("AARCH64:LE:64:v8A", "default", ELF_FORMAT)
+    mips = ("MIPS:BE:64:default", "default", ELF_FORMAT)
+    for name in ("unknown", "default", "__cdecl"):
+        assert select_abi(*arm, calling_convention=name) is ARM
+    for name in ("unknown", "default", "__stdcall"):
+        assert select_abi(*mips, calling_convention=name) is MIPS
+    assert select_abi(*arm, calling_convention="__stdcall") is None
+    assert select_abi(*arm, calling_convention="processEntry") is None
+    assert select_abi(*mips, calling_convention="__cdecl") is None
+
+
+def test_mips_n64_integer_argument_registers_use_the_processor_modules_names():
+    # Ghidra's MIPS module keeps the o32 names for $8-$11: the fifth to eighth n64
+    # integer arguments are t0-t3 there (mips64be.cspec lists a0-a3, t0-t3).
+    assert MIPS.int_argument_registers == ("a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3")
+    assert MIPS.argument_slot_of("t0") == ArgumentSlot(ArgClass.INT, 4)
+    assert MIPS.argument_slot_of("a4") is None
 
 
 def test_slot_assignment_follows_each_abis_numbering():
@@ -101,6 +139,7 @@ def test_slot_assignment_follows_each_abis_numbering():
         ArgumentSlot(ArgClass.INT, 0), ArgumentSlot(ArgClass.INT, 1), ArgumentSlot(ArgClass.FP, 2),
     )
     assert MIPS.argument_register(ArgumentSlot(ArgClass.FP, 2)) == "f14"
+    assert MIPS.argument_register(ArgumentSlot(ArgClass.INT, 5)) == "t1"
     assert ARM.assign_slots((ArgClass.INT,) * 9) is None  # the ninth goes to the stack
 
 
@@ -115,23 +154,19 @@ def test_no_register_has_two_roles_in_one_abi():
 # ------------------------------------------------------------- input surface
 
 def test_side_surface_refuses_what_it_cannot_place():
-    stack = ParameterStorage(False, None, 0, 0, 8)
+    stack = StorageLocation(False, None, None, 0, 0, 8)
     assert side_input_surface(ARM, [stack]) is InputSurfaceRefusal.PARAMETER_NOT_IN_REGISTER
     assert (
-        side_input_surface(ARM, [ParameterStorage(True, "x8", 64, 0, 8)])
+        side_input_surface(ARM, [StorageLocation(True, "x8", "x8", 8, 0, 8)])
         is InputSurfaceRefusal.PARAMETER_REGISTER_NOT_AN_ARGUMENT_SLOT
     )
     # The high half of a MIPS register is not an argument.
     assert (
-        side_input_surface(MIPS, [ParameterStorage(True, "a1", 64, 0, 4)])
+        side_input_surface(MIPS, [StorageLocation(True, "a1_hi", "a1", 8, 0, 4)])
         is InputSurfaceRefusal.PARAMETER_NOT_LOW_PART_OF_REGISTER
     )
-    # ... unless the storage names the whole register and only the recovered type is
-    # narrow (measured: `int` parameters stored as the full `a0` after a type hypothesis).
-    whole = side_input_surface(MIPS, [ParameterStorage(True, "a1", 64, 0, 4, register_name="a1")])
-    assert isinstance(whole, SideInputSurface) and whole.readings[0].width_bytes == 4
     assert (
-        side_input_surface(MIPS, [ParameterStorage(True, "f12", 64, 0, 16)])
+        side_input_surface(MIPS, [StorageLocation(True, "f12", "f12", 8, 0, 16)])
         is InputSurfaceRefusal.PARAMETER_WIDTH_UNSUPPORTED
     )
     assert (
@@ -140,9 +175,43 @@ def test_side_surface_refuses_what_it_cannot_place():
     )
 
 
+def test_a_narrowed_type_on_a_whole_register_is_the_whole_register():
+    # Measured: after a type hypothesis an `int` parameter is recorded as the base
+    # register `a0` itself with size 4; its offset is the register's start, which on a
+    # big-endian processor would otherwise read as the high half.
+    whole = side_input_surface(MIPS, [StorageLocation(True, "a1", "a1", 8, 0, 4)])
+    assert isinstance(whole, SideInputSurface) and whole.readings[0].width_bytes == 4
+
+
+def test_the_position_of_a_piece_is_exact_not_that_of_its_containing_register():
+    # Measured: a 1-byte value in the lowest-order byte of v0 (address v0+7) has no
+    # register of its own size; the register found for it is v0_lo, which starts at v0+4.
+    low_byte = StorageLocation(True, "v0_lo", "v0", 8, 7, 1)
+    assert low_byte.is_low_order_part(big_endian=True)
+    assert not StorageLocation(True, "v0_lo", "v0", 8, 4, 1).is_low_order_part(big_endian=True)
+    assert StorageLocation(True, "w0", "x0", 8, 0, 1).is_low_order_part(big_endian=False)
+    assert not StorageLocation(True, "w0", "x0", 8, 4, 4).is_low_order_part(big_endian=False)
+
+
+def test_storage_location_is_built_from_exact_storage_offsets():
+    class Storage:  # the fields of core.storage.StorageInfo this layer reads
+        is_register = True
+        register_name = "v0_lo"
+        base_register_name = "v0"
+        base_register_size_bits = 64
+        offset = 0x17
+        base_register_offset = 0x10
+        size = 1
+
+    location = StorageLocation.from_storage_info(Storage())
+    assert location == StorageLocation(True, "v0_lo", "v0", 8, 7, 1)
+    assert StorageLocation.from_storage_info(Storage(), size_bytes=4).size_bytes == 4
+
+
 def test_same_abi_correspondence_is_by_register_and_keeps_every_reading():
     left = _surface(MIPS, _mips_int(0, 8), _mips_int(1, 4))
     right = _surface(MIPS, _mips_int(0, 4))          # the second parameter was optimised away
+    assert _surface(MIPS, _mips_int(5)).readings[0].slot == ArgumentSlot(ArgClass.INT, 5)
     correspondence = correspond_inputs(left, right)
     assert isinstance(correspondence, InputCorrespondence)
     first, second = correspondence.arguments
@@ -231,6 +300,7 @@ def test_fp_arguments_take_any_bit_pattern():
     (mips_image,), (arm_image,) = bind_arguments(correspondence, [nan])
     assert (mips_image.register, mips_image.value) == ("f12", nan)
     assert (arm_image.register, arm_image.register_bytes, arm_image.value) == ("z0", 16, nan)
+    assert MIPS.argument_slot_of("f12") == ArgumentSlot(ArgClass.FP, 0)
 
 
 # ----------------------------------------------------------------- entry state
@@ -255,96 +325,190 @@ def test_entry_state_defines_only_what_the_abi_defines():
 
 # ------------------------------------------------------------------ observation
 
-def _ret(base, base_bits, offset, size, **kw):
-    record = dict(is_void=False, location_count=1, is_register=True, base_register_name=base,
-                  base_register_bits=base_bits, bit_offset_in_base=offset, size_bytes=size)
-    record.update(kw)
-    return ReturnStorage(**record)
+def _ret(location, is_void=False, count=1):
+    return ReturnStorage(is_void, (location,) * count)
+
+
+ARM_W0 = StorageLocation(True, "w0", "x0", 8, 0, 4)
+ARM_X0 = StorageLocation(True, "x0", "x0", 8, 0, 8)
+ARM_S0 = StorageLocation(True, "s0", "z0", 32, 0, 4)
+ARM_D0 = StorageLocation(True, "d0", "z0", 32, 0, 8)
+ARM_Q0 = StorageLocation(True, "q0", "z0", 32, 0, 16)
+MIPS_V0 = StorageLocation(True, "v0", "v0", 8, 0, 8)
+MIPS_V0_LO = StorageLocation(True, "v0_lo", "v0", 8, 4, 4)
+MIPS_F0 = StorageLocation(True, "f0", "f0", 8, 0, 8)
+MIPS_F0_LO = StorageLocation(True, "f0_lo", "f0", 8, 4, 4)
+
+
+def _plan_for(abi_left, left, abi_right=None, right=None):
+    plan = plan_return_observation(
+        return_location(abi_left, _ret(left)),
+        return_location(abi_right or abi_left, _ret(right or left)),
+    )
+    assert not isinstance(plan, ObservationRefusal), plan
+    return plan
+
+
+def _seen(value, defined=16):
+    return ObservedRegister(value, defined)
 
 
 def test_return_location_refusals():
-    assert return_location(ARM, _ret("x0", 64, 0, 4, is_void=True)) is ObservationRefusal.RETURN_VOID
+    assert return_location(ARM, _ret(ARM_W0, is_void=True)) is ObservationRefusal.RETURN_VOID
+    assert return_location(ARM, _ret(ARM_W0, count=2)) is ObservationRefusal.RETURN_NOT_SINGLE_LOCATION
+    assert return_location(ARM, ReturnStorage(False, ())) is ObservationRefusal.RETURN_NOT_SINGLE_LOCATION
     assert (
-        return_location(ARM, _ret("x0", 64, 0, 4, location_count=2))
-        is ObservationRefusal.RETURN_NOT_SINGLE_LOCATION
-    )
-    assert (
-        return_location(ARM, _ret(None, 0, 0, 8, is_register=False))
+        return_location(ARM, _ret(StorageLocation(False, None, None, 0, 0, 8)))
         is ObservationRefusal.RETURN_NOT_IN_REGISTER
     )
     assert (
-        return_location(ARM, _ret("x1", 64, 0, 8))
+        return_location(ARM, _ret(StorageLocation(True, "x1", "x1", 8, 0, 8)))
         is ObservationRefusal.RETURN_REGISTER_NOT_A_RETURN_REGISTER
     )
     assert (
-        return_location(MIPS, _ret("v0", 64, 0, 4))
+        return_location(MIPS, _ret(StorageLocation(True, "v0_hi", "v0", 8, 0, 4)))
         is ObservationRefusal.RETURN_NOT_LOW_PART_OF_REGISTER
     )
-    assert return_location(MIPS, _ret("f0", 64, 0, 16)) is ObservationRefusal.RETURN_WIDTH_UNSUPPORTED
+    assert (
+        return_location(MIPS, _ret(StorageLocation(True, "f0", "f0", 8, 0, 16)))
+        is ObservationRefusal.RETURN_WIDTH_UNSUPPORTED
+    )
+
+
+def test_a_one_byte_mips_return_is_the_low_part():
+    # Measured (`bool` returns): the decompiler places the value at v0+7, size 1.
+    location = return_location(MIPS, _ret(StorageLocation(True, "v0_lo", "v0", 8, 7, 1)))
+    assert location.arg_class is ArgClass.INT and location.width_bytes == 1
 
 
 def test_integer_returns_are_compared_on_the_narrower_width():
-    arm = return_location(ARM, _ret("x0", 64, 0, 4))
-    mips = return_location(MIPS, _ret("v0", 64, 0, 8))
-    plan = plan_return_observation(arm, mips)
-    assert plan.arg_class is ArgClass.INT and plan.compare_bytes == 4 and plan.narrowed
+    plan = _plan_for(ARM, ARM_W0, MIPS, MIPS_V0)
+    assert plan.arg_class is ArgClass.INT and plan.narrowed
     # -1 as int: AArch64 leaves the upper half zero, MIPS sign-extends.
     assert (
-        compare_return_values(plan, 0x00000000FFFFFFFF, 0xFFFFFFFFFFFFFFFF)
+        compare_return_values(plan, _seen(0x00000000FFFFFFFF), _seen(0xFFFFFFFFFFFFFFFF))
         is ObservationRelation.NOT_DIFFERENT_ON_OBSERVED_PART
     )
-    assert compare_return_values(plan, 13, 14) is ObservationRelation.DIFFERENT
+    assert compare_return_values(plan, _seen(13), _seen(14)) is ObservationRelation.DIFFERENT
 
 
-def test_return_class_and_fp_format_must_agree():
-    arm_int = return_location(ARM, _ret("x0", 64, 0, 4))
-    arm_fp = return_location(ARM, _ret("z0", 256, 0, 8))
-    assert plan_return_observation(arm_int, arm_fp) is ObservationRefusal.RETURN_CLASS_MISMATCH
-    arm_float = return_location(ARM, _ret("z0", 256, 0, 4))
-    assert plan_return_observation(arm_float, arm_fp) is ObservationRefusal.FP_FORMAT_UNRESOLVED
-
-
-def test_a_16_byte_fp_location_is_binary64_only_with_a_zero_upper_half():
-    wide = return_location(ARM, _ret("z0", 256, 0, 16))
-    plan = plan_return_observation(wide, wide)
-    assert plan.compare_bytes == 16 and not plan.narrowed
-    one, two = _double_bits(1.0), _double_bits(2.0)
-    assert compare_return_values(plan, one, two) is ObservationRelation.DIFFERENT
-    assert compare_return_values(plan, one, one) is ObservationRelation.NOT_DIFFERENT_ON_OBSERVED_PART
+def test_only_defined_bytes_of_an_integer_return_are_compared():
+    plan = _plan_for(MIPS, MIPS_V0)
+    left, right = 0x1111111100000005, 0x2222222200000005
+    assert compare_return_values(plan, _seen(left, 8), _seen(right, 8)) is ObservationRelation.DIFFERENT
+    # One run defined only the low 4 bytes: the rest is not part of what it returned.
     assert (
-        compare_return_values(plan, (1 << 64) | one, two) is ObservationRefusal.FP_FORMAT_UNRESOLVED
+        compare_return_values(plan, _seen(left, 4), _seen(right, 8))
+        is ObservationRelation.NOT_DIFFERENT_ON_OBSERVED_PART
+    )
+    assert (
+        compare_return_values(plan, _seen(left, 0), _seen(right, 8))
+        is ObservationRefusal.RETURN_VALUE_NOT_DEFINED
+    )
+
+
+def test_return_classes_must_agree():
+    arm_int = return_location(ARM, _ret(ARM_W0))
+    arm_fp = return_location(ARM, _ret(ARM_D0))
+    assert plan_return_observation(arm_int, arm_fp) is ObservationRefusal.RETURN_CLASS_MISMATCH
+
+
+def test_binary32_against_binary64_has_no_shared_format():
+    plan = _plan_for(ARM, ARM_S0, ARM, ARM_D0)
+    assert (
+        compare_return_values(plan, _seen(0x3F800000), _seen(_double_bits(1.0)))
+        is ObservationRefusal.FP_FORMAT_UNRESOLVED
+    )
+
+
+def test_a_16_byte_fp_location_needs_a_zero_upper_half():
+    # Measured: AArch64 reports q0 (16 bytes) for most functions that return a double.
+    plan = _plan_for(ARM, ARM_Q0)
+    one, two = _double_bits(1.0), _double_bits(2.0)
+    assert compare_return_values(plan, _seen(one), _seen(two)) is ObservationRelation.DIFFERENT
+    assert (
+        compare_return_values(plan, _seen(one), _seen(one))
+        is ObservationRelation.NOT_DIFFERENT_ON_OBSERVED_PART
+    )
+    assert (
+        compare_return_values(plan, _seen((1 << 64) | one), _seen(two))
+        is ObservationRefusal.FP_FORMAT_UNRESOLVED
+    )
+    # Only the low 8 bytes were written: the upper half is not part of the value.
+    assert (
+        compare_return_values(plan, _seen((1 << 64) | one, 8), _seen(two, 8))
+        is ObservationRelation.DIFFERENT
+    )
+    # Against an 8-byte location (MIPS f0, or AArch64 d0) the shared format is binary64.
+    cross = _plan_for(ARM, ARM_Q0, MIPS, MIPS_F0)
+    assert compare_return_values(cross, _seen(one), _seen(two, 8)) is ObservationRelation.DIFFERENT
+
+
+def test_a_16_byte_fp_value_is_checked_for_nan_under_every_format_it_may_have():
+    plan = _plan_for(ARM, ARM_Q0)
+    # Upper 96 bits zero: this may be a binary32 result, and as one it is a NaN.
+    float_nan = 0x7FC00001
+    assert compare_return_values(plan, _seen(float_nan), _seen(0x7FC00000)) is ObservationRefusal.NAN_OBSERVED
+    assert compare_return_values(plan, _seen(float_nan), _seen(0x3F800000)) is ObservationRefusal.NAN_OBSERVED
+    # Two values that may be binary32 are compared; so are a possible binary32 and a binary64.
+    assert compare_return_values(plan, _seen(0x3F800000), _seen(0x40000000)) is ObservationRelation.DIFFERENT
+    assert (
+        compare_return_values(plan, _seen(0x3F800000), _seen(_double_bits(1.0)))
+        is ObservationRelation.DIFFERENT
+    )
+    # With bits 32..63 set it cannot be a binary32 result, and as binary64 it is not a NaN.
+    not_a_float = (0x3FF00000 << 32) | 0x7FC00001
+    assert (
+        compare_return_values(plan, _seen(not_a_float), _seen(_double_bits(1.0)))
+        is ObservationRelation.DIFFERENT
+    )
+    # Fewer than 8 defined bytes: only binary32 is admissible.
+    assert compare_return_values(plan, _seen(0x3F800000, 4), _seen(0x40000000, 4)) is ObservationRelation.DIFFERENT
+    assert compare_return_values(plan, _seen(float_nan, 4), _seen(0x40000000, 4)) is ObservationRefusal.NAN_OBSERVED
+    assert (
+        compare_return_values(plan, _seen(0x3F800000, 4), _seen(_double_bits(1.0)))
+        is ObservationRefusal.FP_FORMAT_UNRESOLVED
+    )
+    assert (
+        compare_return_values(plan, _seen(0x3F800000, 3), _seen(0x40000000))
+        is ObservationRefusal.RETURN_VALUE_NOT_DEFINED
     )
 
 
 def test_a_nan_is_never_compared():
     # Measured: the emulator returned fff8000000000000 where the machine returned
     # fff0000000000001 (airy SIGN, same source).  A payload difference is not evidence.
-    location = return_location(MIPS, _ret("f0", 64, 0, 8))
-    plan = plan_return_observation(location, location)
+    plan = _plan_for(MIPS, MIPS_F0)
     assert (
-        compare_return_values(plan, 0xFFF8000000000000, 0xFFF0000000000001)
+        compare_return_values(plan, _seen(0xFFF8000000000000, 8), _seen(0xFFF0000000000001, 8))
         is ObservationRefusal.NAN_OBSERVED
     )
     assert (
-        compare_return_values(plan, 0x7FF8000000000000, _double_bits(1.0))
+        compare_return_values(plan, _seen(0x7FF8000000000000, 8), _seen(_double_bits(1.0), 8))
         is ObservationRefusal.NAN_OBSERVED
     )
     infinity = 0x7FF0000000000000
-    assert compare_return_values(plan, infinity, _double_bits(1.0)) is ObservationRelation.DIFFERENT
-    single = return_location(MIPS, _ret("f0", 64, 32, 4))
-    single_plan = plan_return_observation(single, single)
-    assert compare_return_values(single_plan, 0x7FC00000, 0x3F800000) is ObservationRefusal.NAN_OBSERVED
+    assert (
+        compare_return_values(plan, _seen(infinity, 8), _seen(_double_bits(1.0), 8))
+        is ObservationRelation.DIFFERENT
+    )
+    assert (
+        compare_return_values(plan, _seen(infinity, 4), _seen(_double_bits(1.0), 8))
+        is ObservationRefusal.RETURN_VALUE_NOT_DEFINED
+    )
+    single = _plan_for(MIPS, MIPS_F0_LO)
+    assert compare_return_values(single, _seen(0x7FC00000, 8), _seen(0x3F800000, 8)) is ObservationRefusal.NAN_OBSERVED
+    assert compare_return_values(single, _seen(0x3F800000, 8), _seen(0x40000000, 8)) is ObservationRelation.DIFFERENT
 
 
 # ------------------------------------------------------------------- comparison
 
 def _plan():
-    location = return_location(ARM, _ret("x0", 64, 0, 4))
-    return plan_return_observation(location, location)
+    return _plan_for(ARM, ARM_W0)
 
 
 def _returned(value, **kw):
-    return ExecutionResult(Termination.RETURNED, 10, (("x0", value),), **kw)
+    return ExecutionResult(Termination.RETURNED, 10, (("x0", ObservedRegister(value, 8)),), **kw)
 
 
 def test_two_clean_returns_with_different_values_are_a_difference():
@@ -354,7 +518,7 @@ def test_two_clean_returns_with_different_values_are_a_difference():
 
 @pytest.mark.parametrize("termination", [t for t in Termination if t is not Termination.RETURNED])
 def test_a_run_that_did_not_return_establishes_nothing(termination):
-    stopped = ExecutionResult(termination, 5, (("x0", 99),))
+    stopped = ExecutionResult(termination, 5, (("x0", ObservedRegister(99, 8)),))
     for left, right, side in ((stopped, _returned(1), 0), (_returned(1), stopped, 1)):
         result = compare_runs(_plan(), left, right)
         assert isinstance(result, ConcreteNoEvidence)
@@ -375,10 +539,9 @@ def test_equal_values_missing_observations_and_refused_observations_are_no_evide
     assert compare_runs(_plan(), _returned(3), _returned(3)).reason is NoEvidenceReason.NO_DIFFERENCE_OBSERVED
     missing = ExecutionResult(Termination.RETURNED, 1, ())
     assert compare_runs(_plan(), _returned(3), missing).reason is NoEvidenceReason.OBSERVATION_MISSING
-    fp = return_location(MIPS, _ret("f0", 64, 0, 8))
-    fp_plan = plan_return_observation(fp, fp)
-    nan = ExecutionResult(Termination.RETURNED, 1, (("f0", 0x7FF8000000000000),))
-    one = ExecutionResult(Termination.RETURNED, 1, (("f0", _double_bits(1.0)),))
+    fp_plan = _plan_for(MIPS, MIPS_F0)
+    nan = ExecutionResult(Termination.RETURNED, 1, (("f0", ObservedRegister(0x7FF8000000000000, 8)),))
+    one = ExecutionResult(Termination.RETURNED, 1, (("f0", ObservedRegister(_double_bits(1.0), 8)),))
     result = compare_runs(fp_plan, nan, one)
     assert result.reason is NoEvidenceReason.OBSERVATION_REFUSED
     assert result.observation_refusal is ObservationRefusal.NAN_OBSERVED

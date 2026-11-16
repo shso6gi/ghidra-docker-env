@@ -8,27 +8,50 @@ them, and a difference claimed from it is a difference of the return value
 only.  Further components are added next to ``ReturnObservationPlan``; nothing
 in this module reads or replaces the symbolic memory/effect analysis.
 
-Rules (all from the ABI and from the recovered storage of the binary):
+An observation is a read.  A run reports, with the value of the return
+register, how many of its low-order bytes are *defined* at return (bound at
+entry or written by the run); bytes that are not defined are never compared.
 
-* the two return locations must be of the same class (integer / FP);
-* integer class: the values are compared on the low ``min(width)`` bytes.  A
-  difference there is a difference under every width reading; equality there
-  is only equality of that part and proves nothing;
-* floating-point class: the two widths must name one IEEE format.  A 16-byte
-  location is read as binary64 only when the upper 8 bytes of *both* observed
-  values are zero (a binary64 result written to the register clears them, and
-  a zero upper half cannot be a binary128 NaN);
-* a NaN on either side is not comparable: the executor's floating-point
-  arithmetic is not guaranteed to preserve NaN payloads or signalling state.
+Integer class.  The values are compared on the low ``k`` bytes, ``k`` being
+the smallest of the two recovered widths and the two defined widths.  A
+difference there is a difference of the returned value under every width
+reading; equality there is only equality of that part and proves nothing.
+
+Floating-point class.  A difference of bits is evidence only if neither value
+can be a NaN, because the executor's floating-point arithmetic is not
+guaranteed to preserve NaN payloads or signalling state; and whether a bit
+pattern is a NaN depends on its format.  Each side's *admissible formats* are
+derived from its recovered width, its defined bytes and its value:
+
+* width 4: binary32;
+* width 8: binary64;
+* width 16 (AArch64 reports the whole 128-bit register for many functions
+  that return a ``double``): the upper 8 bytes, when defined, must be zero --
+  otherwise the value is a binary128 or a vector and is not compared.  Then
+  binary64 is admissible, and binary32 as well when bits 32..63 are zero (an
+  AArch64 single-precision write clears every higher bit of the register, so
+  a binary32 result always has that shape, and a value of that shape may be
+  one); with fewer than 8 defined bytes only binary32 is.
+
+The two sides must share a format.  A value that is a NaN under *any* of its
+own admissible formats refuses the comparison.  The bits are compared on 8
+bytes when binary64 is shared and on 4 bytes otherwise; when both formats are
+shared, bits 32..63 are zero on both sides and the two comparisons agree.
+
+Limit: a vector or homogeneous aggregate returned in the FP register is read
+as one of the scalar formats above, so a NaN in a lane is not recognised here.
+A run whose floating-point operations touched a NaN is to be excluded by the
+executor's hazards, which do not depend on the format.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 from scripts.function_tracer_pcode.concrete.abi import AbiModel, ArgClass
+from scripts.function_tracer_pcode.concrete.storage import StorageLocation
 
 
 class ObservationRefusal(str, Enum):
@@ -41,6 +64,7 @@ class ObservationRefusal(str, Enum):
     RETURN_NOT_LOW_PART_OF_REGISTER = "RETURN_NOT_LOW_PART_OF_REGISTER"
     RETURN_WIDTH_UNSUPPORTED = "RETURN_WIDTH_UNSUPPORTED"
     RETURN_CLASS_MISMATCH = "RETURN_CLASS_MISMATCH"
+    RETURN_VALUE_NOT_DEFINED = "RETURN_VALUE_NOT_DEFINED"
     FP_FORMAT_UNRESOLVED = "FP_FORMAT_UNRESOLVED"
     NAN_OBSERVED = "NAN_OBSERVED"
 
@@ -48,6 +72,11 @@ class ObservationRefusal(str, Enum):
 class ObservationRelation(str, Enum):
     DIFFERENT = "DIFFERENT"
     NOT_DIFFERENT_ON_OBSERVED_PART = "NOT_DIFFERENT_ON_OBSERVED_PART"
+
+
+class FpFormat(str, Enum):
+    BINARY32 = "BINARY32"
+    BINARY64 = "BINARY64"
 
 
 _INT_WIDTHS = (1, 2, 4, 8)
@@ -58,18 +87,12 @@ _FP_WIDTHS = (4, 8, 16)
 class ReturnStorage:
     """Where a function's recovered return value lives (binary storage facts).
 
-    ``location_count`` is the number of storage pieces; ``is_void`` is the
-    recovered prototype saying nothing is returned.  ``bit_offset_in_base``
-    follows ``core.storage.StorageInfo`` (address-based).
+    ``is_void`` is the recovered prototype saying nothing is returned;
+    ``locations`` are the storage pieces of the return value.
     """
 
     is_void: bool
-    location_count: int
-    is_register: bool
-    base_register_name: Optional[str]
-    base_register_bits: int
-    bit_offset_in_base: int
-    size_bytes: int
+    locations: Tuple[StorageLocation, ...]
 
 
 @dataclass(frozen=True)
@@ -85,41 +108,36 @@ def return_location(
 ) -> Union[ReturnLocation, ObservationRefusal]:
     if storage.is_void:
         return ObservationRefusal.RETURN_VOID
-    if storage.location_count != 1:
+    if len(storage.locations) != 1:
         return ObservationRefusal.RETURN_NOT_SINGLE_LOCATION
-    if not storage.is_register or not storage.base_register_name:
+    location = storage.locations[0]
+    if not location.is_register or not location.base_register_name:
         return ObservationRefusal.RETURN_NOT_IN_REGISTER
-    arg_class = abi.return_class_of(storage.base_register_name)
+    arg_class = abi.return_class_of(location.base_register_name)
     if arg_class is None:
         return ObservationRefusal.RETURN_REGISTER_NOT_A_RETURN_REGISTER
     register_bytes = (
         abi.register_bytes if arg_class is ArgClass.INT else abi.fp_return_register_bytes
     )
     widths = _INT_WIDTHS if arg_class is ArgClass.INT else _FP_WIDTHS
-    if storage.size_bytes not in widths or storage.size_bytes > register_bytes:
+    if location.size_bytes not in widths or location.size_bytes > register_bytes:
         return ObservationRefusal.RETURN_WIDTH_UNSUPPORTED
-    bits = storage.size_bytes * 8
-    low = (
-        storage.bit_offset_in_base + bits == storage.base_register_bits
-        if abi.big_endian
-        else storage.bit_offset_in_base == 0
-    )
-    if not low:
+    if not location.is_low_order_part(abi.big_endian):
         return ObservationRefusal.RETURN_NOT_LOW_PART_OF_REGISTER
-    return ReturnLocation(arg_class, storage.base_register_name, register_bytes, storage.size_bytes)
+    return ReturnLocation(
+        arg_class, location.base_register_name, register_bytes, location.size_bytes
+    )
 
 
 @dataclass(frozen=True)
 class ReturnObservationPlan:
-    """How the two return registers are compared.
+    """Which two return registers are compared, and with which recovered widths.
 
-    ``narrowed`` records that the two locations reported different widths and
-    the comparison uses the smaller one.
+    ``narrowed`` records that the two locations reported different widths.
     """
 
     arg_class: ArgClass
-    locations: tuple
-    compare_bytes: int
+    locations: Tuple[ReturnLocation, ReturnLocation]
     narrowed: bool
 
 
@@ -128,41 +146,83 @@ def plan_return_observation(
 ) -> Union[ReturnObservationPlan, ObservationRefusal]:
     if left.arg_class is not right.arg_class:
         return ObservationRefusal.RETURN_CLASS_MISMATCH
-    widths = {left.width_bytes, right.width_bytes}
-    if left.arg_class is ArgClass.FP and 4 in widths and len(widths) > 1:
-        # binary32 against a wider format: the format is not determined.
-        return ObservationRefusal.FP_FORMAT_UNRESOLVED
     return ReturnObservationPlan(
-        left.arg_class,
-        (left, right),
-        min(widths),
-        len(widths) > 1,
+        left.arg_class, (left, right), left.width_bytes != right.width_bytes
     )
 
 
-def _is_nan(bits: int, width_bytes: int) -> bool:
-    if width_bytes == 4:
+@dataclass(frozen=True)
+class ObservedRegister:
+    """The value of a register at return and how much of it is defined.
+
+    ``defined_low_bytes`` counts the contiguous low-order bytes that were bound
+    at entry or written by the run.
+    """
+
+    value: int
+    defined_low_bytes: int
+
+
+def _low(value: int, byte_count: int) -> int:
+    return value & ((1 << (byte_count * 8)) - 1)
+
+
+def _is_nan(bits: int, fmt: FpFormat) -> bool:
+    if fmt is FpFormat.BINARY32:
+        bits = _low(bits, 4)
         return (bits & 0x7F800000) == 0x7F800000 and (bits & 0x007FFFFF) != 0
+    bits = _low(bits, 8)
     return (bits & 0x7FF0000000000000) == 0x7FF0000000000000 and (
         bits & 0x000FFFFFFFFFFFFF
     ) != 0
 
 
+def _admissible_fp_formats(
+    location: ReturnLocation, observed: ObservedRegister
+) -> Union[Tuple[FpFormat, ...], ObservationRefusal]:
+    defined = min(observed.defined_low_bytes, location.width_bytes)
+    if location.width_bytes == 4:
+        return (FpFormat.BINARY32,) if defined >= 4 else ObservationRefusal.RETURN_VALUE_NOT_DEFINED
+    if location.width_bytes == 8:
+        return (FpFormat.BINARY64,) if defined >= 8 else ObservationRefusal.RETURN_VALUE_NOT_DEFINED
+    # 16-byte location.
+    if defined < 4:
+        return ObservationRefusal.RETURN_VALUE_NOT_DEFINED
+    if defined < 8:
+        return (FpFormat.BINARY32,)
+    if _low(observed.value, defined) >> 64:
+        return ObservationRefusal.FP_FORMAT_UNRESOLVED
+    if (_low(observed.value, 8) >> 32) == 0:
+        return (FpFormat.BINARY64, FpFormat.BINARY32)
+    return (FpFormat.BINARY64,)
+
+
 def compare_return_values(
-    plan: ReturnObservationPlan, left_register_value: int, right_register_value: int
+    plan: ReturnObservationPlan, left: ObservedRegister, right: ObservedRegister
 ) -> Union[ObservationRelation, ObservationRefusal]:
-    """Compare the full values of the two return registers under ``plan``."""
-    values = (left_register_value, right_register_value)
-    compare_bytes = plan.compare_bytes
-    if plan.arg_class is ArgClass.FP:
-        for location, value in zip(plan.locations, values):
-            if location.width_bytes == 16 and value >> 64:
-                return ObservationRefusal.FP_FORMAT_UNRESOLVED
-        compare_bytes = min(compare_bytes, 8)
-    mask = (1 << (compare_bytes * 8)) - 1
-    observed = tuple(value & mask for value in values)
-    if plan.arg_class is ArgClass.FP and any(_is_nan(v, compare_bytes) for v in observed):
-        return ObservationRefusal.NAN_OBSERVED
-    if observed[0] != observed[1]:
+    """Compare the two return registers under ``plan``."""
+    observed = (left, right)
+    if plan.arg_class is ArgClass.INT:
+        compare_bytes = min(
+            min(location.width_bytes, value.defined_low_bytes)
+            for location, value in zip(plan.locations, observed)
+        )
+        if compare_bytes <= 0:
+            return ObservationRefusal.RETURN_VALUE_NOT_DEFINED
+    else:
+        formats = []
+        for location, value in zip(plan.locations, observed):
+            admissible = _admissible_fp_formats(location, value)
+            if isinstance(admissible, ObservationRefusal):
+                return admissible
+            formats.append(admissible)
+        shared = [fmt for fmt in formats[0] if fmt in formats[1]]
+        if not shared:
+            return ObservationRefusal.FP_FORMAT_UNRESOLVED
+        for admissible, value in zip(formats, observed):
+            if any(_is_nan(value.value, fmt) for fmt in admissible):
+                return ObservationRefusal.NAN_OBSERVED
+        compare_bytes = 8 if FpFormat.BINARY64 in shared else 4
+    if _low(left.value, compare_bytes) != _low(right.value, compare_bytes):
         return ObservationRelation.DIFFERENT
     return ObservationRelation.NOT_DIFFERENT_ON_OBSERVED_PART

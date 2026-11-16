@@ -42,6 +42,7 @@ class ConcreteDifference:
     """Both calls returned cleanly and the return values differ."""
 
     plan: ReturnObservationPlan
+    # Full values of the two return registers at return.
     observed_values: Tuple[int, int]
 
 
@@ -81,5 +82,5 @@ def compare_runs(
             NoEvidenceReason.OBSERVATION_REFUSED, observation_refusal=relation
         )
     if relation is ObservationRelation.DIFFERENT:
-        return ConcreteDifference(plan, (values[0], values[1]))
+        return ConcreteDifference(plan, (values[0].value, values[1].value))
     return ConcreteNoEvidence(NoEvidenceReason.NO_DIFFERENCE_OBSERVED)

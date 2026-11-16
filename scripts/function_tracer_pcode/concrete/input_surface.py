@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Iterable, Mapping, Optional, Sequence, Tuple, Union
+from typing import Iterable, Optional, Sequence, Tuple, Union
 
 from scripts.function_tracer_pcode.concrete.abi import (
     AbiModel,
@@ -34,6 +34,7 @@ from scripts.function_tracer_pcode.concrete.abi import (
     ArgumentSlot,
     SlotNumbering,
 )
+from scripts.function_tracer_pcode.concrete.storage import StorageLocation
 
 
 class InputSurfaceRefusal(str, Enum):
@@ -53,51 +54,6 @@ class InputSurfaceRefusal(str, Enum):
 
 _INT_WIDTHS = (1, 2, 4, 8)
 _FP_WIDTHS = (4, 8, 16)
-
-
-@dataclass(frozen=True)
-class ParameterStorage:
-    """Where a recovered parameter lives, as storage facts of the binary.
-
-    ``bit_offset_in_base`` follows ``core.storage.StorageInfo``: it is counted
-    from the lowest *address* of the base register, so on a big-endian
-    processor the low-order part of a register has a non-zero offset.
-
-    ``register_name`` is the register the storage names.  When it is the base
-    register itself, the parameter is that whole register and ``size_bytes``
-    is only the width the recovered type gives it (a type hypothesis can
-    narrow the type of a parameter without moving its storage); the offset is
-    then not a position inside the register.
-    """
-
-    is_register: bool
-    base_register_name: Optional[str]
-    base_register_bits: int
-    bit_offset_in_base: int
-    size_bytes: int
-    register_name: Optional[str] = None
-
-    @classmethod
-    def from_storage_record(cls, storage: Mapping, size_bytes: int) -> "ParameterStorage":
-        """Build from the mapping form of ``StorageInfo`` (``to_dict`` / result JSON)."""
-        return cls(
-            is_register=bool(storage.get("is_register")),
-            base_register_name=storage.get("base_register_name"),
-            base_register_bits=int(storage.get("base_register_size_bits") or 0),
-            bit_offset_in_base=int(storage.get("bit_offset_in_base") or 0),
-            size_bytes=int(size_bytes),
-            register_name=storage.get("register_name"),
-        )
-
-    def is_low_part(self, big_endian: bool) -> bool:
-        bits = self.size_bytes * 8
-        if bits <= 0 or self.base_register_bits <= 0 or bits > self.base_register_bits:
-            return False
-        if self.register_name is not None and self.register_name == self.base_register_name:
-            return True
-        if big_endian:
-            return self.bit_offset_in_base + bits == self.base_register_bits
-        return self.bit_offset_in_base == 0
 
 
 @dataclass(frozen=True)
@@ -121,7 +77,7 @@ class SideInputSurface:
 
 
 def side_input_surface(
-    abi: AbiModel, parameters: Iterable[ParameterStorage]
+    abi: AbiModel, parameters: Iterable[StorageLocation]
 ) -> Union[SideInputSurface, InputSurfaceRefusal]:
     """The input surface of one function from its recovered parameter storage."""
     readings = []
@@ -138,7 +94,7 @@ def side_input_surface(
             or parameter.size_bytes > abi.argument_register_bytes(slot.arg_class)
         ):
             return InputSurfaceRefusal.PARAMETER_WIDTH_UNSUPPORTED
-        if not parameter.is_low_part(abi.big_endian):
+        if not parameter.is_low_order_part(abi.big_endian):
             return InputSurfaceRefusal.PARAMETER_NOT_LOW_PART_OF_REGISTER
         if slot in seen:
             return InputSurfaceRefusal.DUPLICATE_ARGUMENT_SLOT

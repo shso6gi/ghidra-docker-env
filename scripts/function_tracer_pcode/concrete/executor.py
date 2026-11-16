@@ -3,7 +3,8 @@
 
 An executor runs one function of one binary from a fully specified entry
 state and reports how the run ended, the values of the registers it was asked
-to observe, and every *hazard* it noticed.  This module owns the contract
+to observe (with how many of their low-order bytes are defined at return), and
+every *hazard* it noticed.  This module owns the contract
 only; an implementation lives with the runtime it drives (the Ghidra P-code
 emulator), and a recorded implementation can replay stored results.
 
@@ -27,6 +28,7 @@ from typing import Mapping, Optional, Protocol, Tuple
 
 from scripts.function_tracer_pcode.concrete.abi import AbiModel
 from scripts.function_tracer_pcode.concrete.input_surface import RegisterImage
+from scripts.function_tracer_pcode.concrete.observation import ObservedRegister
 
 
 # Addresses of the synthetic call frame.  They are outside any loaded image;
@@ -120,11 +122,12 @@ class Hazard:
 class ExecutionResult:
     termination: Termination
     steps: int
-    observed_registers: Tuple[Tuple[str, int], ...] = ()
+    # (register name, value at return with its defined low-order bytes)
+    observed_registers: Tuple[Tuple[str, ObservedRegister], ...] = ()
     hazards: Tuple[Hazard, ...] = ()
     detail: str = ""
 
-    def observed(self, register: str) -> Optional[int]:
+    def observed(self, register: str) -> Optional[ObservedRegister]:
         for name, value in self.observed_registers:
             if name == register:
                 return value

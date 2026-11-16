@@ -12,8 +12,10 @@ processor module uses, which is what ``core.storage.StorageInfo`` records as
 ``base_register_name``.  The tables are written out per ABI; register names
 are never parsed.
 
-Supported today: AArch64 AAPCS64 and MIPS n64.  An unsupported processor has
-no model, and every consumer treats "no model" as a refusal.
+Supported today: AArch64 AAPCS64 and MIPS n64, each for exactly one
+combination of language, compiler specification and executable format (see
+``select_abi``).  Any other program has no model, and every consumer treats
+"no model" as a refusal.
 """
 
 from __future__ import annotations
@@ -193,7 +195,9 @@ _MIPS_N64 = AbiModel(
     register_bytes=8,
     slot_numbering=SlotNumbering.POSITIONAL,
     narrow_int_rule=NarrowIntRule.SIGN_EXTENDED_REQUIRED,
-    int_argument_registers=("a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"),
+    # n64 passes eight integer arguments in $4-$11.  Ghidra's MIPS module keeps
+    # the o32 names for $8-$11, so the fifth to eighth are t0-t3 there.
+    int_argument_registers=("a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3"),
     fp_argument_registers=("f12", "f13", "f14", "f15", "f16", "f17", "f18", "f19"),
     fp_argument_register_bytes=8,
     int_return_register="v0",
@@ -220,18 +224,50 @@ def abi_model(abi_id: AbiId) -> AbiModel:
     return _MODELS[AbiId(abi_id)]
 
 
-def select_abi(
-    processor: str, pointer_bytes: int, big_endian: bool
-) -> Optional[AbiModel]:
-    """The ABI model of a program, from facts of the binary's language.
+ELF_FORMAT = "Executable and Linking Format (ELF)"
 
-    ``processor`` is the processor name of the program's language
-    (``AARCH64``, ``MIPS``).  ``None`` means the concrete layer has no model
-    for the program, which callers treat as a refusal.
+# (language id, compiler specification id, executable format) -> model.
+#
+# The key is exact on purpose.  The same processor runs other conventions that
+# the tables above do not describe: for AArch64 the Windows, Go and Apple
+# conventions (other compiler specifications, or the AppleSilicon language
+# variant loaded from Mach-O); for 64-bit MIPS the o32/n32/o64 conventions
+# (the ``64-32addr`` languages), the little-endian variants and the microMIPS
+# and R6 instruction sets, none of which has been checked against a binary.
+# An ELF64 big-endian MIPS program under the default specification is n64.
+_SELECTION: Mapping[Tuple[str, str, str], AbiModel] = {
+    ("AARCH64:LE:64:v8A", "default", ELF_FORMAT): _AARCH64,
+    ("MIPS:BE:64:default", "default", ELF_FORMAT): _MIPS_N64,
+}
+
+# Calling-convention names of a function that mean "the program's default
+# convention": no explicit convention, or the default prototype model itself.
+_DEFAULT_CONVENTION_NAMES: Mapping[AbiId, Tuple[str, ...]] = {
+    AbiId.AARCH64_AAPCS64: ("unknown", "default", "__cdecl"),
+    AbiId.MIPS_N64: ("unknown", "default", "__stdcall"),
+}
+
+
+def select_abi(
+    language_id: str,
+    compiler_spec_id: str,
+    executable_format: str,
+    calling_convention: Optional[str] = None,
+) -> Optional[AbiModel]:
+    """The ABI model of a function, from facts of the binary.
+
+    ``language_id`` / ``compiler_spec_id`` / ``executable_format`` identify the
+    program; ``calling_convention`` is the convention name recorded for the
+    function, when one is known.  ``None`` means the concrete layer has no
+    model -- the program is not one of the exact combinations it describes, or
+    the function is marked with a convention other than the program's default
+    -- and callers treat that as a refusal.
     """
-    name = str(processor).upper()
-    if name == "AARCH64" and pointer_bytes == 8 and not big_endian:
-        return _AARCH64
-    if name == "MIPS" and pointer_bytes == 8 and big_endian:
-        return _MIPS_N64
-    return None
+    model = _SELECTION.get((str(language_id), str(compiler_spec_id), str(executable_format)))
+    if model is None:
+        return None
+    if calling_convention is not None and (
+        str(calling_convention) not in _DEFAULT_CONVENTION_NAMES[model.abi_id]
+    ):
+        return None
+    return model

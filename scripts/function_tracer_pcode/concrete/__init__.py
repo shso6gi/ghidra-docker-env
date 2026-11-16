@@ -5,6 +5,7 @@ Shared foundation for establishing behavioural differences by running two
 functions on corresponding concrete inputs:
 
 * ``abi``            calling-convention models (public specification data)
+* ``storage``        exact storage position of a recovered value
 * ``input_surface``  argument slots of a function, their correspondence across
                      two functions, and the register images of a value
 * ``observation``    what is compared after two runs (the return register)
