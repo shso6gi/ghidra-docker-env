@@ -1,0 +1,237 @@
+# -*- coding: utf-8 -*-
+"""Calling-convention models for concrete execution.
+
+An ``AbiModel`` is public-specification data: which registers carry
+arguments and return values, which registers a callee must preserve, and how a
+value narrower than its register is held.  It is the only source of ABI facts
+for the concrete layer -- nothing here is derived from source code, from a
+decompiled prototype, or from an expected verdict.
+
+Registers are named by the *base* (full-width) register name the Ghidra
+processor module uses, which is what ``core.storage.StorageInfo`` records as
+``base_register_name``.  The tables are written out per ABI; register names
+are never parsed.
+
+Supported today: AArch64 AAPCS64 and MIPS n64.  An unsupported processor has
+no model, and every consumer treats "no model" as a refusal.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Mapping, Optional, Tuple
+
+
+class AbiId(str, Enum):
+    AARCH64_AAPCS64 = "AARCH64_AAPCS64"
+    MIPS_N64 = "MIPS_N64"
+
+
+class ArgClass(str, Enum):
+    """The register class an argument or a return value is passed in."""
+
+    INT = "INT"
+    FP = "FP"
+
+
+class SlotNumbering(str, Enum):
+    """How an ABI assigns argument registers to a parameter list.
+
+    ``PER_CLASS``: each class counts on its own (AAPCS64: the k-th integer
+    argument is in ``x<k>``, the k-th floating-point argument in ``v<k>``).
+
+    ``POSITIONAL``: one counter for all arguments (MIPS n64: the i-th argument
+    is in ``a<i>`` or ``f<12+i>`` depending on its class).
+    """
+
+    PER_CLASS = "PER_CLASS"
+    POSITIONAL = "POSITIONAL"
+
+
+class NarrowIntRule(str, Enum):
+    """What an ABI says about the register bits above a narrow integer.
+
+    ``SIGN_EXTENDED_REQUIRED``: a 32-bit value is held sign-extended in its
+    64-bit register whatever its signedness (MIPS n64).
+
+    ``UPPER_BITS_UNSPECIFIED``: the bits above the value are not defined and a
+    conforming callee does not depend on them (AAPCS64).
+    """
+
+    SIGN_EXTENDED_REQUIRED = "SIGN_EXTENDED_REQUIRED"
+    UPPER_BITS_UNSPECIFIED = "UPPER_BITS_UNSPECIFIED"
+
+
+@dataclass(frozen=True)
+class ArgumentSlot:
+    """One register argument position of an ABI.
+
+    ``index`` is the position within ``arg_class`` for ``PER_CLASS`` ABIs and
+    the position in the whole parameter list for ``POSITIONAL`` ABIs.
+    """
+
+    arg_class: ArgClass
+    index: int
+
+
+@dataclass(frozen=True)
+class AbiModel:
+    abi_id: AbiId
+    big_endian: bool
+    register_bytes: int
+    slot_numbering: SlotNumbering
+    narrow_int_rule: NarrowIntRule
+    int_argument_registers: Tuple[str, ...]
+    fp_argument_registers: Tuple[str, ...]
+    fp_argument_register_bytes: int
+    int_return_register: str
+    fp_return_register: str
+    fp_return_register_bytes: int
+    indirect_result_register: Optional[str]
+    stack_pointer: str
+    return_address_register: str
+    # Holds the callee's own entry address at entry (position-independent MIPS code).
+    entry_address_register: Optional[str]
+    callee_saved_registers: Tuple[str, ...]
+    # Control registers the ABI defines at entry, with their entry value.
+    control_register_defaults: Tuple[Tuple[str, int], ...]
+
+    def argument_register(self, slot: ArgumentSlot) -> Optional[str]:
+        table = (
+            self.int_argument_registers
+            if slot.arg_class is ArgClass.INT
+            else self.fp_argument_registers
+        )
+        if slot.index < 0 or slot.index >= len(table):
+            return None
+        return table[slot.index]
+
+    def argument_slot_of(self, base_register_name: str) -> Optional[ArgumentSlot]:
+        """The argument slot a base register carries, or ``None``."""
+        if base_register_name in self.int_argument_registers:
+            return ArgumentSlot(
+                ArgClass.INT, self.int_argument_registers.index(base_register_name)
+            )
+        if base_register_name in self.fp_argument_registers:
+            return ArgumentSlot(
+                ArgClass.FP, self.fp_argument_registers.index(base_register_name)
+            )
+        return None
+
+    def return_class_of(self, base_register_name: str) -> Optional[ArgClass]:
+        if base_register_name == self.int_return_register:
+            return ArgClass.INT
+        if base_register_name == self.fp_return_register:
+            return ArgClass.FP
+        return None
+
+    def return_register(self, arg_class: ArgClass) -> str:
+        return (
+            self.int_return_register
+            if arg_class is ArgClass.INT
+            else self.fp_return_register
+        )
+
+    def argument_register_bytes(self, arg_class: ArgClass) -> int:
+        return (
+            self.register_bytes
+            if arg_class is ArgClass.INT
+            else self.fp_argument_register_bytes
+        )
+
+    def assign_slots(self, classes: Tuple[ArgClass, ...]) -> Optional[Tuple[ArgumentSlot, ...]]:
+        """Slots of a register-only parameter list with these classes, in order.
+
+        ``None`` when the list does not fit in the argument registers (the
+        rest would be passed on the stack, which this model does not cover).
+        """
+        slots = []
+        counters = {ArgClass.INT: 0, ArgClass.FP: 0}
+        for position, arg_class in enumerate(classes):
+            index = (
+                position
+                if self.slot_numbering is SlotNumbering.POSITIONAL
+                else counters[arg_class]
+            )
+            counters[arg_class] += 1
+            slot = ArgumentSlot(arg_class, index)
+            if self.argument_register(slot) is None:
+                return None
+            slots.append(slot)
+        return tuple(slots)
+
+
+_AARCH64 = AbiModel(
+    abi_id=AbiId.AARCH64_AAPCS64,
+    big_endian=False,
+    register_bytes=8,
+    slot_numbering=SlotNumbering.PER_CLASS,
+    narrow_int_rule=NarrowIntRule.UPPER_BITS_UNSPECIFIED,
+    int_argument_registers=("x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"),
+    # Ghidra's AArch64 module makes z<n> the base of v<n>/q<n>/d<n>/s<n>.
+    fp_argument_registers=("z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7"),
+    fp_argument_register_bytes=16,
+    int_return_register="x0",
+    fp_return_register="z0",
+    fp_return_register_bytes=16,
+    indirect_result_register="x8",
+    stack_pointer="sp",
+    return_address_register="x30",
+    entry_address_register=None,
+    callee_saved_registers=(
+        "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27", "x28", "x29",
+        # AAPCS64 preserves the low 64 bits of v8-v15.
+        "d8", "d9", "d10", "d11", "d12", "d13", "d14", "d15",
+    ),
+    control_register_defaults=(("fpcr", 0),),
+)
+
+_MIPS_N64 = AbiModel(
+    abi_id=AbiId.MIPS_N64,
+    big_endian=True,
+    register_bytes=8,
+    slot_numbering=SlotNumbering.POSITIONAL,
+    narrow_int_rule=NarrowIntRule.SIGN_EXTENDED_REQUIRED,
+    int_argument_registers=("a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7"),
+    fp_argument_registers=("f12", "f13", "f14", "f15", "f16", "f17", "f18", "f19"),
+    fp_argument_register_bytes=8,
+    int_return_register="v0",
+    fp_return_register="f0",
+    fp_return_register_bytes=8,
+    indirect_result_register=None,
+    stack_pointer="sp",
+    return_address_register="ra",
+    entry_address_register="t9",
+    callee_saved_registers=(
+        "s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "gp",
+        "f24", "f25", "f26", "f27", "f28", "f29", "f30", "f31",
+    ),
+    control_register_defaults=(("fcsr", 0),),
+)
+
+_MODELS: Mapping[AbiId, AbiModel] = {
+    _AARCH64.abi_id: _AARCH64,
+    _MIPS_N64.abi_id: _MIPS_N64,
+}
+
+
+def abi_model(abi_id: AbiId) -> AbiModel:
+    return _MODELS[AbiId(abi_id)]
+
+
+def select_abi(
+    processor: str, pointer_bytes: int, big_endian: bool
+) -> Optional[AbiModel]:
+    """The ABI model of a program, from facts of the binary's language.
+
+    ``processor`` is the processor name of the program's language
+    (``AARCH64``, ``MIPS``).  ``None`` means the concrete layer has no model
+    for the program, which callers treat as a refusal.
+    """
+    name = str(processor).upper()
+    if name == "AARCH64" and pointer_bytes == 8 and not big_endian:
+        return _AARCH64
+    if name == "MIPS" and pointer_bytes == 8 and big_endian:
+        return _MIPS_N64
+    return None
