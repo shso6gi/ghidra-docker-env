@@ -688,8 +688,10 @@ def _impl_check(
     # before return-width/value preparation or any legacy value shortcut.
     from scripts.function_tracer_pcode.proof.strategies.pairwise_query_executor import (
         closed_formula_needs_no_replay,
+        counterexample_ub_domain_status,
         counterexample_replay_targets,
         execute_guard_overlap,
+        require_satisfiable_pair_premises,
     )
 
     runtime = getattr(self, "_obligation_runtime_session", None)
@@ -1669,6 +1671,33 @@ def _impl_check(
                         continue
                     analysis_safety_validated = True
 
+                # Issue #298: query は UB の制約を課さない（EQ の前提にしない）。witness は両方の
+                # 関数の全ての演算が UB を起こさない入力でなければならない（UB を上から近似した
+                # 反例の領域）。外れる model はその組の witness にしない（executor が領域の中で
+                # 解き直した後でも外れるとき）。
+                if counterexample_ub_domain_status(
+                    self, base_ctx, result.counterexample_raw,
+                ) is not True:
+                    unknown_count += 1
+                    ub_refs = ("ub_witness_domain", result.pair_stage or "unknown")
+                    ub_reason = self._make_sat_counterexample_ub_domain_unknown_reason(
+                        ub_refs,
+                        analysis1,
+                        analysis2,
+                        case1=case1,
+                        case2=case2,
+                        pair_id=pair_id,
+                        stage="S_PAIRWISE",
+                    )
+                    unknown_reasons.append(ub_reason)
+                    rejected_witnesses.append((
+                        "ub_domain", ub_refs, case1, case2, pair_id, ub_reason,
+                    ))
+                    self._debug_print(
+                        f"  Pair {pair_id}: SAT model is outside the UB-free input domain -> UNKNOWN"
+                    )
+                    continue
+
                 self._observe_v2_sat_counterexample_ambiguity((result.pair_stage or "unknown",), analysis1, analysis2, case1=case1, case2=case2, pair_id=pair_id); is_decisive = validate_counterexample_across_cases(
                     self,
                     base_ctx,
@@ -2190,6 +2219,13 @@ def _impl_check(
             f"{', '.join(blocking_reasons)})"
         )
     elif unsat_count == total_pairs:
+        # Issue #298: 組の UNSAT を EQ の根拠にする前に、各組の前提（header ∧ 組の追加の
+        # assert）が SAT であることを確かめる。前提が矛盾する比較の UNSAT は空虚で、限界
+        # ``proof_premise_unsatisfiable`` を記録して送出する（guard だけで到達不能な組とは
+        # 区別する: そちらは前提が SAT）。
+        require_satisfiable_pair_premises(
+            self, base_ctx, cases1, cases2, symbol_replace_fn1, symbol_replace_fn2,
+        )
         final_is_equiv = True
         self._debug_print("=" * 60)
         self._debug_print("Result: EQUIVALENT (all pairs UNSAT)")

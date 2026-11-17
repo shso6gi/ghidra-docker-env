@@ -60,18 +60,22 @@ class SatSafetyResolution(str, Enum):
     REPLAY = "replay"
     #: 解析の安全性の証明が要る。replay では解消しない（入力対応の不足・被覆の欠けを含む）。
     ANALYSIS_UNSAFETY = "analysis_unsafety"
-    #: case partition の曖昧さの解消（別の完了経路。replay の証明記録では解消しない）。
+    #: witness に固有の棄却（case partition の曖昧さ・UB を起こす model（Issue #298））の解消。
+    #: その witness は使わず、別の witness の検証で完了する（replay の証明記録では解消しない）。
     PARTITION_AMBIGUITY = "partition_ambiguity"
 
 
 COUNTEREXAMPLE_REPLAY_UNPROVEN = "counterexample_replay_unproven"
 COUNTEREXAMPLE_ANALYSIS_SAFETY_UNPROVEN = "counterexample_analysis_safety_unproven"
 COUNTEREXAMPLE_PARTITION_REPLAY_AMBIGUOUS = "counterexample_partition_replay_ambiguous"
+#: Issue #298: SAT の model が反例の領域（両方の関数の全ての演算が UB を起こさない入力）の外。
+COUNTEREXAMPLE_UB_DOMAIN_VIOLATED = "counterexample_ub_domain_violated"
 
 #: SAT-safety の typed reason id → 解消の型。
 SAT_SAFETY_REASON_RESOLUTION: Mapping[str, SatSafetyResolution] = MappingProxyType({
     COUNTEREXAMPLE_ANALYSIS_SAFETY_UNPROVEN: SatSafetyResolution.ANALYSIS_UNSAFETY,
     COUNTEREXAMPLE_PARTITION_REPLAY_AMBIGUOUS: SatSafetyResolution.PARTITION_AMBIGUITY,
+    COUNTEREXAMPLE_UB_DOMAIN_VIOLATED: SatSafetyResolution.PARTITION_AMBIGUITY,
     COUNTEREXAMPLE_REPLAY_UNPROVEN: SatSafetyResolution.REPLAY,
 })
 

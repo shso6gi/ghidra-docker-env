@@ -35,6 +35,7 @@ from scripts.function_tracer_pcode.proof.formula.input_correspondence import (
     build_input_correspondence_set,
 )
 from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
+from scripts.function_tracer_pcode.tests.unit._premise_support import assume_satisfiable_premise
 
 
 def _formula_bound_sat_result(model):
@@ -92,6 +93,7 @@ def _base_context():
 
 def test_gate_reports_missing_unbound_and_insufficient_relations_but_not_empty():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    assume_satisfiable_premise(strategy)
     left, right = _same_width_pair()
     sufficient = build_input_correspondence_set(left, right)
     insufficient = build_input_correspondence_set(*_insufficient_pair())
@@ -116,6 +118,7 @@ def test_gate_reports_missing_unbound_and_insufficient_relations_but_not_empty()
 
 def test_gate_reasons_map_to_existing_registered_reasons_and_cannot_be_replay_discharged():
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    assume_satisfiable_premise(strategy)
     left, right = _insufficient_pair()
     (reason,) = strategy._input_correspondence_unsafety_reasons(
         build_input_correspondence_set(left, right),
@@ -151,6 +154,7 @@ def _run_pairwise(monkeypatch, analysis1, analysis2, *, sat: bool, builder):
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(builder, solver_runner, debug=False)
+    assume_satisfiable_premise(strategy)
     case1 = ReturnCase(
         index=0, conditions=[], value_expr=analysis1.returns[0].value,
         return_info=analysis1.returns[0], return_type="int", parameters=analysis1.parameters,
@@ -233,6 +237,7 @@ def _run_monolithic(monkeypatch, analysis1, analysis2, *, status, builder):
     )
     builder.build_base_context.return_value = _base_context()
     strategy = MonolithicStrategy(builder, _Runner(status), debug=False)
+    assume_satisfiable_premise(strategy)
     monkeypatch.setattr(strategy, "_collect_monolithic_return_coverage_unsafety_reasons", lambda *_a: [])
     monkeypatch.setattr(strategy, "_counterexample_is_decisive_across_case_split", lambda *_a: True)
     return strategy.check(analysis1, analysis2)
@@ -295,6 +300,7 @@ def test_monolithic_region_query_relation_comes_from_the_query_that_was_built():
     unrecorded = SimpleNamespace(input_correspondence=None)
     assert region_query_input_correspondence(unrecorded, None) is None
     strategy = MonolithicStrategy(Mock(), _Runner(SolverStatus.UNSAT), debug=False)
+    assume_satisfiable_premise(strategy)
     assert strategy._input_correspondence_unsafety_reasons(
         region_query_input_correspondence(unrecorded, None), authority_correspondence=built,
     ) == ["pair:input_correspondence:unavailable:query"]

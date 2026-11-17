@@ -64,6 +64,7 @@ class UnknownReasonId(str, Enum):
     EQUIVALENCE_BLOCKING_UNSAFETY = "equivalence_blocking_unsafety"
     SAT_UNSAFETY = "sat_unsafety"
     SAT_COUNTEREXAMPLE_AMBIGUOUS = "sat_counterexample_ambiguous"
+    SAT_COUNTEREXAMPLE_UB_DOMAIN_VIOLATED = "sat_counterexample_ub_domain_violated"
     UNRESOLVED_EXPRESSION = "unresolved_expression"
     UNRESOLVED_VALUE_EXPRESSION = "unresolved_value_expression"
     NORMALIZATION_NO_CHANGE = "normalization_no_change"
@@ -536,6 +537,15 @@ def _register_defaults() -> None:
             target_regression="sat_counterexample_ambiguous",
         ),
         UnknownReasonDefinition.create(
+            UnknownReasonId.SAT_COUNTEREXAMPLE_UB_DOMAIN_VIOLATED,
+            UnknownReasonClass.UNSAFE_ANALYSIS,
+            UnknownDecisionEffect.BLOCKS_DISEQUIVALENCE,
+            UnknownReasonScope.PAIR,
+            UnknownAggregationUnit.PAIR,
+            recovery_proof_kind=UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,
+            target_regression="sat_counterexample_ub_domain_violated",
+        ),
+        UnknownReasonDefinition.create(
             UnknownReasonId.UNRESOLVED_EXPRESSION,
             UnknownReasonClass.OPERATIONAL_GAP,
             UnknownDecisionEffect.BLOCKS_DECISION,
@@ -971,6 +981,26 @@ def _register_default_recovery_plans() -> None:
             ),
             target_regression="sat_counterexample_ambiguous",
             description="Recover ambiguous SAT counterexamples only with replay plus partition proof.",
+        ),
+        UnknownRecoveryPlan.create(
+            UnknownReasonId.SAT_COUNTEREXAMPLE_UB_DOMAIN_VIOLATED,
+            (
+                UnknownRecoveryProofObligation.create(
+                    UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,
+                    "sat_counterexample_safety",
+                    required_evidence=(
+                        "counterexample_replay",
+                        "ub_free_counterexample_domain",
+                    ),
+                    description=(
+                        "Accept a SAT counterexample only when its model executes no "
+                        "operation with undefined behaviour in either function "
+                        "(Issue #298); another validated witness supersedes the rejection."
+                    ),
+                ),
+            ),
+            target_regression="sat_counterexample_ub_domain_violated",
+            description="A rejected witness outside the UB-free input domain is superseded only by another validated witness.",
         ),
         UnknownRecoveryPlan.create(
             UnknownReasonId.SOLVER_UNKNOWN_TIMEOUT,

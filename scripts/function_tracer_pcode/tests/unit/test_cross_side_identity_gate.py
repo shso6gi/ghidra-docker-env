@@ -67,6 +67,7 @@ from scripts.function_tracer_pcode.tests.unit._input_correspondence_support impo
     comparison_binding_of,
     positional_comparison,
 )
+from scripts.function_tracer_pcode.tests.unit._premise_support import assume_satisfiable_premise
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +570,7 @@ def test_owner_free_query_assertions_are_built_from_and_registered_with_the_cert
     from scripts.function_tracer_pcode.proof.strategies.pairwise_services._shared import OwnerFreePairAssertions
 
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    assume_satisfiable_premise(strategy)
     comparison = _positional_comparison_binding()
     left, right = _identity_pair()
     checked = ((_case(left),), (_case(right),))
@@ -760,6 +762,7 @@ def test_auxiliary_symbols_are_not_shared_by_index_under_a_swapped_relation():
     from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
 
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    assume_satisfiable_premise(strategy)
     for pair, shared in ((_swapped_pair(), False), (_identity_pair(), True)):
         left, right = pair
         with comparison_scope(comparison_binding_of(left, right)):
@@ -807,6 +810,7 @@ def test_the_runtime_reduction_producer_refuses_a_narrow_limit_read_under_an_ide
     from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
 
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    assume_satisfiable_premise(strategy)
     left = _raw("f", [_d("n", 0)], _loop_value(_p("n", 0)))
     right_full = _raw("g", [_d("n", 0)], _loop_value(_p("n", 0)))
     right_narrow = _raw("g", [_d("n", 0)], _loop_value(_p("n", 0, size=4)))
@@ -987,6 +991,7 @@ def _lowering_check(monkeypatch, right_names):
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    assume_satisfiable_premise(strategy)
     # 左は fp(a)、右は fp(<index 1>) を呼ぶ。右の index 1 の名前を b にすると、relation は a↔a（1↔2）・
     # b↔b（2↔1）で、左右の呼び出しは別の入力を渡す。index で正規化した引数の key は同じになる。
     left = _analysis_with_deferred_call_argument_blocker(
@@ -1035,6 +1040,7 @@ def test_the_readonly_contract_equality_is_added_only_under_a_positional_relatio
     from scripts.function_tracer_pcode.proof.strategies.pairwise import PairwiseStrategy
 
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    assume_satisfiable_premise(strategy)
     monkeypatch.setattr(strategy, "_case_pair_readonly_contract_result_size", lambda *_a: 4)
     monkeypatch.setattr(
         strategy, "_runtime_loop_contract_shortcut_decision",
@@ -1082,6 +1088,7 @@ def test_the_loop_template_proof_is_not_tried_without_a_positional_relation(monk
     monkeypatch.setattr(PairwiseStrategy, "_try_normalization_equivalence", lambda *_a, **_k: QueryResult(None))
     monkeypatch.setattr(template_module, "require_equal_return_bit_widths", reached)
     strategy = template_module.LoopTemplatePairwiseStrategy(Mock(), Mock(), debug=False)
+    assume_satisfiable_premise(strategy)
     left, right = _identity_pair()
     cases = (_case(left), _case(right))
     positional, swapped = _scopes()
@@ -1483,6 +1490,7 @@ def _call_effect_check(argument_sizes):
         runner = Mock()
         runner.timeout = 5
         strategy = PairwiseStrategy(formula_builder, runner, debug=False)
+        assume_satisfiable_premise(strategy)
         left = fixtures._analysis_with_deferred_call_argument_blocker(function_name="func1", binary_id="B1", entry=0x1000)
         right = fixtures._analysis_with_deferred_call_argument_blocker(
             function_name="func2", binary_id="B14", entry=0x2000, argument_sizes=argument_sizes,
@@ -1644,6 +1652,7 @@ def test_the_deferred_call_lowering_reads_the_call_surface_under_a_full_relation
         )
 
     strategy = PairwiseStrategy(Mock(), Mock(), debug=False)
+    assume_satisfiable_premise(strategy)
     # production の analysis は公開済み（``publish_raw_function_analysis``）。証明書は不変の値だけを記録する。
     left, right, narrow = (
         publish_raw_function_analysis(analysis("func1", "B1", 0x1000)),

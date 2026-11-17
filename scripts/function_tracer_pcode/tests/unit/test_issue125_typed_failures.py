@@ -125,9 +125,13 @@ def test_analysis_limitation_registry_is_sealed_and_owns_its_reasons():
     )
 
     # Issue #22 PR-22-D が式サイズ予算の reason を足した（reason 2 / site 1 /
-    # 回復契約 1）。Issue #242（第 8 回）が比べる側の契約の判定不能の reason を足した。どれも同じ扱い:
+    # 回復契約 1）。Issue #242（第 8 回）が比べる側の契約の判定不能の reason を足した。Issue #298 が
+    # 証明の前提の矛盾の reason を足した。どれも同じ扱い:
     # blocks_decision・同じ target kind・同じ proof kind。reason を増やす PR はここへ 1 つ足す。
-    expected = ("analysis_budget_exceeded", "comparison_undecidable", "expression_size_budget_exceeded")
+    expected = (
+        "analysis_budget_exceeded", "comparison_undecidable", "expression_size_budget_exceeded",
+        "proof_premise_unsatisfiable",
+    )
     definitions = ANALYSIS_LIMITATION_REASON_REGISTRY.snapshot()
     assert tuple(definition.reason_id for definition in definitions) == expected
     for definition in definitions:
@@ -520,9 +524,14 @@ PRODUCER_SITES_ADDED_AFTER_ISSUE125 = (
 CAUSE_SLOTS_ADDED_AFTER_ISSUE125 = {
     # Issue #22 PR-22-D: 式サイズ予算。analysis-limitation の site を共有する。
     # Issue #242（第 8 回）: 比べる側の契約の判定不能。同じ site を共有する。
-    NEW_PRODUCER_SITE_ID: ("expression_size_budget_exceeded", "comparison_undecidable"),
+    # Issue #298: 証明の前提の矛盾。同じ site を共有する。
+    NEW_PRODUCER_SITE_ID: (
+        "expression_size_budget_exceeded", "comparison_undecidable", "proof_premise_unsatisfiable",
+    ),
     # Issue #257: 制御フローの不完全さで monolithic fallback を止めた比較。return-coverage の site を共有する。
     "return-coverage-final-terminal": ("return_partition_control_flow_incomplete",),
+    # Issue #298: UB を起こす model の witness の棄却。partition の曖昧さと同じ site を共有する。
+    "sat-safety-ambiguity-observed": ("counterexample_ub_domain_violated",),
 }
 
 #: PR-125-A の後に別 Issue が **既存 site** へ足した producer（site は増えない）。

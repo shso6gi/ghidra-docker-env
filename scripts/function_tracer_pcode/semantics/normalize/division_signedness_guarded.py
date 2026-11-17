@@ -5,7 +5,10 @@ from typing import List, Tuple, Callable
 from scripts.function_tracer_pcode.core import Expression, ExpressionType
 from scripts.function_tracer_pcode.semantics.normalize.context import NormalizationContext
 from scripts.function_tracer_pcode.semantics.normalize.guard_prover import prove_guard_condition
-from scripts.function_tracer_pcode.core.render_smt import render_expression_smt_evidence
+from scripts.function_tracer_pcode.core.render_smt import (
+    SMT_SEMANTICS_REFUSALS,
+    render_expression_smt_for_query,
+)
 
 
 def normalize_udiv_with_guard(
@@ -86,8 +89,13 @@ def _try_convert_udiv_to_sdiv(
         return expr
     
     # SMT式を生成（シンボル名置換を適用）
-    dividend_smt_raw = render_expression_smt_evidence(dividend)
-    divisor_smt_raw = render_expression_smt_evidence(divisor)
+    # Issue #298: guard の query は solver へ渡すので、表示用でない描画を使う。正確な意味が無い
+    # 被演算子なら書き換えない
+    try:
+        dividend_smt_raw = render_expression_smt_for_query(dividend)
+        divisor_smt_raw = render_expression_smt_for_query(divisor)
+    except SMT_SEMANTICS_REFUSALS:
+        return expr
     
     # 置換を適用
     dividend_smt = symbol_replace_fn(dividend_smt_raw)

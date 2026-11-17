@@ -3,6 +3,7 @@ from scripts.function_tracer_pcode.tests.unit._sat_decisiveness_fixtures import 
 
 import pytest
 from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
+from scripts.function_tracer_pcode.tests.unit._premise_support import assume_satisfiable_premise
 
 
 @pytest.fixture(autouse=True)
@@ -622,6 +623,7 @@ def test_pairwise_call_effect_summary_producer_connects_completed_target_proof(m
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    assume_satisfiable_premise(strategy)
     analysis1 = _analysis_with_unsupported_call_effect()
     analysis2 = raw_function_analysis(
         function_name="func2",
@@ -787,6 +789,7 @@ def test_pairwise_matched_unknown_indirect_no_store_call_effect_recovers(monkeyp
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    assume_satisfiable_premise(strategy)
     analysis1 = _analysis_with_unknown_indirect_call_effect(
         function_name="func1",
         binary_id="B10",
@@ -1004,6 +1007,7 @@ def test_pairwise_matched_parameter_exposure_unsupported_call_effect_recovers(mo
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    assume_satisfiable_premise(strategy)
     analysis1 = _analysis_with_unknown_indirect_call_effect(
         function_name="func1",
         binary_id="B10",
@@ -1043,6 +1047,7 @@ def test_pairwise_mixed_unsupported_call_reason_is_compatible_recovers(monkeypat
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    assume_satisfiable_premise(strategy)
     analysis1 = _analysis_with_unknown_indirect_call_effect(
         function_name="func1",
         binary_id="B10",
@@ -1111,6 +1116,7 @@ def test_pairwise_matched_deferred_call_argument_evidence_recovers(monkeypatch):
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    assume_satisfiable_premise(strategy)
     analysis1 = _analysis_with_deferred_call_argument_blocker(
         function_name="func1",
         binary_id="B1",
@@ -1148,6 +1154,7 @@ def test_pairwise_unresolved_deferred_call_return_lowers_with_matched_argument_e
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    assume_satisfiable_premise(strategy)
     analysis1 = _analysis_with_deferred_call_argument_blocker(
         function_name="func1",
         binary_id="B1",
@@ -1692,6 +1699,7 @@ def test_pairwise_bounded_call_argument_evidence_auto_records_phase15_proof(monk
     solver_runner = Mock()
     solver_runner.timeout = 5
     strategy = PairwiseStrategy(formula_builder, solver_runner, debug=False)
+    assume_satisfiable_premise(strategy)
     analysis1 = _analysis_with_effect_call_argument_evidence()
     analysis1.analysis_notes.append("bounded_call_refinement_deferred_expanded")
     analysis2 = raw_function_analysis(

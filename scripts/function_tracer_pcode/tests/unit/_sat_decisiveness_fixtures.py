@@ -1,6 +1,7 @@
 from scripts.function_tracer_pcode.tests.unit._input_correspondence_support import echo_input_correspondence
 import hashlib
 
+from scripts.function_tracer_pcode.tests.unit._premise_support import assume_satisfiable_premise
 from scripts.function_tracer_pcode.core.evidence_authority import record_function_unary_evidence
 
 from contextlib import contextmanager
@@ -1386,9 +1387,11 @@ def _monolithic_return_coverage_gap_setup():
         extra_vars1=[],
         extra_vars2=[],
         param_fragment_constrained=[],
+        premise_formula="(set-logic QF_BV)\n(check-sat)",
     )
     formula_builder.build_base_context.return_value = _base_context_for_single_int_param()
     strategy = MonolithicStrategy(formula_builder, _CoverageGapUnsatSolverRunner(), debug=False)
+    assume_satisfiable_premise(strategy)
     return strategy, analysis1, analysis2
 
 def _phi_circular_unknown(binary_id: str, entry: int, *, seq_time: int = 98) -> Expression:

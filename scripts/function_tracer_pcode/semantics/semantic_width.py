@@ -68,8 +68,8 @@ RETURN_EXTENSION_SURFACE_SOURCE = "cross_side_return_extension_surface"
 RETURN_EXTENSION_SURFACE_COERCION = "equal_width_or_object_proven_extract"
 RETURN_EXTENSION_SURFACE_KINDS = frozenset({"INT_ZEXT", "INT_SEXT", "none"})
 
-#: 幅の違う比較は、SMT lowering が狭い側を signed 比較なら sign_extend、それ以外は
-#: zero_extend で揃える（``core/render_smt/render.py`` の比較分岐）。
+#: 符号付きの比較の演算子（Issue #298 の後、幅の違う比較の揃えには使わない: 描画は伸ばし方を
+#: 推測しない。``core/render_smt/render.py`` の ``_fit_comparison_operands``）。
 SIGNED_COMPARISON_OPS = frozenset({"INT_SLESS", "INT_SLESSEQUAL"})
 
 
@@ -286,9 +286,13 @@ class SemanticWidthNormalizer:
             return None
         if expression_returns_bool(other):
             return None
-        kind = ExtensionKind.SIGN if expr.operator in SIGNED_COMPARISON_OPS else ExtensionKind.ZERO
-        narrowed = self._narrow_constant(constant, other_bits, kind)
-        if narrowed is None:
+        # Issue #298: 描画は幅の違う比較を符号で伸ばさない（伸ばし方が値を変えない形だけを揃える）。
+        # 揃えも同じ条件に限る: 符号なしの比較（等値・不等・<u・<=u）で、定数が zero・sign どちらの
+        # 拡張の像にも入る（狭い幅で最上位 bit が 0）ときだけ ``a op low_N(c)`` と同値
+        if expr.operator not in {"INT_EQUAL", "INT_NOTEQUAL", "INT_LESS", "INT_LESSEQUAL"}:
+            return None
+        narrowed = self._narrow_constant(constant, other_bits, ExtensionKind.ZERO)
+        if narrowed is None or self._narrow_constant(constant, other_bits, ExtensionKind.SIGN) is None:
             return None
         operands = (narrowed, other) if constant is left else (other, narrowed)
         rebuilt = Expression.binary_op(expr.operator, *operands)
@@ -301,8 +305,11 @@ class SemanticWidthNormalizer:
         if len(expr.operands) != 2:
             return None
         left, right = expr.operands
-        new_left = _zero_constant_at_peer_width(left, right)
-        new_right = _zero_constant_at_peer_width(right, left)
+        # Issue #298: 0 を相手の幅へ **狭める** と、符号付きの順序の比較は相手の伸ばし方（sign）を
+        # 決めたことになる。狭める向きは、伸ばし方に依らない比較（符号なし）に限る
+        narrowing_allowed = expr.operator not in SIGNED_COMPARISON_OPS
+        new_left = _zero_constant_at_peer_width(left, right, narrowing_allowed=narrowing_allowed)
+        new_right = _zero_constant_at_peer_width(right, left, narrowing_allowed=narrowing_allowed)
         if new_left is left and new_right is right:
             return None
         return self._rewritten(
@@ -1138,8 +1145,13 @@ def _rewrite_conditions(
     return rewritten, changed
 
 
-def _zero_constant_at_peer_width(candidate: Expression, peer: Expression) -> Expression:
-    """比較の operand が定数 0 なら相手の幅の 0（そうでなければそのまま）。"""
+def _zero_constant_at_peer_width(
+    candidate: Expression, peer: Expression, *, narrowing_allowed: bool = True,
+) -> Expression:
+    """比較の operand が定数 0 なら相手の幅の 0（そうでなければそのまま）。
+
+    ``narrowing_allowed`` が偽なら、相手が定数より狭いときは揃えない（伸ばし方を決めない）。
+    """
 
     if candidate is None or peer is None or candidate.expr_type != ExpressionType.CONSTANT:
         return candidate
@@ -1156,7 +1168,10 @@ def _zero_constant_at_peer_width(candidate: Expression, peer: Expression) -> Exp
         if peer_bits <= 0 or peer_bits % 8 != 0:
             return candidate
         desired_size = max(1, peer_bits // 8)
-    if int(getattr(candidate, "size", 0) or 0) == desired_size:
+    current_size = int(getattr(candidate, "size", 0) or 0)
+    if current_size == desired_size:
+        return candidate
+    if not narrowing_allowed and current_size > desired_size:
         return candidate
     return candidate.clone_with(size=desired_size)
 

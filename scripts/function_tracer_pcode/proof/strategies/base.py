@@ -328,6 +328,7 @@ class CheckStrategy(ABC):
     _counterexample_model_fingerprint = classmethod(_svc_sat_safety._impl__counterexample_model_fingerprint)
     _make_blocking_unsafety_unknown_reason = _svc_sat_safety._impl__make_blocking_unsafety_unknown_reason
     _make_sat_counterexample_ambiguous_unknown_reason = _svc_sat_safety._impl__make_sat_counterexample_ambiguous_unknown_reason
+    _make_sat_counterexample_ub_domain_unknown_reason = _svc_sat_safety._impl__make_sat_counterexample_ub_domain_unknown_reason
     _make_sat_unsafety_unknown_reason = _svc_sat_safety._impl__make_sat_unsafety_unknown_reason
     _normalize_counterexample_model_value = classmethod(_svc_sat_safety._impl__normalize_counterexample_model_value)
     _record_completed_sat_counterexample_replay_proof = _svc_sat_safety._impl__record_completed_sat_counterexample_replay_proof
@@ -337,6 +338,7 @@ class CheckStrategy(ABC):
     _unpaired_input_unsafety_reasons = _svc_sat_safety._impl__unpaired_input_unsafety_reasons
     _pair_return_width_unsafety_reasons = _svc_sat_safety._impl__pair_return_width_unsafety_reasons
     _sat_counterexample_ambiguous_object_target_key = _svc_sat_safety._impl__sat_counterexample_ambiguous_object_target_key
+    _sat_counterexample_ub_domain_object_target_key = _svc_sat_safety._impl__sat_counterexample_ub_domain_object_target_key
     _sat_unsafety_object_evidence = _svc_sat_safety._impl__sat_unsafety_object_evidence
     _sat_unsafety_object_target_key = _svc_sat_safety._impl__sat_unsafety_object_target_key
     _sat_unsafety_reason_object_evidence = _svc_sat_safety._impl__sat_unsafety_reason_object_evidence
