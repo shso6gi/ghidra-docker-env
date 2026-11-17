@@ -44,7 +44,7 @@ jobs:
           python3 -B - <<'PY'
           import importlib
           layers = (
-              "core", "smt", "config", "ghidra", "analysis", "semantics",
+              "core", "smt", "config", "concrete", "ghidra", "analysis", "semantics",
               "proof", "authority", "checker", "reporting", "cli",
           )
           importlib.import_module("scripts.function_tracer_pcode")

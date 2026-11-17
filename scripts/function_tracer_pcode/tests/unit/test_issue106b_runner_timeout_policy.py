@@ -484,7 +484,7 @@ def test_the_runner_variables_stay_at_the_entry_points():
 
     package = REPO_ROOT / "scripts" / "function_tracer_pcode"
     offenders = []
-    for layer in ("core", "smt", "config", "ghidra", "analysis", "semantics", "proof",
+    for layer in ("core", "smt", "config", "concrete", "ghidra", "analysis", "semantics", "proof",
                   "authority", "checker", "cli"):
         for path in (package / layer).rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"))

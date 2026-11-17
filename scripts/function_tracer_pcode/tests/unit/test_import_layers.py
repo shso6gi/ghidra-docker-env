@@ -42,7 +42,7 @@ PACKAGE_PREFIX = PACKAGE_NAME + "."
 
 # Bottom -> top.  Same-layer and downward imports are always allowed.
 LAYERS = (
-    "core", "smt", "config", "ghidra", "analysis", "semantics",
+    "core", "smt", "config", "concrete", "ghidra", "analysis", "semantics",
     "proof", "authority", "checker", "reporting", "cli",
 )
 RANK = {layer: index for index, layer in enumerate(LAYERS)}
