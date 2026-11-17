@@ -964,7 +964,12 @@ def test_post_state_read_is_not_lowered_past_a_may_alias_store():
 
 
 def test_image_bytes_are_read_only_through_the_program_image_gate():
-    """Q1（I7）: image の byte を読む Ghidra の API は `analysis/program_image.py` だけが呼ぶ（判定の無い経路を残さない）。"""
+    """Q1（I7）: image の byte を読む Ghidra の API は `analysis/program_image.py` だけが呼ぶ（判定の無い経路を残さない）。
+
+    例外は具体実行器 `ghidra/concrete_executor.py`（#315 C1）の 1 つだけ。image を emulator の初期 memory として
+    読み込むためで、解析の値にはしない。書き換え可能な data を run が書く前に読んだことは run ごとに記録され
+    （`ExecutionResult.writable_image_reads`）、判定に使ってよいかは具体実行の側（C6）が決める。
+    """
 
     import ast
     from pathlib import Path
@@ -985,7 +990,7 @@ def test_image_bytes_are_read_only_through_the_program_image_gate():
                 name = node.value
             if name in readers:
                 found.add(relative)
-    assert found == {"analysis/program_image.py"}
+    assert found == {"analysis/program_image.py", "ghidra/concrete_executor.py"}
 
 
 def test_memory_array_names_come_only_from_the_sides_module():
