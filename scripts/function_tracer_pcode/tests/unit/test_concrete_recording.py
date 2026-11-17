@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.function_tracer_pcode.concrete.executor import HazardKind, Termination
+from scripts.function_tracer_pcode.concrete.executor import HazardKind, OverflowDisposition, Termination
 from scripts.function_tracer_pcode.concrete.observation import FpFormat
 from scripts.function_tracer_pcode.concrete.recording import (
     TRACE_SCHEMA,
@@ -44,6 +44,7 @@ def test_the_corpus_is_present():
         "mips64_ackermann_step_limit", "arm64_bessk0_external_call", "arm64_loop_float_o0",
         "mips64_loop_float_o2", "arm64_addvalue_bss_read", "arm64_pow_signed_overflow",
         "mips64_pow_signed_overflow", "mips64_airy_sign_nan", "arm64_factorial_neon_ext",
+        "arm64_factorial_int_min_compare",
     }
 
 
@@ -119,6 +120,22 @@ def test_a_signed_overflow_that_decides_a_branch_is_a_hazard_on_real_code():
         assert result.termination is Termination.RETURNED and result.observed(register).value == 13
         assert result.hazard_kinds() == (HazardKind.SIGNED_OVERFLOW,)
         assert result.integer_ub_operations_tracked
+        # the -O0 ``subs`` of a comparison that overflows and is overwritten is no use
+        assert OverflowDisposition.VALUE_USED in {o.disposition for o in result.integer_overflows}
+    dispositions = [o.disposition for o in _result("arm64_pow_signed_overflow").integer_overflows]
+    assert dispositions == [OverflowDisposition.VALUE_NOT_USED, OverflowDisposition.VALUE_USED]
+
+
+def test_the_overflow_of_a_compiled_range_check_is_recorded_with_its_use_on_real_code():
+    # CLEVER/factorial oldV (clang -O3): ``x < 5`` then ``n > 0`` compile to
+    # ``sub w8, w0, #1; cmp w8, #3; b.hi``.  x = INT_MIN wraps in the
+    # compiler's subtraction; the binary cannot tell it from an overflowed
+    # source subtraction, so the run is refused and the use is recorded.
+    result = _result("arm64_factorial_int_min_compare")
+    assert result.hazard_kinds() == (HazardKind.SIGNED_OVERFLOW,)
+    (site,) = result.integer_overflows
+    assert (site.operation, site.width, site.disposition) == ("INT_SUB", 4, OverflowDisposition.VALUE_USED)
+    assert "INT_LESSEQUAL" in site.uses
 
 
 def test_a_nan_operand_makes_the_returned_value_unreliable_on_real_code():

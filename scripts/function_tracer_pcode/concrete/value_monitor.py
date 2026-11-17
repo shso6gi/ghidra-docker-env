@@ -37,28 +37,42 @@ carry one *fact*:
     them), or it is the rounded result of a multiplication that another build
     may fuse into a following addition (the element keeps the operands).
 
-Integer rule (signed overflow).  Two's-complement arithmetic is a ring
-homomorphism from the integers: ``+``, ``-``, ``*``, negation, the bitwise
-operations and left shifts commute with reduction modulo ``2**n``.  A build
-that assumes the overflow away holds the exact value, and every result
-computed from it *by those operations* agrees with the wrapped computation
-on the low bytes.  The two can differ only where a value is used in a way
-that depends on more than its low bytes: a signed comparison, an equality,
-a signed division or right shift, a conversion to floating point, an
-address, a branch, or bytes above the wrapped width.  So:
+Integer rule (signed overflow).  The binary does not say whether an
+operation was a C signed operation, whose overflow is undefined, or an
+unsigned one, whose wrap-around C defines.  A run on an input where the
+source may have had undefined behaviour is no evidence that two builds
+compute different functions, so:
 
 * an ``INT_ADD``/``SUB``/``MULT``/``2COMP``/``LEFT`` whose signed result does
-  not fit records a ``WrapFact``; the modular operations carry it (and drop
-  it when the exact value fits again);
-* a use that depends on more than the low bytes is evaluated twice, on the
-  machine's value and on the exact value; equal results are clean, different
-  results taint the output ``SIGNED_OVERFLOW``;
-* an *unsigned* use (``INT_LESS``, ``INT_DIV``, ``INT_REM``, ``INT_RIGHT``,
-  ``INT_CARRY``) is clean: a compiler emits an unsigned operation for an
-  unsigned value, whose wrap-around C defines, or for a conversion to
-  unsigned, which is modular;
-* ``INT_SEXT``/``INT_ZEXT`` carry the fact to the wider value (on both ISAs
-  they also implement the register write of a 32-bit operation).
+  not fit is an *overflow site* (``IntegerOverflow``), its result carries a
+  ``WrapFact``;
+* a site narrower than the ABI's C ``int`` is a defined conversion: C
+  computes ``char``/``short`` arithmetic in ``int`` and converts back
+  (``NARROWER_THAN_INT``, no fact);
+* moves (``COPY``, ``INT_ZEXT``, ``INT_SEXT`` -- the register write of a
+  32-bit operation on both ISAs) keep the result's identity, and the
+  condition flags its own instruction takes from it (AArch64 ``NG``, ``ZR``
+  of a ``cmp``/``subs``) are not uses: a comparison has no overflow, and
+  ``NG != OV`` is recognised as the exact comparison it is (``FlagFact``);
+* any other use -- an operand of any operation, a store, an address, a
+  branch -- makes the site ``VALUE_USED`` and the run hazardous
+  (``SIGNED_OVERFLOW``).  What used it is recorded (``IntegerOverflow.uses``)
+  but no use clears it: an unsigned use is also what compilers emit for
+  signed values they assume not to overflow, and an unsigned comparison
+  alone is both the compiled form of the range test ``lo <= x <= hi``
+  (``(unsigned)(x - lo) <= hi - lo``, no overflow in the source) and of a
+  source that converts an overflowed difference;
+* a result that is still unused in an observed register at return makes
+  that register unreliable (``VALUE_RETURNED``).
+
+The modular facts of the values computed after a use are still followed:
+two's-complement arithmetic is a ring homomorphism, so ``+``, ``-``,
+``*``, negation, the bitwise operations and left shifts agree with the
+exact computation on the low bytes, and a use that depends on more than
+the low bytes (a signed comparison, a signed division, a branch, an
+address) is evaluated on both.  This says whether the observed value would
+agree with a build that holds the exact value (``reliable_low_bytes``), kept
+apart from the occurrence of the overflow for later stages.
 
 Floating-point rule.  Under the default ``FP_CONTRACT``, the only freedom a
 conforming compiler has on these targets is to fuse a multiplication with
@@ -100,12 +114,17 @@ bytes of a register are free of taints and divergent facts.
 
 Guarantees and limits.  A run is reported as monitored only when every
 operation the monitor needed values for had them.  What the integer monitor
-catches is a signed overflow *executed* by this binary; a build that never
-executes the overflowing operation (it was optimised away) is caught only
-through the other side's run (``compare_runs`` refuses when either side is
-affected).  Signedness is not known from the binary: every overflow of the
-signed reading is recorded, and only uses that depend on more than the low
-bytes refuse; an unsigned use clears it.  A left shift of a negative value
+catches is a signed overflow *executed* by this binary at the width of the
+operation; a build that never executes the overflowing operation (it was
+optimised away, or computes a 32-bit ``int`` in a 64-bit register without
+overflowing it) is caught only through the other side's run
+(``compare_runs`` refuses when either side is affected).  Signedness is not
+known from the binary: every overflow of the signed reading of an ``int``
+width or wider is treated as possibly undefined, including unsigned
+arithmetic (hashes) -- a lost witness, never a wrong one.  A source
+subtraction whose only use is its sign or zero test, compiled to a
+flag-setting compare, is indistinguishable from a comparison; the machine's
+flags then are the exact comparison.  A left shift of a negative value
 that does not overflow, pointer-arithmetic overflow beyond the address width
 and a truncating conversion of an out-of-range integer (implementation
 defined in C) are not reported.  Reassociation and other ``-ffast-math``
@@ -118,7 +137,7 @@ from dataclasses import dataclass
 from typing import Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.concrete import ieee
-from scripts.function_tracer_pcode.concrete.executor import HazardKind
+from scripts.function_tracer_pcode.concrete.executor import HazardKind, IntegerOverflow, OverflowDisposition
 from scripts.function_tracer_pcode.concrete.userops import UseropEffect, UseropOutcome, evaluate_userop
 
 CONST_SPACE = "const"
@@ -164,6 +183,27 @@ class WrapFact:
     # (step, operation, left value, right value, size) of the INT_ADD / INT_SUB
     # that produced the value, for pairing with its overflow flag.
     origin: Optional[tuple] = None
+    # index of the overflowing operation in ``ValueMonitor._sites`` while the
+    # value is still the operation's result (moved, not computed with)
+    site: Optional[int] = None
+
+
+@dataclass
+class _Site:
+    address: int
+    operation: str
+    width: int
+    disposition: OverflowDisposition
+    count: int = 1
+    uses: set = None
+
+
+# Operations that move a value without computing with it: an overflowed
+# result keeps its identity through them (the register write of a 32-bit
+# operation is an INT_ZEXT / INT_SEXT on both ISAs).
+MOVES = frozenset({"COPY", "INT_ZEXT", "INT_SEXT"})
+# Condition flags an instruction derives from its own result (AArch64 NG, ZR).
+FLAG_TESTS = frozenset({"INT_SLESS", "INT_EQUAL", "INT_NOTEQUAL"})
 
 
 @dataclass(frozen=True)
@@ -344,9 +384,13 @@ NO_REQUEST = ValueRequest()
 class ValueMonitor:
     """Shadow state of one run.  Driven by ``RunObserver``."""
 
-    def __init__(self, big_endian: bool, processor: str):
+    def __init__(self, big_endian: bool, processor: str, c_int_bytes: int = 0):
         self._big_endian = big_endian
         self._processor = processor
+        self._c_int_bytes = c_int_bytes
+        self._sites: List[_Site] = []
+        self._site_of: Dict[Tuple[int, str], int] = {}
+        self._address = 0
         self._taint: Dict[Tuple[str, int], FrozenSet[HazardKind]] = {}
         self._facts: Dict[Tuple[str, int, int], object] = {}
         self._fact_at: Dict[Tuple[str, int], Tuple[str, int, int]] = {}
@@ -405,7 +449,7 @@ class ValueMonitor:
         if isinstance(fact, WrapFact) and inside and self._low_aligned(vn, key):
             if vn.size < fact.width:
                 return None, NO_TAINT          # a truncation: modular
-            return WrapFact(fact.width, fact.exact), NO_TAINT
+            return WrapFact(fact.width, fact.exact, None, fact.site), NO_TAINT
         if isinstance(fact, FpFact) and fact.certain:
             return None, NO_TAINT
         if isinstance(fact, FlagFact) and not fact.divergent and fact.kind == "overflow":
@@ -438,6 +482,9 @@ class ValueMonitor:
                     if kind is not None and byte not in written:
                         # the rest of a partly overwritten value
                         self._taint[byte] = self._taint.get(byte, NO_TAINT) | {kind}
+                        if isinstance(old_fact, WrapFact) and old_fact.site is not None and old[0] != "unique":
+                            # its remaining bytes stay readable as program state
+                            self._use(old_fact.site, "PARTIAL_OVERWRITE", "")
         extra = self._instruction_taint
         for key, taint in zip(keys, taints):
             taint = taint | extra if extra else taint
@@ -455,6 +502,7 @@ class ValueMonitor:
 
     def begin_instruction(self, step: int, address: int, ops) -> None:
         self._step = step
+        self._address = address
         self._instruction_taint = NO_TAINT
         self._next_instruction_taint = NO_TAINT
         shape = self._shapes.get(address)
@@ -483,6 +531,70 @@ class ValueMonitor:
         for kind in sorted(kinds, key=lambda k: k.value):
             self.hazards.append((kind, detail))
 
+    # ------------------------------------------------------ overflow sites
+
+    def _site(self, mnemonic: str, width: int, disposition: OverflowDisposition) -> int:
+        key = (self._address, mnemonic)
+        index = self._site_of.get(key)
+        if index is None:
+            index = len(self._sites)
+            self._site_of[key] = index
+            self._sites.append(_Site(self._address, mnemonic, width, disposition, 0, set()))
+        self._sites[index].count += 1
+        return index
+
+    def _use(self, index: int, use: str, where: str) -> None:
+        """The result of an overflowing operation was used (``use``: the
+        operation, ``STORE``, ``ADDRESS``): the run may have executed a C
+        signed overflow."""
+        site = self._sites[index]
+        site.uses.add(use)
+        if site.disposition is OverflowDisposition.VALUE_USED:
+            return
+        site.disposition = OverflowDisposition.VALUE_USED
+        self._count("signed_overflow_used")
+        self._hazard({SIGNED_OVERFLOW}, f"overflow of {site.operation} at {site.address:#x} used by {use}{where}")
+
+    def _sites_in(self, vn) -> List[int]:
+        if vn.space == CONST_SPACE or not self._fact_at:
+            return []
+        found = []
+        for key in self._byte_keys(vn):
+            location = self._fact_at.get(key)
+            if location is None:
+                continue
+            fact = self._facts[location]
+            if isinstance(fact, WrapFact) and fact.site is not None and fact.site not in found:
+                found.append(fact.site)
+        return found
+
+    def _consume(self, vn, use: str, where: str) -> None:
+        for index in self._sites_in(vn):
+            self._use(index, use, where)
+
+    def _consume_inputs(self, op, facts, where: str) -> None:
+        """Mark the overflowed results ``op`` uses (moves and the instruction's
+        own condition flags are not uses)."""
+        m = op.mnemonic
+        for k, vn in enumerate(op.inputs):
+            if vn.space == CONST_SPACE:
+                continue
+            fact = facts[k]
+            carried = isinstance(fact, WrapFact) and fact.site is not None
+            if m in MOVES and carried:
+                continue
+            if (m in FLAG_TESTS and k == 0 and carried and fact.origin is not None
+                    and fact.origin[0] == self._step and len(op.inputs) == 2
+                    and op.inputs[1].space == CONST_SPACE and op.inputs[1].offset == 0):
+                continue
+            self._consume(vn, m, where)
+
+    def overflows(self) -> Tuple[IntegerOverflow, ...]:
+        return tuple(
+            IntegerOverflow(s.address, s.operation, s.width, s.disposition, s.count, tuple(sorted(s.uses)))
+            for s in sorted(self._sites, key=lambda s: (s.address, s.operation))
+        )
+
     # ------------------------------------------------------------ operations
 
     def execute(self, index: int, op, values: Optional[Sequence[int]], where: str) -> Optional[UseropOutcome]:
@@ -504,6 +616,8 @@ class ValueMonitor:
             if unresolved:
                 taints[k] = [t | unresolved for t in taints[k]]
         union = frozenset().union(*[frozenset().union(*t) for t in taints]) if taints else NO_TAINT
+        if self._fact_at and m not in ("LOAD", "STORE"):
+            self._consume_inputs(op, facts, where)
 
         # sinks
         if m == "CBRANCH" and len(inputs) == 2:
@@ -630,8 +744,13 @@ class ValueMonitor:
                 exact = self._exact(m, [_signed(v, s) for v, s in zip(values, sizes)], values)
                 if exact is not None and exact != _signed(actual, out.size):
                     self._count("signed_overflow_" + m)
+                    if out.size < self._c_int_bytes:
+                        # int arithmetic converted back: a defined wrap-around
+                        self._site(m, out.size, OverflowDisposition.NARROWER_THAN_INT)
+                        return None, extra
                     origin = (self._step, m, values[0], values[1], sizes[0]) if m in ("INT_ADD", "INT_SUB") else None
-                    return WrapFact(out.size, exact, origin), extra
+                    site = self._site(m, out.size, OverflowDisposition.VALUE_NOT_USED)
+                    return WrapFact(out.size, exact, origin, site), extra
             return None, extra
         # an input carries a fact
         flag = [f for f in facts if isinstance(f, FlagFact)]
@@ -665,10 +784,10 @@ class ValueMonitor:
                 return None, extra
             origin = (self._step, m, values[0], values[1], sizes[0]) if m in ("INT_ADD", "INT_SUB") else None
             return WrapFact(out.size, exact, origin), extra
-        if m in ("INT_ZEXT", "INT_SEXT", "COPY"):
+        if m in MOVES:
             f = facts[0]
             if isinstance(f, WrapFact):
-                return WrapFact(f.width, f.exact), extra
+                return WrapFact(f.width, f.exact, None, f.site), extra
             if isinstance(f, FlagFact):
                 if m == "COPY":
                     return f, extra
@@ -974,6 +1093,7 @@ class ValueMonitor:
     def address(self, op, where: str, actual_address: int) -> None:
         """Check the address operand of a LOAD / STORE."""
         vn = op.inputs[1]
+        self._consume(vn, "ADDRESS", where)
         taint = union_of(self._taints(vn))
         fact, unresolved = self._read_fact(vn)
         self._sink(taint | unresolved, fact, actual_address, vn.size, where, "address")
@@ -986,8 +1106,9 @@ class ValueMonitor:
             taints = [t | unresolved for t in taints]
         self._write(op.output, taints, fact)
 
-    def store(self, op, space: str, address: int, size: int) -> None:
+    def store(self, op, space: str, address: int, size: int, where: str = "") -> None:
         value = op.inputs[2]
+        self._consume(value, "STORE", where)
         fact, unresolved = self._read_fact(value)
         taints = self._taints(value)
         if unresolved:
@@ -996,11 +1117,22 @@ class ValueMonitor:
 
     # --------------------------------------------------------------- return
 
-    def observe(self, offset: int, size: int, space: str = "register") -> Tuple[int, Tuple[HazardKind, ...]]:
-        """(low bytes free of taints and divergent facts, kinds found) of a register."""
+    def observe(self, offset: int, size: int, space: str = "register", where: str = "") -> Tuple[int, Tuple[HazardKind, ...]]:
+        """(low bytes free of taints and divergent facts, kinds found) of a register.
+
+        The unused result of an overflowing operation in the register makes
+        the whole register unreliable (``VALUE_RETURNED``): it is the
+        function's return value when the caller compares this register.
+        """
         vn = _Vn(space, offset, size)
         reliable = size
         kinds = set()
+        for index in self._sites_in(vn):
+            site = self._sites[index]
+            if site.disposition is OverflowDisposition.VALUE_NOT_USED:
+                site.disposition = OverflowDisposition.VALUE_RETURNED
+            kinds.add(SIGNED_OVERFLOW)
+            reliable = 0
         for k, taint in enumerate(self._taints(vn)):
             if taint:
                 kinds |= taint

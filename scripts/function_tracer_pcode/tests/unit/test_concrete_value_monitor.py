@@ -19,6 +19,8 @@ from scripts.function_tracer_pcode.concrete.executor import (
     EntryState,
     ExecutionRequest,
     HazardKind,
+    IntegerOverflow,
+    OverflowDisposition,
     Termination,
 )
 from scripts.function_tracer_pcode.concrete.observation import FpFormat
@@ -28,6 +30,8 @@ from scripts.function_tracer_pcode.concrete.recording import (
     make_trace,
     replay_events,
     replay_trace,
+    result_from_json,
+    result_to_json,
 )
 from scripts.function_tracer_pcode.concrete.run_observer import (
     OpDescriptor,
@@ -71,11 +75,12 @@ NG, ZR, CY, OV = R(0x100, 1), R(0x101, 1), R(0x102, 1), R(0x103, 1)
 V0, A0, MSP = RegisterFact("v0", 0x10, 8), RegisterFact("a0", 0x20, 8), RegisterFact("sp", 0xE8, 8)
 
 
-def _setup(big_endian=False, processor="AARCH64"):
+def _setup(big_endian=False, processor="AARCH64", c_int_bytes=4):
     registers = (V0, A0, MSP) if big_endian else (X0, X1, X2, D0, D1, D2, SPR)
     return RunSetup(
         big_endian=big_endian, memory_space="ram", registers=registers, stack_pointer="sp",
         code_ranges=(CODE,), external_entries=(), writable_image_ranges=(), processor=processor,
+        c_int_bytes=c_int_bytes,
     )
 
 
@@ -91,9 +96,10 @@ def _nan_bits(size):
 class Machine:
     """Executes P-code on concrete values and drives the observer like the executor."""
 
-    def __init__(self, registers=(), observe=("x0",), big_endian=False, processor="AARCH64", fp_override=None):
+    def __init__(self, registers=(), observe=("x0",), big_endian=False, processor="AARCH64", fp_override=None,
+                 c_int_bytes=4):
         self.big_endian = big_endian
-        self.setup = _setup(big_endian, processor)
+        self.setup = _setup(big_endian, processor, c_int_bytes)
         self.request = _request(registers, observe, big_endian)
         self.observer = RecordingObserver(RunObserver(self.setup, self.request))
         self.state = {}
@@ -188,6 +194,7 @@ class Machine:
         self.observer.returned(tuple(values))
         result = self.observer.result()
         assert replay_events(self.setup, self.request, self.observer.events) == result
+        assert result_from_json(result_to_json(result)) == result
         return result
 
 
@@ -206,17 +213,30 @@ W2 = R(0x4010, 4)
 
 # ------------------------------------------------------------ signed overflow
 
-def test_a_wrapped_value_returned_in_its_own_width_is_reliable():
+USED, NOT_USED, RETURNED, NARROW = (
+    OverflowDisposition.VALUE_USED, OverflowDisposition.VALUE_NOT_USED,
+    OverflowDisposition.VALUE_RETURNED, OverflowDisposition.NARROWER_THAN_INT,
+)
+
+
+def _dispositions(result):
+    return [(o.operation, o.disposition) for o in result.integer_overflows]
+
+
+def test_an_overflowed_result_returned_as_is_makes_the_register_unreliable():
     # AArch64 ``add w0, w0, w1``: INT_ADD at 4 bytes, the register write is a
-    # zero extension.  INT_MAX + 1 wraps; returned as an int (w0) every build
-    # agrees modulo 2**32, so the 4 low bytes are reliable -- not the 8.
+    # zero extension.  INT_MAX + 1 wraps.  Every build agrees modulo 2**32, but
+    # the binary cannot show that the addition was not a C signed addition,
+    # so the returned value is no evidence; the run itself is not refused (the
+    # function may return another register).
     m = Machine([("x0", 0x7FFFFFFF), ("x1", 1)])
     m.ins(op("INT_ADD", U(0x10, 4), W0, W1), op("INT_ZEXT", R(0x4000, 8), U(0x10, 4)))
     result = m.ret()
     assert result.integer_ub_operations_tracked and result.fp_operations_tracked
     observed = result.observed("x0")
-    assert observed.value == INT_MIN32 and observed.reliable_low_bytes == 4
+    assert observed.value == INT_MIN32 and observed.reliable_low_bytes == 0
     assert observed.unreliable == ("SIGNED_OVERFLOW",) and result.hazards == ()
+    assert result.integer_overflows == (IntegerOverflow(0x1000, "INT_ADD", 4, RETURNED, 1, ()),)
     # diagnosis only: what the monitor saw
     assert dict(result.monitor_events) == {"signed_overflow_INT_ADD": 1}
 
@@ -229,50 +249,105 @@ def test_a_wrapped_value_that_decides_a_branch_is_a_hazard():
     assert _kinds(m.ret()) == {HazardKind.SIGNED_OVERFLOW}
 
 
-def test_a_comparison_that_comes_out_the_same_for_the_exact_value_is_clean():
+@pytest.mark.parametrize("use", [
+    # a comparison that comes out the same for the exact value
+    lambda v: [op("INT_NOTEQUAL", U(0x20, 1), v, C(5, 4)), op("CBRANCH", None, C(0x2000, 8), U(0x20, 1))],
+    # arithmetic that undoes the overflow modulo 2**32
+    lambda v: [op("INT_SUB", U(0x14, 4), v, W1), op("INT_SEXT", R(0x4000, 8), U(0x14, 4))],
+    # masking to a non-negative value
+    lambda v: [op("INT_AND", U(0x18, 4), v, C(0x7FFFFFFF, 4)), op("INT_ZEXT", R(0x4000, 8), U(0x18, 4))],
+    # a signed division
+    lambda v: [op("INT_SDIV", U(0x18, 4), v, C(1009, 4)), op("INT_ZEXT", R(0x4000, 8), U(0x18, 4))],
+    # a truncation
+    lambda v: [op("SUBPIECE", U(0x18, 1), v, C(0, 4)), op("INT_ZEXT", R(0x4000, 8), U(0x18, 1))],
+], ids=["comparison-agrees", "undone-modularly", "masked", "signed-division", "truncated"])
+def test_any_use_of_an_overflowed_result_is_a_run_hazard(use):
+    # Whether the later computation would agree with an exact one does not
+    # matter: the source may have had a signed overflow, which C leaves
+    # undefined, so the run is no evidence of a difference.
     m = Machine([("x0", 0x7FFFFFFF), ("x1", 1)])
     m.ins(op("INT_ADD", U(0x10, 4), W0, W1))
-    # INT_MIN (wrapped) and 2**31 (exact) are both != 5
-    m.ins(op("INT_NOTEQUAL", U(0x20, 1), U(0x10, 4), C(5, 4)), op("CBRANCH", None, C(0x2000, 8), U(0x20, 1)))
-    assert m.ret().hazards == ()
+    m.ins(*use(U(0x10, 4)))
+    result = m.ret()
+    assert _kinds(result) == {HazardKind.SIGNED_OVERFLOW}
+    assert _dispositions(result) == [("INT_ADD", USED)]
+    assert "overflow of INT_ADD at 0x1000 used by" in result.hazards[0].detail
 
 
-def test_an_unsigned_use_of_a_wrapped_value_is_clean():
-    # Unsigned hashing: ``h * 31 + c`` overflows the signed reading, then
-    # ``h % n`` / ``h < n`` are unsigned operations, which C defines modulo 2**n.
+def test_an_unsigned_use_is_recorded_but_does_not_clear_the_overflow():
+    # ``h * 31 + c`` then ``h % n``: an unsigned hash is defined modulo 2**n,
+    # but compilers also emit unsigned operations for signed values they
+    # assume do not overflow; the use is kept for later stages as a fact.
     m = Machine([("x0", 0x12345678), ("x1", 31)])
     m.ins(op("INT_MULT", U(0x10, 4), W0, W1))
     m.ins(op("INT_REM", U(0x18, 4), U(0x10, 4), C(1009, 4)), op("INT_ZEXT", R(0x4000, 8), U(0x18, 4)))
-    m.ins(op("INT_LESS", U(0x20, 1), U(0x10, 4), C(100, 4)), op("CBRANCH", None, C(0x2000, 8), U(0x20, 1)))
+    m.ins(op("STORE", None, C(0x1B1, 8), C(SP - 16, 8), U(0x10, 4)))
+    result = m.ret()
+    assert _kinds(result) == {HazardKind.SIGNED_OVERFLOW}
+    assert result.integer_overflows == (IntegerOverflow(0x1000, "INT_MULT", 4, USED, 1, ("INT_REM", "STORE")),)
+
+
+def test_a_range_check_through_a_wrapped_difference_is_still_refused():
+    # clang -O3 compiles ``if (x < 5) { if (x > 0) ...`` to ``sub w8, w0, #1;
+    # cmp w8, #3; b.hi`` -- (unsigned)(x - 1) <= 3.  x = INT_MIN wraps without
+    # an overflow in that source, but a source converting an overflowed
+    # ``x - 1`` compiles to the same instructions: refused, the use recorded.
+    m = Machine([("x0", INT_MIN32)])
+    w8 = R(0x4040, 4)
+    m.ins(op("INT_SUB", U(0x10, 4), W0, C(1, 4)), op("INT_ZEXT", R(0x4040, 8), U(0x10, 4)))
+    m.ins(op("INT_LESSEQUAL", CY, C(3, 4), w8), op("INT_SBORROW", OV, w8, C(3, 4)),
+          op("INT_SUB", U(0x30, 4), w8, C(3, 4)), op("INT_SLESS", NG, U(0x30, 4), C(0, 4)),
+          op("INT_EQUAL", ZR, U(0x30, 4), C(0, 4)))
+    m.ins(op("BOOL_NEGATE", U(0x41, 1), ZR), op("BOOL_AND", U(0x42, 1), CY, U(0x41, 1)),
+          op("CBRANCH", None, C(0x2000, 8), U(0x42, 1)))
+    result = m.ret()
+    assert _kinds(result) == {HazardKind.SIGNED_OVERFLOW}
+    assert result.integer_overflows == (
+        IntegerOverflow(0x1000, "INT_SUB", 4, USED, 1, ("INT_LESSEQUAL", "INT_SBORROW", "INT_SUB")),
+    )
+
+
+def test_an_overflow_narrower_than_int_is_a_defined_conversion():
+    # ``(short)(a + b)`` computed in 16 bits: C adds in ``int`` and converts.
+    m = Machine([("x0", 0x7FFF), ("x1", 1)])
+    h0, h1 = R(0x4000, 2), R(0x4008, 2)
+    m.ins(op("INT_ADD", U(0x10, 2), h0, h1))
+    m.ins(op("INT_SLESS", U(0x20, 1), U(0x10, 2), C(0, 2)), op("CBRANCH", None, C(0x2000, 8), U(0x20, 1)),
+          op("INT_SEXT", R(0x4000, 8), U(0x10, 2)))
     result = m.ret()
     assert result.hazards == () and result.observed("x0").reliable_low_bytes == 8
+    assert _dispositions(result) == [("INT_ADD", NARROW)]
 
 
-def test_a_signed_division_of_a_wrapped_value_taints_its_result():
-    m = Machine([("x0", 0x12345678), ("x1", 31)])
-    m.ins(op("INT_MULT", U(0x10, 4), W0, W1))
-    m.ins(op("INT_SDIV", U(0x18, 4), U(0x10, 4), C(1009, 4)), op("INT_ZEXT", R(0x4000, 8), U(0x18, 4)))
+def test_without_the_int_width_every_width_may_be_a_signed_int():
+    m = Machine([("x0", 0x7FFF), ("x1", 1)], c_int_bytes=0)
+    m.ins(op("INT_ADD", U(0x10, 2), R(0x4000, 2), R(0x4008, 2)))
+    m.ins(op("INT_SLESS", U(0x20, 1), U(0x10, 2), C(0, 2)), op("CBRANCH", None, C(0x2000, 8), U(0x20, 1)))
     result = m.ret()
-    assert result.observed("x0").reliable_low_bytes == 0 and result.hazards == ()
+    assert _kinds(result) == {HazardKind.SIGNED_OVERFLOW}
+    assert _dispositions(result) == [("INT_ADD", USED)]
 
 
-def test_masking_a_wrapped_hash_to_a_non_negative_value_clears_it():
-    m = Machine([("x0", 0x12345678), ("x1", 31)])
-    m.ins(op("INT_MULT", U(0x10, 4), W0, W1))
-    m.ins(op("INT_AND", U(0x18, 4), U(0x10, 4), C(0x7FFFFFFF, 4)))
-    m.ins(op("INT_SREM", U(0x1C, 4), U(0x18, 4), C(1009, 4)), op("INT_ZEXT", R(0x4000, 8), U(0x1C, 4)))
+def test_an_overflowed_result_overwritten_unused_is_not_a_hazard():
+    # clang -O0 ``subs w8, w8, w9`` for a comparison, then ``cset w8, lt``.
+    m = Machine([("x0", INT_MIN32), ("x1", 1)])
+    w8 = R(0x4040, 4)
+    m.ins(op("INT_SUB", U(0x30, 4), W0, W1), op("INT_ZEXT", R(0x4040, 8), U(0x30, 4)))
+    m.ins(op("COPY", R(0x4040, 8), C(1, 8)))
+    m.ins(op("INT_ZEXT", R(0x4000, 8), w8))
     result = m.ret()
-    assert result.observed("x0").reliable_low_bytes == 8 and result.hazards == ()
+    assert result.hazards == () and result.observed("x0").reliable_low_bytes == 8
+    assert _dispositions(result) == [("INT_SUB", NOT_USED)]
 
 
-def test_an_overflow_undone_by_modular_arithmetic_is_clean():
+def test_a_stored_overflowed_result_is_used():
+    # ``s = a + b`` at -O0: the assignment stores it.
     m = Machine([("x0", 0x7FFFFFFF), ("x1", 1)])
     m.ins(op("INT_ADD", U(0x10, 4), W0, W1))
-    m.ins(op("INT_SUB", U(0x14, 4), U(0x10, 4), W1))
-    m.ins(op("INT_SLESS", U(0x20, 1), U(0x14, 4), C(0, 4)), op("CBRANCH", None, C(0x2000, 8), U(0x20, 1)))
-    m.ins(op("INT_SEXT", R(0x4000, 8), U(0x14, 4)))
+    m.ins(op("STORE", None, C(0x1B1, 8), C(SP - 16, 8), U(0x10, 4)))
     result = m.ret()
-    assert result.hazards == () and result.observed("x0").reliable_low_bytes == 8
+    assert _kinds(result) == {HazardKind.SIGNED_OVERFLOW}
+    assert "used by STORE at 0x1004" in result.hazards[0].detail
 
 
 def _cmp(a, b):
@@ -294,7 +369,10 @@ def test_the_aarch64_signed_comparison_through_flags_is_exact():
     m.ins(op("INT_NOTEQUAL", U(0x40, 1), NG, OV), op("CBRANCH", None, C(0x2000, 8), U(0x40, 1)))
     m.ins(op("BOOL_NEGATE", U(0x41, 1), ZR), op("INT_EQUAL", U(0x42, 1), NG, OV),
           op("BOOL_AND", U(0x43, 1), U(0x41, 1), U(0x42, 1)), op("CBRANCH", None, C(0x2000, 8), U(0x43, 1)))
-    assert m.ret().hazards == ()
+    result = m.ret()
+    assert result.hazards == ()
+    # the subtraction overflowed; only its own instruction's flags were taken
+    assert _dispositions(result) == [("INT_SUB", NOT_USED)]
 
 
 def test_the_sign_flag_of_an_overflowed_subtraction_alone_is_a_hazard():
@@ -324,15 +402,16 @@ def test_negating_int_min_then_comparing_is_a_hazard():
     assert _kinds(m.ret()) == {HazardKind.SIGNED_OVERFLOW}
 
 
-def test_mips_sign_extended_32_bit_results_are_followed():
+def test_mips_sign_extended_results_keep_their_overflow_through_moves():
     # MIPS64 ``addiu a0, a0, 1``: INT_ADD on the low half (big-endian offset +4),
-    # INT_SEXT into the register; a 64-bit ``slt``/``blez`` then sees the sign.
+    # INT_SEXT into the register; ``move v0, a0`` copies it to the return.
     m = Machine([("a0", 0x7FFFFFFF)], observe=("v0",), big_endian=True, processor="MIPS")
-    a0_lo, v0_lo = R(0x24, 4), R(0x14, 4)
+    a0_lo = R(0x24, 4)
     m.ins(op("INT_ADD", a0_lo, a0_lo, C(1, 4)), op("INT_SEXT", R(0x20, 8), a0_lo))
-    m.ins(op("INT_ADD", v0_lo, a0_lo, C(0, 4)), op("INT_SEXT", R(0x10, 8), v0_lo))
+    m.ins(op("COPY", R(0x10, 8), R(0x20, 8)))
     result = m.ret()
-    assert result.observed("v0").reliable_low_bytes == 4 and result.hazards == ()
+    assert result.observed("v0").reliable_low_bytes == 0 and result.hazards == ()
+    assert _dispositions(result) == [("INT_ADD", RETURNED)]
 
 
 def test_mips_slt_on_a_sign_extended_wrapped_value_is_a_hazard():

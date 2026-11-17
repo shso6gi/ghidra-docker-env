@@ -144,6 +144,8 @@ class RunSetup:
     # Uninitialized blocks the ELF file defines as zero at program start; the
     # executor zero-fills them and they count as writable program data.
     zero_initialized_ranges: Tuple[Tuple[int, int], ...] = ()
+    # ``AbiModel.c_int_bytes``; 0 when unknown (every width may be ``int``).
+    c_int_bytes: int = 0
 
     def register(self, name: str) -> Optional[RegisterFact]:
         for fact in self.registers:
@@ -197,7 +199,7 @@ class RunObserver:
         self._writable_reads: Set[int] = set()
         self._observed: Tuple[Tuple[str, ObservedRegister], ...] = ()
         self._writable = tuple(setup.writable_image_ranges) + tuple(setup.zero_initialized_ranges)
-        self._monitor = ValueMonitor(setup.big_endian, setup.processor)
+        self._monitor = ValueMonitor(setup.big_endian, setup.processor, setup.c_int_bytes)
         self._monitor_step = -1
         self._userop_value: Optional[int] = None
         for name, _ in request.entry_state.registers:
@@ -378,7 +380,7 @@ class RunObserver:
                 if _in_ranges(byte, self._writable):
                     self._written_writable.add(byte)
         self._monitor.address(op, self._where(), address)
-        self._monitor.store(op, space, address, size)
+        self._monitor.store(op, space, address, size, self._where())
         value = op.inputs[2]
         for significance in range(size):
             tag = self._tags.get((value.space, self._byte_address(value.offset, value.size, significance)))
@@ -419,7 +421,7 @@ class RunObserver:
             fact = self._setup.register(name)
             if fact is None or name not in by_name:
                 continue
-            reliable, kinds = self._monitor.observe(fact.offset, fact.size)
+            reliable, kinds = self._monitor.observe(fact.offset, fact.size, where=f" in {name} at return")
             observed.append((name, ObservedRegister(
                 by_name[name], self._defined_low_bytes(fact), self._value_format(fact),
                 reliable, tuple(kind.value for kind in kinds),
@@ -521,5 +523,6 @@ class RunObserver:
             writable_image_reads=_merge([(byte, 1) for byte in self._writable_reads]),
             operation_counts=tuple(sorted(counts.items())),
             monitor_events=tuple(sorted(self._monitor.counters.items())),
+            integer_overflows=self._monitor.overflows(),
             detail=self._detail,
         )

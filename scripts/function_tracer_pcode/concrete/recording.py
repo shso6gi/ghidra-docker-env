@@ -54,6 +54,8 @@ from scripts.function_tracer_pcode.concrete.executor import (
     ExecutionResult,
     Hazard,
     HazardKind,
+    IntegerOverflow,
+    OverflowDisposition,
     Termination,
 )
 from scripts.function_tracer_pcode.concrete.observation import FpFormat, ObservedRegister
@@ -106,6 +108,7 @@ def setup_to_json(setup: RunSetup) -> Dict[str, Any]:
         "write_page_limit": setup.write_page_limit,
         "processor": setup.processor,
         "zero_initialized_ranges": [list(r) for r in setup.zero_initialized_ranges],
+        "c_int_bytes": setup.c_int_bytes,
     }
 
 
@@ -121,6 +124,7 @@ def setup_from_json(raw: Mapping[str, Any]) -> RunSetup:
         write_page_limit=int(raw["write_page_limit"]),
         processor=str(raw.get("processor", "")),
         zero_initialized_ranges=tuple((int(a), int(b)) for a, b in raw.get("zero_initialized_ranges", ())),
+        c_int_bytes=int(raw.get("c_int_bytes", 0)),
     )
 
 
@@ -169,6 +173,10 @@ def result_to_json(result: ExecutionResult) -> Dict[str, Any]:
         "writable_image_reads": [list(r) for r in result.writable_image_reads],
         "operation_counts": [list(c) for c in result.operation_counts],
         "monitor_events": [list(c) for c in result.monitor_events],
+        "integer_overflows": [
+            [o.address, o.operation, o.width, o.disposition.value, o.count, list(o.uses)]
+            for o in result.integer_overflows
+        ],
         "detail": result.detail,
     }
 
@@ -184,6 +192,10 @@ def result_from_json(raw: Mapping[str, Any]) -> ExecutionResult:
         writable_image_reads=tuple((int(a), int(n)) for a, n in raw["writable_image_reads"]),
         operation_counts=tuple((str(m), int(c)) for m, c in raw["operation_counts"]),
         monitor_events=tuple((str(m), int(c)) for m, c in raw.get("monitor_events", ())),
+        integer_overflows=tuple(
+            IntegerOverflow(int(a), str(m), int(w), OverflowDisposition(d), int(c), tuple(str(x) for x in u))
+            for a, m, w, d, c, u in raw.get("integer_overflows", ())
+        ),
         detail=str(raw["detail"]),
     )
 

@@ -643,6 +643,7 @@ class PcodeEmulatorExecutor:
             writable_image_ranges=self._writable,
             processor=str(self._language.getProcessor()),
             zero_initialized_ranges=self._zero.ranges,
+            c_int_bytes=self.abi.c_int_bytes,
             **kwargs,
         )
 

@@ -156,9 +156,11 @@ class HazardKind(str, Enum):
     # A floating-point value converted to an integer it does not fit (NaN,
     # infinity, out of range): undefined in C (6.3.1.4).
     FP_TO_INTEGER_OUT_OF_RANGE = "FP_TO_INTEGER_OUT_OF_RANGE"
-    # A value computed through a signed integer overflow was used where its
-    # wrapped and its mathematically exact value give different results (a
-    # build that assumes the overflow away may compute the other one; #314).
+    # The run used the result of an operation of C ``int`` width or wider
+    # whose signed reading overflowed (``IntegerOverflow.VALUE_USED``): the
+    # binary cannot exclude that the source had a signed overflow, which C
+    # leaves undefined (#314).  Also: a value computed through such an
+    # overflow was used where its wrapped and its exact value differ.
     SIGNED_OVERFLOW = "SIGNED_OVERFLOW"
     # An integer division by zero (which some instructions define and C does
     # not) or of the most negative value by -1.
@@ -173,6 +175,49 @@ class Hazard:
     kind: HazardKind
     # Location of the first occurrence, for diagnosis only.
     detail: str = ""
+
+
+class OverflowDisposition(Enum):
+    """What became of the result of an operation whose signed reading overflowed."""
+
+    # Narrower than the ABI's C ``int``: C computes such values in ``int`` and
+    # converts the result back, so the wrap-around is a defined conversion.
+    NARROWER_THAN_INT = "NARROWER_THAN_INT"
+    # The value was never used: it was overwritten, or only its own
+    # instruction's condition flags were taken from it (a compare).
+    VALUE_NOT_USED = "VALUE_NOT_USED"
+    # The value was otherwise unused and still in an observed register at
+    # return: that register is not evidence (``ObservedRegister.unreliable``),
+    # the run is (the function may return another register).
+    VALUE_RETURNED = "VALUE_RETURNED"
+    # The value was used (an operand, a store, an address, a branch, the
+    # return value): the binary cannot show that the operation was not a C
+    # signed operation, so the run may have executed undefined behaviour.
+    VALUE_USED = "VALUE_USED"
+
+
+@dataclass(frozen=True)
+class IntegerOverflow:
+    """One operation of the run whose signed result did not fit (#314).
+
+    The occurrence, kept apart from what it means for the evidence: a run
+    hazard (``SIGNED_OVERFLOW``) follows from ``VALUE_USED`` only, and whether
+    the observed value would agree with an exact computation is reported on
+    the observed register (``ObservedRegister.reliable_low_bytes``).
+    """
+
+    address: int
+    operation: str
+    width: int
+    disposition: OverflowDisposition
+    # dynamic executions of this operation that overflowed
+    count: int = 1
+    # What used the value: the P-code operations, and ``STORE`` / ``ADDRESS``
+    # / ``PARTIAL_OVERWRITE``.  Recorded for later stages; no use clears the
+    # hazard.  An unsigned comparison alone (``INT_LESSEQUAL``: compilers
+    # compile ``lo <= x && x <= hi`` to ``(unsigned)(x - lo) <= hi - lo``)
+    # is also what a source with a signed overflow compiles to.
+    uses: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -205,6 +250,8 @@ class ExecutionResult:
     # ``fp_rounding_alternatives``, ``fp_nan``, ...): diagnosis and measurement
     # only; nothing reads it to decide.
     monitor_events: Tuple[Tuple[str, int], ...] = ()
+    # Every operation whose signed result overflowed, by address (#314).
+    integer_overflows: Tuple[IntegerOverflow, ...] = ()
     detail: str = ""
 
     def observed(self, register: str) -> Optional[ObservedRegister]:
