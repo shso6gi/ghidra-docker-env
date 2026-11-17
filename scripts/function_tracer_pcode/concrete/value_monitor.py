@@ -875,6 +875,8 @@ class ValueMonitor:
             results = [None if r is None else FpElement(r)]
             if not fused:
                 return results
+            if a.product is not None or b.product is not None:
+                self._count("fp_contraction_site")
             if a.product is not None:
                 pa, pb, negated = a.product
                 f = ieee.fma(pa, pb, b.bits, fmt, negate_product=negated, negate_c=subtract)

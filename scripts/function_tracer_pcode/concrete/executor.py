@@ -201,6 +201,10 @@ class ExecutionResult:
     # How many P-code operations of each kind the run executed (diagnosis and
     # the measurements of the monitors).
     operation_counts: Tuple[Tuple[str, int], ...] = ()
+    # What the monitors saw, by event (``signed_overflow_INT_ADD``,
+    # ``fp_rounding_alternatives``, ``fp_nan``, ...): diagnosis and measurement
+    # only; nothing reads it to decide.
+    monitor_events: Tuple[Tuple[str, int], ...] = ()
     detail: str = ""
 
     def observed(self, register: str) -> Optional[ObservedRegister]:

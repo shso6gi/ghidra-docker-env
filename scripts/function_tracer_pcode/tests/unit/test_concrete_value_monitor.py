@@ -217,6 +217,8 @@ def test_a_wrapped_value_returned_in_its_own_width_is_reliable():
     observed = result.observed("x0")
     assert observed.value == INT_MIN32 and observed.reliable_low_bytes == 4
     assert observed.unreliable == ("SIGNED_OVERFLOW",) and result.hazards == ()
+    # diagnosis only: what the monitor saw
+    assert dict(result.monitor_events) == {"signed_overflow_INT_ADD": 1}
 
 
 def test_a_wrapped_value_that_decides_a_branch_is_a_hazard():

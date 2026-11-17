@@ -520,5 +520,6 @@ class RunObserver:
             integer_ub_operations_tracked=self._monitor.integer_complete,
             writable_image_reads=_merge([(byte, 1) for byte in self._writable_reads]),
             operation_counts=tuple(sorted(counts.items())),
+            monitor_events=tuple(sorted(self._monitor.counters.items())),
             detail=self._detail,
         )

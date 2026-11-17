@@ -168,6 +168,7 @@ def result_to_json(result: ExecutionResult) -> Dict[str, Any]:
         "integer_ub_operations_tracked": result.integer_ub_operations_tracked,
         "writable_image_reads": [list(r) for r in result.writable_image_reads],
         "operation_counts": [list(c) for c in result.operation_counts],
+        "monitor_events": [list(c) for c in result.monitor_events],
         "detail": result.detail,
     }
 
@@ -182,6 +183,7 @@ def result_from_json(raw: Mapping[str, Any]) -> ExecutionResult:
         integer_ub_operations_tracked=bool(raw["integer_ub_operations_tracked"]),
         writable_image_reads=tuple((int(a), int(n)) for a, n in raw["writable_image_reads"]),
         operation_counts=tuple((str(m), int(c)) for m, c in raw["operation_counts"]),
+        monitor_events=tuple((str(m), int(c)) for m, c in raw.get("monitor_events", ())),
         detail=str(raw["detail"]),
     )
 
