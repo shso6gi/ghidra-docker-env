@@ -50,7 +50,11 @@ as well.  The executor's monitors (``concrete.value_monitor``) follow it, and
 the same for undefined integer operations: a run reports, per observed
 register, how many low-order bytes are free of such doubt
 (``ObservedRegister.reliable_low_bytes``), and only those are compared; a
-doubt that reached the run's control flow is a hazard of the whole run.
+doubt that reached the run's control flow is a hazard of the whole run.  A
+value whose only doubt is the build's rounding choice carries every value a
+conforming build may hold (``ObservedRegister.rounding_values``); it differs
+from the other side's value only when the two sets of possible values are
+disjoint and hold no NaN -- exact sets, no tolerance.
 """
 
 from __future__ import annotations
@@ -190,9 +194,25 @@ class ObservedRegister:
     # Why the bytes above ``reliable_low_bytes`` are in doubt (``HazardKind``
     # values), for diagnosis.
     unreliable: Tuple[str, ...] = ()
+    # When the only doubt is the build's rounding choice
+    # (``FP_ROUNDING_SENSITIVE``): every value a conforming build may hold in
+    # the low ``rounding_bytes`` bytes, the machine's among them; else empty.
+    rounding_values: Tuple[int, ...] = ()
+    rounding_bytes: int = 0
 
     def reliable_for(self, byte_count: int) -> bool:
         return self.reliable_low_bytes is not None and self.reliable_low_bytes >= byte_count
+
+    def possible_values(self, byte_count: int) -> Optional[Tuple[int, ...]]:
+        """The values the low ``byte_count`` bytes may have in a conforming
+        build of the same source, or ``None`` when that is not known."""
+        if self.reliable_for(byte_count):
+            return (_low(self.value, byte_count),)
+        if (self.rounding_bytes == byte_count and self.rounding_values
+                and self.unreliable == ("FP_ROUNDING_SENSITIVE",)
+                and _low(self.value, byte_count) in self.rounding_values):
+            return self.rounding_values
+        return None
 
 
 def _low(value: int, byte_count: int) -> int:
@@ -263,6 +283,16 @@ def compare_return_values(
             return ObservationRefusal.NAN_OBSERVED
         compare_bytes = _FORMAT_BYTES[fmt]
         if not all(value.reliable_for(compare_bytes) for value in observed):
+            # A rounding-sensitive value is compared by its whole set of
+            # possible values: different only if no value of one side is a
+            # value of the other (exact sets, no tolerance).
+            possible = [value.possible_values(compare_bytes) for value in observed]
+            if any(p is None for p in possible):
+                return ObservationRefusal.VALUE_NOT_RELIABLE
+            if any(_is_nan(bits, fmt) for p in possible for bits in p):
+                return ObservationRefusal.VALUE_NOT_RELIABLE
+            if set(possible[0]).isdisjoint(possible[1]):
+                return ObservationRelation.DIFFERENT
             return ObservationRefusal.VALUE_NOT_RELIABLE
     if _low(left.value, compare_bytes) != _low(right.value, compare_bytes):
         return ObservationRelation.DIFFERENT

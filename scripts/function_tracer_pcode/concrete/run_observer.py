@@ -422,9 +422,10 @@ class RunObserver:
             if fact is None or name not in by_name:
                 continue
             reliable, kinds = self._monitor.observe(fact.offset, fact.size, where=f" in {name} at return")
+            rounding_bytes, rounding = self._monitor.rounding_values(fact.offset, fact.size)
             observed.append((name, ObservedRegister(
                 by_name[name], self._defined_low_bytes(fact), self._value_format(fact),
-                reliable, tuple(kind.value for kind in kinds),
+                reliable, tuple(kind.value for kind in kinds), rounding, rounding_bytes,
             )))
         self._observed = tuple(observed)
 

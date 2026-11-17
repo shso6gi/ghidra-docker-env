@@ -1156,6 +1156,27 @@ class ValueMonitor:
             reliable = min(reliable, limit)
         return reliable, tuple(sorted(kinds, key=lambda x: x.value))
 
+    def rounding_values(self, offset: int, size: int, space: str = "register") -> Tuple[int, Tuple[int, ...]]:
+        """(bytes, values) when the only doubt on the low bytes of a register is
+        the build's rounding choice: the floating-point value starting at its
+        lowest byte has several possible values (``FpFact``) and nothing else
+        is in doubt below its size.  ``(0, ())`` otherwise."""
+        location = self._fact_at.get(self._byte(space, offset, size, 0)) if self._fact_at else None
+        if location is None:
+            return 0, ()
+        fact = self._facts[location]
+        if not isinstance(fact, FpFact) or fact.certain or fact.size > size:
+            return 0, ()
+        vn = _Vn(space, offset, size)
+        if not self._low_aligned(vn, location) or location[2] != fact.size:
+            return 0, ()
+        taints = self._taints(vn)
+        if any(taints[k] for k in range(fact.size)):
+            return 0, ()
+        if any(self._fact_at.get(self._byte(space, offset, size, k)) != location for k in range(fact.size)):
+            return 0, ()
+        return fact.size, tuple(sorted({e.bits for e in fact.elements}))
+
 
 class _NotModelled(Exception):
     """An operation of a format or kind the floating-point monitor does not model."""

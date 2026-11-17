@@ -700,3 +700,31 @@ def test_only_the_reliable_low_bytes_of_a_return_value_are_compared():
     refused = compare_runs(fp_plan, fp(0x40036AA32A3732D7, 0), fp(0x40036AA32A3732D8, 8))
     assert refused.observation_refusal is ObservationRefusal.VALUE_NOT_RELIABLE
     assert isinstance(compare_runs(fp_plan, fp(0x40036AA32A3732D7, 8), fp(0x40036AA32A3732D8, 8)), ConcreteDifference)
+
+
+def test_rounding_sensitive_values_are_compared_by_their_possible_values_only():
+    location = return_location(MIPS, _ret(MIPS_F0))
+    plan = plan_return_observation(location, location)
+    one, two, nan = 0x3FF0000000000000, 0x4000000000000000, 0x7FF8000000000000
+
+    def fp(bits, values=(), unreliable=("FP_ROUNDING_SENSITIVE",), size=8):
+        observed = ObservedRegister(bits, 8, B64, 0 if values or unreliable else 8, unreliable, values, size)
+        return ExecutionResult(
+            Termination.RETURNED, 1, (("f0", observed),),
+            fp_operations_tracked=True, integer_ub_operations_tracked=True,
+        )
+
+    exact_two = fp(two, unreliable=())
+    # disjoint sets: a difference whichever value each build holds
+    assert isinstance(compare_runs(plan, fp(one, (one, one + 1)), exact_two), ConcreteDifference)
+    # the sets meet: no evidence
+    met = compare_runs(plan, fp(one, (one, two)), exact_two)
+    assert met.observation_refusal is ObservationRefusal.VALUE_NOT_RELIABLE
+    # fail-closed: no set, a set without the machine's value, a wrong size,
+    # another doubt besides rounding, or a NaN among the possible values
+    for refused in (
+        fp(one), fp(one, (one + 1, one + 2)), fp(one, (one, one + 1), size=4),
+        fp(one, (one, one + 1), ("FP_NAN_OPERAND", "FP_ROUNDING_SENSITIVE")), fp(one, (one, nan)),
+    ):
+        result = compare_runs(plan, refused, exact_two)
+        assert result.observation_refusal is ObservationRefusal.VALUE_NOT_RELIABLE

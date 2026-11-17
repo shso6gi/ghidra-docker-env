@@ -561,6 +561,42 @@ def test_a_fused_multiply_add_with_an_inexact_product_is_not_reliable():
     assert observed.value_format is B64 and observed.reliable_low_bytes == 0
     assert observed.unreliable == ("FP_ROUNDING_SENSITIVE",)
     assert result.fp_operations_tracked and result.hazards == ()
+    # both possible values, the machine's (unfused, 0.0) among them
+    fused = ieee.fma(_double(0.1), _double(10.0), _double(-1.0), ieee.FORMAT_OF_SIZE[8])
+    assert observed.rounding_bytes == 8 and observed.rounding_values == tuple(sorted({0, fused}))
+
+
+def _rounding_sensitive_and(other, value):
+    """z0 of an fmadd-shaped 0.1 * 10 + c, and of ``other`` (a build of another
+    source) returning ``value`` exactly."""
+    m = _fp_machine(0.1, 10.0, -1.0)
+    m.ins(*_fmadd(D0V, D0V, D1V, D2V))
+    sensitive = m.ret().observed("z0")
+    m = _fp_machine(value, 0.0, 0.0)
+    m.ins(op("FLOAT_ADD", D0V, D0V, D1V))
+    return sensitive, m.ret().observed("z0")
+
+
+def test_a_rounding_sensitive_value_differs_only_from_values_none_of_its_roundings_has():
+    from scripts.function_tracer_pcode.concrete.abi import ArgClass
+    from scripts.function_tracer_pcode.concrete.observation import (
+        ObservationRefusal, ObservationRelation, ReturnLocation, compare_return_values, plan_return_observation,
+    )
+    location = ReturnLocation(ArgClass.FP, "z0", 32, 8)
+    plan = plan_return_observation(location, location)
+    # a build of another source returning 1.0: no rounding of 0.1 * 10 - 1 is 1.0
+    sensitive, other = _rounding_sensitive_and("other", 1.0)
+    assert compare_return_values(plan, sensitive, other) is ObservationRelation.DIFFERENT
+    assert compare_return_values(plan, other, sensitive) is ObservationRelation.DIFFERENT
+    # a build of the same source that fused: 5.55e-17 is one of the possible values
+    fused = ieee.fma(_double(0.1), _double(10.0), _double(-1.0), ieee.FORMAT_OF_SIZE[8])
+    m = _fp_machine(0.0, 0.0, 0.0)
+    m.write(D0V, fused)
+    m.ins(op("FLOAT_ADD", D0V, D0V, D1V))
+    same_source = m.ret().observed("z0")
+    assert compare_return_values(plan, sensitive, same_source) is ObservationRefusal.VALUE_NOT_RELIABLE
+    # and two rounding-sensitive values whose sets meet
+    assert compare_return_values(plan, sensitive, sensitive) is ObservationRefusal.VALUE_NOT_RELIABLE
 
 
 def test_an_exact_product_fuses_to_the_same_value():

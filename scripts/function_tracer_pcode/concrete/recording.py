@@ -164,7 +164,7 @@ def result_to_json(result: ExecutionResult) -> Dict[str, Any]:
         "steps": result.steps,
         "observed_registers": [
             [name, o.value, o.defined_low_bytes, None if o.value_format is None else o.value_format.value,
-             o.reliable_low_bytes, list(o.unreliable)]
+             o.reliable_low_bytes, list(o.unreliable), list(o.rounding_values), o.rounding_bytes]
             for name, o in result.observed_registers
         ],
         "hazards": [[h.kind.value, h.detail] for h in result.hazards],
@@ -204,9 +204,11 @@ def _observed_from_json(entry) -> Tuple[str, ObservedRegister]:
     name, value, defined, fmt = entry[:4]
     reliable = entry[4] if len(entry) > 4 else None
     unreliable = tuple(str(k) for k in entry[5]) if len(entry) > 5 else ()
+    rounding = tuple(int(v) for v in entry[6]) if len(entry) > 6 else ()
+    rounding_bytes = int(entry[7]) if len(entry) > 7 else 0
     return str(name), ObservedRegister(
         int(value), int(defined), None if fmt is None else FpFormat(fmt),
-        None if reliable is None else int(reliable), unreliable,
+        None if reliable is None else int(reliable), unreliable, rounding, rounding_bytes,
     )
 
 
