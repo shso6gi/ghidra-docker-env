@@ -15,9 +15,10 @@ compiler specification (``concrete.abi_conformance``); a program without a
 model or with any disagreement is refused, and so is a function marked with
 a calling convention other than the default.
 
-Isolation.  ``execute`` never raises: every exception of the emulator or of
-the driver becomes a result (``FAULT`` for the machine semantics,
-``EXECUTOR_ERROR`` otherwise).  A run is bounded by the request's instruction
+Isolation.  Every Java exception of the emulator becomes a result (``FAULT``
+for the machine semantics, ``EXECUTOR_ERROR`` otherwise).  An error of the
+executor's own Python code is not swallowed: it is recorded as an
+``EXECUTOR_ERROR`` stop and then propagates, as a bug should.  A run is bounded by the request's instruction
 budget, the executor's wall-clock budget and the observer's budget for
 written memory.  A failure of the process itself (the JVM) is contained by
 ``ghidra.concrete_worker``, which runs executors in child processes.
@@ -25,6 +26,7 @@ written memory.  A failure of the process itself (the JVM) is contained by
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -259,34 +261,39 @@ def _make_callbacks(executor: "PcodeEmulatorExecutor"):
         def beforeDecodeInstruction(self, thread, address, context):
             self.decoding = True
 
-        def _fail(self, error) -> None:
-            # An error of the executor's own code inside a callback: stop the run
-            # as an executor error before the emulator can wrap it as a fault.
-            if self.observer.stopped is None:
-                self.observer.stopped_by_executor(
-                    Termination.EXECUTOR_ERROR.value,
-                    f"callback {type(error).__name__}: {str(error)[:300]}",
-                )
-            raise _StopRun()
+        def _guarded(self, function, *args):
+            # An error of the executor's own code inside a callback is recorded as
+            # an executor error before the emulator can wrap it as a machine fault;
+            # the exception itself keeps propagating (nothing is swallowed).
+            finished = False
+            try:
+                value = function(*args)
+                finished = True
+                return value
+            finally:
+                if not finished and self.observer.stopped is None:
+                    error = sys.exc_info()[1]
+                    self.observer.stopped_by_executor(
+                        Termination.EXECUTOR_ERROR.value,
+                        f"callback {type(error).__name__}: {str(error)[:300]}",
+                    )
 
         @JOverride
         def beforeExecuteInstruction(self, thread, instruction, program):
             self.decoding = False
-            try:
-                address = int(instruction.getAddress().getOffset())
-                self.address = address
-                cached = self.opcode_cache.get(address)
-                if cached is None:
-                    code = list(program.getCode())
-                    cached = tuple(int(op.getOpcode()) for op in code)
-                    self.opcode_cache[address] = cached
-                    self.reported.add(address)
-                    self.observer.decoded(address, tuple(_op_descriptor(op) for op in code))
-                self.opcodes = cached
-            except _StopRun:
-                raise
-            except Exception as error:
-                self._fail(error)
+            self._guarded(self._before_execute_instruction, instruction, program)
+
+        def _before_execute_instruction(self, instruction, program):
+            address = int(instruction.getAddress().getOffset())
+            self.address = address
+            cached = self.opcode_cache.get(address)
+            if cached is None:
+                code = list(program.getCode())
+                cached = tuple(int(op.getOpcode()) for op in code)
+                self.opcode_cache[address] = cached
+                self.reported.add(address)
+                self.observer.decoded(address, tuple(_op_descriptor(op) for op in code))
+            self.opcodes = cached
 
         @JOverride
         def afterExecuteInstruction(self, thread, instruction):
@@ -294,12 +301,7 @@ def _make_callbacks(executor: "PcodeEmulatorExecutor"):
 
         @JOverride
         def beforeStepOp(self, thread, op, frame):
-            try:
-                self._before_step_op(thread, op, frame)
-            except _StopRun:
-                raise
-            except Exception as error:
-                self._fail(error)
+            self._guarded(self._before_step_op, thread, op, frame)
 
         def _before_step_op(self, thread, op, frame):
             # The frame has already advanced past ``op`` when the callback runs.
@@ -338,10 +340,9 @@ def _make_callbacks(executor: "PcodeEmulatorExecutor"):
 
         @JOverride
         def beforeLoad(self, thread, op, space, offset, size):
-            try:
-                stop = self.observer.load(str(space.getName()), self._address_of(offset), int(size))
-            except Exception as error:
-                self._fail(error)
+            stop = self._guarded(
+                self.observer.load, str(space.getName()), self._address_of(offset), int(size)
+            )
             if stop is not None:
                 raise _StopRun()
 
@@ -351,10 +352,9 @@ def _make_callbacks(executor: "PcodeEmulatorExecutor"):
 
         @JOverride
         def beforeStore(self, thread, op, space, offset, size, value):
-            try:
-                stop = self.observer.store(str(space.getName()), self._address_of(offset), int(size))
-            except Exception as error:
-                self._fail(error)
+            stop = self._guarded(
+                self.observer.store, str(space.getName()), self._address_of(offset), int(size)
+            )
             if stop is not None:
                 raise _StopRun()
 
@@ -380,10 +380,7 @@ def _make_callbacks(executor: "PcodeEmulatorExecutor"):
 
         @JOverride
         def readUninitialized(self, *args):
-            try:
-                return self._read_uninitialized(*args)
-            except Exception as error:
-                self._fail(error)
+            return self._guarded(self._read_uninitialized, *args)
 
         def _read_uninitialized(self, *args):
             if len(args) == 5:
@@ -544,7 +541,7 @@ class PcodeEmulatorExecutor:
         self.last_trace = None
         try:
             setup = self._setup(request)
-        except Exception as error:  # the request names something this program lacks
+        except ValueError as error:  # the request names something this program lacks
             return ExecutionResult(Termination.EXECUTOR_ERROR, 0, detail=f"setup: {error}")
         refusal = self.function_abi(request.entry_address)
         if isinstance(refusal, ExecutorRefusal):
@@ -553,15 +550,7 @@ class PcodeEmulatorExecutor:
             )
         inner = RunObserver(setup, request)
         observer = RecordingObserver(inner) if self._record else inner
-        try:
-            self._run(setup, request, observer)
-        except BaseException as error:  # never let a run escape as an exception
-            if isinstance(error, (KeyboardInterrupt, SystemExit)):
-                raise
-            if observer.stopped is None:
-                observer.stopped_by_executor(
-                    Termination.EXECUTOR_ERROR.value, f"{type(error).__name__}: {str(error)[:300]}"
-                )
+        self._run(setup, request, observer)
         result = observer.result()
         if self._record:
             self.last_trace = make_trace(
@@ -572,12 +561,16 @@ class PcodeEmulatorExecutor:
 
     @staticmethod
     def _ghidra_version() -> str:
+        import jpype
+
         try:
             return str(_jclass("ghidra.framework.Application").getApplicationVersion())
-        except Exception:
+        except jpype.JException:
             return "unknown"
 
     def _run(self, setup: RunSetup, request: ExecutionRequest, observer) -> None:
+        import jpype
+
         emulator_class = _jclass("ghidra.pcode.emu.PcodeEmulator")
         reason = _jclass("ghidra.pcode.exec.PcodeExecutorStatePiece$Reason")
         callbacks = _make_callbacks(self)
@@ -613,12 +606,11 @@ class PcodeEmulatorExecutor:
                 break
             try:
                 thread.stepInstruction()
-            except BaseException as error:
-                if isinstance(error, (KeyboardInterrupt, SystemExit)):
-                    raise
-                if observer.stopped is not None:
-                    break
-                observer.stopped_by_executor(*self._classify(error))
+            except (jpype.JException, _StopRun) as error:
+                # A stop the observer asked for, or a Java exception of the emulator
+                # (wrapping the stop, or the machine semantics stopping).
+                if observer.stopped is None:
+                    observer.stopped_by_executor(*self._classify(error))
                 break
             if observer.stopped is not None:
                 break
@@ -637,11 +629,8 @@ class PcodeEmulatorExecutor:
 
     @staticmethod
     def _classify(error) -> Tuple[str, str]:
-        java_name = ""
-        try:
-            java_name = str(error.getClass().getName())
-        except Exception:
-            pass
+        get_class = getattr(error, "getClass", None)
+        java_name = str(get_class().getName()) if callable(get_class) else ""
         detail = f"{java_name or type(error).__name__}: {str(error)[:300]}"
         if any(java_name.startswith(prefix) for prefix in _FAULT_EXCEPTION_PREFIXES):
             return Termination.FAULT.value, detail
@@ -657,9 +646,11 @@ def open_executor(
     must agree with the program's compiler specification in every fact both
     state (``concrete.abi_conformance``).
     """
+    import jpype
+
     try:
         facts = compiler_spec_facts(program)
-    except Exception as error:  # a specification without the facts the check needs
+    except jpype.JException as error:  # a specification without the facts the check needs
         return ExecutorRefusal(
             ExecutorRefusalReason.COMPILER_SPEC_FACTS_UNAVAILABLE, f"{type(error).__name__}: {error}"
         )
