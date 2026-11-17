@@ -213,9 +213,8 @@ W2 = R(0x4010, 4)
 
 # ------------------------------------------------------------ signed overflow
 
-USED, NOT_USED, RETURNED, NARROW = (
-    OverflowDisposition.VALUE_USED, OverflowDisposition.VALUE_NOT_USED,
-    OverflowDisposition.VALUE_RETURNED, OverflowDisposition.NARROWER_THAN_INT,
+USED, NOT_USED, RETURNED = (
+    OverflowDisposition.VALUE_USED, OverflowDisposition.VALUE_NOT_USED, OverflowDisposition.VALUE_RETURNED,
 )
 
 
@@ -307,25 +306,51 @@ def test_a_range_check_through_a_wrapped_difference_is_still_refused():
     )
 
 
-def test_an_overflow_narrower_than_int_is_a_defined_conversion():
-    # ``(short)(a + b)`` computed in 16 bits: C adds in ``int`` and converts.
-    m = Machine([("x0", 0x7FFF), ("x1", 1)])
+def test_a_narrow_operation_that_stands_for_an_int_overflow_is_a_hazard():
+    # ``unsigned short f(unsigned short a, unsigned short b) { return a * b; }``:
+    # C multiplies in ``int``; 0xFFFF * 0xFFFF = 4294836225 overflows ``int``
+    # (undefined).  A build that needs only the low 16 bits may multiply at
+    # 16 bits (a vectorised lane): that operation's wrap is the only trace of
+    # the ``int`` overflow, so the width of the operation clears nothing.
+    m = Machine([("x0", 0xFFFF), ("x1", 0xFFFF)])
     h0, h1 = R(0x4000, 2), R(0x4008, 2)
-    m.ins(op("INT_ADD", U(0x10, 2), h0, h1))
-    m.ins(op("INT_SLESS", U(0x20, 1), U(0x10, 2), C(0, 2)), op("CBRANCH", None, C(0x2000, 8), U(0x20, 1)),
-          op("INT_SEXT", R(0x4000, 8), U(0x10, 2)))
-    result = m.ret()
-    assert result.hazards == () and result.observed("x0").reliable_low_bytes == 8
-    assert _dispositions(result) == [("INT_ADD", NARROW)]
-
-
-def test_without_the_int_width_every_width_may_be_a_signed_int():
-    m = Machine([("x0", 0x7FFF), ("x1", 1)], c_int_bytes=0)
-    m.ins(op("INT_ADD", U(0x10, 2), R(0x4000, 2), R(0x4008, 2)))
-    m.ins(op("INT_SLESS", U(0x20, 1), U(0x10, 2), C(0, 2)), op("CBRANCH", None, C(0x2000, 8), U(0x20, 1)))
+    m.ins(op("INT_MULT", U(0x10, 2), h0, h1))
+    m.ins(op("STORE", None, C(0x1B1, 8), C(SP - 16, 8), U(0x10, 2)))
     result = m.ret()
     assert _kinds(result) == {HazardKind.SIGNED_OVERFLOW}
-    assert _dispositions(result) == [("INT_ADD", USED)]
+    assert _dispositions(result) == [("INT_MULT", USED)]
+
+
+def test_a_narrow_overflowed_result_returned_makes_the_register_unreliable():
+    # the same product returned as is (zero-extended into w0)
+    m = Machine([("x0", 0xFFFF), ("x1", 0xFFFF)])
+    m.ins(op("INT_MULT", U(0x10, 2), R(0x4000, 2), R(0x4008, 2)), op("INT_ZEXT", R(0x4000, 8), U(0x10, 2)))
+    result = m.ret()
+    assert result.hazards == () and result.observed("x0").reliable_low_bytes == 0
+    assert _dispositions(result) == [("INT_MULT", RETURNED)]
+
+
+def test_a_narrow_operation_that_wraps_under_neither_reading_is_clean():
+    # 0x8000 + 0 at 16 bits: -32768 signed, 32768 unsigned -- no wrap either way
+    m = Machine([("x0", 0x8000), ("x1", 0)])
+    m.ins(op("INT_ADD", U(0x10, 2), R(0x4000, 2), R(0x4008, 2)))
+    m.ins(op("STORE", None, C(0x1B1, 8), C(SP - 16, 8), U(0x10, 2)))
+    result = m.ret()
+    assert result.hazards == () and result.integer_overflows == ()
+
+
+def test_the_unsigned_reading_applies_below_int_width_only():
+    # 32-bit 0xFFFFFFFF * 0xFFFFFFFF: -1 * -1 in the signed reading, the
+    # unsigned product wraps -- defined for ``unsigned int`` (no promotion)
+    m = Machine([("x0", 0xFFFFFFFF), ("x1", 0xFFFFFFFF)])
+    m.ins(op("INT_MULT", U(0x10, 4), W0, W1))
+    m.ins(op("STORE", None, C(0x1B1, 8), C(SP - 16, 8), U(0x10, 4)))
+    assert m.ret().integer_overflows == ()
+    # without the ABI's int width every width is checked both ways
+    m = Machine([("x0", 0xFFFFFFFF), ("x1", 0xFFFFFFFF)], c_int_bytes=0)
+    m.ins(op("INT_MULT", U(0x10, 4), W0, W1))
+    m.ins(op("STORE", None, C(0x1B1, 8), C(SP - 16, 8), U(0x10, 4)))
+    assert _kinds(m.ret()) == {HazardKind.SIGNED_OVERFLOW}
 
 
 def test_an_overflowed_result_overwritten_unused_is_not_a_hazard():

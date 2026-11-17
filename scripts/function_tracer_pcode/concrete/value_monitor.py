@@ -46,9 +46,15 @@ compute different functions, so:
 * an ``INT_ADD``/``SUB``/``MULT``/``2COMP``/``LEFT`` whose signed result does
   not fit is an *overflow site* (``IntegerOverflow``), its result carries a
   ``WrapFact``;
-* a site narrower than the ABI's C ``int`` is a defined conversion: C
-  computes ``char``/``short`` arithmetic in ``int`` and converts back
-  (``NARROWER_THAN_INT``, no fact);
+* an operation narrower than the ABI's C ``int`` may compute the low bits
+  of ``int`` arithmetic on promoted operands of either signedness
+  (``unsigned short`` times ``unsigned short`` overflows ``int``; a
+  vectorised 16-bit lane), and its own wrap may be the only trace of that
+  overflow: it is a site when it wraps under the signed *or* the unsigned
+  reading of its operands (0xFFFF * 0xFFFF does not overflow as -1 * -1).
+  Its true ``int`` value is then unknown, so any use is refused like an
+  ``int`` overflow -- conservative: ``(unsigned short)(a + b)`` that wraps
+  at 16 bits is refused although ``a + b`` fits ``int``;
 * moves (``COPY``, ``INT_ZEXT``, ``INT_SEXT`` -- the register write of a
   32-bit operation on both ISAs) keep the result's identity, and the
   condition flags its own instruction takes from it (AArch64 ``NG``, ``ZR``
@@ -119,8 +125,8 @@ operation; a build that never executes the overflowing operation (it was
 optimised away, or computes a 32-bit ``int`` in a 64-bit register without
 overflowing it) is caught only through the other side's run
 (``compare_runs`` refuses when either side is affected).  Signedness is not
-known from the binary: every overflow of the signed reading of an ``int``
-width or wider is treated as possibly undefined, including unsigned
+known from the binary: every overflow of the signed reading (and, below
+``int`` width, of the unsigned reading) is treated as possibly undefined, including unsigned
 arithmetic (hashes) -- a lost witness, never a wrong one.  A source
 subtraction whose only use is its sign or zero test, compiled to a
 flag-setting compare, is indistinguishable from a comparison; the machine's
@@ -387,7 +393,8 @@ class ValueMonitor:
     def __init__(self, big_endian: bool, processor: str, c_int_bytes: int = 0):
         self._big_endian = big_endian
         self._processor = processor
-        self._c_int_bytes = c_int_bytes
+        # operations narrower than this are checked under both readings
+        self._narrow_below = c_int_bytes if c_int_bytes > 0 else 1 << 30
         self._sites: List[_Site] = []
         self._site_of: Dict[Tuple[int, str], int] = {}
         self._address = 0
@@ -742,12 +749,13 @@ class ValueMonitor:
         if not has_fact:
             if m in WRAPPING and actual is not None:
                 exact = self._exact(m, [_signed(v, s) for v, s in zip(values, sizes)], values)
+                if (exact is None or exact == _signed(actual, out.size)) and out.size < self._narrow_below:
+                    # promoted operands may be unsigned: the zero-extended reading
+                    unsigned = self._exact(m, [_mask(v, s) for v, s in zip(values, sizes)], values)
+                    if unsigned is not None and unsigned != _mask(actual, out.size):
+                        exact = unsigned
                 if exact is not None and exact != _signed(actual, out.size):
                     self._count("signed_overflow_" + m)
-                    if out.size < self._c_int_bytes:
-                        # int arithmetic converted back: a defined wrap-around
-                        self._site(m, out.size, OverflowDisposition.NARROWER_THAN_INT)
-                        return None, extra
                     origin = (self._step, m, values[0], values[1], sizes[0]) if m in ("INT_ADD", "INT_SUB") else None
                     site = self._site(m, out.size, OverflowDisposition.VALUE_NOT_USED)
                     return WrapFact(out.size, exact, origin, site), extra

@@ -117,9 +117,10 @@ class AbiModel:
     callee_saved_registers: Tuple[str, ...]
     # Control registers the ABI defines at entry, with their entry value.
     control_register_defaults: Tuple[Tuple[str, int], ...]
-    # Bytes of the C ``int`` type of the ABI's data model.  Arithmetic on
-    # narrower values is ``int`` arithmetic converted back (C11 6.3.1.1), so
-    # their wrap-around is never a signed overflow.
+    # Bytes of the C ``int`` type of the ABI's data model.  Operands narrower
+    # than ``int`` are promoted to ``int`` (C11 6.3.1.1), signed or unsigned,
+    # so an operation narrower than ``int`` may stand for ``int`` arithmetic
+    # on either extension of its operands.
     c_int_bytes: int = 0
 
     def argument_register(self, slot: ArgumentSlot) -> Optional[str]:

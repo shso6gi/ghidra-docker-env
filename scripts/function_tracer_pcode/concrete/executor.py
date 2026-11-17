@@ -156,8 +156,8 @@ class HazardKind(str, Enum):
     # A floating-point value converted to an integer it does not fit (NaN,
     # infinity, out of range): undefined in C (6.3.1.4).
     FP_TO_INTEGER_OUT_OF_RANGE = "FP_TO_INTEGER_OUT_OF_RANGE"
-    # The run used the result of an operation of C ``int`` width or wider
-    # whose signed reading overflowed (``IntegerOverflow.VALUE_USED``): the
+    # The run used the result of an operation whose signed reading
+    # overflowed (``IntegerOverflow.VALUE_USED``): the
     # binary cannot exclude that the source had a signed overflow, which C
     # leaves undefined (#314).  Also: a value computed through such an
     # overflow was used where its wrapped and its exact value differ.
@@ -180,9 +180,6 @@ class Hazard:
 class OverflowDisposition(Enum):
     """What became of the result of an operation whose signed reading overflowed."""
 
-    # Narrower than the ABI's C ``int``: C computes such values in ``int`` and
-    # converts the result back, so the wrap-around is a defined conversion.
-    NARROWER_THAN_INT = "NARROWER_THAN_INT"
     # The value was never used: it was overwritten, or only its own
     # instruction's condition flags were taken from it (a compare).
     VALUE_NOT_USED = "VALUE_NOT_USED"

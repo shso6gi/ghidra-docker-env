@@ -144,7 +144,8 @@ class RunSetup:
     # Uninitialized blocks the ELF file defines as zero at program start; the
     # executor zero-fills them and they count as writable program data.
     zero_initialized_ranges: Tuple[Tuple[int, int], ...] = ()
-    # ``AbiModel.c_int_bytes``; 0 when unknown (every width may be ``int``).
+    # ``AbiModel.c_int_bytes``; 0 when unknown (every width is then checked
+    # as if narrower than ``int``: both readings).
     c_int_bytes: int = 0
 
     def register(self, name: str) -> Optional[RegisterFact]:
