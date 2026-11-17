@@ -23,6 +23,8 @@ ALLOWED_PROJECT = (
 ALLOWED_EXTERNAL = {
     "__future__", "dataclasses", "enum", "typing", "json", "os", "signal", "subprocess", "sys",
     "time", "tempfile", "pathlib", "xml", "jpype",
+    # exact arithmetic for the IEEE 754 model and the ELF section table
+    "fractions", "math", "struct",
 }
 FORBIDDEN_TEXT = ("qemu", "ubsan", "ground_truth", "eqbench", "newv", "/eq/", "/neq/", "expected_verdict")
 
@@ -39,7 +41,10 @@ def _imports(path):
 
 def test_the_modules_exist():
     names = {p.name for p in MODULES}
-    assert {"run_observer.py", "abi_conformance.py", "recording.py", "concrete_executor.py", "concrete_worker.py"} <= names
+    assert {
+        "run_observer.py", "abi_conformance.py", "recording.py", "concrete_executor.py", "concrete_worker.py",
+        "value_monitor.py", "ieee.py", "userops.py", "elf_sections.py",
+    } <= names
 
 
 def test_only_the_binary_boundary_and_the_abi_tables_are_imported():

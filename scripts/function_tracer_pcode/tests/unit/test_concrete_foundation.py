@@ -371,8 +371,8 @@ def _plan_for(abi_left, left, abi_right=None, right=None):
     return plan
 
 
-def _seen(value, defined=16, fmt=None):
-    return ObservedRegister(value, defined, fmt)
+def _seen(value, defined=16, fmt=None, reliable=16):
+    return ObservedRegister(value, defined, fmt, reliable)
 
 
 B32, B64 = FpFormat.BINARY32, FpFormat.BINARY64
@@ -580,7 +580,7 @@ def _plan():
 def _returned(value, **kw):
     kw.setdefault("fp_operations_tracked", True)
     kw.setdefault("integer_ub_operations_tracked", True)
-    return ExecutionResult(Termination.RETURNED, 10, (("x0", ObservedRegister(value, 8)),), **kw)
+    return ExecutionResult(Termination.RETURNED, 10, (("x0", ObservedRegister(value, 8, None, 8)),), **kw)
 
 
 def test_two_clean_returns_with_different_values_are_a_difference():
@@ -613,11 +613,11 @@ def test_equal_values_missing_observations_and_refused_observations_are_no_evide
     assert compare_runs(_plan(), _returned(3), missing).reason is NoEvidenceReason.OBSERVATION_MISSING
     fp_plan = _plan_for(MIPS, MIPS_F0)
     nan = ExecutionResult(
-        Termination.RETURNED, 1, (("f0", ObservedRegister(0x7FF8000000000000, 8, B64)),),
+        Termination.RETURNED, 1, (("f0", ObservedRegister(0x7FF8000000000000, 8, B64, 8)),),
         fp_operations_tracked=True, integer_ub_operations_tracked=True,
     )
     one = ExecutionResult(
-        Termination.RETURNED, 1, (("f0", ObservedRegister(_double_bits(1.0), 8, B64)),),
+        Termination.RETURNED, 1, (("f0", ObservedRegister(_double_bits(1.0), 8, B64, 8)),),
         fp_operations_tracked=True, integer_ub_operations_tracked=True,
     )
     result = compare_runs(fp_plan, nan, one)
@@ -658,7 +658,7 @@ def test_rounding_sensitive_arithmetic_is_a_hazard_of_the_run():
 
     def run(bits, hazards=()):
         return ExecutionResult(
-            Termination.RETURNED, 1, (("f0", ObservedRegister(bits, 8, B64)),),
+            Termination.RETURNED, 1, (("f0", ObservedRegister(bits, 8, B64, 8)),),
             hazards=hazards, fp_operations_tracked=True, integer_ub_operations_tracked=True,
         )
 
@@ -669,3 +669,34 @@ def test_rounding_sensitive_arithmetic_is_a_hazard_of_the_run():
     assert result.hazard_kinds == (HazardKind.FP_ROUNDING_SENSITIVE,)
     # Without such arithmetic in either run the same bits are a difference.
     assert isinstance(compare_runs(plan, run(0x40036AA32A3732D7), run(0x40036AA32A3732D8)), ConcreteDifference)
+
+
+def test_only_the_reliable_low_bytes_of_a_return_value_are_compared():
+    # C3: the monitors report how many low bytes of each observed register do
+    # not depend on an undefined operation or a rounding choice.  A comparison
+    # that needs more bytes, or a register without that report, is refused.
+    plan = _plan()
+
+    def run(value, reliable, unreliable=()):
+        return ExecutionResult(
+            Termination.RETURNED, 1, (("x0", ObservedRegister(value, 8, None, reliable, unreliable)),),
+            fp_operations_tracked=True, integer_ub_operations_tracked=True,
+        )
+
+    assert isinstance(compare_runs(plan, run(13, 4), run(14, 8)), ConcreteDifference)   # w0: 4 bytes
+    for reliable in (None, 0, 3):
+        result = compare_runs(plan, run(13, reliable, ("SIGNED_OVERFLOW",)), run(14, 8))
+        assert result.reason is NoEvidenceReason.OBSERVATION_REFUSED
+        assert result.observation_refusal is ObservationRefusal.VALUE_NOT_RELIABLE
+    location = return_location(MIPS, _ret(MIPS_F0))
+    fp_plan = plan_return_observation(location, location)
+
+    def fp(bits, reliable):
+        return ExecutionResult(
+            Termination.RETURNED, 1, (("f0", ObservedRegister(bits, 8, B64, reliable)),),
+            fp_operations_tracked=True, integer_ub_operations_tracked=True,
+        )
+
+    refused = compare_runs(fp_plan, fp(0x40036AA32A3732D7, 0), fp(0x40036AA32A3732D8, 8))
+    assert refused.observation_refusal is ObservationRefusal.VALUE_NOT_RELIABLE
+    assert isinstance(compare_runs(fp_plan, fp(0x40036AA32A3732D7, 8), fp(0x40036AA32A3732D8, 8)), ConcreteDifference)

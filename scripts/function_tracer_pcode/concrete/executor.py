@@ -150,6 +150,22 @@ class HazardKind(str, Enum):
     # can be a difference of rounding, not of the function -- in the returned
     # floating-point value or in anything derived from it.
     FP_ROUNDING_SENSITIVE = "FP_ROUNDING_SENSITIVE"
+    # The emulator's floating-point result differs from the IEEE 754 result of
+    # the same operands (the emulator, not the machine, is in doubt).
+    FP_EMULATION_MISMATCH = "FP_EMULATION_MISMATCH"
+    # A floating-point value converted to an integer it does not fit (NaN,
+    # infinity, out of range): undefined in C (6.3.1.4).
+    FP_TO_INTEGER_OUT_OF_RANGE = "FP_TO_INTEGER_OUT_OF_RANGE"
+    # A value computed through a signed integer overflow was used where its
+    # wrapped and its mathematically exact value give different results (a
+    # build that assumes the overflow away may compute the other one; #314).
+    SIGNED_OVERFLOW = "SIGNED_OVERFLOW"
+    # An integer division by zero (which some instructions define and C does
+    # not) or of the most negative value by -1.
+    INTEGER_DIVISION_UNDEFINED = "INTEGER_DIVISION_UNDEFINED"
+    # A shift whose amount the instruction reduced modulo the width: C leaves
+    # a shift by the width or more undefined.
+    SHIFT_COUNT_OUT_OF_RANGE = "SHIFT_COUNT_OUT_OF_RANGE"
 
 
 @dataclass(frozen=True)
@@ -166,9 +182,11 @@ class ExecutionResult:
     # (register name, value at return with its defined low-order bytes)
     observed_registers: Tuple[Tuple[str, ObservedRegister], ...] = ()
     hazards: Tuple[Hazard, ...] = ()
-    # The executor examined every floating-point operation of the run for the
-    # FP_* hazards.  A result that does not say so is not compared: the
-    # absence of an FP hazard means something only when they were looked for.
+    # The executor examined every floating-point operation of the run with
+    # its operand values (``concrete.value_monitor``: rounding alternatives,
+    # NaN, the emulator's own results).  A result that does not say so is not
+    # compared: the absence of an FP hazard means something only when they
+    # were looked for.
     fp_operations_tracked: bool = False
     # The same for integer operations whose result C leaves undefined on some
     # inputs (signed overflow, division, shift counts; #314).  Two builds of one

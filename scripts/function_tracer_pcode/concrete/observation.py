@@ -46,9 +46,11 @@ of the same source then return results that differ in the last place
 (measured on the target machine: one source, ``gcc -O0`` against ``gcc -O2``,
 two of fourteen inputs).  That is a property of the run, not of the returned
 bits, and it applies to an integer computed from floating-point values just
-as well; it is reported as a hazard of the run
-(``executor.HazardKind.FP_ROUNDING_SENSITIVE``) and a run with a hazard is
-never compared.
+as well.  The executor's monitors (``concrete.value_monitor``) follow it, and
+the same for undefined integer operations: a run reports, per observed
+register, how many low-order bytes are free of such doubt
+(``ObservedRegister.reliable_low_bytes``), and only those are compared; a
+doubt that reached the run's control flow is a hazard of the whole run.
 """
 
 from __future__ import annotations
@@ -74,6 +76,10 @@ class ObservationRefusal(str, Enum):
     RETURN_VALUE_NOT_DEFINED = "RETURN_VALUE_NOT_DEFINED"
     FP_FORMAT_UNRESOLVED = "FP_FORMAT_UNRESOLVED"
     NAN_OBSERVED = "NAN_OBSERVED"
+    # The compared bytes are not known to be what every conforming build
+    # computes on this input (a signed overflow, a rounding choice, a NaN, ...;
+    # ``ObservedRegister.unreliable`` says which), or the run did not report it.
+    VALUE_NOT_RELIABLE = "VALUE_NOT_RELIABLE"
 
 
 class ObservationRelation(str, Enum):
@@ -169,11 +175,24 @@ class ObservedRegister:
     produced the value, as the executor established it from the run (through
     whole-register copies of that value); ``None`` when the value was not
     produced by such a write or the executor did not establish it.
+
+    ``reliable_low_bytes`` counts the low-order bytes whose value does not
+    depend on an undefined operation or on a rounding choice of the build;
+    only those are compared.
     """
 
     value: int
     defined_low_bytes: int
     value_format: Optional[FpFormat] = None
+    # Low-order bytes free of every monitor's doubt (``concrete.value_monitor``);
+    # ``None`` = not reported, and then nothing of the value is compared.
+    reliable_low_bytes: Optional[int] = None
+    # Why the bytes above ``reliable_low_bytes`` are in doubt (``HazardKind``
+    # values), for diagnosis.
+    unreliable: Tuple[str, ...] = ()
+
+    def reliable_for(self, byte_count: int) -> bool:
+        return self.reliable_low_bytes is not None and self.reliable_low_bytes >= byte_count
 
 
 def _low(value: int, byte_count: int) -> int:
@@ -228,6 +247,8 @@ def compare_return_values(
         )
         if compare_bytes <= 0:
             return ObservationRefusal.RETURN_VALUE_NOT_DEFINED
+        if not all(value.reliable_for(compare_bytes) for value in observed):
+            return ObservationRefusal.VALUE_NOT_RELIABLE
     else:
         sides = []
         for location, value in zip(plan.locations, observed):
@@ -241,6 +262,8 @@ def compare_return_values(
         if any(_is_nan(bits, fmt) for _, bits in sides):
             return ObservationRefusal.NAN_OBSERVED
         compare_bytes = _FORMAT_BYTES[fmt]
+        if not all(value.reliable_for(compare_bytes) for value in observed):
+            return ObservationRefusal.VALUE_NOT_RELIABLE
     if _low(left.value, compare_bytes) != _low(right.value, compare_bytes):
         return ObservationRelation.DIFFERENT
     return ObservationRelation.NOT_DIFFERENT_ON_OBSERVED_PART
