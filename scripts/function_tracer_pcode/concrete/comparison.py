@@ -2,7 +2,8 @@
 """Deciding what two concrete runs on corresponding inputs establish.
 
 ``compare_runs`` returns either a ``ConcreteDifference`` -- both calls
-completed without a hazard and the observed return values differ -- or a
+completed without a hazard, both were examined by the floating-point and the
+integer-UB monitors, and the observed return values differ -- or a
 ``ConcreteNoEvidence`` with the reason nothing was established.
 
 Neither is a final outcome of a pair.  ``ConcreteNoEvidence`` in particular is
@@ -33,6 +34,7 @@ class NoEvidenceReason(str, Enum):
     RUN_DID_NOT_RETURN = "RUN_DID_NOT_RETURN"
     RUN_HAS_HAZARD = "RUN_HAS_HAZARD"
     FP_OPERATIONS_NOT_TRACKED = "FP_OPERATIONS_NOT_TRACKED"
+    INTEGER_UB_NOT_TRACKED = "INTEGER_UB_NOT_TRACKED"
     OBSERVATION_MISSING = "OBSERVATION_MISSING"
     OBSERVATION_REFUSED = "OBSERVATION_REFUSED"
     NO_DIFFERENCE_OBSERVED = "NO_DIFFERENCE_OBSERVED"
@@ -74,6 +76,9 @@ def compare_runs(
     for side, run in enumerate(runs):
         if not run.fp_operations_tracked:
             return ConcreteNoEvidence(NoEvidenceReason.FP_OPERATIONS_NOT_TRACKED, side=side)
+    for side, run in enumerate(runs):
+        if not run.integer_ub_operations_tracked:
+            return ConcreteNoEvidence(NoEvidenceReason.INTEGER_UB_NOT_TRACKED, side=side)
     values = []
     for side, (run, location) in enumerate(zip(runs, plan.locations)):
         value = run.observed(location.register)

@@ -15,6 +15,7 @@ from scripts.function_tracer_pcode.concrete.abi import (
     AbiId,
     ArgClass,
     ArgumentSlot,
+    NarrowIntImage,
     NarrowIntRule,
     abi_model,
     select_abi,
@@ -252,16 +253,36 @@ def test_two_different_abis_without_a_positional_side_have_no_common_order():
     assert correspond_inputs(left, right) is InputSurfaceRefusal.CROSS_ABI_NUMBERING_UNSUPPORTED
 
 
-def test_a_32bit_integer_is_written_sign_extended_on_both_abis():
+def test_a_32bit_integer_is_written_in_each_abis_own_extension():
     # Measured: writing 0x80000000 zero-extended into a MIPS n64 register made the
     # emulator disagree with the real machine (the entry state was not conforming).
+    # AAPCS64 leaves the upper bits unspecified and Ghidra's AArch64 compiler
+    # specification declares zero extension, so the AArch64 image is zero-extended.
     assert MIPS.narrow_int_rule is NarrowIntRule.SIGN_EXTENDED_REQUIRED
+    assert MIPS.narrow_int_image is NarrowIntImage.SIGN_EXTENDED
+    assert ARM.narrow_int_rule is NarrowIntRule.UPPER_BITS_UNSPECIFIED
+    assert ARM.narrow_int_image is NarrowIntImage.ZERO_EXTENDED
     correspondence = correspond_inputs(_surface(MIPS, _mips_int(0)), _surface(ARM, _arm_int(0)))
     (mips_image,), (arm_image,) = bind_arguments(correspondence, [0x80000000])
     assert mips_image.register == "a0" and mips_image.value == 0xFFFFFFFF80000000
-    assert arm_image.register == "x0" and arm_image.value == 0xFFFFFFFF80000000
-    (mips_image,), _ = bind_arguments(correspondence, [5])
-    assert mips_image.value == 5
+    assert arm_image.register == "x0" and arm_image.value == 0x0000000080000000
+    (mips_image,), (arm_image,) = bind_arguments(correspondence, [5])
+    assert mips_image.value == 5 and arm_image.value == 5
+
+
+def test_an_aarch64_argument_read_as_int_and_long_needs_one_image_for_both():
+    # Zero-extended as an int, sign-extended as a long: a value with bit 31 set has
+    # no image that is the same argument under both readings.
+    correspondence = correspond_inputs(_surface(ARM, _arm_int(0, 4)), _surface(ARM, _arm_int(0, 8)))
+    assert correspondence.arguments[0].readings == (4, 8)
+    assert (
+        bind_arguments(correspondence, [0xFFFFFFFFFFFFFFFF])
+        is InputSurfaceRefusal.VALUE_NOT_CONFORMING_UNDER_EVERY_READING
+    )
+    assert bind_arguments(correspondence, [0x7FFFFFFF])[0][0].value == 0x7FFFFFFF
+    # Read as int on both sides, -1 is the zero-extended image.
+    narrow = correspond_inputs(_surface(ARM, _arm_int(0, 4)), _surface(ARM, _arm_int(0, 4)))
+    assert bind_arguments(narrow, [0xFFFFFFFF])[0][0].value == 0x00000000FFFFFFFF
 
 
 def test_a_value_must_conform_under_every_width_reading():
@@ -558,6 +579,7 @@ def _plan():
 
 def _returned(value, **kw):
     kw.setdefault("fp_operations_tracked", True)
+    kw.setdefault("integer_ub_operations_tracked", True)
     return ExecutionResult(Termination.RETURNED, 10, (("x0", ObservedRegister(value, 8)),), **kw)
 
 
@@ -587,16 +609,16 @@ def test_any_hazard_on_either_side_establishes_nothing(kind):
 
 def test_equal_values_missing_observations_and_refused_observations_are_no_evidence():
     assert compare_runs(_plan(), _returned(3), _returned(3)).reason is NoEvidenceReason.NO_DIFFERENCE_OBSERVED
-    missing = ExecutionResult(Termination.RETURNED, 1, (), fp_operations_tracked=True)
+    missing = ExecutionResult(Termination.RETURNED, 1, (), fp_operations_tracked=True, integer_ub_operations_tracked=True)
     assert compare_runs(_plan(), _returned(3), missing).reason is NoEvidenceReason.OBSERVATION_MISSING
     fp_plan = _plan_for(MIPS, MIPS_F0)
     nan = ExecutionResult(
         Termination.RETURNED, 1, (("f0", ObservedRegister(0x7FF8000000000000, 8, B64)),),
-        fp_operations_tracked=True,
+        fp_operations_tracked=True, integer_ub_operations_tracked=True,
     )
     one = ExecutionResult(
         Termination.RETURNED, 1, (("f0", ObservedRegister(_double_bits(1.0), 8, B64)),),
-        fp_operations_tracked=True,
+        fp_operations_tracked=True, integer_ub_operations_tracked=True,
     )
     result = compare_runs(fp_plan, nan, one)
     assert result.reason is NoEvidenceReason.OBSERVATION_REFUSED
@@ -614,6 +636,18 @@ def test_a_run_whose_fp_operations_were_not_examined_establishes_nothing():
     assert ExecutionResult(Termination.RETURNED, 1).fp_operations_tracked is False
 
 
+def test_a_run_whose_integer_ub_operations_were_not_examined_establishes_nothing():
+    # Measured: pow/test (one source, clang -O0 / -O1) returns 13 and 14 for
+    # y = INT_MIN on the real machine (signed overflow of -y).  Without the
+    # integer-UB monitor such a run is not evidence.
+    untracked = _returned(13, integer_ub_operations_tracked=False)
+    for left, right, side in ((untracked, _returned(14), 0), (_returned(14), untracked, 1)):
+        result = compare_runs(_plan(), left, right)
+        assert isinstance(result, ConcreteNoEvidence)
+        assert result.reason is NoEvidenceReason.INTEGER_UB_NOT_TRACKED and result.side == side
+    assert ExecutionResult(Termination.RETURNED, 1).integer_ub_operations_tracked is False
+
+
 def test_rounding_sensitive_arithmetic_is_a_hazard_of_the_run():
     # Measured on the target machine: one source (bess/bessk0), gcc -O0 against
     # gcc -O2, returns 40036aa32a3732d7 and 40036aa32a3732d8 for 0.1 -- the -O2 build
@@ -625,7 +659,7 @@ def test_rounding_sensitive_arithmetic_is_a_hazard_of_the_run():
     def run(bits, hazards=()):
         return ExecutionResult(
             Termination.RETURNED, 1, (("f0", ObservedRegister(bits, 8, B64)),),
-            hazards=hazards, fp_operations_tracked=True,
+            hazards=hazards, fp_operations_tracked=True, integer_ub_operations_tracked=True,
         )
 
     fused = (Hazard(HazardKind.FP_ROUNDING_SENSITIVE, "fmadd"),)

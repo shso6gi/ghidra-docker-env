@@ -65,6 +65,24 @@ class NarrowIntRule(str, Enum):
     UPPER_BITS_UNSPECIFIED = "UPPER_BITS_UNSPECIFIED"
 
 
+class NarrowIntImage(str, Enum):
+    """How the concrete layer fills the register bits above a narrow integer.
+
+    The image must be one the ABI admits (``NarrowIntRule``) and the one the
+    program's compiler specification declares for its integer parameters
+    (``extension="sign"`` / ``"zero"``), so that the entry state conforms to
+    both.  ``concrete.abi_conformance`` checks the second at run time.
+
+    AAPCS64 leaves the bits unspecified and Ghidra's AArch64 specification
+    declares zero extension -- which is also what a caller's 32-bit register
+    write produces -- so the AArch64 image is zero-extended.  MIPS n64 requires
+    sign extension and its specification declares nothing.
+    """
+
+    SIGN_EXTENDED = "SIGN_EXTENDED"
+    ZERO_EXTENDED = "ZERO_EXTENDED"
+
+
 @dataclass(frozen=True)
 class ArgumentSlot:
     """One register argument position of an ABI.
@@ -84,6 +102,7 @@ class AbiModel:
     register_bytes: int
     slot_numbering: SlotNumbering
     narrow_int_rule: NarrowIntRule
+    narrow_int_image: NarrowIntImage
     int_argument_registers: Tuple[str, ...]
     fp_argument_registers: Tuple[str, ...]
     fp_argument_register_bytes: int
@@ -170,6 +189,7 @@ _AARCH64 = AbiModel(
     register_bytes=8,
     slot_numbering=SlotNumbering.PER_CLASS,
     narrow_int_rule=NarrowIntRule.UPPER_BITS_UNSPECIFIED,
+    narrow_int_image=NarrowIntImage.ZERO_EXTENDED,
     int_argument_registers=("x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"),
     # Ghidra's AArch64 module makes z<n> the base of v<n>/q<n>/d<n>/s<n>.
     fp_argument_registers=("z0", "z1", "z2", "z3", "z4", "z5", "z6", "z7"),
@@ -195,6 +215,7 @@ _MIPS_N64 = AbiModel(
     register_bytes=8,
     slot_numbering=SlotNumbering.POSITIONAL,
     narrow_int_rule=NarrowIntRule.SIGN_EXTENDED_REQUIRED,
+    narrow_int_image=NarrowIntImage.SIGN_EXTENDED,
     # n64 passes eight integer arguments in $4-$11.  Ghidra's MIPS module keeps
     # the o32 names for $8-$11, so the fifth to eighth are t0-t3 there.
     int_argument_registers=("a0", "a1", "a2", "a3", "t0", "t1", "t2", "t3"),
@@ -240,11 +261,18 @@ _SELECTION: Mapping[Tuple[str, str, str], AbiModel] = {
     ("MIPS:BE:64:default", "default", ELF_FORMAT): _MIPS_N64,
 }
 
+# The name of the default prototype in the compiler specification of each
+# selected program (checked at run time by ``concrete.abi_conformance``).
+SPECIFICATION_PROTOTYPE_NAMES: Mapping[AbiId, str] = {
+    AbiId.AARCH64_AAPCS64: "__cdecl",
+    AbiId.MIPS_N64: "__stdcall",
+}
+
 # Calling-convention names of a function that mean "the program's default
 # convention": no explicit convention, or the default prototype model itself.
 _DEFAULT_CONVENTION_NAMES: Mapping[AbiId, Tuple[str, ...]] = {
-    AbiId.AARCH64_AAPCS64: ("unknown", "default", "__cdecl"),
-    AbiId.MIPS_N64: ("unknown", "default", "__stdcall"),
+    abi_id: ("unknown", "default", name)
+    for abi_id, name in SPECIFICATION_PROTOTYPE_NAMES.items()
 }
 
 
