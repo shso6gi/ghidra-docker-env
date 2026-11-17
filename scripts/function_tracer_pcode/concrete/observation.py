@@ -17,31 +17,38 @@ the smallest of the two recovered widths and the two defined widths.  A
 difference there is a difference of the returned value under every width
 reading; equality there is only equality of that part and proves nothing.
 
-Floating-point class.  A difference of bits is evidence only if neither value
-can be a NaN, because the executor's floating-point arithmetic is not
-guaranteed to preserve NaN payloads or signalling state; and whether a bit
-pattern is a NaN depends on its format.  Each side's *admissible formats* are
-derived from its recovered width, its defined bytes and its value:
+Floating-point class.  Two bit patterns can only be compared as values of one
+known format: binary32 1.0 (``0x3F800000``) and binary64 1.0
+(``0x3FF0000000000000``) are different bits and the same number, and which
+bytes of the register are the value at all depends on the format.  The format
+is not inferred from the shape of the value.  It is *evidence from the run*:
+the executor reports, with the register, the format of the scalar
+floating-point write that produced its value (``ObservedRegister.value_format``),
+and reports nothing when the value was not produced by such a write (a vector
+operation, an aggregate, a copy of bytes of unknown meaning).  Then:
 
-* width 4: binary32;
-* width 8: binary64;
-* width 16 (AArch64 reports the whole 128-bit register for many functions
-  that return a ``double``): the upper 8 bytes, when defined, must be zero --
-  otherwise the value is a binary128 or a vector and is not compared.  Then
-  binary64 is admissible, and binary32 as well when bits 32..63 are zero (an
-  AArch64 single-precision write clears every higher bit of the register, so
-  a binary32 result always has that shape, and a value of that shape may be
-  one); with fewer than 8 defined bytes only binary32 is.
+* each side must carry that evidence, and the two formats must be equal;
+* the evidence must agree with the recovered storage width (4 bytes is
+  binary32, 8 bytes is binary64; a 16-byte location -- AArch64 reports the
+  whole 128-bit register for many functions that return a ``double`` --
+  accepts either);
+* the bytes of the format must be defined, and on a 16-byte location every
+  defined byte above the format must be zero (a scalar write clears them; a
+  non-zero byte there means the register holds something wider);
+* a NaN on either side refuses the comparison: the executor's arithmetic is
+  not guaranteed to preserve NaN payloads or signalling state;
+* otherwise the bits of the format are compared.
 
-The two sides must share a format.  A value that is a NaN under *any* of its
-own admissible formats refuses the comparison.  The bits are compared on 8
-bytes when binary64 is shared and on 4 bytes otherwise; when both formats are
-shared, bits 32..63 are zero on both sides and the two comparisons agree.
-
-Limit: a vector or homogeneous aggregate returned in the FP register is read
-as one of the scalar formats above, so a NaN in a lane is not recognised here.
-A run whose floating-point operations touched a NaN is to be excluded by the
-executor's hazards, which do not depend on the format.
+What this module cannot see.  Different bits of one format are different
+values, but they are not always a difference *between the functions*: a C
+compiler may contract ``a * b + c`` into one fused operation, and two builds
+of the same source then return results that differ in the last place
+(measured on the target machine: one source, ``gcc -O0`` against ``gcc -O2``,
+two of fourteen inputs).  That is a property of the run, not of the returned
+bits, and it applies to an integer computed from floating-point values just
+as well; it is reported as a hazard of the run
+(``executor.HazardKind.FP_ROUNDING_SENSITIVE``) and a run with a hazard is
+never compared.
 """
 
 from __future__ import annotations
@@ -157,10 +164,16 @@ class ObservedRegister:
 
     ``defined_low_bytes`` counts the contiguous low-order bytes that were bound
     at entry or written by the run.
+
+    ``value_format`` is the format of the scalar floating-point write that
+    produced the value, as the executor established it from the run (through
+    whole-register copies of that value); ``None`` when the value was not
+    produced by such a write or the executor did not establish it.
     """
 
     value: int
     defined_low_bytes: int
+    value_format: Optional[FpFormat] = None
 
 
 def _low(value: int, byte_count: int) -> int:
@@ -177,24 +190,30 @@ def _is_nan(bits: int, fmt: FpFormat) -> bool:
     ) != 0
 
 
-def _admissible_fp_formats(
+_FORMAT_BYTES = {FpFormat.BINARY32: 4, FpFormat.BINARY64: 8}
+# Formats a recovered storage width is compatible with.
+_WIDTH_FORMATS = {
+    4: (FpFormat.BINARY32,),
+    8: (FpFormat.BINARY64,),
+    16: (FpFormat.BINARY32, FpFormat.BINARY64),
+}
+
+
+def _fp_value(
     location: ReturnLocation, observed: ObservedRegister
-) -> Union[Tuple[FpFormat, ...], ObservationRefusal]:
-    defined = min(observed.defined_low_bytes, location.width_bytes)
-    if location.width_bytes == 4:
-        return (FpFormat.BINARY32,) if defined >= 4 else ObservationRefusal.RETURN_VALUE_NOT_DEFINED
-    if location.width_bytes == 8:
-        return (FpFormat.BINARY64,) if defined >= 8 else ObservationRefusal.RETURN_VALUE_NOT_DEFINED
-    # 16-byte location.
-    if defined < 4:
-        return ObservationRefusal.RETURN_VALUE_NOT_DEFINED
-    if defined < 8:
-        return (FpFormat.BINARY32,)
-    if _low(observed.value, defined) >> 64:
+) -> Union[Tuple[FpFormat, int], ObservationRefusal]:
+    """The format and the bits of one side's floating-point return value."""
+    fmt = observed.value_format
+    if fmt is None or fmt not in _WIDTH_FORMATS[location.width_bytes]:
         return ObservationRefusal.FP_FORMAT_UNRESOLVED
-    if (_low(observed.value, 8) >> 32) == 0:
-        return (FpFormat.BINARY64, FpFormat.BINARY32)
-    return (FpFormat.BINARY64,)
+    format_bytes = _FORMAT_BYTES[fmt]
+    defined = min(observed.defined_low_bytes, location.width_bytes)
+    if defined < format_bytes:
+        return ObservationRefusal.RETURN_VALUE_NOT_DEFINED
+    if _low(observed.value, defined) >> (format_bytes * 8):
+        # Defined bytes above the scalar: the register holds something wider.
+        return ObservationRefusal.FP_FORMAT_UNRESOLVED
+    return fmt, _low(observed.value, format_bytes)
 
 
 def compare_return_values(
@@ -210,19 +229,18 @@ def compare_return_values(
         if compare_bytes <= 0:
             return ObservationRefusal.RETURN_VALUE_NOT_DEFINED
     else:
-        formats = []
+        sides = []
         for location, value in zip(plan.locations, observed):
-            admissible = _admissible_fp_formats(location, value)
-            if isinstance(admissible, ObservationRefusal):
-                return admissible
-            formats.append(admissible)
-        shared = [fmt for fmt in formats[0] if fmt in formats[1]]
-        if not shared:
+            side = _fp_value(location, value)
+            if isinstance(side, ObservationRefusal):
+                return side
+            sides.append(side)
+        if sides[0][0] is not sides[1][0]:
             return ObservationRefusal.FP_FORMAT_UNRESOLVED
-        for admissible, value in zip(formats, observed):
-            if any(_is_nan(value.value, fmt) for fmt in admissible):
-                return ObservationRefusal.NAN_OBSERVED
-        compare_bytes = 8 if FpFormat.BINARY64 in shared else 4
+        fmt = sides[0][0]
+        if any(_is_nan(bits, fmt) for _, bits in sides):
+            return ObservationRefusal.NAN_OBSERVED
+        compare_bytes = _FORMAT_BYTES[fmt]
     if _low(left.value, compare_bytes) != _low(right.value, compare_bytes):
         return ObservationRelation.DIFFERENT
     return ObservationRelation.NOT_DIFFERENT_ON_OBSERVED_PART

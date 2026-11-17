@@ -109,6 +109,17 @@ class HazardKind(str, Enum):
     UNDEFINED_REGISTER_READ = "UNDEFINED_REGISTER_READ"
     UNDEFINED_MEMORY_READ = "UNDEFINED_MEMORY_READ"
     STACK_POINTER_NOT_RESTORED = "STACK_POINTER_NOT_RESTORED"
+    # A floating-point operation consumed or produced a NaN.  The executor's
+    # arithmetic is not guaranteed to preserve NaN payloads or signalling
+    # state, so nothing computed after it is known to match the machine.
+    FP_NAN_OPERAND = "FP_NAN_OPERAND"
+    # The run executed floating-point arithmetic whose result a conforming
+    # compiler may round differently in another build of the same source: a
+    # fused multiply-add, or a multiplication whose result feeds an addition
+    # or subtraction (which another build may fuse).  A difference after it
+    # can be a difference of rounding, not of the function -- in the returned
+    # floating-point value or in anything derived from it.
+    FP_ROUNDING_SENSITIVE = "FP_ROUNDING_SENSITIVE"
 
 
 @dataclass(frozen=True)
@@ -125,6 +136,10 @@ class ExecutionResult:
     # (register name, value at return with its defined low-order bytes)
     observed_registers: Tuple[Tuple[str, ObservedRegister], ...] = ()
     hazards: Tuple[Hazard, ...] = ()
+    # The executor examined every floating-point operation of the run for the
+    # FP_* hazards.  A result that does not say so is not compared: the
+    # absence of an FP hazard means something only when they were looked for.
+    fp_operations_tracked: bool = False
     detail: str = ""
 
     def observed(self, register: str) -> Optional[ObservedRegister]:

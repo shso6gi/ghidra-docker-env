@@ -43,6 +43,7 @@ from scripts.function_tracer_pcode.concrete.input_surface import (
     side_input_surface,
 )
 from scripts.function_tracer_pcode.concrete.observation import (
+    FpFormat,
     ObservationRefusal,
     ObservationRelation,
     ObservedRegister,
@@ -349,8 +350,11 @@ def _plan_for(abi_left, left, abi_right=None, right=None):
     return plan
 
 
-def _seen(value, defined=16):
-    return ObservedRegister(value, defined)
+def _seen(value, defined=16, fmt=None):
+    return ObservedRegister(value, defined, fmt)
+
+
+B32, B64 = FpFormat.BINARY32, FpFormat.BINARY64
 
 
 def test_return_location_refusals():
@@ -413,64 +417,101 @@ def test_return_classes_must_agree():
     assert plan_return_observation(arm_int, arm_fp) is ObservationRefusal.RETURN_CLASS_MISMATCH
 
 
-def test_binary32_against_binary64_has_no_shared_format():
-    plan = _plan_for(ARM, ARM_S0, ARM, ARM_D0)
-    assert (
-        compare_return_values(plan, _seen(0x3F800000), _seen(_double_bits(1.0)))
-        is ObservationRefusal.FP_FORMAT_UNRESOLVED
-    )
-
-
-def test_a_16_byte_fp_location_needs_a_zero_upper_half():
-    # Measured: AArch64 reports q0 (16 bytes) for most functions that return a double.
+def test_fp_values_are_compared_only_in_a_format_the_run_established():
+    # AArch64 reports q0 (16 bytes) for most functions that return a double, so the
+    # storage width does not say which bytes are the value or what they mean.
     plan = _plan_for(ARM, ARM_Q0)
     one, two = _double_bits(1.0), _double_bits(2.0)
-    assert compare_return_values(plan, _seen(one), _seen(two)) is ObservationRelation.DIFFERENT
+    assert compare_return_values(plan, _seen(one, fmt=B64), _seen(two, fmt=B64)) is ObservationRelation.DIFFERENT
     assert (
-        compare_return_values(plan, _seen(one), _seen(one))
+        compare_return_values(plan, _seen(one, fmt=B64), _seen(one, fmt=B64))
         is ObservationRelation.NOT_DIFFERENT_ON_OBSERVED_PART
     )
     assert (
-        compare_return_values(plan, _seen((1 << 64) | one), _seen(two))
-        is ObservationRefusal.FP_FORMAT_UNRESOLVED
-    )
-    # Only the low 8 bytes were written: the upper half is not part of the value.
-    assert (
-        compare_return_values(plan, _seen((1 << 64) | one, 8), _seen(two, 8))
+        compare_return_values(plan, _seen(0x3F800000, fmt=B32), _seen(0x40000000, fmt=B32))
         is ObservationRelation.DIFFERENT
     )
-    # Against an 8-byte location (MIPS f0, or AArch64 d0) the shared format is binary64.
-    cross = _plan_for(ARM, ARM_Q0, MIPS, MIPS_F0)
-    assert compare_return_values(cross, _seen(one), _seen(two, 8)) is ObservationRelation.DIFFERENT
+    # No evidence on one side or on both: the bits are not compared, whatever they are.
+    for left, right in (
+        (_seen(one), _seen(two)),
+        (_seen(one, fmt=B64), _seen(two)),
+        (_seen(one), _seen(two, fmt=B64)),
+    ):
+        assert compare_return_values(plan, left, right) is ObservationRefusal.FP_FORMAT_UNRESOLVED
 
 
-def test_a_16_byte_fp_value_is_checked_for_nan_under_every_format_it_may_have():
+def test_the_same_number_in_two_formats_is_not_a_difference():
+    # binary32 1.0 and binary64 1.0 are different bits and the same number.
     plan = _plan_for(ARM, ARM_Q0)
-    # Upper 96 bits zero: this may be a binary32 result, and as one it is a NaN.
-    float_nan = 0x7FC00001
-    assert compare_return_values(plan, _seen(float_nan), _seen(0x7FC00000)) is ObservationRefusal.NAN_OBSERVED
-    assert compare_return_values(plan, _seen(float_nan), _seen(0x3F800000)) is ObservationRefusal.NAN_OBSERVED
-    # Two values that may be binary32 are compared; so are a possible binary32 and a binary64.
-    assert compare_return_values(plan, _seen(0x3F800000), _seen(0x40000000)) is ObservationRelation.DIFFERENT
     assert (
-        compare_return_values(plan, _seen(0x3F800000), _seen(_double_bits(1.0)))
-        is ObservationRelation.DIFFERENT
+        compare_return_values(plan, _seen(0x3F800000, fmt=B32), _seen(_double_bits(1.0), fmt=B64))
+        is ObservationRefusal.FP_FORMAT_UNRESOLVED
     )
-    # With bits 32..63 set it cannot be a binary32 result, and as binary64 it is not a NaN.
-    not_a_float = (0x3FF00000 << 32) | 0x7FC00001
+    # The shape of a value is not evidence of its format: these bits could be a
+    # binary32 1.0 or a tiny binary64, and without evidence they are neither.
     assert (
-        compare_return_values(plan, _seen(not_a_float), _seen(_double_bits(1.0)))
-        is ObservationRelation.DIFFERENT
+        compare_return_values(plan, _seen(0x3F800000), _seen(_double_bits(1.0), fmt=B64))
+        is ObservationRefusal.FP_FORMAT_UNRESOLVED
     )
-    # Fewer than 8 defined bytes: only binary32 is admissible.
-    assert compare_return_values(plan, _seen(0x3F800000, 4), _seen(0x40000000, 4)) is ObservationRelation.DIFFERENT
-    assert compare_return_values(plan, _seen(float_nan, 4), _seen(0x40000000, 4)) is ObservationRefusal.NAN_OBSERVED
+    # A binary32 against a wider value whose low half happens to equal it.
     assert (
-        compare_return_values(plan, _seen(0x3F800000, 4), _seen(_double_bits(1.0)))
+        compare_return_values(plan, _seen(0x3F800000, fmt=B32), _seen(0x400000003F800000, fmt=B64))
+        is ObservationRefusal.FP_FORMAT_UNRESOLVED
+    )
+
+
+def test_format_evidence_must_agree_with_the_recovered_width():
+    double_location = _plan_for(MIPS, MIPS_F0)
+    assert (
+        compare_return_values(double_location, _seen(0x3F800000, 8, B32), _seen(0x40000000, 8, B32))
+        is ObservationRefusal.FP_FORMAT_UNRESOLVED
+    )
+    single_location = _plan_for(MIPS, MIPS_F0_LO)
+    assert (
+        compare_return_values(single_location, _seen(1, 8, B64), _seen(2, 8, B64))
         is ObservationRefusal.FP_FORMAT_UNRESOLVED
     )
     assert (
-        compare_return_values(plan, _seen(0x3F800000, 3), _seen(0x40000000))
+        compare_return_values(single_location, _seen(0x3F800000, 8, B32), _seen(0x40000000, 8, B32))
+        is ObservationRelation.DIFFERENT
+    )
+    # A 4-byte location against an 8-byte one never shares a format.
+    mixed = _plan_for(ARM, ARM_S0, ARM, ARM_D0)
+    assert (
+        compare_return_values(mixed, _seen(0x3F800000, fmt=B32), _seen(_double_bits(1.0), fmt=B64))
+        is ObservationRefusal.FP_FORMAT_UNRESOLVED
+    )
+    # A 16-byte location against an 8-byte one (AArch64 q0 and MIPS f0): binary64 on both.
+    cross = _plan_for(ARM, ARM_Q0, MIPS, MIPS_F0)
+    assert (
+        compare_return_values(cross, _seen(_double_bits(1.0), fmt=B64), _seen(_double_bits(2.0), 8, B64))
+        is ObservationRelation.DIFFERENT
+    )
+
+
+def test_a_register_holding_more_than_the_scalar_is_not_compared():
+    plan = _plan_for(ARM, ARM_Q0)
+    one, two = _double_bits(1.0), _double_bits(2.0)
+    # Defined bytes above the scalar are not zero: a vector, an aggregate or a binary128.
+    assert (
+        compare_return_values(plan, _seen((1 << 64) | one, fmt=B64), _seen(two, fmt=B64))
+        is ObservationRefusal.FP_FORMAT_UNRESOLVED
+    )
+    assert (
+        compare_return_values(plan, _seen((0x40000000 << 32) | 0x3F800000, fmt=B32), _seen(0x3F800000, fmt=B32))
+        is ObservationRefusal.FP_FORMAT_UNRESOLVED
+    )
+    # Bytes the run did not define are not part of the value.
+    assert (
+        compare_return_values(plan, _seen((1 << 64) | one, 8, B64), _seen(two, 8, B64))
+        is ObservationRelation.DIFFERENT
+    )
+    assert (
+        compare_return_values(plan, _seen(one, 4, B64), _seen(two, fmt=B64))
+        is ObservationRefusal.RETURN_VALUE_NOT_DEFINED
+    )
+    assert (
+        compare_return_values(plan, _seen(0x3F800000, 3, B32), _seen(0x40000000, fmt=B32))
         is ObservationRefusal.RETURN_VALUE_NOT_DEFINED
     )
 
@@ -480,25 +521,33 @@ def test_a_nan_is_never_compared():
     # fff0000000000001 (airy SIGN, same source).  A payload difference is not evidence.
     plan = _plan_for(MIPS, MIPS_F0)
     assert (
-        compare_return_values(plan, _seen(0xFFF8000000000000, 8), _seen(0xFFF0000000000001, 8))
+        compare_return_values(plan, _seen(0xFFF8000000000000, 8, B64), _seen(0xFFF0000000000001, 8, B64))
         is ObservationRefusal.NAN_OBSERVED
     )
     assert (
-        compare_return_values(plan, _seen(0x7FF8000000000000, 8), _seen(_double_bits(1.0), 8))
+        compare_return_values(plan, _seen(0x7FF8000000000000, 8, B64), _seen(_double_bits(1.0), 8, B64))
         is ObservationRefusal.NAN_OBSERVED
     )
     infinity = 0x7FF0000000000000
     assert (
-        compare_return_values(plan, _seen(infinity, 8), _seen(_double_bits(1.0), 8))
+        compare_return_values(plan, _seen(infinity, 8, B64), _seen(_double_bits(1.0), 8, B64))
         is ObservationRelation.DIFFERENT
     )
-    assert (
-        compare_return_values(plan, _seen(infinity, 4), _seen(_double_bits(1.0), 8))
-        is ObservationRefusal.RETURN_VALUE_NOT_DEFINED
-    )
     single = _plan_for(MIPS, MIPS_F0_LO)
-    assert compare_return_values(single, _seen(0x7FC00000, 8), _seen(0x3F800000, 8)) is ObservationRefusal.NAN_OBSERVED
-    assert compare_return_values(single, _seen(0x3F800000, 8), _seen(0x40000000, 8)) is ObservationRelation.DIFFERENT
+    assert (
+        compare_return_values(single, _seen(0x7FC00000, 8, B32), _seen(0x3F800000, 8, B32))
+        is ObservationRefusal.NAN_OBSERVED
+    )
+    wide = _plan_for(ARM, ARM_Q0)
+    assert (
+        compare_return_values(wide, _seen(0x7FC00001, fmt=B32), _seen(0x3F800000, fmt=B32))
+        is ObservationRefusal.NAN_OBSERVED
+    )
+
+
+def test_integer_returns_need_no_format_evidence():
+    plan = _plan_for(ARM, ARM_W0)
+    assert compare_return_values(plan, _seen(13), _seen(14)) is ObservationRelation.DIFFERENT
 
 
 # ------------------------------------------------------------------- comparison
@@ -508,6 +557,7 @@ def _plan():
 
 
 def _returned(value, **kw):
+    kw.setdefault("fp_operations_tracked", True)
     return ExecutionResult(Termination.RETURNED, 10, (("x0", ObservedRegister(value, 8)),), **kw)
 
 
@@ -537,11 +587,51 @@ def test_any_hazard_on_either_side_establishes_nothing(kind):
 
 def test_equal_values_missing_observations_and_refused_observations_are_no_evidence():
     assert compare_runs(_plan(), _returned(3), _returned(3)).reason is NoEvidenceReason.NO_DIFFERENCE_OBSERVED
-    missing = ExecutionResult(Termination.RETURNED, 1, ())
+    missing = ExecutionResult(Termination.RETURNED, 1, (), fp_operations_tracked=True)
     assert compare_runs(_plan(), _returned(3), missing).reason is NoEvidenceReason.OBSERVATION_MISSING
     fp_plan = _plan_for(MIPS, MIPS_F0)
-    nan = ExecutionResult(Termination.RETURNED, 1, (("f0", ObservedRegister(0x7FF8000000000000, 8)),))
-    one = ExecutionResult(Termination.RETURNED, 1, (("f0", ObservedRegister(_double_bits(1.0), 8)),))
+    nan = ExecutionResult(
+        Termination.RETURNED, 1, (("f0", ObservedRegister(0x7FF8000000000000, 8, B64)),),
+        fp_operations_tracked=True,
+    )
+    one = ExecutionResult(
+        Termination.RETURNED, 1, (("f0", ObservedRegister(_double_bits(1.0), 8, B64)),),
+        fp_operations_tracked=True,
+    )
     result = compare_runs(fp_plan, nan, one)
     assert result.reason is NoEvidenceReason.OBSERVATION_REFUSED
     assert result.observation_refusal is ObservationRefusal.NAN_OBSERVED
+
+
+def test_a_run_whose_fp_operations_were_not_examined_establishes_nothing():
+    # The absence of an FP hazard means something only when the executor looked for
+    # them; an integer return can depend on floating-point arithmetic too.
+    untracked = _returned(13, fp_operations_tracked=False)
+    for left, right, side in ((untracked, _returned(14), 0), (_returned(14), untracked, 1)):
+        result = compare_runs(_plan(), left, right)
+        assert isinstance(result, ConcreteNoEvidence)
+        assert result.reason is NoEvidenceReason.FP_OPERATIONS_NOT_TRACKED and result.side == side
+    assert ExecutionResult(Termination.RETURNED, 1).fp_operations_tracked is False
+
+
+def test_rounding_sensitive_arithmetic_is_a_hazard_of_the_run():
+    # Measured on the target machine: one source (bess/bessk0), gcc -O0 against
+    # gcc -O2, returns 40036aa32a3732d7 and 40036aa32a3732d8 for 0.1 -- the -O2 build
+    # fuses a multiplication and an addition.  The bits differ; the functions do not.
+    assert HazardKind.FP_ROUNDING_SENSITIVE in HazardKind and HazardKind.FP_NAN_OPERAND in HazardKind
+    location = return_location(MIPS, _ret(MIPS_F0))
+    plan = plan_return_observation(location, location)
+
+    def run(bits, hazards=()):
+        return ExecutionResult(
+            Termination.RETURNED, 1, (("f0", ObservedRegister(bits, 8, B64)),),
+            hazards=hazards, fp_operations_tracked=True,
+        )
+
+    fused = (Hazard(HazardKind.FP_ROUNDING_SENSITIVE, "fmadd"),)
+    result = compare_runs(plan, run(0x40036AA32A3732D7), run(0x40036AA32A3732D8, fused))
+    assert isinstance(result, ConcreteNoEvidence)
+    assert result.reason is NoEvidenceReason.RUN_HAS_HAZARD
+    assert result.hazard_kinds == (HazardKind.FP_ROUNDING_SENSITIVE,)
+    # Without such arithmetic in either run the same bits are a difference.
+    assert isinstance(compare_runs(plan, run(0x40036AA32A3732D7), run(0x40036AA32A3732D8)), ConcreteDifference)

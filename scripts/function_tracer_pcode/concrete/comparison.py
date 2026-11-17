@@ -32,6 +32,7 @@ from scripts.function_tracer_pcode.concrete.observation import (
 class NoEvidenceReason(str, Enum):
     RUN_DID_NOT_RETURN = "RUN_DID_NOT_RETURN"
     RUN_HAS_HAZARD = "RUN_HAS_HAZARD"
+    FP_OPERATIONS_NOT_TRACKED = "FP_OPERATIONS_NOT_TRACKED"
     OBSERVATION_MISSING = "OBSERVATION_MISSING"
     OBSERVATION_REFUSED = "OBSERVATION_REFUSED"
     NO_DIFFERENCE_OBSERVED = "NO_DIFFERENCE_OBSERVED"
@@ -70,6 +71,9 @@ def compare_runs(
             return ConcreteNoEvidence(
                 NoEvidenceReason.RUN_HAS_HAZARD, side=side, hazard_kinds=run.hazard_kinds()
             )
+    for side, run in enumerate(runs):
+        if not run.fp_operations_tracked:
+            return ConcreteNoEvidence(NoEvidenceReason.FP_OPERATIONS_NOT_TRACKED, side=side)
     values = []
     for side, (run, location) in enumerate(zip(runs, plan.locations)):
         value = run.observed(location.register)
