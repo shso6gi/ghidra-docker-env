@@ -32,6 +32,7 @@ from scripts.function_tracer_pcode.concrete.abi import (
     AbiModel,
     ArgClass,
     ArgumentSlot,
+    NarrowIntImage,
     SlotNumbering,
 )
 from scripts.function_tracer_pcode.concrete.storage import StorageLocation
@@ -204,6 +205,16 @@ def _sign_extend(value: int, from_bytes: int, to_bytes: int) -> int:
     return value & ((1 << (to_bytes * 8)) - 1)
 
 
+def _zero_extend(value: int, from_bytes: int, to_bytes: int) -> int:
+    return value & ((1 << (from_bytes * 8)) - 1) & ((1 << (to_bytes * 8)) - 1)
+
+
+def _narrow_image(abi: AbiModel, value: int, from_bytes: int, to_bytes: int) -> int:
+    if abi.narrow_int_image is NarrowIntImage.ZERO_EXTENDED:
+        return _zero_extend(value, from_bytes, to_bytes)
+    return _sign_extend(value, from_bytes, to_bytes)
+
+
 def argument_register_images(
     correspondence: InputCorrespondence, argument: AbstractArgument, value: int
 ) -> Union[Tuple[RegisterImage, RegisterImage], InputSurfaceRefusal]:
@@ -212,13 +223,20 @@ def argument_register_images(
     ``value`` is a non-negative bit pattern of the argument's widest reading
     (at most 8 bytes).
 
-    Integer class.  The same 64-bit image is written on both sides, and it is
-    admitted only in *canonical narrow form* under every reading narrower than
-    the register: for a 4-byte reading the image is the sign extension of its
-    low 32 bits (what MIPS n64 requires, and one of the images AAPCS64
-    allows); for a 1- or 2-byte reading the value's top bit is clear as well,
-    so the sign- and zero-extended promotions agree.  Such an image is the
-    same argument value whichever reading is the true one, on either ABI.
+    Integer class.  The value is admitted only when it is *the same integer
+    under every reading*: for every reading narrower than the register its
+    sign extension to the widest reading is the value itself, and for a 1- or
+    2-byte reading its top bit is clear as well (the sign- and zero-extended
+    promotions then agree).
+
+    Each side's image is that integer in the form the side's ABI model writes
+    (``AbiModel.narrow_int_image``): when every reading is narrower than the
+    register, the widest reading extended by the side's rule (MIPS n64 sign
+    extension, AArch64 zero extension); otherwise the 8-byte value.  The image
+    must then be in that form under every narrower reading too -- an AArch64
+    argument read as 4 bytes by one signature and 8 by the other is refused
+    when bit 31 is set, because no single image is both the zero-extended
+    ``int`` and the sign-extended ``long``.
 
     Floating-point class.  Every bit pattern is a conforming register value;
     the pattern is written to the low bytes and the rest of the register is
@@ -229,18 +247,29 @@ def argument_register_images(
     if value < 0 or value >> (width * 8):
         return InputSurfaceRefusal.VALUE_WIDER_THAN_REGISTER
 
+    if argument.arg_class is ArgClass.INT:
+        canonical = _sign_extend(value, width, 8)
+        for reading in argument.readings:
+            if reading >= 8:
+                continue
+            if canonical != _sign_extend(canonical, reading, 8):
+                return InputSurfaceRefusal.VALUE_NOT_CONFORMING_UNDER_EVERY_READING
+            if reading < 4 and (canonical >> (reading * 8 - 1)) & 1:
+                return InputSurfaceRefusal.VALUE_NOT_CONFORMING_UNDER_EVERY_READING
+
     images = []
     for abi, slot in zip(correspondence.abis, argument.slots):
         register = abi.argument_register(slot)
         register_bytes = abi.argument_register_bytes(argument.arg_class)
         if argument.arg_class is ArgClass.INT:
-            image = _sign_extend(value, width, register_bytes)
+            if width >= register_bytes:
+                image = canonical & ((1 << (register_bytes * 8)) - 1)
+            else:
+                image = _narrow_image(abi, canonical, width, register_bytes)
             for reading in argument.readings:
                 if reading >= register_bytes:
                     continue
-                if image != _sign_extend(image, reading, register_bytes):
-                    return InputSurfaceRefusal.VALUE_NOT_CONFORMING_UNDER_EVERY_READING
-                if reading < 4 and (image >> (reading * 8 - 1)) & 1:
+                if image != _narrow_image(abi, image, reading, register_bytes):
                     return InputSurfaceRefusal.VALUE_NOT_CONFORMING_UNDER_EVERY_READING
         else:
             image = value
