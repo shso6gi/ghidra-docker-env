@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
@@ -251,9 +251,20 @@ def replay_witnesses(
     stop_at_first_confirmation: bool = True,
     may_continue: Callable[[], bool] = lambda: True,
     clock: Callable[[], float] = lambda: 0.0,
+    time_left: Callable[[], Optional[float]] = lambda: None,
 ) -> Tuple[WitnessReplay, ...]:
     """Replay distinct witnesses in order until one is confirmed (by default)
-    or ``may_continue`` says the budget is spent."""
+    or ``may_continue`` says the budget is spent.
+
+    ``time_left()`` is the budget left (``None``: unbounded); each run gets it
+    as its time limit, so no run outlasts the budget."""
+
+    def run(side: int, request: ExecutionRequest) -> ExecutionResult:
+        left = time_left()
+        if left is not None:
+            request = replace(request, time_limit_seconds=max(0.0, float(left)))
+        return executors[side].execute(request)
+
     replays: List[WitnessReplay] = []
     seen = set()
     for witness in witnesses:
@@ -265,7 +276,7 @@ def replay_witnesses(
         seen.add(identity)
         if not may_continue():
             break
-        replay = judge_witness(plan, witness, lambda side, request: executors[side].execute(request), clock)
+        replay = judge_witness(plan, witness, run, clock)
         replays.append(replay)
         if stop_at_first_confirmation and replay.status is WitnessStatus.CONFIRMED:
             break

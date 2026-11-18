@@ -128,9 +128,15 @@ taints, and
   (``INT_ADD`` of an unmarked offset, ``INT_SUB`` of an unmarked offset from
   it); any other computation on it -- masking, shifting, multiplying, adding
   two addresses -- is marked ``ADDRESS_BITS``, which nothing cancels;
-* a difference or a comparison of two pointers of the same kind, and an
-  equality of a pointer with zero, are not marked: C defines them only within
-  one object, where the placement cancels;
+* the only comparison that removes the mark is the null test -- an equality of
+  an unmodified pointer with the constant zero, false wherever the objects
+  are placed.  A difference or a comparison of two addresses keeps it (as
+  ``ADDRESS_BITS``), also when both are of one kind: the binary does not show
+  that they point into one object, and for two objects the result is the
+  placement (``(uintptr_t)&b - (uintptr_t)&a``, ``&a + 1 == &b``), which two
+  builds of one source need not share.  Pointer loops (``p != end``) are
+  therefore refused where they decide a branch -- a lost witness, never a
+  wrong one;
 * an address operand of a load or store and a branch target are addresses by
   definition, so the mark is no doubt there;
 * a marked branch condition is a hazard of the run (the path depends on the
@@ -141,8 +147,7 @@ either (``RunObserver``): an address can also be assembled from constants
 narrower than a pointer (MIPS ``lui``/``daddiu``), which the marks do not
 follow.  Limits: the image ranges and the frame are the executor's, so an
 address computed from other constants, an integer that coincides with an
-image address (refused, never confirmed), and a comparison between two
-objects of the same kind (undefined in C) are not distinguished.
+image address (refused, never confirmed) are not distinguished.
 
 Sinks.  A taint or a divergent fact that reaches a branch condition, a
 computed branch target or a load/store address is a hazard of the run (the
@@ -224,13 +229,15 @@ POINTER_MOVES = frozenset({"COPY", "INT_ZEXT", "INT_SEXT", "SUBPIECE", "PIECE"})
 # Bitwise operations that are moves for some value of the other operand (MIPS
 # ``move`` is ``or rd, rs, $zero``): their operand values are needed.
 MASKING = frozenset({"INT_OR", "INT_XOR", "INT_AND"})
-# Comparisons and differences of two addresses of the same kind (and, for an
-# equality, of an address with zero) give the same result wherever the frame
-# or the image was placed.
-ADDRESS_CANCELLING = frozenset({
-    "INT_SUB", "INT_EQUAL", "INT_NOTEQUAL", "INT_LESS", "INT_LESSEQUAL", "INT_SLESS",
-    "INT_SLESSEQUAL", "INT_CARRY", "INT_SCARRY", "INT_SBORROW",
-})
+# The only comparison that gives the same result wherever the frame or the
+# image was placed: an equality of an unmodified pointer with the constant
+# zero (a null test; no object of either build is at address 0).  Two
+# addresses are never compared or subtracted without a mark: the binary does
+# not show that they point into one object, and for two objects the result is
+# the placement itself (``(uintptr_t)&b - (uintptr_t)&a``, ``&a + 1 == &b``,
+# a relational comparison of two objects -- implementation-defined,
+# unspecified or undefined in C, and different between builds of one source).
+NULL_TESTS = frozenset({"INT_EQUAL", "INT_NOTEQUAL"})
 POINTER_BYTES = 8
 
 
@@ -783,14 +790,11 @@ class ValueMonitor:
             return bool(kinds) and kinds <= POINTER_KINDS
 
         cancelled = NO_TAINT
-        if m in ADDRESS_CANCELLING and len(sides) == 2:
+        if m in NULL_TESTS and len(sides) == 2:
             left, right = sides
-            if pointer(left) and pointer(right):
-                cancelled = left & right
-            if m in ("INT_EQUAL", "INT_NOTEQUAL"):
-                for this, other in ((left, op.inputs[1]), (right, op.inputs[0])):
-                    if pointer(this) and other.space == CONST_SPACE and other.offset == 0:
-                        cancelled = cancelled | this
+            for this, other, other_kinds in ((left, op.inputs[1], right), (right, op.inputs[0], left)):
+                if pointer(this) and not other_kinds and other.space == CONST_SPACE and other.offset == 0:
+                    cancelled = cancelled | this
         carriers = [bool(kinds & POINTER_KINDS) for kinds in sides]
         if m in POINTER_MOVES:
             kept = POINTER_KINDS

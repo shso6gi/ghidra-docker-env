@@ -275,3 +275,18 @@ def test_witnesses_are_told_apart_by_exact_values_not_by_their_rendering():
     witnesses = [{"a_1": 1, "a_2": 1, "b": True}, {"a_1": 1, "a_2": 1, "b": 1}, {"a_2": 1, "b": True, "a_1": 1}]
     replays = replay_witnesses(plan, witnesses, (left, right), stop_at_first_confirmation=False)
     assert len(replays) == 2
+
+
+def test_every_run_gets_what_is_left_of_the_budget_as_its_time_limit():
+    # (review of PR #321) a witness started inside the budget must not outlast it
+    plan = _arm_plan()
+    left, right = Fixed(_clean(1), _clean(2)), Fixed(_clean(1), _clean(3))
+    budget = iter([7.5, 2.0, 0.5, -1.0])
+    replay_witnesses(plan, [{"a_1": 1, "a_2": 1}, {"a_1": 2, "a_2": 2}], (left, right),
+                     time_left=lambda: next(budget))
+    assert [r.time_limit_seconds for r in left.requests] == [7.5, 0.5]
+    assert [r.time_limit_seconds for r in right.requests] == [2.0, 0.0]
+    # without a budget the executor's own limit applies
+    plain = Fixed(_clean(1))
+    replay_witnesses(plan, [{"a_1": 1, "a_2": 1}], (plain, Fixed(_clean(2))))
+    assert plain.requests[0].time_limit_seconds is None

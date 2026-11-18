@@ -48,6 +48,8 @@ def test_the_corpus_is_present():
         "arm64_ptrsyn_global_pointer_return", "mips64_ptrsyn_stack_address_return",
         "arm64_ptrsyn_branch_on_address_bits", "mips64_ptrsyn_pointer_difference",
         "arm64_ptrsyn_writable_global_read", "mips64_ptrsyn_bss_read",
+        "arm64_ptrsyn2_global_order", "mips64_ptrsyn2_global_distance", "arm64_ptrsyn2_one_past_equal",
+        "mips64_ptrsyn2_stack_distance", "arm64_ptrsyn2_same_array_distance",
     }
 
 
@@ -198,9 +200,28 @@ def test_a_branch_on_the_bits_of_an_address_is_a_hazard_on_real_code():
     assert result.hazard_kinds() == (HazardKind.ADDRESS_BITS,)
 
 
-def test_a_pointer_difference_through_a_mips_move_is_reliable_on_real_code():
-    # clang -O0 copies the frame pointer with ``move`` (``or rd, rs, zero``)
-    result, observed = _x0("mips64_ptrsyn_pointer_difference")
+def test_a_difference_of_two_addresses_is_not_reliable_on_real_code():
+    # Review of PR #321: the binary does not show that two addresses point into one
+    # object.  ``p - q`` of one local array (clang -O0, through a MIPS ``move``) is
+    # refused like the distance of two objects (``fixtures/concrete/ptrsyn2.c``),
+    # which differs between builds of one source.
+    for name in ("mips64_ptrsyn_pointer_difference", "mips64_ptrsyn2_global_distance",
+                 "mips64_ptrsyn2_stack_distance"):
+        result, observed = _x0(name)
+        assert result.hazards == () and observed.reliable_low_bytes == 0, name
+        assert observed.unreliable == ("ADDRESS_BITS",), name
+
+
+@pytest.mark.parametrize("name", ["arm64_ptrsyn2_global_order", "arm64_ptrsyn2_one_past_equal"])
+def test_a_branch_on_two_objects_addresses_is_a_hazard_on_real_code(name):
+    # ``&g_b < &g_a`` and ``&g_a + 1 == &g_b`` (two objects; clang -O0 branches)
+    result, _ = _x0(name)
+    assert result.hazard_kinds() == (HazardKind.ADDRESS_BITS,)
+
+
+def test_an_index_computed_without_addresses_stays_reliable_on_real_code():
+    # gcc -O2 computes ``&g_arr[x & 7] - &g_arr[0]`` as ``x & 7``: no address is used
+    result, observed = _x0("arm64_ptrsyn2_same_array_distance")
     assert result.hazards == () and observed.reliable_low_bytes == 8 and observed.value == 1
 
 

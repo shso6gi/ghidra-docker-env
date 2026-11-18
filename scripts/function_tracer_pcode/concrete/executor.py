@@ -119,6 +119,9 @@ class ExecutionRequest:
     entry_state: EntryState
     observe_registers: Tuple[str, ...]
     step_limit: int = DEFAULT_STEP_LIMIT
+    # Wall-clock budget of this run; the executor uses the smaller of this and
+    # its own (``None``: its own).  A caller with a deadline passes what is left.
+    time_limit_seconds: Optional[float] = None
 
 
 class Termination(str, Enum):
@@ -186,10 +189,10 @@ class HazardKind(str, Enum):
     # depends on where the executor -- or a linker, a loader -- placed the
     # frame or the image, which two binaries do not share.  As a taint it
     # marks values; it is a hazard of the run when such a value decided a
-    # branch, and a returned value carrying it is not compared (#18).  A
-    # comparison or a difference of two addresses of the same kind, and a
-    # comparison with zero (a null test), do not depend on the placement (C
-    # defines them within one object only).
+    # branch, and a returned value carrying it is not compared (#18).  Only a
+    # null test of an unmodified pointer removes it: a comparison or a
+    # difference of two addresses depends on the placement unless they point
+    # into one object, which the binary does not show.
     STACK_ADDRESS = "STACK_ADDRESS"
     IMAGE_ADDRESS = "IMAGE_ADDRESS"
     # A value computed from the bits of such an address other than by pointer
