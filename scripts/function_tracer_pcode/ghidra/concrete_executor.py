@@ -75,7 +75,7 @@ from scripts.function_tracer_pcode.concrete.run_observer import (
 from scripts.function_tracer_pcode.concrete.storage import StorageLocation
 
 DEFAULT_TIME_LIMIT_SECONDS = 60.0
-EXECUTOR_VERSION = "pcode-emulator-executor-v2"
+EXECUTOR_VERSION = "pcode-emulator-executor-v3"
 # Zero-filling a larger block would cost more than any run needs; such a
 # block stays undefined.
 MAX_ZERO_FILL_BYTES = 64 << 20
@@ -536,16 +536,21 @@ class PcodeEmulatorExecutor:
         memory = program.getMemory()
         self._memory_space = str(program.getAddressFactory().getDefaultAddressSpace().getName())
         self._image = []
-        code, writable = [], []
+        code, writable, image_ranges = [], [], []
         import jpype
 
         for block in memory.getBlocks():
             start = block.getStart()
-            if not block.isInitialized() or block.isExternalBlock() or not start.isMemoryAddress():
+            if block.isExternalBlock() or not start.isMemoryAddress():
                 continue
             if str(start.getAddressSpace().getName()) != self._memory_space:
                 continue
             size = int(block.getSize())
+            # every block of the image, initialized or not (``.bss``): the
+            # provenance of addresses (``concrete.value_monitor``)
+            image_ranges.append((int(start.getOffset()), int(start.getOffset()) + size))
+            if not block.isInitialized():
+                continue
             data = jpype.JArray(jpype.JByte)(size)
             block.getBytes(start, data)
             self._image.append((start, size, data))
@@ -563,6 +568,7 @@ class PcodeEmulatorExecutor:
                 externals.append((int(function.getEntryPoint().getOffset()), str(target.getName())))
         self._zero = self._zero_initialized(program, memory)
         self._code = tuple(sorted(code))
+        self._image_ranges = tuple(sorted(image_ranges))
         self._writable = tuple(sorted(writable))
         self._externals = tuple(sorted(externals))
         self._write_page_limit = write_page_limit
@@ -639,6 +645,7 @@ class PcodeEmulatorExecutor:
             registers=tuple(facts),
             stack_pointer=self.abi.stack_pointer,
             code_ranges=self._code,
+            image_ranges=self._image_ranges,
             external_entries=self._externals,
             writable_image_ranges=self._writable,
             processor=str(self._language.getProcessor()),

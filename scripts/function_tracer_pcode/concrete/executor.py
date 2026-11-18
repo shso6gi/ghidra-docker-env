@@ -55,12 +55,20 @@ class EntryState:
     defined (register name -> byte count): an AArch64 floating-point argument
     is a 16-byte ``v`` register value although Ghidra's base register ``z`` is
     wider.  A register not listed is defined in full.
+
+    ``address_registers`` names the registers whose entry value is an address
+    and of what (``HazardKind.STACK_ADDRESS`` / ``IMAGE_ADDRESS``): the stack
+    pointer, the return address, the entry address.  Their values are where
+    the executor placed the frame and the image, not inputs of the function;
+    the monitors follow what is computed from them
+    (``concrete.value_monitor``).
     """
 
     registers: Tuple[Tuple[str, int], ...]
     stack_pointer: int
     return_address: int
     defined_bytes: Tuple[Tuple[str, int], ...] = ()
+    address_registers: Tuple[Tuple[str, "HazardKind"], ...] = ()
 
     def register_map(self) -> Mapping[str, int]:
         return dict(self.registers)
@@ -79,10 +87,14 @@ def build_entry_state(
 ) -> EntryState:
     registers = {}
     defined_bytes = {}
+    address_registers = {}
     registers[abi.stack_pointer] = stack_pointer
+    address_registers[abi.stack_pointer] = HazardKind.STACK_ADDRESS
     registers[abi.return_address_register] = return_address
+    address_registers[abi.return_address_register] = HazardKind.IMAGE_ADDRESS
     if abi.entry_address_register is not None:
         registers[abi.entry_address_register] = entry_address
+        address_registers[abi.entry_address_register] = HazardKind.IMAGE_ADDRESS
     for index, name in enumerate(abi.callee_saved_registers):
         registers[name] = _callee_saved_value(index)
     for name, value in abi.control_register_defaults:
@@ -97,6 +109,7 @@ def build_entry_state(
         stack_pointer,
         return_address,
         tuple(sorted(defined_bytes.items())),
+        tuple(sorted(address_registers.items())),
     )
 
 
@@ -168,6 +181,21 @@ class HazardKind(str, Enum):
     # A shift whose amount the instruction reduced modulo the width: C leaves
     # a shift by the width or more undefined.
     SHIFT_COUNT_OUT_OF_RANGE = "SHIFT_COUNT_OUT_OF_RANGE"
+    # A value computed from an address of the run's stack frame, or of the
+    # program image (code, data, the GOT, a pointer stored in the image): it
+    # depends on where the executor -- or a linker, a loader -- placed the
+    # frame or the image, which two binaries do not share.  As a taint it
+    # marks values; it is a hazard of the run when such a value decided a
+    # branch, and a returned value carrying it is not compared (#18).  A
+    # comparison or a difference of two addresses of the same kind, and a
+    # comparison with zero (a null test), do not depend on the placement (C
+    # defines them within one object only).
+    STACK_ADDRESS = "STACK_ADDRESS"
+    IMAGE_ADDRESS = "IMAGE_ADDRESS"
+    # A value computed from the bits of such an address other than by pointer
+    # arithmetic (masking, shifting, multiplying, a comparison that does not
+    # cancel the placement): never cancelled.
+    ADDRESS_BITS = "ADDRESS_BITS"
 
 
 @dataclass(frozen=True)
@@ -235,6 +263,11 @@ class ExecutionResult:
     # source may return different values on such an input, so a run that was
     # not examined for them is not compared either.
     integer_ub_operations_tracked: bool = False
+    # The same for the provenance of addresses (``STACK_ADDRESS`` /
+    # ``IMAGE_ADDRESS``): the executor reported the program image's ranges and
+    # every pointer-sized value the run loaded, so a returned value that
+    # depends on where the stack or the image was placed is recognised.
+    address_provenance_tracked: bool = False
     # Address ranges (start, byte count) of writable, initialized program data
     # (global variables, the GOT) the run read before writing them: the run
     # depends on the program's state at start, which is a fact about the run

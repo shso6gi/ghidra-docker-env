@@ -113,6 +113,37 @@ Other undefined operations, from the operand values:
 * a floating-point result of the emulator that differs from the IEEE 754
   result of the same operands taints ``FP_EMULATION_MISMATCH``.
 
+Address rule (#18).  The executor places the stack frame and the program
+image; a linker and a loader place them differently in another binary.  A
+value computed from an address therefore says nothing about the function:
+the pointer a function returns, or an integer made from it.  The monitor
+marks as ``STACK_ADDRESS`` what is computed from the stack pointer at entry,
+and as ``IMAGE_ADDRESS`` what is computed from the return or entry address,
+from a pointer-sized constant inside the image (AArch64 ``adrp``), or from a
+pointer-sized value loaded from memory that lies inside the image (a GOT
+entry, a pointer stored in the data).  The marks propagate like the other
+taints, and
+
+* a value stays a pointer only through moves and pointer arithmetic
+  (``INT_ADD`` of an unmarked offset, ``INT_SUB`` of an unmarked offset from
+  it); any other computation on it -- masking, shifting, multiplying, adding
+  two addresses -- is marked ``ADDRESS_BITS``, which nothing cancels;
+* a difference or a comparison of two pointers of the same kind, and an
+  equality of a pointer with zero, are not marked: C defines them only within
+  one object, where the placement cancels;
+* an address operand of a load or store and a branch target are addresses by
+  definition, so the mark is no doubt there;
+* a marked branch condition is a hazard of the run (the path depends on the
+  placement), and a marked return register is not compared.
+
+A value of the return register that lies inside the image is not compared
+either (``RunObserver``): an address can also be assembled from constants
+narrower than a pointer (MIPS ``lui``/``daddiu``), which the marks do not
+follow.  Limits: the image ranges and the frame are the executor's, so an
+address computed from other constants, an integer that coincides with an
+image address (refused, never confirmed), and a comparison between two
+objects of the same kind (undefined in C) are not distinguished.
+
 Sinks.  A taint or a divergent fact that reaches a branch condition, a
 computed branch target or a load/store address is a hazard of the run (the
 path itself depends on it).  At return, ``observe`` reports how many low
@@ -180,6 +211,27 @@ MAX_EXACT_BITS = 4096
 
 SIGNED_OVERFLOW = HazardKind.SIGNED_OVERFLOW
 NO_TAINT: FrozenSet[HazardKind] = frozenset()
+# Provenance of addresses (#18): not a doubt about the arithmetic but about
+# where the value came from.  An address is a fine load/store address or
+# branch target; it is a hazard where it decides a branch, and a returned value
+# carrying it is not compared.
+POINTER_KINDS: FrozenSet[HazardKind] = frozenset({HazardKind.STACK_ADDRESS, HazardKind.IMAGE_ADDRESS})
+ADDRESS_KINDS: FrozenSet[HazardKind] = POINTER_KINDS | {HazardKind.ADDRESS_BITS}
+# Operations whose result is still a pointer when one operand is: moves and
+# pointer arithmetic (``INT_ADD`` with one pointer operand, ``INT_SUB`` of an
+# offset from a pointer).
+POINTER_MOVES = frozenset({"COPY", "INT_ZEXT", "INT_SEXT", "SUBPIECE", "PIECE"})
+# Bitwise operations that are moves for some value of the other operand (MIPS
+# ``move`` is ``or rd, rs, $zero``): their operand values are needed.
+MASKING = frozenset({"INT_OR", "INT_XOR", "INT_AND"})
+# Comparisons and differences of two addresses of the same kind (and, for an
+# equality, of an address with zero) give the same result wherever the frame
+# or the image was placed.
+ADDRESS_CANCELLING = frozenset({
+    "INT_SUB", "INT_EQUAL", "INT_NOTEQUAL", "INT_LESS", "INT_LESSEQUAL", "INT_SLESS",
+    "INT_SLESSEQUAL", "INT_CARRY", "INT_SCARRY", "INT_SBORROW",
+})
+POINTER_BYTES = 8
 
 
 @dataclass(frozen=True)
@@ -390,9 +442,21 @@ NO_REQUEST = ValueRequest()
 class ValueMonitor:
     """Shadow state of one run.  Driven by ``RunObserver``."""
 
-    def __init__(self, big_endian: bool, processor: str, c_int_bytes: int = 0):
+    def __init__(
+        self,
+        big_endian: bool,
+        processor: str,
+        c_int_bytes: int = 0,
+        image_ranges: Sequence[Tuple[int, int]] = (),
+    ):
         self._big_endian = big_endian
         self._processor = processor
+        # (start, end) ranges of the loaded program image; a pointer-sized
+        # constant or loaded value inside them is an image address.
+        self._image_ranges = tuple(image_ranges)
+        # The output of a pointer-sized LOAD whose value has not arrived yet.
+        self._pending_load = None
+        self.address_complete = bool(self._image_ranges)
         # operations narrower than this are checked under both readings
         self._narrow_below = c_int_bytes if c_int_bytes > 0 else 1 << 30
         self._sites: List[_Site] = []
@@ -426,8 +490,27 @@ class ValueMonitor:
     def _count(self, name: str) -> None:
         self.counters[name] = self.counters.get(name, 0) + 1
 
+    def _in_image(self, value: int) -> bool:
+        return any(start <= value < end for start, end in self._image_ranges)
+
+    def seed(self, space: str, offset: int, size: int, byte_count: int, kind: HazardKind) -> None:
+        """The low ``byte_count`` bytes of a register hold an address at entry."""
+        for k in range(min(byte_count, size)):
+            key = self._byte(space, offset, size, k)
+            self._taint[key] = self._taint.get(key, NO_TAINT) | {kind}
+
+    def _settle_load(self) -> None:
+        if self._pending_load is not None:
+            # the executor did not report the value the monitor asked for
+            self._pending_load = None
+            self.address_complete = False
+
     def _taints(self, vn) -> List[FrozenSet[HazardKind]]:
-        if vn.space == CONST_SPACE or not self._taint:
+        if vn.space == CONST_SPACE:
+            if vn.size == POINTER_BYTES and self._image_ranges and self._in_image(vn.offset):
+                return [frozenset({HazardKind.IMAGE_ADDRESS})] * vn.size
+            return [NO_TAINT] * vn.size
+        if not self._taint:
             return [NO_TAINT] * vn.size
         return [self._taint.get(key, NO_TAINT) for key in self._byte_keys(vn)]
 
@@ -508,6 +591,7 @@ class ValueMonitor:
     # ---------------------------------------------------------- instructions
 
     def begin_instruction(self, step: int, address: int, ops) -> None:
+        self._settle_load()
         self._step = step
         self._address = address
         self._instruction_taint = NO_TAINT
@@ -518,8 +602,26 @@ class ValueMonitor:
             self._shapes[address] = shape
         self._shape = shape
 
+    def _pointer_operand(self, op) -> bool:
+        if not self._taint:
+            return False
+        return any(
+            vn.space != CONST_SPACE and any(t & POINTER_KINDS for t in self._taints(vn))
+            for vn in op.inputs
+        )
+
     def value_request(self, index: int, op) -> ValueRequest:
+        request = self._value_request(index, op)
+        if not request.inputs and op.mnemonic in MASKING and self._pointer_operand(op):
+            return ValueRequest(True, request.output)
+        return request
+
+    def _value_request(self, index: int, op) -> ValueRequest:
         m = op.mnemonic
+        if m == "LOAD":
+            if self._image_ranges and op.output is not None and op.output.size == POINTER_BYTES:
+                return ValueRequest(False, True)
+            return NO_REQUEST
         if m in FP_OPS:
             return ValueRequest(True, m != "FLOAT_NAN")
         if m == "CALLOTHER":
@@ -606,12 +708,16 @@ class ValueMonitor:
 
     def execute(self, index: int, op, values: Optional[Sequence[int]], where: str) -> Optional[UseropOutcome]:
         """Apply ``op`` to the shadow.  ``values`` are the operand values when supplied."""
+        self._settle_load()
         self._expected_output = None
         request = self.value_request(index, op)
         if request.inputs and values is None:
             if op.mnemonic in FP_OPS or op.mnemonic == "CALLOTHER":
                 self.fp_complete = False
-            if op.mnemonic not in FP_OPS:
+            if not self._value_request(index, op).inputs:
+                # asked only to recognise a move of a pointer
+                self.address_complete = False
+            elif op.mnemonic not in FP_OPS:
                 self.integer_complete = False
         m = op.mnemonic
         inputs = op.inputs
@@ -631,9 +737,12 @@ class ValueMonitor:
             self._sink(union_of(taints[1]), facts[1], values[1] if values else None, inputs[1].size, where, "branch condition")
             return None
         if m in ("BRANCHIND", "CALLIND", "RETURN") and inputs:
-            self._sink(union_of(taints[0]), facts[0], values[0] if values else None, inputs[0].size, where, "branch target")
+            # a branch target is an address: its provenance is no doubt
+            self._sink(union_of(taints[0]) - ADDRESS_KINDS, facts[0], values[0] if values else None, inputs[0].size, where, "branch target")
             return None
         if m in ("LOAD", "STORE"):
+            if m == "LOAD" and self.value_request(index, op).output:
+                self._pending_load = op.output
             return None   # handled by load() / store()
         if m == "CALLOTHER":
             return self._userop(op, values, taints, facts, where)
@@ -649,7 +758,7 @@ class ValueMonitor:
             union = union | {HazardKind.FP_ROUNDING_SENSITIVE}
             taints = [[t | {HazardKind.FP_ROUNDING_SENSITIVE} for t in ts] for ts in taints]
             facts = [None if isinstance(f, FpFact) else f for f in facts]
-        out_taints = self._propagate(m, op, taints, union)
+        out_taints = self._propagate(m, op, taints, union, values)
         if m == "COPY" and inputs[0].size == out.size and facts[0] is not None:
             # an exact copy keeps what is known of the value
             self._write(out, out_taints, facts[0])
@@ -664,7 +773,46 @@ class ValueMonitor:
             self._next_instruction_taint = NO_TAINT
         return None
 
-    def _propagate(self, m: str, op, taints, union) -> List[FrozenSet[HazardKind]]:
+    def _propagate(self, m: str, op, taints, union, values=None) -> List[FrozenSet[HazardKind]]:
+        result = self._propagate_taints(m, op, taints, union)
+        if not union & ADDRESS_KINDS:
+            return result
+        sides = [union_of(t) for t in taints]
+
+        def pointer(kinds) -> bool:      # a pointer, not bits of one
+            return bool(kinds) and kinds <= POINTER_KINDS
+
+        cancelled = NO_TAINT
+        if m in ADDRESS_CANCELLING and len(sides) == 2:
+            left, right = sides
+            if pointer(left) and pointer(right):
+                cancelled = left & right
+            if m in ("INT_EQUAL", "INT_NOTEQUAL"):
+                for this, other in ((left, op.inputs[1]), (right, op.inputs[0])):
+                    if pointer(this) and other.space == CONST_SPACE and other.offset == 0:
+                        cancelled = cancelled | this
+        carriers = [bool(kinds & POINTER_KINDS) for kinds in sides]
+        if m in POINTER_MOVES:
+            kept = POINTER_KINDS
+        elif m == "INT_ADD" and len(carriers) == 2 and carriers.count(True) == 1:
+            kept = POINTER_KINDS
+        elif m == "INT_SUB" and len(carriers) == 2 and carriers == [True, False]:
+            kept = POINTER_KINDS
+        elif m in MASKING and len(carriers) == 2 and carriers.count(True) == 1 and values:
+            # ``x | 0``, ``x ^ 0``, ``x & ~0`` with the other operand unmarked
+            other = values[carriers.index(False)]
+            identity = _mask(-1, op.inputs[0].size) if m == "INT_AND" else 0
+            kept = POINTER_KINDS if _mask(other, op.inputs[0].size) == identity and not sides[carriers.index(False)] else NO_TAINT
+        else:
+            kept = NO_TAINT
+        out = []
+        for t in result:
+            t = t - cancelled
+            stray = (t & POINTER_KINDS) - kept
+            out.append((t - stray) | {HazardKind.ADDRESS_BITS} if stray else t)
+        return out
+
+    def _propagate_taints(self, m: str, op, taints, union) -> List[FrozenSet[HazardKind]]:
         out = op.output
         if not union:
             return [NO_TAINT] * out.size
@@ -1036,7 +1184,14 @@ class ValueMonitor:
         return [None if r is None else FpElement(r)]
 
     def output(self, value: int) -> None:
-        """The emulator's result of the last operation (checked against IEEE 754)."""
+        """The emulator's result of the last operation (checked against IEEE 754),
+        or the value a pointer-sized LOAD read (an image address or not)."""
+        if self._pending_load is not None:
+            out, self._pending_load = self._pending_load, None
+            if self._in_image(_mask(value, out.size)):
+                self._write(out, [t | {HazardKind.IMAGE_ADDRESS} for t in self._taints(out)],
+                            self._read_fact(out)[0])
+            return
         expected = self._expected_output
         self._expected_output = None
         if expected is None:
@@ -1102,7 +1257,8 @@ class ValueMonitor:
         """Check the address operand of a LOAD / STORE."""
         vn = op.inputs[1]
         self._consume(vn, "ADDRESS", where)
-        taint = union_of(self._taints(vn))
+        # an address operand is an address: its provenance is no doubt
+        taint = union_of(self._taints(vn)) - ADDRESS_KINDS
         fact, unresolved = self._read_fact(vn)
         self._sink(taint | unresolved, fact, actual_address, vn.size, where, "address")
 
@@ -1132,6 +1288,7 @@ class ValueMonitor:
         the whole register unreliable (``VALUE_RETURNED``): it is the
         function's return value when the caller compares this register.
         """
+        self._settle_load()
         vn = _Vn(space, offset, size)
         reliable = size
         kinds = set()
