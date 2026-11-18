@@ -202,6 +202,22 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--no-concrete-replay",
+        action="store_true",
+        help=(
+            "無条件の判定が UNKNOWN の pair で、solver の witness を両 binary の具体実行"
+            "（Ghidra の P-code emulator）で再生する処理を無効にする（デフォルト: 有効）。"
+            "差が確定したときは conditional 列だけが変わり、無条件の判定は変わらない（Issue #18）"
+        ),
+    )
+    parser.add_argument(
+        "--concrete-replay-budget",
+        type=float,
+        default=60.0,
+        metavar="SECONDS",
+        help="1 pair の具体実行の時間の上限（秒、解析期限の残りを超えない。デフォルト: 60）",
+    )
+    parser.add_argument(
         "--no-completed-recovery-proofs",
         action="store_true",
         help="completed recovery proof を結果へ反映しない（Phase 2 producer 検証用）",

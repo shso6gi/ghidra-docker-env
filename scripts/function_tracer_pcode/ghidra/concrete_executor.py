@@ -608,6 +608,25 @@ class PcodeEmulatorExecutor:
 
     # -------------------------------------------------------------- facts
 
+    @property
+    def program_facts(self) -> Dict[str, Any]:
+        """Identity of the program and the executor (the premises of a concrete proof)."""
+        facts = dict(self._program_facts)
+        facts["executor"] = EXECUTOR_VERSION
+        facts["ghidra"] = self._ghidra_version()
+        return facts
+
+    def register_location(self, space: str, offset: int, size: int) -> Optional[StorageLocation]:
+        """The storage piece ``size`` bytes at ``offset`` of address space ``space``
+        (a recovered parameter or return storage member), or ``None`` when the
+        space or the register is not this program's."""
+        address_space = self._program.getAddressFactory().getAddressSpace(space)
+        if address_space is None or not address_space.isRegisterSpace():
+            return None
+        varnode = _jclass("ghidra.program.model.pcode.Varnode")(address_space.getAddress(offset), size)
+        location = _location(self._language, varnode)
+        return location if location.is_register else None
+
     def function_abi(self, entry_address: int) -> Union[AbiModel, ExecutorRefusal]:
         """The ABI model of the function at ``entry_address``, or why there is none."""
         address = self._language.getDefaultSpace().getAddress(entry_address)
