@@ -215,7 +215,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=60.0,
         metavar="SECONDS",
-        help="1 pair の具体実行の時間の上限（秒、解析期限の残りを超えない。デフォルト: 60）",
+        help=(
+            "1 pair の具体実行の時間の上限（秒。デフォルト: 60）。解析期限（--analysis-timeout）の"
+            "残りを超えず、解析期限が無ければ具体実行は行わない"
+        ),
     )
     parser.add_argument(
         "--no-completed-recovery-proofs",

@@ -78,6 +78,8 @@ CONCRETE_SIDE_UNAVAILABLE = "concrete_replay_side_unavailable"
 CONCRETE_PLAN_REFUSED = "concrete_replay_plan_refused"
 CONCRETE_NOT_CONFIRMED = "concrete_replay_not_confirmed"
 CONCRETE_BUDGET_EXHAUSTED = "concrete_replay_budget_exhausted"
+#: the pair has no analysis deadline: the replay runs only inside one
+CONCRETE_NO_DEADLINE = "concrete_replay_no_analysis_deadline"
 
 #: Distinct witnesses replayed per pair at most.
 MAX_WITNESSES = 16
@@ -356,7 +358,8 @@ def run_concrete_counterexample_proof(
     step_limit: int,
     clock: Callable[[], float] = time.monotonic,
 ) -> ConcreteCounterexampleArtifact:
-    """Replay ``witnesses`` on both sides within ``budget_seconds``.
+    """Replay ``witnesses`` on both sides within ``budget_seconds`` (no witness
+    starts after it, and every run's time limit is what is left of it).
 
     ``subjects`` holds, per side, a ``ConcreteSubject`` or the reason the side
     was refused (a string, recorded in the artifact's ``plan``)."""
@@ -403,6 +406,8 @@ def run_concrete_counterexample_proof(
     replays: Tuple[WitnessReplay, ...] = replay_witnesses(
         plan, witnesses, (subjects[0].executor, subjects[1].executor),
         may_continue=may_continue, clock=clock,
+        # every run gets what is left: the replay never outlasts its budget
+        time_left=lambda: budget_seconds - (clock() - started),
     )
     records = tuple(replay.to_json() for replay in replays)
     confirmed = next(

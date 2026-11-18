@@ -571,14 +571,19 @@ def _stopped_lane_diagnostic(exc: BaseException, *, swallowed: bool) -> Mapping[
     }
 
 
-def _concrete_lane_budget(budget_seconds: float) -> float:
-    """具体実行に使ってよい秒数: 設定の予算と pair の解析期限の残りの小さい方。"""
+def _concrete_lane_budget(budget_seconds: float) -> Optional[float]:
+    """具体実行に使ってよい秒数: 設定の予算と pair の解析期限の残りの小さい方。
+
+    解析期限が無い（runner の ``ANALYSIS_TIMEOUT=0``、CLI で ``--analysis-timeout`` を
+    渡さない）なら ``None``: 具体実行は期限の中でだけ走る。期限の外で走ると、確定済みの
+    判定の後に process の期限（supervisor の TIMEOUT）へ近づく時間を足すことになる。
+    """
 
     from scripts.function_tracer_pcode.core.deadline import active_deadline
 
     deadline = active_deadline()
     if deadline is None:
-        return float(budget_seconds)
+        return None
     return min(float(budget_seconds), deadline.remaining_seconds())
 
 
@@ -587,6 +592,7 @@ def _run_concrete_proof(result: Any, analyses: Tuple[Any, Any], concrete_subject
 
     from scripts.function_tracer_pcode.proof.concrete_counterexample import (
         CONCRETE_BUDGET_EXHAUSTED,
+        CONCRETE_NO_DEADLINE,
         ConcreteCounterexampleArtifact,
         run_concrete_counterexample_proof,
         solver_witnesses,
@@ -594,6 +600,10 @@ def _run_concrete_proof(result: Any, analyses: Tuple[Any, Any], concrete_subject
 
     witnesses = solver_witnesses(result)
     budget = _concrete_lane_budget(getattr(options, "budget_seconds", 0.0))
+    if witnesses and budget is None:
+        return ConcreteCounterexampleArtifact._create(
+            witness_count=len(witnesses), non_decisive_reasons=(CONCRETE_NO_DEADLINE,)
+        )
     if witnesses and budget <= 0:
         return ConcreteCounterexampleArtifact._create(
             witness_count=len(witnesses), non_decisive_reasons=(CONCRETE_BUDGET_EXHAUSTED,)

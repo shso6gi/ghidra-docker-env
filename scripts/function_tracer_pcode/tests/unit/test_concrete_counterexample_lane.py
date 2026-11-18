@@ -227,15 +227,19 @@ def _sat_pair(*reasons, effect="blocks_disequivalence"):
     return projection, result
 
 
-def _concrete_lane(result, projection, left, right, analyses=None):
-    analyses = analyses or (_analysis(), _analysis(0x2000))
-    return run_production_conditional_lane(
-        result, projection=projection, analyses=analyses, observation_policy=NO_OBSERVATION,
-        solver_runner=_Solver(True),
-        concrete_subjects=lambda a1, a2: _subjects(left, right),
-        concrete_options=SimpleNamespace(budget_seconds=30.0, step_limit=1000),
-    )
+def _concrete_lane(result, projection, left, right, analyses=None, *, deadline=600.0):
+    """The production lane inside an analysis deadline of ``deadline`` seconds (``None``: none)."""
+    from scripts.function_tracer_pcode.core.deadline import DeadlinePolicy, deadline_scope
 
+    analyses = analyses or (_analysis(), _analysis(0x2000))
+    with deadline_scope(None if deadline is None else DeadlinePolicy(deadline)):
+        return run_production_conditional_lane(
+            result, projection=projection, analyses=analyses, observation_policy=NO_OBSERVATION,
+            solver_runner=_Solver(True),
+            concrete_subjects=lambda a1, a2: _subjects(left, right),
+            concrete_options=SimpleNamespace(budget_seconds=30.0, step_limit=1000),
+        )
+@pytest.mark.wall_clock   # the lane reads the analysis deadline (Issue #239)
 
 def test_a_confirmed_replay_discharges_only_the_sat_safety_causes_and_gives_conditional_not_eq():
     projection, result = _sat_pair(SAT_REASON, "counterexample_replay_unproven")
@@ -254,6 +258,7 @@ def test_a_confirmed_replay_discharges_only_the_sat_safety_causes_and_gives_cond
     }
 
 
+@pytest.mark.wall_clock   # the lane reads the analysis deadline (Issue #239)
 @pytest.mark.parametrize("effect", ["blocks_decision", "blocks_disequivalence"])
 def test_a_confirmed_replay_does_not_discharge_other_blockers(effect):
     causes = [_cause(SAT_REASON, index=0), _cause(OTHER_REASON, index=1)]
@@ -269,7 +274,7 @@ def test_a_confirmed_replay_does_not_discharge_other_blockers(effect):
         "counterexample_analysis_safety_unproven", "counterexample_replay_unproven",
         "counterexample_partition_replay_ambiguous",
     }
-
+@pytest.mark.wall_clock   # the lane reads the analysis deadline (Issue #239)
 
 def test_an_unconfirmed_replay_issues_no_column_and_keeps_its_record():
     projection, result = _sat_pair(SAT_REASON)
@@ -281,6 +286,7 @@ def test_an_unconfirmed_replay_issues_no_column_and_keeps_its_record():
     assert record["artifact_payload"]["replays"][0]["reason"] == "NO_DIFFERENCE_OBSERVED"
 
 
+@pytest.mark.wall_clock   # the lane reads the analysis deadline (Issue #239)
 @pytest.mark.parametrize("outcome", [Outcome.EQUIVALENT, Outcome.NOT_EQ, Outcome.ERROR])
 def test_no_replay_runs_after_a_decided_pair(outcome):
     projection, _ = _sat_pair(SAT_REASON)
@@ -362,3 +368,39 @@ def test_a_parameter_is_located_by_its_varnode_and_read_at_its_type_width():
     # a stack or unlocatable parameter is not a register parameter
     analysis.parameters[0]["storage"] = {"is_register": False, "offset": 8, "size": 4, "space_name": "stack"}
     assert not formula_inputs(analysis, "_1", locate)[0].location.is_register
+
+
+def test_the_replay_never_outlasts_its_budget():
+    # (review of PR #321/#322) a witness started 1 s before the end of the budget
+    # gets 1 s, not the executor's own 20 s per run
+    now = [0.0]
+    left, right = Fixed(_clean(13), _clean(13)), Fixed(_clean(13), _clean(14))
+
+    def tick():
+        now[0] += 4.5
+        return now[0]
+
+    artifact = _proof(left, right, witnesses=(WITNESS, dict(WITNESS, param_1_1=4, param_1_2=4)),
+                      budget_seconds=10.0, clock=tick)
+    limits = [r.time_limit_seconds for r in left.requests + right.requests]
+    assert all(limit is not None and limit <= 10.0 for limit in limits)
+    assert artifact.diagnostics["replayed"] <= 2
+@pytest.mark.wall_clock   # the lane reads the analysis deadline (Issue #239)
+
+def test_the_replay_runs_only_inside_an_analysis_deadline():
+    # without a cooperative deadline the time added after the decision would only
+    # bring the pair process closer to the supervisor's timeout
+    projection, result = _sat_pair(SAT_REASON)
+    left = Fixed(_clean(13))
+    diagnostics = _concrete_lane(result, projection, left, Fixed(_clean(14)), deadline=None)
+    assert left.requests == [] and result.conditional_outcome is None
+    payload = diagnostics["concrete_replay"]["artifact_payload"]
+    assert payload["non_decisive_reasons"] == ["concrete_replay_no_analysis_deadline"]
+@pytest.mark.wall_clock   # the lane reads the analysis deadline (Issue #239)
+
+def test_the_replay_budget_is_what_is_left_of_the_deadline():
+    projection, result = _sat_pair(SAT_REASON)
+    left, right = Fixed(_clean(13)), Fixed(_clean(14))
+    _concrete_lane(result, projection, left, right, deadline=5.0)
+    assert 0 < left.requests[0].time_limit_seconds <= 5.0
+    assert 0 < right.requests[0].time_limit_seconds <= left.requests[0].time_limit_seconds
