@@ -54,6 +54,7 @@ from scripts.function_tracer_pcode.concrete.observation import (
     return_location,
 )
 from scripts.function_tracer_pcode.concrete.recording import request_to_json, result_to_json
+from scripts.function_tracer_pcode.core.structural import exact_value_key
 from scripts.function_tracer_pcode.concrete.witness import (
     FormulaInput,
     WitnessInput,
@@ -256,10 +257,12 @@ def replay_witnesses(
     replays: List[WitnessReplay] = []
     seen = set()
     for witness in witnesses:
-        digest = witness_digest(witness)
-        if digest in seen:
+        # identity by exact comparison of the assignment (``core.structural``),
+        # never by its digest
+        identity = exact_value_key(tuple(sorted((str(name), value) for name, value in witness.items())))
+        if identity in seen:
             continue
-        seen.add(digest)
+        seen.add(identity)
         if not may_continue():
             break
         replay = judge_witness(plan, witness, lambda side, request: executors[side].execute(request), clock)

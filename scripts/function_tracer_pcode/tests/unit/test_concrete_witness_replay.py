@@ -266,3 +266,12 @@ def test_replay_skips_repeated_witnesses_stops_at_a_confirmation_and_honours_the
     replays = replay_witnesses(plan, witnesses, (Fixed(_clean(1)), Fixed(_clean(1))),
                                may_continue=lambda: next(budget))
     assert len(replays) == 1
+
+
+def test_witnesses_are_told_apart_by_exact_values_not_by_their_rendering():
+    # A Boolean and an integer that print alike are different assignments.
+    plan = _arm_plan()
+    left, right = Fixed(_clean(1), _clean(1)), Fixed(_clean(1), _clean(1))
+    witnesses = [{"a_1": 1, "a_2": 1, "b": True}, {"a_1": 1, "a_2": 1, "b": 1}, {"a_2": 1, "b": True, "a_1": 1}]
+    replays = replay_witnesses(plan, witnesses, (left, right), stop_at_first_confirmation=False)
+    assert len(replays) == 2
