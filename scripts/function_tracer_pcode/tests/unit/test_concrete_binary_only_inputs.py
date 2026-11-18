@@ -25,6 +25,8 @@ ALLOWED_EXTERNAL = {
     "time", "tempfile", "pathlib", "xml", "jpype",
     # exact arithmetic for the IEEE 754 model and the ELF section table
     "fractions", "math", "struct",
+    # the identity of a replayed witness (concrete.replay)
+    "hashlib",
 }
 FORBIDDEN_TEXT = ("qemu", "ubsan", "ground_truth", "eqbench", "newv", "/eq/", "/neq/", "expected_verdict")
 
