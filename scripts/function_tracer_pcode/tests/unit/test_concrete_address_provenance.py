@@ -74,27 +74,91 @@ def test_the_return_address_register_is_an_image_address():
     assert observed.unreliable == ("IMAGE_ADDRESS",)
 
 
-def test_the_difference_of_two_pointers_into_one_frame_is_reliable():
-    # ``p - q`` within one object: the placement cancels.
+# Two addresses are never compared or subtracted without a mark (review of
+# PR #321): the binary does not show that they point into one object, and for
+# two objects the result is the placement itself.  Measured on real builds of
+# one source (``fixtures/concrete/ptrsyn2.c``): with a same-kind cancellation,
+# ``(uintptr_t)&g_b - (uintptr_t)&g_a``, ``&g_b < &g_a`` and ``&g_a + 1 == &g_b``
+# gave ConcreteDifference between 5, 6 and 10 pairs of builds.
+
+def _two(first, second):
+    """x1 = first, x2 = second (each an op list writing that register)."""
     m = _arm()
-    m.ins(op("INT_ADD", X1R, SPV, C(8, 8)), op("INT_ADD", X2R, SPV, C(40, 8)))
-    m.ins(op("INT_SUB", U(0x10, 8), X2R, X1R), op("INT_SRIGHT", X0R, U(0x10, 8), C(2, 8)))
-    result, observed = _returned(m)
-    assert observed.value == 8 and observed.reliable_low_bytes == 8 and result.hazards == ()
+    m.ins(*first(X1R), *second(X2R))
+    return m
 
 
-def test_a_loop_bound_comparison_of_two_pointers_is_no_hazard():
-    # ``for (p = buf; p != end; ++p)`` and ``p < end``
-    m = _arm()
-    m.ins(op("INT_ADD", X1R, SPV, C(8, 8)), op("INT_ADD", X2R, SPV, C(40, 8)))
-    m.ins(op("INT_NOTEQUAL", U(0x20, 1), X1R, X2R), op("CBRANCH", None, C(0x2000, 8), U(0x20, 1)))
-    m.ins(op("INT_LESS", U(0x21, 1), X1R, X2R), op("CBRANCH", None, C(0x2000, 8), U(0x21, 1)))
-    # AArch64 ``cmp x1, x2``: the flags come from the difference
-    m.ins(op("INT_SUB", U(0x30, 8), X1R, X2R), op("INT_SLESS", U(0x22, 1), U(0x30, 8), C(0, 8)),
-          op("INT_SBORROW", U(0x23, 1), X1R, X2R), op("CBRANCH", None, C(0x2000, 8), U(0x22, 1)))
+GLOBAL_A = lambda r: [op("COPY", r, C(0x111030, 8))]                     # &g_a (adrp + add folded)
+GLOBAL_B = lambda r: [op("COPY", r, C(0x111034, 8))]                     # &g_b, another object
+LOCAL_U = lambda r: [op("INT_ADD", r, SPV, C(8, 8))]                     # &u
+LOCAL_V = lambda r: [op("INT_ADD", r, SPV, C(12, 8))]                    # &v, another object
+SAME_BASE_ELEMENT = lambda r: [op("INT_ADD", r, X1R, C(12, 8))]          # derived from x1
+
+
+@pytest.mark.parametrize("first, second", [
+    (GLOBAL_A, GLOBAL_B), (LOCAL_U, LOCAL_V), (GLOBAL_A, LOCAL_V),
+    # derived from the same register: still not shown to be one object (a compiler
+    # may address one global or local from another's address)
+    (GLOBAL_A, SAME_BASE_ELEMENT), (LOCAL_U, SAME_BASE_ELEMENT),
+], ids=["two-globals", "two-locals", "global-local", "global-derived", "local-derived"])
+@pytest.mark.parametrize("use", ["difference", "less", "less-equal", "signed-less", "equal", "not-equal", "cmp-flags"])
+def test_two_addresses_are_never_compared_or_subtracted_without_a_mark(first, second, use):
+    m = _two(first, second)
+    if use == "difference":
+        # (long)((uintptr_t)q - (uintptr_t)p), returned
+        m.ins(op("INT_SUB", X0R, X2R, X1R))
+        _, observed = _returned(m)
+        assert observed.reliable_low_bytes == 0 and observed.unreliable == ("ADDRESS_BITS",)
+        return
+    mnemonic = {"less": "INT_LESS", "less-equal": "INT_LESSEQUAL", "signed-less": "INT_SLESS",
+                "equal": "INT_EQUAL", "not-equal": "INT_NOTEQUAL"}.get(use)
+    if mnemonic is not None:
+        m.ins(op(mnemonic, U(0x20, 1), X1R, X2R), op("CBRANCH", None, C(0x2000, 8), U(0x20, 1)))
+    else:
+        # AArch64 ``cmp x1, x2; b.lt``: flags from the difference and the borrow
+        m.ins(op("INT_SUB", U(0x30, 8), X1R, X2R), op("INT_SLESS", U(0x22, 1), U(0x30, 8), C(0, 8)),
+              op("INT_SBORROW", U(0x23, 1), X1R, X2R), op("BOOL_XOR", U(0x24, 1), U(0x22, 1), U(0x23, 1)),
+              op("CBRANCH", None, C(0x2000, 8), U(0x24, 1)))
     m.ins(op("COPY", X0R, C(1, 8)))
-    result, observed = _returned(m)
-    assert result.hazards == () and observed.reliable_low_bytes == 8
+    result, _ = _returned(m)
+    assert set(result.hazard_kinds()) == {BITS}
+
+
+def test_a_comparison_value_of_two_addresses_returned_is_not_reliable():
+    # ``return &g_b < &g_a`` computed without a branch (cset)
+    m = _two(GLOBAL_A, GLOBAL_B)
+    m.ins(op("INT_LESS", U(0x20, 1), X2R, X1R), op("INT_ZEXT", X0R, U(0x20, 1)))
+    _, observed = _returned(m)
+    assert observed.reliable_low_bytes == 0 and observed.unreliable == ("ADDRESS_BITS",)
+
+
+def test_a_pointer_loop_bound_is_refused_where_it_decides_a_branch():
+    # ``for (p = buf; p != end; ++p)``: one object in the source, two addresses in
+    # the binary -- refused (a lost witness, never a wrong one)
+    m = _arm()
+    m.ins(op("INT_ADD", X1R, SPV, C(8, 8)), op("INT_ADD", X2R, X1R, C(32, 8)))
+    m.ins(op("INT_NOTEQUAL", U(0x20, 1), X1R, X2R), op("CBRANCH", None, C(0x2000, 8), U(0x20, 1)))
+    m.ins(op("COPY", X0R, C(1, 8)))
+    result, _ = _returned(m)
+    assert set(result.hazard_kinds()) == {BITS}
+
+
+@pytest.mark.parametrize("operand", [
+    lambda r: [op("INT_ADD", r, X1R, C(4, 8))],             # p + 4 == 0 is not a null test
+    lambda r: [op("INT_AND", r, X1R, C(0xFFFFFFFF, 8))],    # neither are bits of p
+])
+def test_only_an_unmodified_pointer_compared_with_zero_is_a_null_test(operand):
+    m = _arm()
+    m.ins(op("COPY", X1R, C(GLOBAL, 8)), *operand(X2R))
+    m.ins(op("INT_EQUAL", U(0x20, 1), X2R, C(0, 8)), op("CBRANCH", None, C(0x2000, 8), U(0x20, 1)))
+    m.ins(op("COPY", X0R, C(1, 8)))
+    result, _ = _returned(m)
+    # p + 4 stays a pointer (the test is then a null test of a pointer value);
+    # masked bits are not a pointer and the branch is a hazard
+    if operand(X2R)[0].mnemonic == "INT_AND":
+        assert set(result.hazard_kinds()) == {BITS}
+    else:
+        assert result.hazards == ()
 
 
 def test_a_null_test_of_a_pointer_is_no_hazard():
@@ -165,6 +229,7 @@ def test_an_integer_return_inside_the_image_is_not_reliable_however_computed():
 
 def test_mips_move_of_a_pointer_is_a_move():
     # MIPS ``move s8, sp`` is ``or s8, sp, zero``; ``or`` with a non-zero value is not.
+    # (Before the review fix this test subtracted two pointers, which no longer clears.)
     zero = R(0x0, 8)
     s8 = R(0xF0, 8)
     m = Machine([("a0", 0)], observe=("v0",), big_endian=True, processor="MIPS",
@@ -172,13 +237,14 @@ def test_mips_move_of_a_pointer_is_a_move():
     msp = R(0xE8, 8)
     m.write(zero, 0)
     m.ins(op("INT_OR", s8, msp, zero))
-    m.ins(op("INT_ADD", U(0x10, 8), s8, C(8, 8)), op("INT_SUB", R(V0.offset, 8), U(0x10, 8), msp))
+    m.ins(op("INT_ADD", U(0x10, 8), s8, C(8, 8)), op("COPY", R(V0.offset, 8), U(0x10, 8)))
     result = m.ret()
-    assert result.address_provenance_tracked and result.observed("v0").reliable_low_bytes == 8
+    # the copy through ``or`` kept the pointer: still a stack address, not bits
+    assert result.address_provenance_tracked and result.observed("v0").unreliable == ("STACK_ADDRESS",)
     m = Machine([("a0", 0x4)], observe=("v0",), big_endian=True, processor="MIPS",
                 image_ranges=IMAGE, address_registers=(("sp", STACK),))
     m.ins(op("INT_OR", s8, msp, R(0x20, 8)))
-    m.ins(op("INT_SUB", R(V0.offset, 8), s8, msp))
+    m.ins(op("COPY", R(V0.offset, 8), s8))
     assert m.ret().observed("v0").unreliable == ("ADDRESS_BITS",)
 
 

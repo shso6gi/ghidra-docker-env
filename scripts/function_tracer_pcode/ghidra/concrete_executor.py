@@ -717,13 +717,16 @@ class PcodeEmulatorExecutor:
         thread.overrideContextWithDefault()
 
         callbacks.inspecting = False
-        deadline = time.monotonic() + self._time_limit
+        limit = self._time_limit
+        if request.time_limit_seconds is not None:
+            limit = max(0.0, min(limit, float(request.time_limit_seconds)))
+        deadline = time.monotonic() + limit
         while True:
             counter = int(thread.getCounter().getOffset())
             if observer.instruction(counter) is not None:
                 break
             if time.monotonic() > deadline:
-                observer.stopped_by_executor(Termination.TIME_LIMIT.value, f"{self._time_limit:g} s")
+                observer.stopped_by_executor(Termination.TIME_LIMIT.value, f"{limit:g} s")
                 break
             try:
                 thread.stepInstruction()

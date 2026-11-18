@@ -48,6 +48,7 @@ pointer-sized loads: they replay as not ``address_provenance_tracked``.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.concrete.executor import (
@@ -146,6 +147,7 @@ def request_to_json(request: ExecutionRequest) -> Dict[str, Any]:
         },
         "observe_registers": list(request.observe_registers),
         "step_limit": request.step_limit,
+        "time_limit_seconds": request.time_limit_seconds,
     }
 
 
@@ -162,6 +164,7 @@ def request_from_json(raw: Mapping[str, Any]) -> ExecutionRequest:
         ),
         observe_registers=tuple(str(n) for n in raw["observe_registers"]),
         step_limit=int(raw["step_limit"]),
+        time_limit_seconds=None if raw.get("time_limit_seconds") is None else float(raw["time_limit_seconds"]),
     )
 
 
@@ -357,10 +360,11 @@ class RecordedExecutor:
                 program = sha256
             elif sha256 != program:
                 raise ValueError("a recorded executor holds the runs of one program")
-            self._traces[request_from_json(trace["request"])] = trace
+            self._traces[replace(request_from_json(trace["request"]), time_limit_seconds=None)] = trace
 
     def execute(self, request: ExecutionRequest) -> ExecutionResult:
-        trace = self._traces.get(request)
+        # a run's time limit decides nothing a recording could differ in
+        trace = self._traces.get(replace(request, time_limit_seconds=None))
         if trace is None:
             return ExecutionResult(Termination.EXECUTOR_ERROR, 0, detail="no recorded run for this request")
         replayed, _ = replay_trace(trace)
