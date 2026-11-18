@@ -15,6 +15,19 @@ compiler specification (``concrete.abi_conformance``); a program without a
 model or with any disagreement is refused, and so is a function marked with
 a calling convention other than the default.
 
+Values.  For every P-code operation the observer names
+(``RunObserver.value_request``), the driver reads the operation's input
+values from the emulator's state before it runs and, when asked, the value
+it wrote afterwards; the observer's monitors (``concrete.value_monitor``)
+derive everything from them.  A user operation runs only when
+``concrete.userops`` establishes its meaning; the driver writes the value the
+observer computed (``handleMissingUserop``).
+
+Initial memory.  The program's initialized blocks, and the uninitialized
+blocks the ELF file defines as zero at program start (``.bss``; found in the
+file's own section table by ``concrete.elf_sections``), zero-filled.  Every
+other location starts undefined.
+
 Isolation.  Every Java exception of the emulator becomes a result (``FAULT``
 for the machine semantics, ``EXECUTOR_ERROR`` otherwise).  An error of the
 executor's own Python code is not swallowed: it is recorded as an
@@ -46,6 +59,11 @@ from scripts.function_tracer_pcode.concrete.executor import (
     ExecutionResult,
     Termination,
 )
+from scripts.function_tracer_pcode.concrete.elf_sections import (
+    MemoryBlockFact,
+    parse_section_table,
+    zero_initialized_blocks,
+)
 from scripts.function_tracer_pcode.concrete.recording import RecordingObserver, make_trace
 from scripts.function_tracer_pcode.concrete.run_observer import (
     OpDescriptor,
@@ -57,7 +75,10 @@ from scripts.function_tracer_pcode.concrete.run_observer import (
 from scripts.function_tracer_pcode.concrete.storage import StorageLocation
 
 DEFAULT_TIME_LIMIT_SECONDS = 60.0
-EXECUTOR_VERSION = "pcode-emulator-executor-v1"
+EXECUTOR_VERSION = "pcode-emulator-executor-v2"
+# Zero-filling a larger block would cost more than any run needs; such a
+# block stays undefined.
+MAX_ZERO_FILL_BYTES = 64 << 20
 
 _DIVISIONS = frozenset({"INT_DIV", "INT_SDIV", "INT_REM", "INT_SREM"})
 # Exceptions of the emulator that are the machine semantics stopping, not a
@@ -201,13 +222,39 @@ def _varnode(vn) -> Varnode:
     return Varnode(str(vn.getAddress().getAddressSpace().getName()), int(vn.getOffset()), int(vn.getSize()))
 
 
-def _op_descriptor(op) -> OpDescriptor:
+def _op_descriptor(op, language) -> OpDescriptor:
     output = op.getOutput()
+    mnemonic = str(op.getMnemonic())
+    userop = None
+    if mnemonic == "CALLOTHER":
+        name = language.getUserDefinedOpName(int(op.getInput(0).getOffset()))
+        userop = None if name is None else str(name)
     return OpDescriptor(
-        str(op.getMnemonic()),
+        mnemonic,
         None if output is None else _varnode(output),
         tuple(_varnode(op.getInput(i)) for i in range(op.getNumInputs())),
+        userop,
     )
+
+
+def _file_reader(program):
+    """``(read(offset, count) -> bytes, length)`` of the program's original file bytes."""
+    import jpype
+
+    all_bytes = list(program.getMemory().getAllFileBytes())
+    if len(all_bytes) != 1:
+        return None, 0
+    file_bytes = all_bytes[0]
+    length = int(file_bytes.getSize())
+
+    def read(offset: int, count: int) -> bytes:
+        if offset < 0 or count < 0 or offset + count > length:
+            return b""
+        data = jpype.JArray(jpype.JByte)(count)
+        got = int(file_bytes.getOriginalBytes(offset, data, 0, count))
+        return bytes(int(b) & 0xFF for b in data[:got])
+
+    return read, length
 
 
 # ------------------------------------------------------------- callbacks
@@ -232,6 +279,18 @@ def _make_callbacks(executor: "PcodeEmulatorExecutor"):
             self.big_endian = executor._big_endian
             self.arith = None
             self.state = None
+            self.want_output = False
+            self.reason_inspect = _jclass("ghidra.pcode.exec.PcodeExecutorStatePiece$Reason").INSPECT
+            self.language = executor._language
+
+        def _value(self, thread, varnode) -> int:
+            if varnode.isConstant():
+                return int(varnode.getOffset()) & ((1 << (8 * int(varnode.getSize()))) - 1)
+            self.inspecting = True
+            try:
+                return _int_of(thread.getState().getVar(varnode, self.reason_inspect), self.big_endian)
+            finally:
+                self.inspecting = False
 
         @JOverride
         def emulatorCreated(self, machine):
@@ -292,7 +351,7 @@ def _make_callbacks(executor: "PcodeEmulatorExecutor"):
                 cached = tuple(int(op.getOpcode()) for op in code)
                 self.opcode_cache[address] = cached
                 self.reported.add(address)
-                self.observer.decoded(address, tuple(_op_descriptor(op) for op in code))
+                self.observer.decoded(address, tuple(_op_descriptor(op, self.language) for op in code))
             self.opcodes = cached
 
         @JOverride
@@ -311,7 +370,12 @@ def _make_callbacks(executor: "PcodeEmulatorExecutor"):
                     Termination.EXECUTOR_ERROR.value, f"P-code frame mismatch at {self.address:#x}"
                 )
                 raise _StopRun()
-            if self.observer.op(index) is not None:
+            request = self.observer.value_request(index)
+            values = None
+            if request.inputs:
+                values = tuple(self._value(thread, op.getInput(i)) for i in range(op.getNumInputs()))
+            self.want_output = request.output and op.getOutput() is not None
+            if self.observer.op(index, values) is not None:
                 raise _StopRun()
             if str(op.getMnemonic()) in _DIVISIONS:
                 divisor = op.getInput(1)
@@ -332,7 +396,12 @@ def _make_callbacks(executor: "PcodeEmulatorExecutor"):
 
         @JOverride
         def afterStepOp(self, thread, op, frame):
-            pass
+            if self.want_output:
+                self.want_output = False
+                self._guarded(self._after_step_op, thread, op)
+
+        def _after_step_op(self, thread, op):
+            self.observer.op_output(self._value(thread, op.getOutput()))
 
         def _address_of(self, offset) -> int:
             purpose = _jclass("ghidra.pcode.exec.PcodeArithmetic$Purpose").LOAD
@@ -368,7 +437,23 @@ def _make_callbacks(executor: "PcodeEmulatorExecutor"):
 
         @JOverride
         def handleMissingUserop(self, thread, op, frame, name, library):
-            return False
+            return bool(self._guarded(self._userop, thread, op))
+
+        def _userop(self, thread, op):
+            # The observer decided in beforeStepOp that this user operation runs
+            # and computed its value (concrete.userops).
+            value = self.observer.userop_value()
+            output = op.getOutput()
+            if output is None:
+                return True
+            if value is None:
+                return False
+            self.inspecting = True
+            try:
+                thread.getState().setVar(output, _bytes_of(value, int(output.getSize()), self.big_endian))
+            finally:
+                self.inspecting = False
+            return True
 
         @JOverride
         def dataWritten(self, *args):
@@ -476,6 +561,7 @@ class PcodeEmulatorExecutor:
             target = function.getThunkedFunction(True)
             if target is not None and target.isExternal():
                 externals.append((int(function.getEntryPoint().getOffset()), str(target.getName())))
+        self._zero = self._zero_initialized(program, memory)
         self._code = tuple(sorted(code))
         self._writable = tuple(sorted(writable))
         self._externals = tuple(sorted(externals))
@@ -489,7 +575,30 @@ class PcodeEmulatorExecutor:
             "abi_conformance": [
                 [m.item.value, m.expected, m.found] for m in conformance.mismatches
             ],
+            "processor": str(self._language.getProcessor()),
+            "zero_initialized_ranges": [[a, b] for a, b in self._zero.ranges],
+            "left_undefined_blocks": [list(entry) for entry in self._zero.left_undefined],
         }
+
+    def _zero_initialized(self, program, memory):
+        blocks = []
+        for block in memory.getBlocks():
+            start = block.getStart()
+            if not start.isMemoryAddress() or str(start.getAddressSpace().getName()) != self._memory_space:
+                continue
+            if block.isExternalBlock():
+                continue
+            blocks.append(MemoryBlockFact(
+                str(block.getName()), int(start.getOffset()), int(block.getSize()), bool(block.isInitialized())
+            ))
+        read, length = _file_reader(program)
+        table = None if read is None else parse_section_table(read, length)
+        result = zero_initialized_blocks(table, blocks)
+        kept = tuple((a, b) for a, b in result.ranges if b - a <= MAX_ZERO_FILL_BYTES)
+        dropped = tuple(
+            (f"{a:#x}", "larger than the zero-fill budget") for a, b in result.ranges if b - a > MAX_ZERO_FILL_BYTES
+        )
+        return type(result)(kept, result.left_undefined + dropped)
 
     # -------------------------------------------------------------- facts
 
@@ -532,6 +641,9 @@ class PcodeEmulatorExecutor:
             code_ranges=self._code,
             external_entries=self._externals,
             writable_image_ranges=self._writable,
+            processor=str(self._language.getProcessor()),
+            zero_initialized_ranges=self._zero.ranges,
+            c_int_bytes=self.abi.c_int_bytes,
             **kwargs,
         )
 
@@ -580,6 +692,9 @@ class PcodeEmulatorExecutor:
         shared = emulator.getSharedState()
         for start, size, data in self._image:
             shared.setVar(start, size, True, data)
+        space = self._language.getDefaultSpace()
+        for begin, end in self._zero.ranges:
+            shared.setVar(space.getAddress(begin), end - begin, True, jpype.JArray(jpype.JByte)(end - begin))
         thread = emulator.newThread()
         state = thread.getState()
         # (``callbacks.inspecting`` stays set until the first instruction.)
@@ -591,7 +706,6 @@ class PcodeEmulatorExecutor:
             if self._big_endian:
                 address = address.add(size - count)
             state.setVar(address, count, True, _bytes_of(value, count, self._big_endian))
-        space = self._language.getDefaultSpace()
         thread.overrideCounter(space.getAddress(request.entry_address))
         thread.overrideContextWithDefault()
 

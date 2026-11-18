@@ -328,7 +328,9 @@ def test_a_run_without_fp_or_integer_arithmetic_is_tracked_for_both():
 
 
 @pytest.mark.parametrize("mnemonic", sorted(FP_OPERATIONS))
-def test_any_fp_operation_leaves_the_run_unexamined_until_the_monitor_exists(mnemonic):
+def test_an_fp_operation_without_its_operand_values_leaves_the_run_unexamined(mnemonic):
+    # The floating-point monitor needs every FP operation's operand values
+    # (C3); a run that does not supply them (a version 1 trace) is not examined.
     run = Run()
     run.ins(op(mnemonic, U(0x10, 8), R(0x5020, 8), R(0x5020, 8)))
     result = run.ret([("x0", 5), ("sp", SP)])
@@ -336,11 +338,22 @@ def test_any_fp_operation_leaves_the_run_unexamined_until_the_monitor_exists(mne
 
 
 @pytest.mark.parametrize("mnemonic", sorted(INTEGER_UB_OPERATIONS))
-def test_any_integer_operation_c_may_leave_undefined_leaves_the_run_unexamined(mnemonic):
+def test_an_integer_operation_c_may_leave_undefined_without_its_values_leaves_the_run_unexamined(mnemonic):
     run = Run()
     run.ins(op(mnemonic, U(0x10, 8), R(0x4000, 8), R(0x4008, 8)))
     result = run.ret([("x0", 5), ("sp", SP)])
     assert not result.integer_ub_operations_tracked and result.fp_operations_tracked
+
+
+@pytest.mark.parametrize("mnemonic", ["INT_DIV", "INT_REM", "INT_RIGHT", "INT_SRIGHT", "INT_LESS", "INT_SLESS"])
+def test_integer_operations_on_values_without_monitor_facts_need_no_values(mnemonic):
+    # Division by zero stops the run in the executor (or is caught by the
+    # instruction's guard); unsigned and signed uses of ordinary values are
+    # only examined when an operand carries a signed-overflow fact.
+    run = Run()
+    run.ins(op(mnemonic, U(0x10, 8), R(0x4000, 8), R(0x4008, 8)))
+    result = run.ret([("x0", 5), ("sp", SP)])
+    assert result.integer_ub_operations_tracked and result.fp_operations_tracked
 
 
 def test_fmadd_is_two_operations_in_the_emulator():

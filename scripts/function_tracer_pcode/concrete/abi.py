@@ -117,6 +117,11 @@ class AbiModel:
     callee_saved_registers: Tuple[str, ...]
     # Control registers the ABI defines at entry, with their entry value.
     control_register_defaults: Tuple[Tuple[str, int], ...]
+    # Bytes of the C ``int`` type of the ABI's data model.  Operands narrower
+    # than ``int`` are promoted to ``int`` (C11 6.3.1.1), signed or unsigned,
+    # so an operation narrower than ``int`` may stand for ``int`` arithmetic
+    # on either extension of its operands.
+    c_int_bytes: int = 0
 
     def argument_register(self, slot: ArgumentSlot) -> Optional[str]:
         table = (
@@ -207,6 +212,7 @@ _AARCH64 = AbiModel(
         "d8", "d9", "d10", "d11", "d12", "d13", "d14", "d15",
     ),
     control_register_defaults=(("fpcr", 0),),
+    c_int_bytes=4,       # LP64 (AAPCS64 data model)
 )
 
 _MIPS_N64 = AbiModel(
@@ -233,6 +239,7 @@ _MIPS_N64 = AbiModel(
         "f24", "f25", "f26", "f27", "f28", "f29", "f30", "f31",
     ),
     control_register_defaults=(("fcsr", 0),),
+    c_int_bytes=4,       # LP64 (n64 data model)
 )
 
 _MODELS: Mapping[AbiId, AbiModel] = {

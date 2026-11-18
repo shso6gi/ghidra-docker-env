@@ -150,6 +150,24 @@ class HazardKind(str, Enum):
     # can be a difference of rounding, not of the function -- in the returned
     # floating-point value or in anything derived from it.
     FP_ROUNDING_SENSITIVE = "FP_ROUNDING_SENSITIVE"
+    # The emulator's floating-point result differs from the IEEE 754 result of
+    # the same operands (the emulator, not the machine, is in doubt).
+    FP_EMULATION_MISMATCH = "FP_EMULATION_MISMATCH"
+    # A floating-point value converted to an integer it does not fit (NaN,
+    # infinity, out of range): undefined in C (6.3.1.4).
+    FP_TO_INTEGER_OUT_OF_RANGE = "FP_TO_INTEGER_OUT_OF_RANGE"
+    # The run used the result of an operation whose signed reading
+    # overflowed (``IntegerOverflow.VALUE_USED``): the
+    # binary cannot exclude that the source had a signed overflow, which C
+    # leaves undefined (#314).  Also: a value computed through such an
+    # overflow was used where its wrapped and its exact value differ.
+    SIGNED_OVERFLOW = "SIGNED_OVERFLOW"
+    # An integer division by zero (which some instructions define and C does
+    # not) or of the most negative value by -1.
+    INTEGER_DIVISION_UNDEFINED = "INTEGER_DIVISION_UNDEFINED"
+    # A shift whose amount the instruction reduced modulo the width: C leaves
+    # a shift by the width or more undefined.
+    SHIFT_COUNT_OUT_OF_RANGE = "SHIFT_COUNT_OUT_OF_RANGE"
 
 
 @dataclass(frozen=True)
@@ -159,6 +177,46 @@ class Hazard:
     detail: str = ""
 
 
+class OverflowDisposition(Enum):
+    """What became of the result of an operation whose signed reading overflowed."""
+
+    # The value was never used: it was overwritten, or only its own
+    # instruction's condition flags were taken from it (a compare).
+    VALUE_NOT_USED = "VALUE_NOT_USED"
+    # The value was otherwise unused and still in an observed register at
+    # return: that register is not evidence (``ObservedRegister.unreliable``),
+    # the run is (the function may return another register).
+    VALUE_RETURNED = "VALUE_RETURNED"
+    # The value was used (an operand, a store, an address, a branch, the
+    # return value): the binary cannot show that the operation was not a C
+    # signed operation, so the run may have executed undefined behaviour.
+    VALUE_USED = "VALUE_USED"
+
+
+@dataclass(frozen=True)
+class IntegerOverflow:
+    """One operation of the run whose signed result did not fit (#314).
+
+    The occurrence, kept apart from what it means for the evidence: a run
+    hazard (``SIGNED_OVERFLOW``) follows from ``VALUE_USED`` only, and whether
+    the observed value would agree with an exact computation is reported on
+    the observed register (``ObservedRegister.reliable_low_bytes``).
+    """
+
+    address: int
+    operation: str
+    width: int
+    disposition: OverflowDisposition
+    # dynamic executions of this operation that overflowed
+    count: int = 1
+    # What used the value: the P-code operations, and ``STORE`` / ``ADDRESS``
+    # / ``PARTIAL_OVERWRITE``.  Recorded for later stages; no use clears the
+    # hazard.  An unsigned comparison alone (``INT_LESSEQUAL``: compilers
+    # compile ``lo <= x && x <= hi`` to ``(unsigned)(x - lo) <= hi - lo``)
+    # is also what a source with a signed overflow compiles to.
+    uses: Tuple[str, ...] = ()
+
+
 @dataclass(frozen=True)
 class ExecutionResult:
     termination: Termination
@@ -166,9 +224,11 @@ class ExecutionResult:
     # (register name, value at return with its defined low-order bytes)
     observed_registers: Tuple[Tuple[str, ObservedRegister], ...] = ()
     hazards: Tuple[Hazard, ...] = ()
-    # The executor examined every floating-point operation of the run for the
-    # FP_* hazards.  A result that does not say so is not compared: the
-    # absence of an FP hazard means something only when they were looked for.
+    # The executor examined every floating-point operation of the run with
+    # its operand values (``concrete.value_monitor``: rounding alternatives,
+    # NaN, the emulator's own results).  A result that does not say so is not
+    # compared: the absence of an FP hazard means something only when they
+    # were looked for.
     fp_operations_tracked: bool = False
     # The same for integer operations whose result C leaves undefined on some
     # inputs (signed overflow, division, shift counts; #314).  Two builds of one
@@ -183,6 +243,12 @@ class ExecutionResult:
     # How many P-code operations of each kind the run executed (diagnosis and
     # the measurements of the monitors).
     operation_counts: Tuple[Tuple[str, int], ...] = ()
+    # What the monitors saw, by event (``signed_overflow_INT_ADD``,
+    # ``fp_rounding_alternatives``, ``fp_nan``, ...): diagnosis and measurement
+    # only; nothing reads it to decide.
+    monitor_events: Tuple[Tuple[str, int], ...] = ()
+    # Every operation whose signed result overflowed, by address (#314).
+    integer_overflows: Tuple[IntegerOverflow, ...] = ()
     detail: str = ""
 
     def observed(self, register: str) -> Optional[ObservedRegister]:

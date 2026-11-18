@@ -14,14 +14,21 @@ register values at return.  ``RunObserver`` turns that stream into an
 * which observed register bytes are defined at return;
 * the floating-point format of an observed value (``value_format``), from the
   operation that produced it (below);
-* whether the operations the hazard monitors need to examine ran
+* the doubts of the integer-UB and floating-point monitors
+  (``concrete.value_monitor``): hazards where they reached the control flow,
+  and the reliable low-order bytes of each observed register;
+* whether those monitors saw every operand value they needed
   (``fp_operations_tracked``, ``integer_ub_operations_tracked``);
+* user operations: run only when ``concrete.userops`` establishes their
+  meaning (the observer computes the value the executor writes);
 * writable program data the run read before writing it.
 
-The observer reads no values beyond the addresses of loads and stores and the
-registers at return: it never decides anything from what a computation
-produced.  The same observer consumes a live run and a recorded one
-(``concrete.recording``), so a recorded run replays through production code.
+Values.  The observer asks, per operation, for the operand values it needs
+(``value_request``) and the executor supplies them with the operation
+(``op(index, values)``) and, when asked, the operation's result
+(``op_output``).  The same observer consumes a live run and a recorded one
+(``concrete.recording``), so a recorded run replays through production code;
+a recording without the values (schema v1) replays as unmonitored.
 
 Undefined values.  The emulator itself tracks which bytes hold a value (the
 entry state, the loaded program image, everything the run wrote) and reports
@@ -40,11 +47,9 @@ computed by integer operations.  At return a register's value has a format
 only when its low-order 4 or 8 bytes are exactly the bytes of one such value
 in order.  Nothing is inferred from the bits themselves.
 
-Monitoring.  The NaN / rounding monitor (#317) and the integer-UB monitor
-(#314) are not implemented yet.  A run is reported as examined for one of them
-only when it executed none of the operations that monitor would have to look
-at; any user operation counts against both, because its semantics are not
-known here.
+Memory at start.  The loaded image is defined; so is memory the ELF file
+defines as zero at program start (``RunSetup.zero_initialized_ranges``,
+``concrete.elf_sections``), which is writable program data like ``.data``.
 """
 
 from __future__ import annotations
@@ -60,6 +65,14 @@ from scripts.function_tracer_pcode.concrete.executor import (
     Termination,
 )
 from scripts.function_tracer_pcode.concrete.observation import FpFormat, ObservedRegister
+from scripts.function_tracer_pcode.concrete.userops import UseropEffect
+from scripts.function_tracer_pcode.concrete.value_monitor import (
+    FP_OPS as FP_MONITORED_OPERATIONS,
+    INTEGER_VALUE_OPS,
+    NO_REQUEST,
+    ValueMonitor,
+    ValueRequest,
+)
 
 REGISTER_SPACE = "register"
 UNIQUE_SPACE = "unique"
@@ -72,16 +85,11 @@ FP_VALUE_OPERATIONS = frozenset({
     "FLOAT_ADD", "FLOAT_SUB", "FLOAT_MULT", "FLOAT_DIV", "FLOAT_NEG", "FLOAT_ABS",
     "FLOAT_SQRT", "INT2FLOAT", "FLOAT2FLOAT", "CEIL", "FLOOR", "ROUND",
 })
-# Every operation the NaN / rounding monitor has to examine.
-FP_OPERATIONS = FP_VALUE_OPERATIONS | frozenset({
-    "FLOAT_EQUAL", "FLOAT_NOTEQUAL", "FLOAT_LESS", "FLOAT_LESSEQUAL", "FLOAT_NAN", "TRUNC",
-})
-# Every operation the integer-UB monitor has to examine: the arithmetic C
-# leaves undefined on some operands (overflow, division, shift counts).
-INTEGER_UB_OPERATIONS = frozenset({
-    "INT_ADD", "INT_SUB", "INT_MULT", "INT_2COMP", "INT_DIV", "INT_SDIV", "INT_REM",
-    "INT_SREM", "INT_LEFT", "INT_RIGHT", "INT_SRIGHT",
-})
+# Every operation the floating-point monitor examines with its operand values.
+FP_OPERATIONS = FP_MONITORED_OPERATIONS
+# The integer operations whose operand values the integer-UB monitor always
+# needs (others only when an operand carries a monitor fact).
+INTEGER_UB_OPERATIONS = INTEGER_VALUE_OPS
 USER_OPERATION = "CALLOTHER"
 
 _FORMAT_OF_SIZE = {4: FpFormat.BINARY32, 8: FpFormat.BINARY64}
@@ -101,6 +109,8 @@ class OpDescriptor:
     mnemonic: str
     output: Optional[Varnode]
     inputs: Tuple[Varnode, ...]
+    # The user operation's name, for ``CALLOTHER``.
+    userop: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +139,14 @@ class RunSetup:
     external_entries: Tuple[Tuple[int, str], ...]
     writable_image_ranges: Tuple[Tuple[int, int], ...]
     write_page_limit: int = DEFAULT_WRITE_PAGE_LIMIT
+    # Ghidra's processor name (``AARCH64``, ``MIPS``): selects user operations.
+    processor: str = ""
+    # Uninitialized blocks the ELF file defines as zero at program start; the
+    # executor zero-fills them and they count as writable program data.
+    zero_initialized_ranges: Tuple[Tuple[int, int], ...] = ()
+    # ``AbiModel.c_int_bytes``; 0 when unknown (every width is then checked
+    # as if narrower than ``int``: both readings).
+    c_int_bytes: int = 0
 
     def register(self, name: str) -> Optional[RegisterFact]:
         for fact in self.registers:
@@ -181,6 +199,10 @@ class RunObserver:
         self._written_writable: Set[int] = set()
         self._writable_reads: Set[int] = set()
         self._observed: Tuple[Tuple[str, ObservedRegister], ...] = ()
+        self._writable = tuple(setup.writable_image_ranges) + tuple(setup.zero_initialized_ranges)
+        self._monitor = ValueMonitor(setup.big_endian, setup.processor, setup.c_int_bytes)
+        self._monitor_step = -1
+        self._userop_value: Optional[int] = None
         for name, _ in request.entry_state.registers:
             fact = setup.register(name)
             if fact is None:
@@ -246,25 +268,78 @@ class RunObserver:
         """The P-code of the instruction at ``address`` (reported once per address)."""
         self._decoded[address] = tuple(ops)
 
-    def op(self, index: int) -> Optional[Termination]:
-        """Operation ``index`` of the current instruction is about to run."""
+    def _current_op(self, index: int) -> Optional[OpDescriptor]:
+        ops = self._decoded.get(self._address)
+        if ops is None or not 0 <= index < len(ops):
+            return None
+        if self._monitor_step != self._steps:
+            self._monitor_step = self._steps
+            self._monitor.begin_instruction(self._steps, self._address, ops)
+        return ops[index]
+
+    def value_request(self, index: int) -> ValueRequest:
+        """Which values of operation ``index`` the monitors need (inputs, result)."""
+        if self._termination is not None:
+            return NO_REQUEST
+        op = self._current_op(index)
+        if op is None:
+            return NO_REQUEST
+        return self._monitor.value_request(index, op)
+
+    def op(self, index: int, values: Optional[Tuple[int, ...]] = None) -> Optional[Termination]:
+        """Operation ``index`` of the current instruction is about to run.
+
+        ``values`` are the operation's input values (unsigned, in input order,
+        constants included) when the executor supplies them.
+        """
         if self._termination is not None:
             return self._termination
         if self._check_no_pending() is not None:
             return self._termination
-        ops = self._decoded.get(self._address)
-        if ops is None or not 0 <= index < len(ops):
+        op = self._current_op(index)
+        if op is None:
             return self._stop(Termination.EXECUTOR_ERROR, f"no P-code for operation {index}{self._where()}")
-        op = ops[index]
         self._counts[op.mnemonic] = self._counts.get(op.mnemonic, 0) + 1
+        self._userop_value = None
+        outcome = self._monitor.execute(index, op, values, self._where())
         if op.mnemonic == USER_OPERATION:
-            return self._stop(Termination.UNSUPPORTED_OPERATION, f"user operation{self._where()}")
+            if outcome is None or outcome.effect is UseropEffect.UNSUPPORTED:
+                detail = "" if outcome is None else f": {outcome.detail}"
+                return self._stop(Termination.UNSUPPORTED_OPERATION, f"user operation{self._where()}{detail}")
+            if outcome.effect is UseropEffect.TRAP:
+                return self._stop(Termination.FAULT, f"{op.userop}{self._where()}")
+            if op.output is not None:
+                if outcome.value is None:
+                    return self._stop(
+                        Termination.EXECUTOR_ERROR, f"{op.userop} without its operand values{self._where()}"
+                    )
+                self._userop_value = outcome.value
+                fmt = _FORMAT_OF_SIZE.get(outcome.fp_size) if outcome.fp_size else None
+                if fmt is not None:
+                    self._producers += 1
+                    for k in range(op.output.size):
+                        self._set_tag(op.output, k, (self._producers, fmt, k))
+                else:
+                    for k in range(op.output.size):
+                        self._set_tag(op.output, k, None)
+                self._mark_output_defined(op.output)
+            return None
         if op.mnemonic in ("LOAD", "STORE"):
             # Applied when the executor reports the address.
             self._pending = op
             return None
         self._apply(op)
         return None
+
+    def op_output(self, value: int) -> None:
+        """The value the last operation wrote (when ``value_request`` asked for it)."""
+        if self._termination is not None:
+            return
+        self._monitor.output(value)
+
+    def userop_value(self) -> Optional[int]:
+        """The value the executor writes for the user operation that is running."""
+        return self._userop_value
 
     def load(self, space: str, address: int, size: int) -> Optional[Termination]:
         """The pending ``LOAD`` reads ``size`` bytes at ``address`` of ``space``."""
@@ -276,6 +351,8 @@ class RunObserver:
             return self._stop(Termination.EXECUTOR_ERROR, f"load without its LOAD operation{self._where()}")
         if space == self._setup.memory_space:
             self._note_writable_read(address, size)
+        self._monitor.address(op, self._where(), address)
+        self._monitor.load(op, space, address, size)
         for significance in range(size):
             tag = self._tags.get((space, self._byte_address(address, size, significance)))
             self._set_tag(op.output, significance, tag)
@@ -301,8 +378,10 @@ class RunObserver:
                     Termination.RESOURCE_LIMIT, f"more than {self._setup.write_page_limit} pages written"
                 )
             for byte in range(address, end):
-                if _in_ranges(byte, self._setup.writable_image_ranges):
+                if _in_ranges(byte, self._writable):
                     self._written_writable.add(byte)
+        self._monitor.address(op, self._where(), address)
+        self._monitor.store(op, space, address, size, self._where())
         value = op.inputs[2]
         for significance in range(size):
             tag = self._tags.get((value.space, self._byte_address(value.offset, value.size, significance)))
@@ -343,8 +422,11 @@ class RunObserver:
             fact = self._setup.register(name)
             if fact is None or name not in by_name:
                 continue
+            reliable, kinds = self._monitor.observe(fact.offset, fact.size, where=f" in {name} at return")
+            rounding_bytes, rounding = self._monitor.rounding_values(fact.offset, fact.size)
             observed.append((name, ObservedRegister(
-                by_name[name], self._defined_low_bytes(fact), self._value_format(fact)
+                by_name[name], self._defined_low_bytes(fact), self._value_format(fact),
+                reliable, tuple(kind.value for kind in kinds), rounding, rounding_bytes,
             )))
         self._observed = tuple(observed)
 
@@ -394,7 +476,7 @@ class RunObserver:
     def _note_writable_read(self, address: int, size: int) -> None:
         unwritten = [
             byte for byte in range(address, address + size)
-            if _in_ranges(byte, self._setup.writable_image_ranges)
+            if _in_ranges(byte, self._writable)
             and byte not in self._written_writable
         ]
         self._writable_reads.update(unwritten)
@@ -431,16 +513,18 @@ class RunObserver:
             termination = Termination.EXECUTOR_ERROR
             self._detail = "the run ended without a termination"
         counts = self._counts
-        fp_seen = any(name in counts for name in FP_OPERATIONS) or USER_OPERATION in counts
-        ub_seen = any(name in counts for name in INTEGER_UB_OPERATIONS) or USER_OPERATION in counts
+        for kind, detail in self._monitor.hazards:
+            self._hazard(kind, detail)
         return ExecutionResult(
             termination=termination,
             steps=self._steps,
             observed_registers=self._observed if termination is Termination.RETURNED else (),
             hazards=tuple(self._hazards.values()),
-            fp_operations_tracked=not fp_seen,
-            integer_ub_operations_tracked=not ub_seen,
+            fp_operations_tracked=self._monitor.fp_complete,
+            integer_ub_operations_tracked=self._monitor.integer_complete,
             writable_image_reads=_merge([(byte, 1) for byte in self._writable_reads]),
             operation_counts=tuple(sorted(counts.items())),
+            monitor_events=tuple(sorted(self._monitor.counters.items())),
+            integer_overflows=self._monitor.overflows(),
             detail=self._detail,
         )

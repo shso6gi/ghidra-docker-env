@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Recording concrete runs and replaying them without Ghidra.
 
-A *run trace* (schema ``concrete-run-trace-v1``) holds what one live run
+A *run trace* (schema ``concrete-run-trace-v2``) holds what one live run
 produced, as data:
 
 * ``program`` -- identity of the binary and the facts its executor was
@@ -23,9 +23,15 @@ Event encoding (JSON arrays):
 ====================================  ==========================================
 ``["I", address]``                    next instruction
 ``["D", address, [op, ...]]``         P-code of an instruction (first time only);
-                                      ``op = [mnemonic, out | null, [in, ...]]``,
-                                      a varnode is ``[space, offset, size]``
+                                      ``op = [mnemonic, out | null, [in, ...]]``
+                                      (``CALLOTHER``: a fourth element, the user
+                                      operation's name); a varnode is
+                                      ``[space, offset, size]``
 ``["O", index]``                      operation ``index`` runs
+``["O", index, [value, ...]]``        ... with its input values (unsigned, in
+                                      input order), when the observer asked
+``["P", value]``                      the value the operation wrote, when the
+                                      observer asked
 ``["L", space, address, size]``       the pending LOAD's address
 ``["S", space, address, size]``       the pending STORE's address
 ``["U", space, offset, size, d]``     read of a location holding no value
@@ -33,6 +39,9 @@ Event encoding (JSON arrays):
 ``["X", termination, detail]``        the executor stopped the run
 ``["R", [[register, value], ...]]``   register values at return
 ====================================  ==========================================
+
+Version 1 traces (C1, without values) still replay; a run whose monitors
+needed values it lacks replays as not monitored.
 """
 
 from __future__ import annotations
@@ -45,6 +54,8 @@ from scripts.function_tracer_pcode.concrete.executor import (
     ExecutionResult,
     Hazard,
     HazardKind,
+    IntegerOverflow,
+    OverflowDisposition,
     Termination,
 )
 from scripts.function_tracer_pcode.concrete.observation import FpFormat, ObservedRegister
@@ -56,7 +67,9 @@ from scripts.function_tracer_pcode.concrete.run_observer import (
     Varnode,
 )
 
-TRACE_SCHEMA = "concrete-run-trace-v1"
+TRACE_SCHEMA = "concrete-run-trace-v2"
+TRACE_SCHEMA_V1 = "concrete-run-trace-v1"
+_SCHEMAS = (TRACE_SCHEMA, TRACE_SCHEMA_V1)
 
 
 # ------------------------------------------------------------- encoding
@@ -70,11 +83,17 @@ def _decode_varnode(raw) -> Optional[Varnode]:
 
 
 def encode_op(op: OpDescriptor) -> list:
-    return [op.mnemonic, _varnode(op.output), [_varnode(v) for v in op.inputs]]
+    raw = [op.mnemonic, _varnode(op.output), [_varnode(v) for v in op.inputs]]
+    if op.userop is not None:
+        raw.append(op.userop)
+    return raw
 
 
 def decode_op(raw) -> OpDescriptor:
-    return OpDescriptor(str(raw[0]), _decode_varnode(raw[1]), tuple(_decode_varnode(v) for v in raw[2]))
+    return OpDescriptor(
+        str(raw[0]), _decode_varnode(raw[1]), tuple(_decode_varnode(v) for v in raw[2]),
+        str(raw[3]) if len(raw) > 3 and raw[3] is not None else None,
+    )
 
 
 def setup_to_json(setup: RunSetup) -> Dict[str, Any]:
@@ -87,6 +106,9 @@ def setup_to_json(setup: RunSetup) -> Dict[str, Any]:
         "external_entries": [list(e) for e in setup.external_entries],
         "writable_image_ranges": [list(r) for r in setup.writable_image_ranges],
         "write_page_limit": setup.write_page_limit,
+        "processor": setup.processor,
+        "zero_initialized_ranges": [list(r) for r in setup.zero_initialized_ranges],
+        "c_int_bytes": setup.c_int_bytes,
     }
 
 
@@ -100,6 +122,9 @@ def setup_from_json(raw: Mapping[str, Any]) -> RunSetup:
         external_entries=tuple((int(a), str(n)) for a, n in raw["external_entries"]),
         writable_image_ranges=tuple((int(a), int(b)) for a, b in raw["writable_image_ranges"]),
         write_page_limit=int(raw["write_page_limit"]),
+        processor=str(raw.get("processor", "")),
+        zero_initialized_ranges=tuple((int(a), int(b)) for a, b in raw.get("zero_initialized_ranges", ())),
+        c_int_bytes=int(raw.get("c_int_bytes", 0)),
     )
 
 
@@ -138,7 +163,8 @@ def result_to_json(result: ExecutionResult) -> Dict[str, Any]:
         "termination": result.termination.value,
         "steps": result.steps,
         "observed_registers": [
-            [name, o.value, o.defined_low_bytes, None if o.value_format is None else o.value_format.value]
+            [name, o.value, o.defined_low_bytes, None if o.value_format is None else o.value_format.value,
+             o.reliable_low_bytes, list(o.unreliable), list(o.rounding_values), o.rounding_bytes]
             for name, o in result.observed_registers
         ],
         "hazards": [[h.kind.value, h.detail] for h in result.hazards],
@@ -146,6 +172,11 @@ def result_to_json(result: ExecutionResult) -> Dict[str, Any]:
         "integer_ub_operations_tracked": result.integer_ub_operations_tracked,
         "writable_image_reads": [list(r) for r in result.writable_image_reads],
         "operation_counts": [list(c) for c in result.operation_counts],
+        "monitor_events": [list(c) for c in result.monitor_events],
+        "integer_overflows": [
+            [o.address, o.operation, o.width, o.disposition.value, o.count, list(o.uses)]
+            for o in result.integer_overflows
+        ],
         "detail": result.detail,
     }
 
@@ -154,16 +185,30 @@ def result_from_json(raw: Mapping[str, Any]) -> ExecutionResult:
     return ExecutionResult(
         termination=Termination(raw["termination"]),
         steps=int(raw["steps"]),
-        observed_registers=tuple(
-            (str(name), ObservedRegister(int(value), int(defined), None if fmt is None else FpFormat(fmt)))
-            for name, value, defined, fmt in raw["observed_registers"]
-        ),
+        observed_registers=tuple(_observed_from_json(entry) for entry in raw["observed_registers"]),
         hazards=tuple(Hazard(HazardKind(kind), str(detail)) for kind, detail in raw["hazards"]),
         fp_operations_tracked=bool(raw["fp_operations_tracked"]),
         integer_ub_operations_tracked=bool(raw["integer_ub_operations_tracked"]),
         writable_image_reads=tuple((int(a), int(n)) for a, n in raw["writable_image_reads"]),
         operation_counts=tuple((str(m), int(c)) for m, c in raw["operation_counts"]),
+        monitor_events=tuple((str(m), int(c)) for m, c in raw.get("monitor_events", ())),
+        integer_overflows=tuple(
+            IntegerOverflow(int(a), str(m), int(w), OverflowDisposition(d), int(c), tuple(str(x) for x in u))
+            for a, m, w, d, c, u in raw.get("integer_overflows", ())
+        ),
         detail=str(raw["detail"]),
+    )
+
+
+def _observed_from_json(entry) -> Tuple[str, ObservedRegister]:
+    name, value, defined, fmt = entry[:4]
+    reliable = entry[4] if len(entry) > 4 else None
+    unreliable = tuple(str(k) for k in entry[5]) if len(entry) > 5 else ()
+    rounding = tuple(int(v) for v in entry[6]) if len(entry) > 6 else ()
+    rounding_bytes = int(entry[7]) if len(entry) > 7 else 0
+    return str(name), ObservedRegister(
+        int(value), int(defined), None if fmt is None else FpFormat(fmt),
+        None if reliable is None else int(reliable), unreliable, rounding, rounding_bytes,
     )
 
 
@@ -188,9 +233,19 @@ class RecordingObserver:
         self.events.append(["D", address, [encode_op(op) for op in ops]])
         return self._inner.decoded(address, ops)
 
-    def op(self, index):
-        self.events.append(["O", index])
-        return self._inner.op(index)
+    def value_request(self, index):
+        return self._inner.value_request(index)
+
+    def op(self, index, values=None):
+        self.events.append(["O", index] if values is None else ["O", index, [int(v) for v in values]])
+        return self._inner.op(index, values)
+
+    def op_output(self, value):
+        self.events.append(["P", int(value)])
+        return self._inner.op_output(value)
+
+    def userop_value(self):
+        return self._inner.userop_value()
 
     def load(self, space, address, size):
         self.events.append(["L", space, address, size])
@@ -226,7 +281,10 @@ def replay_events(setup: RunSetup, request: ExecutionRequest, events: Iterable[S
         elif kind == "D":
             observer.decoded(int(event[1]), tuple(decode_op(raw) for raw in event[2]))
         elif kind == "O":
-            observer.op(int(event[1]))
+            values = tuple(int(v) for v in event[2]) if len(event) > 2 else None
+            observer.op(int(event[1]), values)
+        elif kind == "P":
+            observer.op_output(int(event[1]))
         elif kind == "L":
             observer.load(str(event[1]), int(event[2]), int(event[3]))
         elif kind == "S":
@@ -263,7 +321,7 @@ def make_trace(
 
 def replay_trace(trace: Mapping[str, Any]) -> Tuple[ExecutionResult, ExecutionResult]:
     """(replayed result, recorded result) of one trace."""
-    if trace.get("schema") != TRACE_SCHEMA:
+    if trace.get("schema") not in _SCHEMAS:
         raise ValueError(f"not a {TRACE_SCHEMA} trace: {trace.get('schema')!r}")
     setup = setup_from_json(trace["setup"])
     request = request_from_json(trace["request"])
@@ -283,7 +341,7 @@ class RecordedExecutor:
         self._traces: Dict[ExecutionRequest, Mapping[str, Any]] = {}
         program: Optional[str] = None
         for trace in traces:
-            if trace.get("schema") != TRACE_SCHEMA:
+            if trace.get("schema") not in _SCHEMAS:
                 raise ValueError(f"not a {TRACE_SCHEMA} trace: {trace.get('schema')!r}")
             sha256 = trace["program"].get("sha256")
             if program is None:
