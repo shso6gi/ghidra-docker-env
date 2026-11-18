@@ -37,6 +37,16 @@ from scripts.function_tracer_pcode.proof.assumptions import (
 class ConditionalDecisiveProofKind(str, Enum):
     CONDITIONAL_EQ_CLOSURE = "CONDITIONAL_EQ_CLOSURE"
     CONDITIONAL_SAFE_COUNTEREXAMPLE = "CONDITIONAL_SAFE_COUNTEREXAMPLE"
+    # Issue #18: two runs of the binaries on corresponding inputs returned
+    # different values (``proof.concrete_counterexample``).
+    CONDITIONAL_CONCRETE_COUNTEREXAMPLE = "CONDITIONAL_CONCRETE_COUNTEREXAMPLE"
+
+
+#: The conditional proof kinds that establish NOT_EQ.
+CONDITIONAL_NOT_EQ_PROOF_KINDS = frozenset({
+    ConditionalDecisiveProofKind.CONDITIONAL_SAFE_COUNTEREXAMPLE,
+    ConditionalDecisiveProofKind.CONDITIONAL_CONCRETE_COUNTEREXAMPLE,
+})
 
 
 def canonical_assumption_dependencies(
@@ -552,7 +562,7 @@ def finalize_conditional_decision(
     if len(kinds) != len(set(kinds)):
         malformed = True
     has_eq = ConditionalDecisiveProofKind.CONDITIONAL_EQ_CLOSURE in kinds
-    has_not_eq = ConditionalDecisiveProofKind.CONDITIONAL_SAFE_COUNTEREXAMPLE in kinds
+    has_not_eq = any(kind in CONDITIONAL_NOT_EQ_PROOF_KINDS for kind in kinds)
     active = projection.c_active_base
     blocks_eq = any(
         row.decision_effect in {"blocks_equivalence", "blocks_decision"} for row in active

@@ -276,6 +276,9 @@ def _run_conditional_lane(
             solver_runner=getattr(checker, "solver_runner", None),
             timeout=getattr(checker, "timeout", None),
             debug=bool(getattr(checker, "debug", False)),
+            # Issue #18 C2: the checker's concrete replay (None unless the CLI enabled it)
+            concrete_subjects=getattr(checker, "concrete_replay_subjects", None),
+            concrete_options=getattr(checker, "concrete_replay", None),
         )
     else:
         # pair が terminal（G4-c）か、安全な counterexample を commit 済み（#130 S3 / A-5）。

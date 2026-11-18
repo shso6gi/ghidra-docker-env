@@ -596,6 +596,17 @@ def _message_text(exc: BaseException, max_chars: int) -> str:
     return exception_text(exc, max_chars)
 
 
+def _concrete_replay_options(args):
+    """The checker's concrete replay options (Issue #18 C2), ``None`` when disabled."""
+
+    from scripts.function_tracer_pcode.checker.concrete_replay import ConcreteReplayOptions
+
+    budget = getattr(args, "concrete_replay_budget", 60.0)
+    if getattr(args, "no_concrete_replay", False) or budget is None or float(budget) <= 0:
+        return None
+    return ConcreteReplayOptions(budget_seconds=float(budget))
+
+
 def run_equivalence_check(args):
     """等価性判定を実行する。
 
@@ -773,6 +784,7 @@ def run_equivalence_check(args):
         observes_errno=getattr(args, "observe_errno", False),
         observes_fenv=getattr(args, "observe_fenv", False),
         identical_fast_path=not getattr(args, "no_identical_fast_path", False),
+        concrete_replay=_concrete_replay_options(args),
     )
 
     available_solvers = checker.solver_runner.get_available_solvers()

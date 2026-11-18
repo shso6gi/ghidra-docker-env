@@ -34,6 +34,17 @@ class AssumptionKind(str, Enum):
     # normal return).  Being an external symbol is *not* itself evidence for
     # this; the premise is what the proof assumes on top of that evidence.
     EXTERNAL_CALLEE_SPEC = "EXTERNAL_CALLEE_SPEC"
+    # Issue #18 (concrete replay): the function follows the ABI model's calling
+    # convention, its recovered parameter storage are its inputs and its
+    # recovered return location is its result.  Payload: ``abi_id``,
+    # ``entry_address``, ``program_sha256``, ``argument_registers``,
+    # ``return_register``, ``return_class``, ``return_width_bytes``; subject
+    # ``function1`` / ``function2``.
+    CONCRETE_CALLING_CONVENTION = "CONCRETE_CALLING_CONVENTION"
+    # Issue #18: the processor specification's P-code is what the machine
+    # computes for the executed instructions.  Payload: ``executor``,
+    # ``ghidra``, ``languages``, ``compiler_specs``; subject ``executor``.
+    CONCRETE_PCODE_SEMANTICS = "CONCRETE_PCODE_SEMANTICS"
 
 
 # Payload leaves are exact primitives.  Subclasses (JPype ``JInt`` /

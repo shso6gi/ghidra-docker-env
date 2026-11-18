@@ -39,6 +39,13 @@ occurrence は残す ―― external callee の仮定はそれを discharge す�
          fact_id → CallSiteFact.identity.pcode_op_key    ← 既存の object identity
       → proof artifact が運んだ modelled callsite の PcodeOpRef.stable_key() と一致
 
+**具体実行の反例（Issue #18 C2）**: ``proof.concrete_counterexample`` が両 binary の
+具体実行で戻り値の差を確定したとき、その証拠は記号解析の近似に依存しない（witness は
+入力の選び方にすぎず、差を示すのは実行）。したがって落とせるのは **同じ pair の SAT-safety
+の cause**（:data:`CONCRETE_DISCHARGED_REASON_IDS`、記号の反例が安全と示せないこと）だけで、
+それ以外の ``blocks_disequivalence`` / ``blocks_decision`` は残る。仮定（呼び出し規約・
+P-code の意味）は receipt の assumption set に載る。
+
 いずれかが解決できなければ **その cause は落とさない**（fail closed）。occurrence 数・
 並び順・reason 名の一致は対応根拠にしない。ここで落とせなかった理由（outcome
 partition、ABI 幅、recurrence、argument extraction など）は残り、
@@ -56,6 +63,7 @@ from scripts.function_tracer_pcode.authority.contracts import (
     VerifiedLifecycleProjection,
 )
 from scripts.function_tracer_pcode.authority.decision.conditional import (
+    canonical_assumption_dependencies,
     assumption_set_receipt_bound_violation,
     ConditionalDecisiveProofKind,
     ConditionalDecisiveProofReceipt,
@@ -91,6 +99,19 @@ ASSUMPTION_DISCHARGED_REASON_IDS = frozenset({
     "call_effect_correspondence_unproven",
     "effect_endpoint_correspondence_unproven",
 })
+
+
+#: 具体実行の反例が引き受ける active cause の reason id: 記号の反例の安全性（SAT-safety）。
+#: 語彙の owner は ``proof.sat_safety_resolution``（ここには写さない）。
+def _concrete_discharged_reason_ids() -> frozenset:
+    from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
+        SAT_SAFETY_TYPED_REASON_IDS,
+    )
+
+    return frozenset(SAT_SAFETY_TYPED_REASON_IDS)
+
+
+CONCRETE_DISCHARGED_REASON_IDS = _concrete_discharged_reason_ids()
 
 
 #: call-effect 域の prerequisite cause 鍵のタグ（``_prerequisite_authority`` が作る）。
@@ -173,6 +194,38 @@ def validated_conditional_proof_artifact(artifact: Any) -> Any:
         )
     artifact.validate()
     return artifact
+
+
+def validated_concrete_proof_artifact(artifact: Any) -> Any:
+    """exact な ``ConcreteCounterexampleArtifact`` で、digest が保存 field と一致すること。"""
+
+    from scripts.function_tracer_pcode.proof.concrete_counterexample import (
+        ConcreteCounterexampleArtifact,
+    )
+
+    if type(artifact) is not ConcreteCounterexampleArtifact:
+        raise TypeError(
+            "the conditional lane accepts an exact ConcreteCounterexampleArtifact only: "
+            f"{type(artifact).__name__}"
+        )
+    artifact.validate()
+    return artifact
+
+
+def concrete_discharged_causes(
+    projection: VerifiedLifecycleProjection, *, artifact: Any
+) -> frozenset:
+    """具体実行の反例が引き受けた ``(occurrence_id, cause_id)``: 決定的な artifact のとき、
+    同じ pair の SAT-safety の active cause だけ。"""
+
+    artifact = validated_concrete_proof_artifact(artifact)
+    if not artifact.decisive:
+        return frozenset()
+    return frozenset(
+        (row.occurrence_id, row.cause_id)
+        for row in projection.c_active_base
+        if row.reason_id in CONCRETE_DISCHARGED_REASON_IDS
+    )
 
 
 def conditional_discharged_causes(
@@ -365,6 +418,8 @@ _PROOF_KIND_BY_NAME = {
         ConditionalDecisiveProofKind.CONDITIONAL_SAFE_COUNTEREXAMPLE
     ),
 }
+#: 具体実行の artifact が名乗れる唯一の kind
+_CONCRETE_PROOF_KIND_NAME = "CONDITIONAL_CONCRETE_COUNTEREXAMPLE"
 
 
 def conditional_lane_is_eligible(unconditional_decision: Any) -> bool:
@@ -382,44 +437,79 @@ def issue_conditional_decision(
     projection: VerifiedLifecycleProjection,
     artifact: Any,
     result: Any = None,
+    concrete_artifact: Any = None,
 ) -> Any:
     """proof artifact を conditional 列の ``ConditionalDecisionReceipt`` にする。
 
     decisive でない artifact でも receipt は出す（conditional_outcome は
     ``UNKNOWN``）。無条件 receipt / projection / 結果には触れない。
+
+    ``artifact`` は外部 callee の仮定の lane（Issue #20、``None`` 可）、
+    ``concrete_artifact`` は具体実行の反例（Issue #18、``None`` 可）。決定的な artifact
+    ごとに receipt を 1 つ作り、どの receipt も **決定的な artifact の仮定の和**に依存する
+    （最小化しない。列の仮定の集合は 1 つ）。決定的なものが無ければ、外部 callee の lane の
+    集合で ``UNKNOWN`` の receipt を作る（従来どおり）。
     """
 
     if not conditional_lane_is_eligible(unconditional_decision):
         raise ValueError("the conditional lane runs only after an unconditional UNKNOWN")
-    artifact = validated_conditional_proof_artifact(artifact)
-    assumption_set = tuple(getattr(artifact, "assumption_set", ()) or ())
+    decisive = []        # (proof kind, artifact digest, assumption set, discharged causes)
+    base_set: Tuple[Any, ...] = ()
+    if artifact is not None:
+        artifact = validated_conditional_proof_artifact(artifact)
+        base_set = tuple(getattr(artifact, "assumption_set", ()) or ())
+        proof_kind_name = getattr(artifact, "proof_kind", None)
+        if proof_kind_name is not None:
+            proof_kind = _PROOF_KIND_BY_NAME.get(str(proof_kind_name))
+            if proof_kind is None:
+                raise ValueError(f"unknown conditional proof kind: {proof_kind_name}")
+            if not base_set:
+                raise ValueError("a conditional lane requires a non-empty assumption set")
+            # 仮定が実際に引き受けた cause occurrence だけを落とす。対応を証明
+            # できなければ 1 つも落とさず、残った blocker がそのまま効く。
+            decisive.append((
+                proof_kind,
+                str(getattr(artifact, "artifact_digest", "")),
+                base_set,
+                conditional_discharged_causes(projection, result=result, artifact=artifact),
+            ))
+    if concrete_artifact is not None:
+        concrete_artifact = validated_concrete_proof_artifact(concrete_artifact)
+        if concrete_artifact.decisive:
+            if concrete_artifact.proof_kind != _CONCRETE_PROOF_KIND_NAME:
+                raise ValueError(f"unknown concrete proof kind: {concrete_artifact.proof_kind}")
+            decisive.append((
+                ConditionalDecisiveProofKind.CONDITIONAL_CONCRETE_COUNTEREXAMPLE,
+                concrete_artifact.artifact_digest,
+                tuple(concrete_artifact.assumption_set),
+                concrete_discharged_causes(projection, artifact=concrete_artifact),
+            ))
+    if decisive:
+        assumption_set = canonical_assumption_dependencies(
+            premise for _kind, _digest, premises, _causes in decisive for premise in premises
+        )
+    else:
+        assumption_set = base_set
     if not assumption_set:
         raise ValueError("a conditional lane requires a non-empty assumption set")
 
-    proof_kind_name = getattr(artifact, "proof_kind", None)
     receipts: Tuple[ConditionalDecisiveProofReceipt, ...] = ()
     lane_projection = projection
-    if proof_kind_name is not None:
-        proof_kind = _PROOF_KIND_BY_NAME.get(str(proof_kind_name))
-        if proof_kind is None:
-            raise ValueError(f"unknown conditional proof kind: {proof_kind_name}")
-        # 仮定が実際に引き受けた cause occurrence だけを落とす。対応を証明
-        # できなければ 1 つも落とさず、残った blocker がそのまま効く。
-        discharged = conditional_discharged_causes(
-            projection, result=result, artifact=artifact
-        )
+    if decisive:
+        discharged = frozenset().union(*(causes for _kind, _digest, _premises, causes in decisive))
         lane_projection = conditional_lane_projection(
             projection, discharged_causes=discharged
         )
-        receipts = (
+        receipts = tuple(
             ConditionalDecisiveProofReceipt.create(
                 result_occurrence_id=lane_projection.result_occurrence_id,
                 lifecycle_projection_digest=lane_projection.lifecycle_projection_digest,
                 proof_kind=proof_kind,
-                proof_artifact_digest=str(getattr(artifact, "artifact_digest", "")),
-                # dependency minimization はしない。view が運んだ集合そのもの。
+                proof_artifact_digest=digest,
+                # dependency minimization はしない。列の集合そのもの。
                 assumption_dependencies=assumption_set,
-            ),
+            )
+            for proof_kind, digest, _premises, _causes in decisive
         )
     authority = ConditionalFinalizationAuthority(
         lane_projection.result_occurrence_id,
@@ -481,6 +571,58 @@ def _stopped_lane_diagnostic(exc: BaseException, *, swallowed: bool) -> Mapping[
     }
 
 
+def _concrete_lane_budget(budget_seconds: float) -> Optional[float]:
+    """具体実行に使ってよい秒数: 設定の予算と pair の解析期限の残りの小さい方。
+
+    解析期限が無い（runner の ``ANALYSIS_TIMEOUT=0``、CLI で ``--analysis-timeout`` を
+    渡さない）なら ``None``: 具体実行は期限の中でだけ走る。期限の外で走ると、確定済みの
+    判定の後に process の期限（supervisor の TIMEOUT）へ近づく時間を足すことになる。
+    """
+
+    from scripts.function_tracer_pcode.core.deadline import active_deadline
+
+    deadline = active_deadline()
+    if deadline is None:
+        return None
+    return min(float(budget_seconds), deadline.remaining_seconds())
+
+
+def _run_concrete_proof(result: Any, analyses: Tuple[Any, Any], concrete_subjects: Any, options: Any) -> Any:
+    """solver の witness を両 binary で再生した proof artifact（Issue #18 C2）。"""
+
+    from scripts.function_tracer_pcode.proof.concrete_counterexample import (
+        CONCRETE_BUDGET_EXHAUSTED,
+        CONCRETE_NO_DEADLINE,
+        ConcreteCounterexampleArtifact,
+        run_concrete_counterexample_proof,
+        solver_witnesses,
+    )
+
+    witnesses = solver_witnesses(result)
+    budget = _concrete_lane_budget(getattr(options, "budget_seconds", 0.0))
+    if witnesses and budget is None:
+        return ConcreteCounterexampleArtifact._create(
+            witness_count=len(witnesses), non_decisive_reasons=(CONCRETE_NO_DEADLINE,)
+        )
+    if witnesses and budget <= 0:
+        return ConcreteCounterexampleArtifact._create(
+            witness_count=len(witnesses), non_decisive_reasons=(CONCRETE_BUDGET_EXHAUSTED,)
+        )
+    subjects = concrete_subjects(*analyses) if witnesses else None
+    return run_concrete_counterexample_proof(
+        analyses[0], analyses[1], witnesses, subjects,
+        budget_seconds=budget, step_limit=int(getattr(options, "step_limit", 0)),
+    )
+
+
+def _concrete_diagnostic(artifact: Any) -> Mapping[str, Any]:
+    """結果に残す具体実行の記録（receipt が digest を bind する artifact の内容そのもの）。"""
+
+    record = dict(artifact.to_json())
+    record["diagnostics"] = dict(artifact.diagnostics)
+    return record
+
+
 def run_production_conditional_lane(
     result: Any,
     *,
@@ -491,11 +633,18 @@ def run_production_conditional_lane(
     timeout: Optional[float] = None,
     debug: bool = False,
     input_correspondence_factory: Optional[Any] = None,
+    concrete_subjects: Optional[Any] = None,
+    concrete_options: Any = None,
 ) -> Optional[Mapping[str, Any]]:
     """production の conditional lane。``result`` の conditional 列だけを触る。
 
     conditional 列を付けたときはその診断を返し、起動しなかった / 付けなかった
     ときは ``None`` を返す。例外は投げない（無条件の判定を絶対に壊さない）。
+
+    ``concrete_subjects(analysis1, analysis2)`` と ``concrete_options`` があれば（CLI が
+    具体実行を有効にした checker）、solver の witness の具体実行（Issue #18 C2）も行い、
+    その記録を診断の ``concrete_replay`` に残す。差を確定したら conditional 列の
+    ``CONDITIONAL_CONCRETE_COUNTEREXAMPLE`` になる。
     """
 
     from scripts.function_tracer_pcode.authority.decision.production_cutover import (
@@ -513,6 +662,7 @@ def run_production_conditional_lane(
         # base pair か、その最終 relation（Issue #167）が結び付いていない（fail closed）。
         return None
     analysis1, analysis2 = analyses
+    concrete_enabled = concrete_subjects is not None and concrete_options is not None
 
     try:
         with post_decision_failure_scope() as lane_ledger:
@@ -525,19 +675,31 @@ def run_production_conditional_lane(
                 timeout=timeout,
                 debug=debug,
             )
+            concrete = (
+                _run_concrete_proof(result, (analysis1, analysis2), concrete_subjects, concrete_options)
+                if concrete_enabled else None
+            )
             stopped = lane_ledger.pending_failure()
         if stopped is not None:
             # 計算の途中で限界 / 内部バグが記録され、どこかで握り潰された。結果は
             # 不完全なので conditional 列を作らない（fail closed。判定は確定済み）。
             return _stopped_lane_diagnostic(stopped.exception, swallowed=True)
-        if not artifact.assumption_set:
+        extra = {} if concrete is None else {"concrete_replay": _concrete_diagnostic(concrete)}
+        if concrete is not None and concrete.decisive:
+            extra["concrete_proof_kind"] = concrete.proof_kind
+        concrete_decisive = concrete is not None and concrete.decisive
+        if concrete_decisive and assumption_set_receipt_bound_violation(tuple(concrete.assumption_set)):
+            concrete_decisive = False
+        external_decisive = bool(artifact.assumption_set) and artifact.decisive
+        if not artifact.assumption_set and not concrete_decisive:
             # view が立たなかった。conditional 列は作らない（fail closed）。
             return {
                 "conditional_lane": "not_constructed",
                 "non_decisive_reasons": list(artifact.non_decisive_reasons),
                 "diagnostics": dict(artifact.diagnostics),
+                **extra,
             }
-        if not artifact.decisive:
+        if not external_decisive and not concrete_decisive:
             # 何も証明できていない。conditional 列は「出たときだけ出す」ので、
             # 起動した事実と非決定理由は診断にだけ残す。
             return {
@@ -545,9 +707,13 @@ def run_production_conditional_lane(
                 "non_decisive_reasons": list(artifact.non_decisive_reasons),
                 "assumption_count": len(artifact.assumption_set),
                 "diagnostics": dict(artifact.diagnostics),
+                **extra,
             }
-        over_bound = assumption_set_receipt_bound_violation(tuple(artifact.assumption_set))
-        if over_bound is not None:
+        over_bound = (
+            assumption_set_receipt_bound_violation(tuple(artifact.assumption_set))
+            if external_decisive else None
+        )
+        if over_bound is not None and not concrete_decisive:
             # receipt の契約（仮定の数と大きさ）に収まらない: receipt を作らない（fail closed。
             # 確定済みの判定・exit code は不変。出力の契約違反の ERROR にしない）
             return {
@@ -556,12 +722,15 @@ def run_production_conditional_lane(
                 "assumption_count": len(artifact.assumption_set),
                 "non_decisive_reasons": list(artifact.non_decisive_reasons),
                 "diagnostics": dict(artifact.diagnostics),
+                **extra,
             }
+        external = artifact if external_decisive and over_bound is None else None
         receipt = issue_conditional_decision(
             unconditional_decision=decision,
             projection=projection,
-            artifact=artifact,
+            artifact=external,
             result=result,
+            concrete_artifact=concrete if concrete_decisive else None,
         )
         attach_conditional_decision(result, receipt)
     except AnalysisLimitation as exc:
@@ -575,14 +744,18 @@ def run_production_conditional_lane(
             "conditional_lane": "failed",
             "error": f"{type(exc).__name__}: {exc}",
         }
+    discharged = 0
+    if external is not None:
+        discharged += len(conditional_discharged_causes(projection, result=result, artifact=external))
+    if concrete_decisive:
+        discharged += len(concrete_discharged_causes(projection, artifact=concrete))
     return {
         "conditional_lane": "issued",
         "conditional_outcome": receipt.conditional_outcome.value,
-        "proof_kind": artifact.proof_kind,
-        "assumption_count": len(artifact.assumption_set),
-        "discharged_cause_count": len(
-            conditional_discharged_causes(projection, result=result, artifact=artifact)
-        ),
+        "proof_kind": artifact.proof_kind if external is not None else None,
+        "assumption_count": len(receipt.assumption_set),
+        "discharged_cause_count": discharged,
         "non_decisive_reasons": list(artifact.non_decisive_reasons),
         "diagnostics": dict(artifact.diagnostics),
+        **extra,
     }
