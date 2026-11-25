@@ -71,6 +71,9 @@ class ObservationRefusal(str, Enum):
     """Why a return location or a comparison was not accepted."""
 
     RETURN_VOID = "RETURN_VOID"
+    # The recovered prototype returns a pointer: its value is an address whose
+    # placement two binaries do not share (#18).
+    RETURN_TYPE_POINTER = "RETURN_TYPE_POINTER"
     RETURN_NOT_IN_REGISTER = "RETURN_NOT_IN_REGISTER"
     RETURN_NOT_SINGLE_LOCATION = "RETURN_NOT_SINGLE_LOCATION"
     RETURN_REGISTER_NOT_A_RETURN_REGISTER = "RETURN_REGISTER_NOT_A_RETURN_REGISTER"
@@ -105,11 +108,13 @@ class ReturnStorage:
     """Where a function's recovered return value lives (binary storage facts).
 
     ``is_void`` is the recovered prototype saying nothing is returned;
-    ``locations`` are the storage pieces of the return value.
+    ``locations`` are the storage pieces of the return value; ``is_pointer``
+    is the recovered prototype saying the value is a pointer.
     """
 
     is_void: bool
     locations: Tuple[StorageLocation, ...]
+    is_pointer: bool = False
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,8 @@ def return_location(
 ) -> Union[ReturnLocation, ObservationRefusal]:
     if storage.is_void:
         return ObservationRefusal.RETURN_VOID
+    if storage.is_pointer:
+        return ObservationRefusal.RETURN_TYPE_POINTER
     if len(storage.locations) != 1:
         return ObservationRefusal.RETURN_NOT_SINGLE_LOCATION
     location = storage.locations[0]

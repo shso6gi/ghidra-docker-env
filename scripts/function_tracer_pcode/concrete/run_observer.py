@@ -21,7 +21,12 @@ register values at return.  ``RunObserver`` turns that stream into an
   (``fp_operations_tracked``, ``integer_ub_operations_tracked``);
 * user operations: run only when ``concrete.userops`` establishes their
   meaning (the observer computes the value the executor writes);
-* writable program data the run read before writing it.
+* writable program data the run read before writing it;
+* the provenance of addresses (``concrete.value_monitor``): values computed
+  from the stack pointer, the return or entry address, or an address inside
+  the image, and whether every value that rule needed was supplied
+  (``address_provenance_tracked``).  A returned register whose value lies
+  inside the image is not compared, however the value was computed.
 
 Values.  The observer asks, per operation, for the operand values it needs
 (``value_request``) and the executor supplies them with the operation
@@ -70,6 +75,7 @@ from scripts.function_tracer_pcode.concrete.value_monitor import (
     FP_OPS as FP_MONITORED_OPERATIONS,
     INTEGER_VALUE_OPS,
     NO_REQUEST,
+    POINTER_BYTES,
     ValueMonitor,
     ValueRequest,
 )
@@ -147,6 +153,11 @@ class RunSetup:
     # ``AbiModel.c_int_bytes``; 0 when unknown (every width is then checked
     # as if narrower than ``int``: both readings).
     c_int_bytes: int = 0
+    # Every initialized block of the loaded image (code, read-only and
+    # writable data), for the provenance of addresses; empty when the
+    # executor did not report them (a version 2 trace), and then the run is
+    # not ``address_provenance_tracked``.
+    image_ranges: Tuple[Tuple[int, int], ...] = ()
 
     def register(self, name: str) -> Optional[RegisterFact]:
         for fact in self.registers:
@@ -200,7 +211,9 @@ class RunObserver:
         self._writable_reads: Set[int] = set()
         self._observed: Tuple[Tuple[str, ObservedRegister], ...] = ()
         self._writable = tuple(setup.writable_image_ranges) + tuple(setup.zero_initialized_ranges)
-        self._monitor = ValueMonitor(setup.big_endian, setup.processor, setup.c_int_bytes)
+        self._monitor = ValueMonitor(
+            setup.big_endian, setup.processor, setup.c_int_bytes, setup.image_ranges
+        )
         self._monitor_step = -1
         self._userop_value: Optional[int] = None
         for name, _ in request.entry_state.registers:
@@ -211,6 +224,11 @@ class RunObserver:
             count = min(count, fact.size)
             for significance in range(count):
                 self._defined_registers.add(self._byte_address(fact.offset, fact.size, significance))
+        for name, kind in request.entry_state.address_registers:
+            fact = setup.register(name)
+            if fact is not None:
+                count = request.entry_state.defined_byte_count(name) or fact.size
+                self._monitor.seed(REGISTER_SPACE, fact.offset, fact.size, count, HazardKind(kind))
 
     # ------------------------------------------------------------ helpers
 
@@ -423,6 +441,11 @@ class RunObserver:
             if fact is None or name not in by_name:
                 continue
             reliable, kinds = self._monitor.observe(fact.offset, fact.size, where=f" in {name} at return")
+            low = by_name[name] & ((1 << (8 * POINTER_BYTES)) - 1)
+            if fact.size >= POINTER_BYTES and any(a <= low < b for a, b in self._setup.image_ranges):
+                # an address of the image, however it was computed
+                reliable = 0
+                kinds = tuple(sorted(set(kinds) | {HazardKind.IMAGE_ADDRESS}, key=lambda k: k.value))
             rounding_bytes, rounding = self._monitor.rounding_values(fact.offset, fact.size)
             observed.append((name, ObservedRegister(
                 by_name[name], self._defined_low_bytes(fact), self._value_format(fact),
@@ -522,6 +545,7 @@ class RunObserver:
             hazards=tuple(self._hazards.values()),
             fp_operations_tracked=self._monitor.fp_complete,
             integer_ub_operations_tracked=self._monitor.integer_complete,
+            address_provenance_tracked=self._monitor.address_complete,
             writable_image_reads=_merge([(byte, 1) for byte in self._writable_reads]),
             operation_counts=tuple(sorted(counts.items())),
             monitor_events=tuple(sorted(self._monitor.counters.items())),

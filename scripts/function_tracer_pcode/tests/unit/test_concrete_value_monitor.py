@@ -75,18 +75,20 @@ NG, ZR, CY, OV = R(0x100, 1), R(0x101, 1), R(0x102, 1), R(0x103, 1)
 V0, A0, MSP = RegisterFact("v0", 0x10, 8), RegisterFact("a0", 0x20, 8), RegisterFact("sp", 0xE8, 8)
 
 
-def _setup(big_endian=False, processor="AARCH64", c_int_bytes=4):
+def _setup(big_endian=False, processor="AARCH64", c_int_bytes=4, image_ranges=()):
     registers = (V0, A0, MSP) if big_endian else (X0, X1, X2, D0, D1, D2, SPR)
     return RunSetup(
         big_endian=big_endian, memory_space="ram", registers=registers, stack_pointer="sp",
         code_ranges=(CODE,), external_entries=(), writable_image_ranges=(), processor=processor,
-        c_int_bytes=c_int_bytes,
+        c_int_bytes=c_int_bytes, image_ranges=tuple(image_ranges),
     )
 
 
-def _request(registers, observe, big_endian=False):
+def _request(registers, observe, big_endian=False, address_registers=()):
     registers = tuple(registers) + (("sp", SP),)
-    return ExecutionRequest(0x1000, EntryState(registers, SP, RET), tuple(observe), 1000)
+    return ExecutionRequest(
+        0x1000, EntryState(registers, SP, RET, (), tuple(address_registers)), tuple(observe), 1000
+    )
 
 
 def _nan_bits(size):
@@ -97,10 +99,10 @@ class Machine:
     """Executes P-code on concrete values and drives the observer like the executor."""
 
     def __init__(self, registers=(), observe=("x0",), big_endian=False, processor="AARCH64", fp_override=None,
-                 c_int_bytes=4):
+                 c_int_bytes=4, image_ranges=(), address_registers=()):
         self.big_endian = big_endian
-        self.setup = _setup(big_endian, processor, c_int_bytes)
-        self.request = _request(registers, observe, big_endian)
+        self.setup = _setup(big_endian, processor, c_int_bytes, image_ranges)
+        self.request = _request(registers, observe, big_endian, address_registers)
         self.observer = RecordingObserver(RunObserver(self.setup, self.request))
         self.state = {}
         self.address = 0x1000
@@ -168,6 +170,8 @@ class Machine:
                 address = values[1]
                 stop = self.observer.load("ram", address, o.output.size)
                 self.write(o.output, self.read(Varnode("ram", address, o.output.size)))
+                if request.output and stop is None:
+                    self.observer.op_output(self.read(o.output))
             elif o.mnemonic == "STORE":
                 address = values[1]
                 stop = self.observer.store("ram", address, o.inputs[2].size)

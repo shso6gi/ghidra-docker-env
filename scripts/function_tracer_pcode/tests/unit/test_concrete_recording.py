@@ -45,6 +45,11 @@ def test_the_corpus_is_present():
         "mips64_loop_float_o2", "arm64_addvalue_bss_read", "arm64_pow_signed_overflow",
         "mips64_pow_signed_overflow", "mips64_airy_sign_nan", "arm64_factorial_neon_ext",
         "arm64_factorial_int_min_compare",
+        "arm64_ptrsyn_global_pointer_return", "mips64_ptrsyn_stack_address_return",
+        "arm64_ptrsyn_branch_on_address_bits", "mips64_ptrsyn_pointer_difference",
+        "arm64_ptrsyn_writable_global_read", "mips64_ptrsyn_bss_read",
+        "arm64_ptrsyn2_global_order", "mips64_ptrsyn2_global_distance", "arm64_ptrsyn2_one_past_equal",
+        "mips64_ptrsyn2_stack_distance", "arm64_ptrsyn2_same_array_distance",
     }
 
 
@@ -167,3 +172,60 @@ def test_a_recorded_executor_replays_known_requests_and_refuses_unknown_ones():
         RecordedExecutor([trace, _trace("mips64_ackermann_returned")])     # two programs
     with pytest.raises(ValueError):
         RecordedExecutor([dict(trace, schema="other")])
+
+
+# ------------------------------------------- addresses and program state (#18)
+# ``fixtures/concrete/ptrsyn.c``, built like the EqBench binaries (arm64 / mips64,
+# gcc / clang, -O0 / -O2); each run with the first argument 1.
+
+def _x0(name):
+    result = _result(name)
+    assert result.termination is Termination.RETURNED and result.address_provenance_tracked
+    return result, result.observed_registers[0][1]
+
+
+def test_a_returned_pointer_to_a_global_is_not_reliable_on_real_code():
+    result, observed = _x0("arm64_ptrsyn_global_pointer_return")
+    assert observed.reliable_low_bytes == 0 and observed.unreliable == ("IMAGE_ADDRESS",)
+    assert result.hazards == ()
+
+
+def test_a_returned_stack_address_is_not_reliable_on_real_code():
+    _, observed = _x0("mips64_ptrsyn_stack_address_return")
+    assert observed.reliable_low_bytes == 0 and observed.unreliable == ("STACK_ADDRESS",)
+
+
+def test_a_branch_on_the_bits_of_an_address_is_a_hazard_on_real_code():
+    result, _ = _x0("arm64_ptrsyn_branch_on_address_bits")
+    assert result.hazard_kinds() == (HazardKind.ADDRESS_BITS,)
+
+
+def test_a_difference_of_two_addresses_is_not_reliable_on_real_code():
+    # Review of PR #321: the binary does not show that two addresses point into one
+    # object.  ``p - q`` of one local array (clang -O0, through a MIPS ``move``) is
+    # refused like the distance of two objects (``fixtures/concrete/ptrsyn2.c``),
+    # which differs between builds of one source.
+    for name in ("mips64_ptrsyn_pointer_difference", "mips64_ptrsyn2_global_distance",
+                 "mips64_ptrsyn2_stack_distance"):
+        result, observed = _x0(name)
+        assert result.hazards == () and observed.reliable_low_bytes == 0, name
+        assert observed.unreliable == ("ADDRESS_BITS",), name
+
+
+@pytest.mark.parametrize("name", ["arm64_ptrsyn2_global_order", "arm64_ptrsyn2_one_past_equal"])
+def test_a_branch_on_two_objects_addresses_is_a_hazard_on_real_code(name):
+    # ``&g_b < &g_a`` and ``&g_a + 1 == &g_b`` (two objects; clang -O0 branches)
+    result, _ = _x0(name)
+    assert result.hazard_kinds() == (HazardKind.ADDRESS_BITS,)
+
+
+def test_an_index_computed_without_addresses_stays_reliable_on_real_code():
+    # gcc -O2 computes ``&g_arr[x & 7] - &g_arr[0]`` as ``x & 7``: no address is used
+    result, observed = _x0("arm64_ptrsyn2_same_array_distance")
+    assert result.hazards == () and observed.reliable_low_bytes == 8 and observed.value == 1
+
+
+@pytest.mark.parametrize("name", ["arm64_ptrsyn_writable_global_read", "mips64_ptrsyn_bss_read"])
+def test_reads_of_writable_program_data_are_recorded_on_real_code(name):
+    result, observed = _x0(name)
+    assert result.writable_image_reads and result.hazards == () and observed.reliable_low_bytes == 8

@@ -2,9 +2,17 @@
 """Deciding what two concrete runs on corresponding inputs establish.
 
 ``compare_runs`` returns either a ``ConcreteDifference`` -- both calls
-completed without a hazard, both were examined by the floating-point and the
-integer-UB monitors, and the observed return values differ -- or a
+completed without a hazard, both were examined by the floating-point, the
+integer-UB and the address-provenance monitors, neither read writable program
+data it had not written, and the observed return values differ -- or a
 ``ConcreteNoEvidence`` with the reason nothing was established.
+
+Writable program data (``.data``, ``.bss``, the GOT) holds the program's
+state when the function is called: the executor knows only its value at
+program start, which a call in a running program need not see, and two
+binaries do not share it.  A run that read such data is no evidence (#18);
+reads of data the run itself wrote first, and of read-only data (constants
+of the function), are not such reads.
 
 Neither is a final outcome of a pair.  ``ConcreteNoEvidence`` in particular is
 internal: its reasons become registered UNKNOWN reasons where a proof consumes
@@ -35,6 +43,8 @@ class NoEvidenceReason(str, Enum):
     RUN_HAS_HAZARD = "RUN_HAS_HAZARD"
     FP_OPERATIONS_NOT_TRACKED = "FP_OPERATIONS_NOT_TRACKED"
     INTEGER_UB_NOT_TRACKED = "INTEGER_UB_NOT_TRACKED"
+    ADDRESS_PROVENANCE_NOT_TRACKED = "ADDRESS_PROVENANCE_NOT_TRACKED"
+    WRITABLE_IMAGE_READ = "WRITABLE_IMAGE_READ"
     OBSERVATION_MISSING = "OBSERVATION_MISSING"
     OBSERVATION_REFUSED = "OBSERVATION_REFUSED"
     NO_DIFFERENCE_OBSERVED = "NO_DIFFERENCE_OBSERVED"
@@ -79,6 +89,12 @@ def compare_runs(
     for side, run in enumerate(runs):
         if not run.integer_ub_operations_tracked:
             return ConcreteNoEvidence(NoEvidenceReason.INTEGER_UB_NOT_TRACKED, side=side)
+    for side, run in enumerate(runs):
+        if not run.address_provenance_tracked:
+            return ConcreteNoEvidence(NoEvidenceReason.ADDRESS_PROVENANCE_NOT_TRACKED, side=side)
+    for side, run in enumerate(runs):
+        if run.writable_image_reads:
+            return ConcreteNoEvidence(NoEvidenceReason.WRITABLE_IMAGE_READ, side=side)
     values = []
     for side, (run, location) in enumerate(zip(runs, plan.locations)):
         value = run.observed(location.register)

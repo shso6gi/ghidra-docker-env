@@ -41,11 +41,14 @@ Event encoding (JSON arrays):
 ====================================  ==========================================
 
 Version 1 traces (C1, without values) still replay; a run whose monitors
-needed values it lacks replays as not monitored.
+needed values it lacks replays as not monitored.  Version 2 traces (C3) lack
+the image ranges, the address registers of the entry state and the values of
+pointer-sized loads: they replay as not ``address_provenance_tracked``.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from scripts.function_tracer_pcode.concrete.executor import (
@@ -67,9 +70,10 @@ from scripts.function_tracer_pcode.concrete.run_observer import (
     Varnode,
 )
 
-TRACE_SCHEMA = "concrete-run-trace-v2"
+TRACE_SCHEMA = "concrete-run-trace-v3"
+TRACE_SCHEMA_V2 = "concrete-run-trace-v2"
 TRACE_SCHEMA_V1 = "concrete-run-trace-v1"
-_SCHEMAS = (TRACE_SCHEMA, TRACE_SCHEMA_V1)
+_SCHEMAS = (TRACE_SCHEMA, TRACE_SCHEMA_V2, TRACE_SCHEMA_V1)
 
 
 # ------------------------------------------------------------- encoding
@@ -109,6 +113,7 @@ def setup_to_json(setup: RunSetup) -> Dict[str, Any]:
         "processor": setup.processor,
         "zero_initialized_ranges": [list(r) for r in setup.zero_initialized_ranges],
         "c_int_bytes": setup.c_int_bytes,
+        "image_ranges": [list(r) for r in setup.image_ranges],
     }
 
 
@@ -125,6 +130,7 @@ def setup_from_json(raw: Mapping[str, Any]) -> RunSetup:
         processor=str(raw.get("processor", "")),
         zero_initialized_ranges=tuple((int(a), int(b)) for a, b in raw.get("zero_initialized_ranges", ())),
         c_int_bytes=int(raw.get("c_int_bytes", 0)),
+        image_ranges=tuple((int(a), int(b)) for a, b in raw.get("image_ranges", ())),
     )
 
 
@@ -137,9 +143,11 @@ def request_to_json(request: ExecutionRequest) -> Dict[str, Any]:
             "stack_pointer": state.stack_pointer,
             "return_address": state.return_address,
             "defined_bytes": [[n, c] for n, c in state.defined_bytes],
+            "address_registers": [[n, k.value] for n, k in state.address_registers],
         },
         "observe_registers": list(request.observe_registers),
         "step_limit": request.step_limit,
+        "time_limit_seconds": request.time_limit_seconds,
     }
 
 
@@ -152,9 +160,11 @@ def request_from_json(raw: Mapping[str, Any]) -> ExecutionRequest:
             int(state["stack_pointer"]),
             int(state["return_address"]),
             tuple((str(n), int(c)) for n, c in state.get("defined_bytes", ())),
+            tuple((str(n), HazardKind(k)) for n, k in state.get("address_registers", ())),
         ),
         observe_registers=tuple(str(n) for n in raw["observe_registers"]),
         step_limit=int(raw["step_limit"]),
+        time_limit_seconds=None if raw.get("time_limit_seconds") is None else float(raw["time_limit_seconds"]),
     )
 
 
@@ -170,6 +180,7 @@ def result_to_json(result: ExecutionResult) -> Dict[str, Any]:
         "hazards": [[h.kind.value, h.detail] for h in result.hazards],
         "fp_operations_tracked": result.fp_operations_tracked,
         "integer_ub_operations_tracked": result.integer_ub_operations_tracked,
+        "address_provenance_tracked": result.address_provenance_tracked,
         "writable_image_reads": [list(r) for r in result.writable_image_reads],
         "operation_counts": [list(c) for c in result.operation_counts],
         "monitor_events": [list(c) for c in result.monitor_events],
@@ -189,6 +200,7 @@ def result_from_json(raw: Mapping[str, Any]) -> ExecutionResult:
         hazards=tuple(Hazard(HazardKind(kind), str(detail)) for kind, detail in raw["hazards"]),
         fp_operations_tracked=bool(raw["fp_operations_tracked"]),
         integer_ub_operations_tracked=bool(raw["integer_ub_operations_tracked"]),
+        address_provenance_tracked=bool(raw.get("address_provenance_tracked", False)),
         writable_image_reads=tuple((int(a), int(n)) for a, n in raw["writable_image_reads"]),
         operation_counts=tuple((str(m), int(c)) for m, c in raw["operation_counts"]),
         monitor_events=tuple((str(m), int(c)) for m, c in raw.get("monitor_events", ())),
@@ -348,10 +360,11 @@ class RecordedExecutor:
                 program = sha256
             elif sha256 != program:
                 raise ValueError("a recorded executor holds the runs of one program")
-            self._traces[request_from_json(trace["request"])] = trace
+            self._traces[replace(request_from_json(trace["request"]), time_limit_seconds=None)] = trace
 
     def execute(self, request: ExecutionRequest) -> ExecutionResult:
-        trace = self._traces.get(request)
+        # a run's time limit decides nothing a recording could differ in
+        trace = self._traces.get(replace(request, time_limit_seconds=None))
         if trace is None:
             return ExecutionResult(Termination.EXECUTOR_ERROR, 0, detail="no recorded run for this request")
         replayed, _ = replay_trace(trace)

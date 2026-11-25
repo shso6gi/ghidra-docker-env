@@ -580,6 +580,7 @@ def _plan():
 def _returned(value, **kw):
     kw.setdefault("fp_operations_tracked", True)
     kw.setdefault("integer_ub_operations_tracked", True)
+    kw.setdefault("address_provenance_tracked", True)
     return ExecutionResult(Termination.RETURNED, 10, (("x0", ObservedRegister(value, 8, None, 8)),), **kw)
 
 
@@ -609,16 +610,16 @@ def test_any_hazard_on_either_side_establishes_nothing(kind):
 
 def test_equal_values_missing_observations_and_refused_observations_are_no_evidence():
     assert compare_runs(_plan(), _returned(3), _returned(3)).reason is NoEvidenceReason.NO_DIFFERENCE_OBSERVED
-    missing = ExecutionResult(Termination.RETURNED, 1, (), fp_operations_tracked=True, integer_ub_operations_tracked=True)
+    missing = ExecutionResult(Termination.RETURNED, 1, (), fp_operations_tracked=True, integer_ub_operations_tracked=True, address_provenance_tracked=True)
     assert compare_runs(_plan(), _returned(3), missing).reason is NoEvidenceReason.OBSERVATION_MISSING
     fp_plan = _plan_for(MIPS, MIPS_F0)
     nan = ExecutionResult(
         Termination.RETURNED, 1, (("f0", ObservedRegister(0x7FF8000000000000, 8, B64, 8)),),
-        fp_operations_tracked=True, integer_ub_operations_tracked=True,
+        fp_operations_tracked=True, integer_ub_operations_tracked=True, address_provenance_tracked=True,
     )
     one = ExecutionResult(
         Termination.RETURNED, 1, (("f0", ObservedRegister(_double_bits(1.0), 8, B64, 8)),),
-        fp_operations_tracked=True, integer_ub_operations_tracked=True,
+        fp_operations_tracked=True, integer_ub_operations_tracked=True, address_provenance_tracked=True,
     )
     result = compare_runs(fp_plan, nan, one)
     assert result.reason is NoEvidenceReason.OBSERVATION_REFUSED
@@ -659,7 +660,7 @@ def test_rounding_sensitive_arithmetic_is_a_hazard_of_the_run():
     def run(bits, hazards=()):
         return ExecutionResult(
             Termination.RETURNED, 1, (("f0", ObservedRegister(bits, 8, B64, 8)),),
-            hazards=hazards, fp_operations_tracked=True, integer_ub_operations_tracked=True,
+            hazards=hazards, fp_operations_tracked=True, integer_ub_operations_tracked=True, address_provenance_tracked=True,
         )
 
     fused = (Hazard(HazardKind.FP_ROUNDING_SENSITIVE, "fmadd"),)
@@ -680,7 +681,7 @@ def test_only_the_reliable_low_bytes_of_a_return_value_are_compared():
     def run(value, reliable, unreliable=()):
         return ExecutionResult(
             Termination.RETURNED, 1, (("x0", ObservedRegister(value, 8, None, reliable, unreliable)),),
-            fp_operations_tracked=True, integer_ub_operations_tracked=True,
+            fp_operations_tracked=True, integer_ub_operations_tracked=True, address_provenance_tracked=True,
         )
 
     assert isinstance(compare_runs(plan, run(13, 4), run(14, 8)), ConcreteDifference)   # w0: 4 bytes
@@ -694,7 +695,7 @@ def test_only_the_reliable_low_bytes_of_a_return_value_are_compared():
     def fp(bits, reliable):
         return ExecutionResult(
             Termination.RETURNED, 1, (("f0", ObservedRegister(bits, 8, B64, reliable)),),
-            fp_operations_tracked=True, integer_ub_operations_tracked=True,
+            fp_operations_tracked=True, integer_ub_operations_tracked=True, address_provenance_tracked=True,
         )
 
     refused = compare_runs(fp_plan, fp(0x40036AA32A3732D7, 0), fp(0x40036AA32A3732D8, 8))
@@ -711,7 +712,7 @@ def test_rounding_sensitive_values_are_compared_by_their_possible_values_only():
         observed = ObservedRegister(bits, 8, B64, 0 if values or unreliable else 8, unreliable, values, size)
         return ExecutionResult(
             Termination.RETURNED, 1, (("f0", observed),),
-            fp_operations_tracked=True, integer_ub_operations_tracked=True,
+            fp_operations_tracked=True, integer_ub_operations_tracked=True, address_provenance_tracked=True,
         )
 
     exact_two = fp(two, unreliable=())
@@ -728,3 +729,56 @@ def test_rounding_sensitive_values_are_compared_by_their_possible_values_only():
     ):
         result = compare_runs(plan, refused, exact_two)
         assert result.observation_refusal is ObservationRefusal.VALUE_NOT_RELIABLE
+
+
+# ------------------------------------------- addresses and program state (#18)
+
+def test_a_run_whose_address_provenance_was_not_examined_establishes_nothing():
+    # A returned pointer differs between two binaries because the image and the
+    # frame are placed differently; without the provenance monitor that is not seen.
+    untracked = _returned(13, address_provenance_tracked=False)
+    for left, right, side in ((untracked, _returned(14), 0), (_returned(14), untracked, 1)):
+        result = compare_runs(_plan(), left, right)
+        assert isinstance(result, ConcreteNoEvidence)
+        assert result.reason is NoEvidenceReason.ADDRESS_PROVENANCE_NOT_TRACKED and result.side == side
+    assert ExecutionResult(Termination.RETURNED, 1).address_provenance_tracked is False
+
+
+def test_a_run_that_read_writable_program_data_establishes_nothing():
+    # The value of .data / .bss / the GOT at a call is the program's state, not an
+    # input both binaries share: only its value at program start is known.
+    reader = _returned(13, writable_image_reads=((0x412000, 4),))
+    for left, right, side in ((reader, _returned(14), 0), (_returned(14), reader, 1)):
+        result = compare_runs(_plan(), left, right)
+        assert isinstance(result, ConcreteNoEvidence)
+        assert result.reason is NoEvidenceReason.WRITABLE_IMAGE_READ and result.side == side
+
+
+@pytest.mark.parametrize("kind", [HazardKind.STACK_ADDRESS, HazardKind.IMAGE_ADDRESS, HazardKind.ADDRESS_BITS])
+def test_a_returned_value_derived_from_an_address_is_not_compared(kind):
+    def run(value):
+        return ExecutionResult(
+            Termination.RETURNED, 1, (("x0", ObservedRegister(value, 8, None, 0, (kind.value,))),),
+            fp_operations_tracked=True, integer_ub_operations_tracked=True, address_provenance_tracked=True,
+        )
+    result = compare_runs(_plan_for(ARM, ARM_X0), run(0x111034), run(0x112014))
+    assert result.reason is NoEvidenceReason.OBSERVATION_REFUSED
+    assert result.observation_refusal is ObservationRefusal.VALUE_NOT_RELIABLE
+
+
+def test_a_pointer_typed_return_is_refused_before_any_run():
+    pointer = ReturnStorage(False, (ARM_X0,), is_pointer=True)
+    assert return_location(ARM, pointer) is ObservationRefusal.RETURN_TYPE_POINTER
+    assert return_location(ARM, ReturnStorage(True, (ARM_X0,), is_pointer=True)) is ObservationRefusal.RETURN_VOID
+    assert not isinstance(return_location(ARM, ReturnStorage(False, (ARM_X0,))), ObservationRefusal)
+
+
+def test_the_entry_state_marks_the_registers_that_hold_addresses():
+    arm = build_entry_state(ARM, 0x1000, ())
+    assert dict(arm.address_registers) == {
+        "sp": HazardKind.STACK_ADDRESS, "x30": HazardKind.IMAGE_ADDRESS,
+    }
+    mips = build_entry_state(MIPS, 0x1000, ())
+    assert dict(mips.address_registers) == {
+        "sp": HazardKind.STACK_ADDRESS, "ra": HazardKind.IMAGE_ADDRESS, "t9": HazardKind.IMAGE_ADDRESS,
+    }
