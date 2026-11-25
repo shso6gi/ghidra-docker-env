@@ -615,12 +615,67 @@ def build_pair_query(
         return "\n".join(lines)
 
 
-def _build_pairwise_extra_assertions(
+def build_pair_premise_query(
+    base_ctx: Dict[str, Any],
+    case1: ReturnCase,
+    case2: ReturnCase,
+    param_replace_fn1,
+    param_replace_fn2,
+    pair_id: str,
+) -> str:
+    """組の query が共有する前提だけ（guard・値の不等式を除く）の充足可能性の query（Issue #298）。
+
+    前提は header（入力対応・型の仮説・FP の仮定・readonly の公理など）と、その組の
+    追加の assert（guard の query と value query のものの和）。これが UNSAT なら、その組の
+    UNSAT は guard・値と無関係に起きる（空虚）ので、EQ の根拠にしない
+    （``proof.obligations.premise``）。前提が SAT で guard を足して UNSAT になる組は、正当に
+    到達不能な組。
+
+    同じ前提は同じ文字列にする（``require_satisfiable_premises`` は文字列で共有する）:
+    組の番号・case の要約を書かず、追加の assert の項目からも comment の行（組の番号を含む
+    出自の説明）を除き、重複を除いて並べ替える（comment・assert の順は充足可能性を変えない）。追加の assert が無い組は header だけ（制約の無い記号の宣言は
+    充足可能性を変えない）。追加の assert がある組だけ、その記号を宣言する case の宣言を
+    並べ替えて含める。
+    """
+    extra = sorted({
+        content
+        for item in (
+            _pairwise_extra_assertion_items(base_ctx, pair_id, guard_only=True)
+            + _pairwise_extra_assertion_items(base_ctx, pair_id)
+        )
+        for content in (_premise_item_content(item),)
+        if content
+    })
+    lines = _build_query_header(
+        "; Proof Premise Satisfiability",
+        logic=base_ctx.get("smt_logic", "QF_BV"),
+    )
+    lines.extend(base_ctx["header_lines"])
+    if extra:
+        declarations = build_case_symbol_declarations(
+            base_ctx, ((case1, param_replace_fn1), (case2, param_replace_fn2)),
+        )
+        lines.extend(sorted({line for line in declarations if line.strip() and not line.lstrip().startswith(";")}))
+        lines.extend(extra)
+    lines.append("(check-sat)")
+    return "\n".join(lines)
+
+
+def _premise_item_content(item: str) -> str:
+    """追加の assert の項目から comment の行を除いた内容（前提の文字列の共有に使う）。"""
+    return "\n".join(
+        line.rstrip() for line in str(item).splitlines()
+        if line.strip() and not line.strip().startswith(";")
+    )
+
+
+def _pairwise_extra_assertion_items(
     base_ctx: Dict[str, Any],
     pair_id: str,
     *,
     guard_only: bool = False,
 ) -> List[str]:
+    """組の追加の assert（guard の query か value query のもの）。書式を付けない生の項目。"""
     assertions_by_pair = base_ctx.get("pairwise_extra_assertions_by_pair") or {}
     if guard_only:
         bundles = tuple(
@@ -640,8 +695,16 @@ def _build_pairwise_extra_assertions(
         call_projection_by_pair = base_ctx.get("call_projection_assertions_by_pair") or {}
         call_assertions = tuple(call_projection_by_pair.get(pair_id) or ())
         extra = tuple(assertions_by_pair.get(pair_id) or ())
-    raw_assertions = call_assertions + extra
-    assertions = [str(item) for item in raw_assertions if str(item).strip()]
+    return [str(item) for item in call_assertions + extra if str(item).strip()]
+
+
+def _build_pairwise_extra_assertions(
+    base_ctx: Dict[str, Any],
+    pair_id: str,
+    *,
+    guard_only: bool = False,
+) -> List[str]:
+    assertions = _pairwise_extra_assertion_items(base_ctx, pair_id, guard_only=guard_only)
     if not assertions:
         return []
     return [

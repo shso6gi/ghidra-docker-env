@@ -45,8 +45,10 @@ from scripts.function_tracer_pcode.proof.cause_identity import (
 )
 from scripts.function_tracer_pcode.proof.strategies.pairwise_query_builder import (
     build_case_symbol_declarations,
+    build_pair_premise_query,
     build_void_return_disequivalence_query,
 )
+from scripts.function_tracer_pcode.proof.ub.domain import UB_WITNESS_DOMAIN_KEY
 
 
 class _SealedLoopV2RendererReceiptMeta(type):
@@ -970,6 +972,10 @@ def solve_query_after_guard(
     )
     stage2_result.last_query = full_query
     stage2_result.pair_stage = "with-ineq"
+    if stage2_result.is_equivalent is False:
+        stage2_result = resolve_witness_in_ub_domain(
+            strategy, base_ctx, full_query, stage2_result, pair_id,
+        )
 
     if (
         stage2_result.is_equivalent is None
@@ -1032,6 +1038,54 @@ def solve_query_after_guard(
     # semantic blocker, when present, was established independently above.
 
     return stage2_result
+
+
+def resolve_witness_in_ub_domain(
+    strategy,
+    base_ctx: Dict[str, Any],
+    value_query: str,
+    sat_result: QueryResult,
+    pair_id: str,
+) -> QueryResult:
+    """SAT の model が反例の領域の外なら、領域の中の model を探し直す（Issue #298）。
+
+    value query は UB の制約を課さない（EQ の前提にしない）ので、model が UB を起こし得る
+    入力になることがある。そのまま捨てると、領域の中に正しい witness があっても NOT_EQ を
+    失う。value query に反例の領域（両方の関数の全ての演算の制約）を足して
+    解き直し、SAT ならその model を witness の候補にする（呼び手は改めて領域・他の検証を
+    確かめる）。UNSAT・決まらないときは元の結果を返す（呼び手が witness にしない）。
+    UNSAT は EQ の証拠に使わない（制約を上から近似した query なので）。
+    """
+    if counterexample_ub_domain_status(
+        strategy, base_ctx, sat_result.counterexample_raw,
+    ) is not False:
+        return sat_result
+    domain_lines = ub_witness_domain_lines(base_ctx)
+    head, sep, tail = value_query.rpartition("(check-sat)")
+    if not sep or not domain_lines:
+        return sat_result
+    domain_query = "\n".join((
+        head.rstrip("\n"),
+        "; Counterexample domain: no undefined behaviour in either function (Issue #298)",
+        *domain_lines,
+        sep + tail,
+    ))
+    stats = getattr(strategy, "_active_normalization_stats", None)
+    retried = strategy._solve_query_internal(
+        domain_query,
+        pair_id,
+        stage="with-ineq-ub-domain",
+        use_hard_timeout=True,
+    )
+    found = retried.is_equivalent is False and bool(retried.counterexample_raw)
+    if stats is not None:
+        key = "ub_witness_domain_resolved" if found else "ub_witness_domain_unresolved"
+        stats[key] = stats.get(key, 0) + 1
+    if not found:
+        return sat_result
+    retried.last_query = domain_query
+    retried.pair_stage = "with-ineq-ub-domain"
+    return retried
 
 
 def solve_query_twostage(
@@ -1216,6 +1270,117 @@ def build_counterexample_model_assertions(
     return tuple(_build_model_assertions(base_ctx, counterexample_raw))
 
 
+#: base_ctx の中の、前提の充足可能性の結果（query → 結果。比較の中で共有）
+PROOF_PREMISE_STATUS_KEY = "proof_premise_status"
+
+
+def solve_premise_query(strategy, scope: str, query: str) -> Optional[bool]:
+    """前提だけの query を解く: SAT なら True、UNSAT なら False、決まらなければ None。"""
+    timeout = max(1, int(getattr(strategy, "per_query_timeout", 5) or 5))
+    result = _run_query_with_timeout(strategy.solver_runner, query, timeout=timeout)
+    _log_solver_errors(strategy, query, result.results)
+    if result.is_equivalent is False:
+        return True
+    if result.is_equivalent is True:
+        return False
+    strategy._debug_print(f"  Premise query {scope} returned UNKNOWN/TIMEOUT")
+    return None
+
+
+def require_satisfiable_pair_premises(
+    strategy,
+    base_ctx: Dict[str, Any],
+    cases1,
+    cases2,
+    param_replace_fn1,
+    param_replace_fn2,
+) -> None:
+    """全ての組の前提（header ∧ 組の追加の assert）が SAT であることを確かめる（Issue #298）。
+
+    pairwise の EQ（全ての組が UNSAT）の直前に呼ぶ。組の UNSAT は guard の query・value
+    query・正規化・書き換えのどれから来ても、その組の前提を共有する。前提が UNSAT・判定
+    不能なら ``proof.obligations.premise`` が限界を記録して送出する（EQ にしない）。
+    """
+    from scripts.function_tracer_pcode.proof.obligations.premise import (
+        require_satisfiable_premises,
+    )
+
+    premises = (
+        (
+            f"pair({i},{j})",
+            build_pair_premise_query(
+                base_ctx, case1, case2, param_replace_fn1, param_replace_fn2, f"({i},{j})",
+            ),
+        )
+        for i, case1 in enumerate(cases1)
+        for j, case2 in enumerate(cases2)
+    )
+    solved = require_satisfiable_premises(
+        strategy._solve_premise_query,
+        premises,
+        cache=base_ctx.setdefault(PROOF_PREMISE_STATUS_KEY, {}),
+    )
+    stats = getattr(strategy, "_active_normalization_stats", None)
+    if stats is not None:
+        stats["proof_premise_queries"] = int(stats.get("proof_premise_queries", 0) or 0) + solved
+
+
+def ub_witness_domain_lines(base_ctx: Dict[str, Any]) -> Optional[Tuple[str, ...]]:
+    """反例の領域の行（Issue #298）。領域が無効なら ``()``、作れないなら ``None``。
+
+    作れない（描画が式の正確な意味を持たない）ときは、witness が UB を起こさないことを
+    示せないので、呼び手は witness にしない。
+    """
+    from scripts.function_tracer_pcode.core.render_smt import SMT_SEMANTICS_REFUSALS
+
+    domain = base_ctx.get(UB_WITNESS_DOMAIN_KEY)
+    if domain is None:
+        return ()
+    try:
+        return tuple(domain.lines())
+    except SMT_SEMANTICS_REFUSALS:
+        return None
+
+
+def counterexample_ub_domain_status(
+    strategy,
+    base_ctx: Dict[str, Any],
+    counterexample_raw: Optional[Dict[str, Any]],
+) -> Optional[bool]:
+    """SAT の model が反例の領域（UB を起こさない入力）に入るか（Issue #298）。
+
+    query は UB の制約を課さない（EQ の前提にしない）。NOT_EQ の witness は、どちらの関数の
+    source でも UB を起こさない入力でなければならないが、source の演算・実行条件を binary
+    から示せないので、両方の関数の全ての演算の制約を無条件に課す（``proof.ub.domain``）。
+
+    True: 領域に入る（制約が無いときも）。False: 外れる。None: 決まらない（model が無い・
+    solver が答えない・領域を作れない）。呼び手は True 以外を witness にしない。
+    """
+    domain_lines = ub_witness_domain_lines(base_ctx)
+    if domain_lines is None:
+        return None
+    if not any(line.lstrip().startswith("(assert") for line in domain_lines):
+        return True
+    if counterexample_raw:
+        model_assertions = _build_model_assertions(base_ctx, counterexample_raw)
+        if not model_assertions:
+            return None
+    elif closed_formula_needs_no_replay(base_ctx):
+        model_assertions = []
+    else:
+        return None
+    lines: List[str] = [
+        f"(set-logic {base_ctx.get('smt_logic', 'QF_BV')})",
+        "",
+    ]
+    lines.extend(base_ctx["header_lines"])
+    lines.extend(model_assertions)
+    lines.append("; Counterexample domain: no undefined behaviour in either function (Issue #298)")
+    lines.extend(domain_lines)
+    lines.append("(check-sat)")
+    return _run_validation_query(strategy, "\n".join(lines), "ub-witness-domain")
+
+
 def _validate_counterexample_model(
     strategy,
     base_ctx: Dict[str, Any],
@@ -1226,6 +1391,15 @@ def _validate_counterexample_model(
     counterexample_raw: Optional[Dict[str, Any]],
     decisive_pairs: Optional[Sequence[Tuple[int, int]]],
 ) -> bool:
+    strategy._last_counterexample_rejection_kind = None
+    if counterexample_ub_domain_status(strategy, base_ctx, counterexample_raw) is not True:
+        # model を NOT_EQ の witness にする経路は全てこの検証を通る（最後の砦）。呼び手は
+        # 棄却の種類（``_last_counterexample_rejection_kind``）で理由を選ぶ。
+        strategy._last_counterexample_rejection_kind = "ub_domain"
+        strategy._debug_print(
+            "  Counterexample rejected: model is outside the UB-free input domain"
+        )
+        return False
     if not counterexample_raw:
         if closed_formula_needs_no_replay(base_ctx):
             # A closed formula (no parameters, no extra or runtime symbols)

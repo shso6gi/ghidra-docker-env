@@ -266,6 +266,12 @@ def _const_value_for_template(expr: Expression, width_bits: int) -> Optional[int
         if inner is None:
             return None
         if expr.operator in {"INT_ZEXT", "INT_SEXT"}:
+            # 拡張は被演算子の幅の値を伸ばす（SEXT は最上位 bit で埋める）
+            operand_bits = int(expr.operands[0].get_bit_width() or 0)
+            if 0 < operand_bits < width_bits:
+                inner %= 1 << operand_bits
+                if expr.operator == "INT_SEXT" and inner >> (operand_bits - 1):
+                    inner = (inner - (1 << operand_bits)) % modulus
             return inner
         if expr.operator in {"INT_2COMP", "INT_NEGATE"}:
             return (-inner) % modulus
@@ -299,7 +305,13 @@ def _const_value_for_template(expr: Expression, width_bits: int) -> Optional[int
 
 def _strip_width_adapter(expr: Expression, target_bits: int) -> Expression:
     if expr.expr_type == ExpressionType.UNARY_OP and expr.operands:
-        if expr.operator in {"INT_ZEXT", "INT_SEXT"}:
+        # Issue #298: 拡張は、被演算子が目標の幅以上なら 2^target_bits の剰余で見えない（外してよい）。
+        # 被演算子が狭いと ZEXT と SEXT の値が違うので外さない（外すと両者と、伸ばし方の分からない
+        # 狭い値が同じ atom になる）
+        if (
+            expr.operator in {"INT_ZEXT", "INT_SEXT"}
+            and expr.operands[0].get_bit_width() >= target_bits
+        ):
             return expr.operands[0]
         return expr
 
@@ -388,10 +400,13 @@ def _expr_key(expr: Expression, width_bits: int) -> StructuralKey:
         _normalize_expression_for_width(expr, width_bits),
         NormalizationContext(settings=SAFE_NORMALIZATION_SETTINGS),
     )
+    # Issue #298 / #246: 拡張は ``_normalize_expression_for_width`` が目標の幅で見えないものだけを
+    # 外す。key で全ての拡張を外す（lossy）と、ZEXT と SEXT（と伸ばし方の分からない狭い値）が同じ
+    # atom になる
     return expression_key_or_identity(
         normalized,
         normalize_commutative=True,
-        strip_width_adapters=True,
+        strip_width_adapters=False,
         collapse_full_masks=True,
         include_memory_read_order=False,
     )

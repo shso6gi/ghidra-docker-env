@@ -20,7 +20,9 @@ from scripts.function_tracer_pcode.proof.strategies.proof_gates._shared import (
     store_comparison_evidence,
 )
 from scripts.function_tracer_pcode.proof.sat_safety_resolution import (
+    COUNTEREXAMPLE_PARTITION_REPLAY_AMBIGUOUS,
     COUNTEREXAMPLE_REPLAY_MISSING_REF,
+    COUNTEREXAMPLE_UB_DOMAIN_VIOLATED,
     SAT_SAFETY_RECOVERY_REQUIREMENTS,
     SAT_SAFETY_TYPED_REASON_IDS,
     classify_sat_safety_blocker,
@@ -940,6 +942,74 @@ def _impl__make_sat_counterexample_ambiguous_unknown_reason(
     ))
 
 
+def _impl__make_sat_counterexample_ub_domain_unknown_reason(
+    self,
+    evidence_refs: Sequence[str],
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+    *,
+    case1: Any,
+    case2: Any,
+    pair_id: str,
+    stage: str,
+) -> UnknownReasonRecord:
+    """SAT の model が反例の領域（UB を起こさない入力）の外にある（Issue #298）。
+
+    その model だけを witness にしない理由（witness に固有）。別の組の witness が検証
+    されれば退く（``_supersede_rejected_witness_blocker`` の ``ub_domain``）。
+    """
+    refs = tuple(str(ref) for ref in evidence_refs or ()) or ("ub_witness_domain",)
+    object_target_key = self._sat_counterexample_ub_domain_object_target_key(
+        refs,
+        analysis1,
+        analysis2,
+        case1=case1,
+        case2=case2,
+        pair_id=pair_id,
+    )
+    reason_record = make_unknown_reason(
+        UnknownReasonId.SAT_COUNTEREXAMPLE_UB_DOMAIN_VIOLATED,
+        stage=stage,
+        pair_or_case=pair_id,
+        evidence_refs=refs,
+        detail="SAT counterexample executes an operation with undefined behaviour",
+        recovery_proof_kind=UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,
+        recovery_proof_obligations=(
+            UnknownRecoveryProofObligation.create(
+                UnknownRecoveryProofKind.SAT_UNSAFETY_RESOLUTION,
+                "sat_counterexample_safety",
+                required_evidence=(
+                    "counterexample_replay",
+                    "ub_free_counterexample_domain",
+                ),
+                description=(
+                    "Find a counterexample whose model executes no operation with "
+                    "undefined behaviour in either function."
+                ),
+            ),
+        ),
+        proof_stage="sat_counterexample_safety",
+        evidence_kind="ub_witness_domain",
+        object_target_key=object_target_key,
+        object_evidence={
+            "object_derived": True,
+            "evidence_version": 1,
+            "evidence_kind": "ub_witness_domain",
+            "object_target_kind": object_target_key[0],
+            "object_target_key": object_target_key,
+            "left": self._sat_unsafety_side_object_evidence("left", analysis1, case1),
+            "right": self._sat_unsafety_side_object_evidence("right", analysis2, case2),
+            "ub_domain_evidence_refs": refs,
+        },
+        recovery_action="sat_counterexample_ub_free_witness_required",
+        action_status=UnknownRecoveryActionStatus.PENDING_PROOF,
+    )
+    _emit_v2_sat_safety_witness_rejection_observed(
+        COUNTEREXAMPLE_UB_DOMAIN_VIOLATED, refs, object_target_key,
+    )
+    return reason_record
+
+
 def _impl__sat_unsafety_object_evidence(
     self,
     sat_unsafety_reasons: Sequence[str],
@@ -1089,6 +1159,24 @@ def _impl__sat_counterexample_ambiguous_object_target_key(
         self._sat_unsafety_side_object_key("left", analysis1, case1),
         self._sat_unsafety_side_object_key("right", analysis2, case2),
         ("ambiguity_evidence_refs", tuple(str(ref) for ref in evidence_refs or ())),
+    )
+
+def _impl__sat_counterexample_ub_domain_object_target_key(
+    self,
+    evidence_refs: Sequence[str],
+    analysis1: FunctionReturnAnalysis,
+    analysis2: FunctionReturnAnalysis,
+    *,
+    case1: Any,
+    case2: Any,
+    pair_id: str,
+) -> Tuple[Any, ...]:
+    return (
+        "sat_counterexample_ub_domain",
+        ("pair", pair_id),
+        self._sat_unsafety_side_object_key("left", analysis1, case1),
+        self._sat_unsafety_side_object_key("right", analysis2, case2),
+        ("ub_domain_evidence_refs", tuple(str(ref) for ref in evidence_refs or ())),
     )
 
 def _impl__sat_unsafety_side_object_key(
@@ -1257,6 +1345,20 @@ def _impl__supersede_rejected_witness_blocker(
             refs, target_key, proof_artifact_digest=proof_digest,
         )
         return True
+    if kind == "ub_domain":
+        target_key = self._sat_counterexample_ub_domain_object_target_key(
+            evidence_refs,
+            analysis1,
+            analysis2,
+            case1=case1,
+            case2=case2,
+            pair_id=pair_id,
+        )
+        _emit_v2_sat_safety_witness_rejection_if_observed(
+            COUNTEREXAMPLE_UB_DOMAIN_VIOLATED,
+            refs, target_key, proof_artifact_digest=proof_digest,
+        )
+        return True
     if not replay_may_resolve_sat_safety_reason(reason_record.reason_id, refs):
         # 別の witness の検証が退けてよいのは、その witness に固有の replay 型の
         # blocker だけ。解析の不安全は witness に固有でないので完了させない。
@@ -1422,7 +1524,22 @@ def _emit_v2_sat_safety_blockers_completed_if_observed(
         ), producer_site_manifest_id="sat-safety-blocker-completed")
 
 
-def _emit_v2_sat_safety_ambiguity_observed(
+#: witness に固有の棄却の種類 → (観測・完了で名指す missing fact, ref が無いときの既定の ref)。
+#: 観測と完了は同じ reason id・fact を名指す（そうでないと完了は拒否される）。
+_WITNESS_REJECTION_FACTS = {
+    COUNTEREXAMPLE_PARTITION_REPLAY_AMBIGUOUS: (
+        ("unique_counterexample_partition_witness", False),
+        "partition_replay_ambiguous",
+    ),
+    COUNTEREXAMPLE_UB_DOMAIN_VIOLATED: (
+        ("ub_free_counterexample_witness", False),
+        "ub_witness_domain",
+    ),
+}
+
+
+def _emit_v2_sat_safety_witness_rejection_observed(
+    reason_id: str,
     evidence_refs: Sequence[str],
     object_target_key: Any,
 ) -> None:
@@ -1431,17 +1548,19 @@ def _emit_v2_sat_safety_ambiguity_observed(
         emit_sat_safety_signal,
     )
 
+    fact, default_ref = _WITNESS_REJECTION_FACTS[reason_id]
     emit_sat_safety_signal(SatSafetyBlockerProductionSignal(
         action="OBSERVED",
-        reason_id="counterexample_partition_replay_ambiguous",
+        reason_id=reason_id,
         canonical_target_key=object_target_key,
-        missing_semantic_fact=("unique_counterexample_partition_witness", False),
-        evidence_refs=tuple(evidence_refs) or ("partition_replay_ambiguous",),
+        missing_semantic_fact=fact,
+        evidence_refs=tuple(evidence_refs) or (default_ref,),
         producer_id=SAT_SAFETY_AMBIGUITY_OBSERVED_SITE.producer_id,
     ), producer_site_manifest_id="sat-safety-ambiguity-observed")
 
 
-def _emit_v2_sat_safety_ambiguity_if_observed(
+def _emit_v2_sat_safety_witness_rejection_if_observed(
+    reason_id: str,
     evidence_refs: Sequence[str],
     object_target_key: Any,
     *,
@@ -1452,15 +1571,39 @@ def _emit_v2_sat_safety_ambiguity_if_observed(
         emit_sat_safety_completion_if_observed,
     )
 
+    fact, default_ref = _WITNESS_REJECTION_FACTS[reason_id]
     emit_sat_safety_completion_if_observed(SatSafetyBlockerProductionSignal(
         action="COMPLETED",
-        reason_id="counterexample_partition_replay_ambiguous",
+        reason_id=reason_id,
         canonical_target_key=object_target_key,
-        missing_semantic_fact=("unique_counterexample_partition_witness", False),
-        evidence_refs=tuple(evidence_refs) or ("partition_replay_ambiguous",),
+        missing_semantic_fact=fact,
+        evidence_refs=tuple(evidence_refs) or (default_ref,),
         producer_id=SAT_SAFETY_AMBIGUITY_COMPLETED_SITE.producer_id,
         proof_artifact_digest=proof_artifact_digest,
     ), producer_site_manifest_id="sat-safety-ambiguity-completed")
+
+
+def _emit_v2_sat_safety_ambiguity_observed(
+    evidence_refs: Sequence[str],
+    object_target_key: Any,
+) -> None:
+    _emit_v2_sat_safety_witness_rejection_observed(
+        COUNTEREXAMPLE_PARTITION_REPLAY_AMBIGUOUS, evidence_refs, object_target_key,
+    )
+
+
+def _emit_v2_sat_safety_ambiguity_if_observed(
+    evidence_refs: Sequence[str],
+    object_target_key: Any,
+    *,
+    proof_artifact_digest: str,
+) -> None:
+    _emit_v2_sat_safety_witness_rejection_if_observed(
+        COUNTEREXAMPLE_PARTITION_REPLAY_AMBIGUOUS,
+        evidence_refs,
+        object_target_key,
+        proof_artifact_digest=proof_artifact_digest,
+    )
 
 
 def _v2_sat_safety_proof_digest(proof_content: Mapping[str, Any]) -> str:

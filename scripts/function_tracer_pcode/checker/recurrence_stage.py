@@ -62,7 +62,10 @@ class RecurrenceStageMixin:
         reasons = tuple(getattr(strategy_result, "unknown_reasons", ()) or ())
         if not reasons:
             return None
-        sat_reason_ids = SAT_SAFETY_TYPED_REASON_IDS | {"sat_counterexample_ambiguous"}
+        sat_reason_ids = SAT_SAFETY_TYPED_REASON_IDS | {
+            "sat_counterexample_ambiguous",
+            "sat_counterexample_ub_domain_violated",
+        }
         if (
             int(getattr(strategy_result, "sat_pairs", 0) or 0) > 0
             or getattr(strategy_result, "counterexample_raw", None) is not None

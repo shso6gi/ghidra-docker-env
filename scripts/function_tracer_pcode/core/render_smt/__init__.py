@@ -98,6 +98,7 @@ from scripts.function_tracer_pcode.core.render_smt.render import (  # noqa: F401
     expression_node_has_unsupported_smt_ops,
     expression_returns_bool,
     expression_to_smt,
+    render_expression_smt_for_query,
     condition_to_smt,
     render_condition_smt_evidence,
     render_expression_smt_evidence,
@@ -139,6 +140,7 @@ from scripts.function_tracer_pcode.core.render_smt.widths import (  # noqa: F401
     _smt_scale_term,
     _smt_width_if_known,
     boolean_value_bits,
+    constant_value_at_width,
     expression_smt_bit_width,
     expression_value_bit_width,
 )

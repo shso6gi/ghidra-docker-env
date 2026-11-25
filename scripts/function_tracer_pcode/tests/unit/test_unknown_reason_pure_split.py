@@ -111,6 +111,7 @@ def _snapshot():
 # なので、追加分はここに明示して pre-split 分の parity と区別する）。
 _POST_SPLIT_REASON_ADDITIONS = {
     "expansion_case_budget_exceeded",  # Issue #131
+    "sat_counterexample_ub_domain_violated",  # Issue #298
 }
 
 
@@ -132,15 +133,25 @@ _POST_SPLIT_PLAN_CHANGES = {
 }
 
 
+# 分割後に新しく足した回復計画。
+_POST_SPLIT_PLAN_ADDITIONS = {
+    "sat_counterexample_ub_domain_violated",  # Issue #298
+}
+
+
 def test_recovery_plan_registry_matches_the_pre_split_snapshot():
     snap = _snapshot()
     current = {k: v.to_dict() for k, v in proof_ur._UNKNOWN_RECOVERY_PLAN_REGISTRY.items()}
-    assert set(current) == set(snap["plans"])
+    assert set(current) - set(snap["plans"]) == _POST_SPLIT_PLAN_ADDITIONS
+    assert set(snap["plans"]) - set(current) == set()
     current_json = json.loads(json.dumps(current, sort_keys=True, default=str))
-    assert {k: v for k, v in current_json.items() if k not in _POST_SPLIT_PLAN_CHANGES} == {
+    assert {
+        k: v for k, v in current_json.items()
+        if k not in _POST_SPLIT_PLAN_CHANGES and k not in _POST_SPLIT_PLAN_ADDITIONS
+    } == {
         k: v for k, v in snap["plans"].items() if k not in _POST_SPLIT_PLAN_CHANGES
     }
-    assert len(current) == 29
+    assert len(current) == 29 + len(_POST_SPLIT_PLAN_ADDITIONS)
 
 
 def test_the_sat_unsafety_plan_reads_the_analysis_unsafety_requirement_of_the_owner():

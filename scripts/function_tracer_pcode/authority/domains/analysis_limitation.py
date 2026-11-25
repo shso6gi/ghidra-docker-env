@@ -63,6 +63,10 @@ EXPRESSION_SIZE_BUDGET_REASON_ID = "expression_size_budget_exceeded"
 #: Issue #242 第 8 回: 比べる側の契約（`core/live_values`）が、比べる値を組み込みの code だけでは双子と同じに
 #: 比べられなかった限界。`core/comparison_limits.ComparisonUndecidable.REASON_ID` と同じ値。
 COMPARISON_UNDECIDABLE_REASON_ID = "comparison_undecidable"
+#: Issue #298: 証明の前提（入力対応・型の仮説・その他の仮定・組の追加の assert）が充足可能と
+#: 示せない限界。その UNSAT は空虚なので EQ の根拠にしない。
+#: `proof/obligations/premise.ProofPremiseUnsatisfiable.REASON_ID` と同じ値。
+PROOF_PREMISE_UNSATISFIABLE_REASON_ID = "proof_premise_unsatisfiable"
 ANALYSIS_BUDGET_PROOF_KIND = "analysis_budget_proof"
 ANALYSIS_BUDGET_CONTRACT_ID = "analysis-budget-recovery"
 ANALYSIS_LIMITATION_TARGET_KIND = "analysis_limitation"
@@ -104,6 +108,16 @@ ANALYSIS_LIMITATION_REASON_REGISTRY = SealedReasonRegistry.build((
         "proof_obligation", "blocks_decision",
         frozenset((ANALYSIS_LIMITATION_TARGET_KIND,)),
         ("limitation_site", "comparison_undecidable"),
+        frozenset((ANALYSIS_BUDGET_PROOF_KIND,)), True,
+        "analysis_limitation_v1", RecoveryAddressability.REQUIREMENT_REQUIRED,
+    ),
+    # 前提が矛盾する比較では UNSAT（EQ）も SAT の model（NOT_EQ）も意味を持たないので
+    # `blocks_decision`。回復の契約は同じ（矛盾の無い前提で解析を完了できたことの証明）
+    ReasonDefinition(
+        PROOF_PREMISE_UNSATISFIABLE_REASON_ID, ANALYSIS_LIMITATION_DOMAIN,
+        "proof_obligation", "blocks_decision",
+        frozenset((ANALYSIS_LIMITATION_TARGET_KIND,)),
+        ("limitation_site", "proof_premise_unsatisfiable"),
         frozenset((ANALYSIS_BUDGET_PROOF_KIND,)), True,
         "analysis_limitation_v1", RecoveryAddressability.REQUIREMENT_REQUIRED,
     ),
@@ -322,7 +336,10 @@ ANALYSIS_LIMITATION_OBSERVED_SITE = AnalysisLimitationProducerSiteSpec(
     "analysis-limitation-observed",
     ANALYSIS_LIMITATION_PRODUCER_ID,
     "ELIGIBLE",
-    (ANALYSIS_BUDGET_REASON_ID, EXPRESSION_SIZE_BUDGET_REASON_ID, COMPARISON_UNDECIDABLE_REASON_ID),
+    (
+        ANALYSIS_BUDGET_REASON_ID, EXPRESSION_SIZE_BUDGET_REASON_ID, COMPARISON_UNDECIDABLE_REASON_ID,
+        PROOF_PREMISE_UNSATISFIABLE_REASON_ID,
+    ),
 )
 
 ANALYSIS_LIMITATION_PRODUCER_SITE_SPECS = (ANALYSIS_LIMITATION_OBSERVED_SITE,)

@@ -30,7 +30,21 @@ def test_return_region_summary_coverage_accepts_pointer_guard_plus_count_partiti
         parameters=parameters,
     )
 
-    assert coverage_key is not None
+    # Issue #298: 64 bit の ``0 <s count`` と 32 bit の ``0 <s count`` が分割を作るのは、64 bit の値が
+    # 32 bit の値の sign 拡張のとき。その根拠（拡張）が式に無いので、描画は伸ばし方を推測せず、
+    # 被覆は示せない
+    assert coverage_key is None
+
+    # 正例: 64 bit の側が 32 bit の値の明示的な sign 拡張なら、被覆を示せる
+    sign_extended = Expression.unary_op("INT_SEXT", count_narrow)
+    sign_extended.size = 8
+    count_positive_sext = _cond("INT_SLESS", Expression.constant(0, size=8), sign_extended)
+    explicit_key = summarizer._prove_summary_conditions_plus_exact_returns_cover_active_precondition(
+        summary_conditions=[pointer_nonnull, count_positive_sext],
+        exact_returns=[exact_pointer_null, exact_count_nonpositive],
+        parameters=parameters,
+    )
+    assert explicit_key is not None
 
 def test_counter_parameter_normalization_rejects_same_name_different_index():
     summarizer = StructuralRecurrenceSummarizer(PcodeTracer.__new__(PcodeTracer), debug=False)

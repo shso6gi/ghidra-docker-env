@@ -251,7 +251,13 @@ def test_t1_p1_usage_hint_hypothesis_does_not_reach_final_equivalent():
     assert [item.get("phase") for item in applied] == ["P1_SIGNEDNESS"], applied
     assert result["final_outcome"] not in {"EQUIVALENT", "NOT_EQ"}, result["final_outcome"]
     assert result["final_outcome"] == "UNKNOWN"
-    assert "right:parameter_domain_hypothesis:P1_SIGNEDNESS:u64->s32" in _reason_text(result)
+    # 仮説の下の解析を止めたのが入力領域の authority か、共有の描画（Issue #298: 仮説で狭めた葉を
+    # 広い演算に置いた形は、伸ばし方が式に無いので描画が拒否する）か。どちらも fail-closed
+    reasons = _reason_text(result)
+    assert (
+        "right:parameter_domain_hypothesis:P1_SIGNEDNESS:u64->s32" in reasons
+        or "extension is not determined" in reasons
+    ), reasons
 
 
 def test_t2_p4a_abi_hypothesis_without_hint_does_not_reach_final_equivalent():

@@ -32,6 +32,18 @@ from scripts.function_tracer_pcode.core import (
     StorageInfo,
 )
 from scripts.function_tracer_pcode.proof.formula.input_correspondence import build_input_correspondence_set
+from scripts.function_tracer_pcode.core.render_smt import SMT_SEMANTICS_REFUSALS
+from scripts.function_tracer_pcode.core.semantic_snapshot import traverse_semantic_graph
+import pytest
+
+
+def _leaf_names(expr):
+    """式の graph の PARAMETER / VARIABLE の名前（描画に依らない構造の確認用）。"""
+    return {
+        getattr(node, "name", None)
+        for node in traverse_semantic_graph(expr).entry_order
+        if getattr(getattr(node, "expr_type", None), "name", None) in {"PARAMETER", "VARIABLE"}
+    }
 
 
 def _param(name: str, size: int, *, index: int | None = None, storage_info=None) -> Expression:
@@ -502,14 +514,18 @@ def test_normalize_analysis_keeps_fragment_backed_widening_patterns():
     )
 
     normalized = normalize_analysis_semantic_width(analysis)
-    value_smt = normalized.returns[0].value.to_smt()
-    cond_smt = normalized.returns[0].conditions[0].to_smt()
+    value = normalized.returns[0].value
+    cond = normalized.returns[0].conditions[0].expression
 
-    assert "in_a0_hi" in value_smt
-    assert "in_a1_hi" in value_smt
-    assert "(bvsdiv param_1 param_2)" not in value_smt
-    assert "in_a1_hi" in cond_smt
-    assert "(distinct param_2 (_ bv0 32))" not in cond_smt
+    # 断片の形を保つ（sext へ畳まない）
+    assert {"in_a0_hi", "in_a1_hi"} <= _leaf_names(value)
+    assert "in_a1_hi" in _leaf_names(cond)
+    # Issue #298: ``(hi << 32) | lo`` の lo（32 bit）を 64 bit の INT_OR でどう伸ばすかは式に無いので、
+    # 描画は推測せず拒否する（以前は宣言の符号で伸ばし方を選んでいた）
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        value.to_smt()
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        normalized.returns[0].conditions[0].to_smt()
 
 
 def test_normalize_analysis_deduplicates_wide_nonzero_and_masked_nonzero_conditions():
@@ -628,11 +644,13 @@ def test_normalize_analysis_keeps_fragment_backed_pointer_reads_unassumed():
     )
 
     normalized = normalize_analysis_semantic_width(analysis)
-    stored_smt = normalized.effect_summary.effects[0].value.to_smt()
+    stored = normalized.effect_summary.effects[0].value
 
-    assert "in_a0_hi" in stored_smt
-    # zero_extend は描画時の幅合わせ（in_a0_hi << 32）で、畳み込みではない。
-    assert "((_ sign_extend 32) param_1)" not in stored_smt
+    # 断片の形を保つ（ext(param_1) と仮定しない）
+    assert {"in_a0_hi", "param_1"} <= _leaf_names(stored)
+    # Issue #298: lo の伸ばし方が式に無いので、描画は推測せず拒否する
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        stored.to_smt()
 
 
 def test_normalize_analysis_synchronizes_parameter_expr_widths_with_declared_metadata():
@@ -664,12 +682,12 @@ def test_normalize_analysis_synchronizes_parameter_expr_widths_with_declared_met
 
     normalized = normalize_analysis_semantic_width(analysis)
     cond_smt = normalized.returns[0].conditions[0].to_smt()
-    value_smt = normalized.returns[0].value.to_smt()
 
     assert "(distinct param_1 (_ bv0 32))" in cond_smt
-    assert "(select mem32 param_1)" not in value_smt
-    assert "(bvadd (_ bv4 64) param_1)" not in value_smt
-    assert "((_ zero_extend 32) param_1)" in value_smt
+    # Issue #298: 32 bit の pointer の引数を 64 bit の番地の加算でどう伸ばすか（ABI によって zero /
+    # sign のどちらもある）は式に無いので、描画は推測せず拒否する（以前は zero 拡張していた）
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        normalized.returns[0].value.to_smt()
 
 
 def test_formula_builder_handles_mips64_abi_param_width_mismatch_in_return_exprs():
@@ -719,12 +737,12 @@ def test_formula_builder_handles_mips64_abi_param_width_mismatch_in_return_exprs
         return_type="int",
     )
 
-    formula = builder.build_equivalence_formula_extended(analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2)).formula
-
-    assert "(declare-const param_1_2 (_ BitVec 32))" in formula
-    assert "(select mem32 param_1_2)" not in formula
-    assert "(bvadd (_ bv4 64) param_1_2)" not in formula
-    assert "((_ zero_extend 32) param_1_2)" in formula
+    # Issue #298: 32 bit の pointer の引数を 64 bit の番地の加算で伸ばす形は、伸ばし方（ABI によって
+    # zero / sign）が式に無いので、式を作らず拒否する（以前は zero 拡張を推測していた）
+    with pytest.raises(SMT_SEMANTICS_REFUSALS):
+        builder.build_equivalence_formula_extended(
+            analysis1, analysis2, input_correspondence=build_input_correspondence_set(analysis1, analysis2),
+        )
 
 
 def test_readonly_reduction_contract_does_not_locally_narrow_wide_return_surface():

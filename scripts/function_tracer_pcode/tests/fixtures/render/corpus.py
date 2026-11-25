@@ -60,9 +60,12 @@ def _intrinsic(name: str, operands, size: int = 4, opcode=None) -> Expression:
 
 
 def _doubling(depth: int, leaf: Expression) -> Expression:
+    # P-code の INT_ADD は出力と入力の大きさが同じ（Issue #298: 宣言が被演算子より広い算術は、
+    # 伸ばし方が決まらなければ描画が拒否する）。変更前の描画は葉の幅で計算していたので、
+    # 葉の大きさで宣言しても記録した描画（baseline）と同じ意味になる
     node = leaf
     for _ in range(depth):
-        node = _binary("INT_ADD", node, node)
+        node = _binary("INT_ADD", node, node, size=int(leaf.size or 4))
     return node
 
 

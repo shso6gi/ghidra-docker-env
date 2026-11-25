@@ -33,7 +33,9 @@ def normalize_shift_amounts(
     left = expr.operands[0]
     right = expr.operands[1]
 
-    if left.expr_type == ExpressionType.CONSTANT and int(left.value) == 0:
+    from scripts.function_tracer_pcode.core.render_smt.widths import constant_value_at_width
+
+    if constant_value_at_width(left) == 0:
         zero = Expression.constant(0, size=expr.size or left.size)
         zero.size = expr.size or zero.size
         context.record_rule(
@@ -44,7 +46,9 @@ def normalize_shift_amounts(
         )
         return zero
 
-    if right.expr_type == ExpressionType.CONSTANT and int(right.value) == 0:
+    # Issue #298: 量は描画の値（8 bit の 256 は 0）で読み、左の被演算子が shift と同じ幅のときだけ
+    # 外す（被演算子が狭いと、外すと伸ばし方の分からない狭い値に置き換わる）
+    if constant_value_at_width(right) == 0 and _same_declared_width(expr, left):
         context.record_rule(
             rule_name="SHIFT_ZERO_SIMPLIFICATION",
             before_expr=render_expression_smt_evidence(expr),
@@ -172,6 +176,11 @@ def _extract_origin_var_name(expr: Expression):
                 return inner.name
 
     return None
+
+
+def _same_declared_width(expr: Expression, replacement: Expression) -> bool:
+    """宣言の大きさが同じか（どちらかが不明なら置き換えない）。"""
+    return int(expr.size or 0) > 0 and int(expr.size or 0) == int(replacement.size or 0)
 
 
 def _is_all_ones_mask(value: int) -> bool:
