@@ -436,3 +436,30 @@ def test_the_eval_profiles_differ_only_in_the_concrete_stages():
     assert {k: v for k, v in on.items() if k != "EQBENCH_CONCRETE_STAGES"} == {
         k: v for k, v in off.items() if k != "EQBENCH_CONCRETE_STAGES"
     }
+
+
+def test_the_setting_record_reaches_the_serialized_result():
+    """記録は結果 JSON の ``diagnostics`` に出る（固定の形の view が落とさない）。
+
+    `result.diagnostics` に付けただけでは足りない: 結果 JSON は
+    `result_diagnostics_payload` の固定の形の view から作られる。
+    """
+    from scripts.function_tracer_pcode.checker.diagnostics import result_diagnostics_payload
+    from scripts.function_tracer_pcode.cli.args import build_parser
+    from scripts.function_tracer_pcode.cli.commands.equivalence import (
+        _attach_concrete_execution_setting,
+    )
+
+    args = build_parser().parse_args(["--equiv", "a", "b", "-f", "f", "--analysis-timeout", "410"])
+    result = type("_R", (), {})()
+    result.diagnostics = {}
+    _attach_concrete_execution_setting(result, args)
+    payload = result_diagnostics_payload(result)
+    assert payload["concrete_execution_setting"] == result.diagnostics["concrete_execution_setting"]
+    assert payload["concrete_execution_setting"]["effective_stages"] == ["witness_replay"]
+    lazy = dict(result_diagnostics_payload(result, lazy=True).json_items())
+    assert "concrete_execution_setting" in lazy
+    # 記録の無い結果では key を出さない（CLI を経ない結果 JSON の形は変えない）
+    bare = type("_R", (), {})()
+    bare.diagnostics = {}
+    assert "concrete_execution_setting" not in result_diagnostics_payload(bare)
