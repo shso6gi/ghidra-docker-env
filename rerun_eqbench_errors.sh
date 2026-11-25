@@ -6,6 +6,9 @@
 # ANALYSIS_TIMEOUT_MARGIN reach both runners unchanged, and ANALYSIS_TIMEOUT=0
 # reruns the ERROR pairs of a tree written before the deadline existed with the
 # same analysis config, so its other pair statuses stay reusable.
+# EQBENCH_CONCRETE_STAGES / EQBENCH_CONCRETE_BUDGET (Issue #323) pass through the
+# same way; they are part of the analysis config identity, so a rerun with another
+# concrete setting does not reuse the tree's pair statuses.
 
 set -euo pipefail
 

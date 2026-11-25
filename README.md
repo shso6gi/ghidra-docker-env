@@ -452,6 +452,44 @@ such a run reads as the pre-deadline analysis config, so it can resume a tree wr
 before the deadline existed (`rerun_eqbench_errors.sh` passes `ANALYSIS_TIMEOUT` through
 to both runners; use `ANALYSIS_TIMEOUT=0` to rerun the ERROR pairs of such a tree).
 
+### Concrete execution setting (Issue #323)
+
+The concrete replay of the solver's witnesses (Issue #18; conditional column only,
+never the unconditional verdict) is set per run:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `EQBENCH_CONCRETE_STAGES` | `witness_replay` | comma-separated stages from `checker.concrete_replay.CONCRETE_STAGES`; `none` turns concrete execution off |
+| `EQBENCH_CONCRETE_BUDGET` | `60` | seconds of concrete execution per pair (never past the analysis deadline) |
+
+The Eq, Neq and subset runners resolve both with one rule
+(`reporting/runner_concrete_policy.py`, called after the deadline policy). Concrete
+execution runs only inside the analysis deadline, so with `ANALYSIS_TIMEOUT=0` an
+explicitly requested stage stops the run with exit 1 before anything is scheduled,
+while the default degrades to no stage (`concrete_inactive_reason=no_analysis_deadline`,
+with a warning). Every pair gets the CLI flags of the *effective* setting
+(`--concrete-replay-budget N` or `--no-concrete-replay`). `run_manifest.txt` records the
+requested and effective values (`concrete_stages_requested`, `concrete_budget_requested`,
+`concrete_stages`, `concrete_budget`, `concrete_inactive_reason`); the effective stages and
+budget are part of the analysis config identity
+(`analysis_config_schema=eqbench-analysis-config-v6`, never projected onto v5), so runs
+with different concrete settings never reuse each other's pair statuses. Each pair's
+result JSON carries the setting it actually ran under in
+`diagnostics.concrete_execution_setting` (a diagnostic, never a verdict input).
+
+`python3 -B -m scripts.function_tracer_pcode.reporting.concrete_evaluation --baseline <OFF
+tree> --treatment <ON tree> [--json R] [--pairs P.tsv] [--allow-difference NAME ...]`
+compares two such runs: it first checks that they differ only in the concrete setting
+(source digest, analysis config, environment, pair set, per-pair binary sha256,
+completeness; exit 4 when not comparable, unless each difference is named), then that
+every pair's own record matches its tree's manifest and that the pair status and the
+result JSON agree (exit 5 otherwise), and reports main and conditional transitions, Eq
+false `NOT_EQ`, Neq / Neq-Core / ground-truth detection, concrete differences (pairs,
+function pairs, witnesses), confirmed pairs held at conditional `UNKNOWN` per remaining
+reason, why a replay established nothing, and the cost against the baseline. A
+conditional `NOT_EQ` is never counted as a `NOT_EQ`. The formal OFF / ON procedure is
+in `eval/README.md`.
+
 ### Measurement subset
 
 `scripts/function_tracer_pcode/reporting/eqbench_subset.json` fixes a small

@@ -48,6 +48,23 @@ HALF_EQ = "eq"
 HALF_NEQ = "neq"
 HALVES = (HALF_EQ, HALF_NEQ)
 
+#: The Neq-Core view (EvalPrep plan v2 §7.4): the Neq set without the
+#: functions listed here, which the evaluation leaves out when it aggregates.
+#: A view for reports only -- never an input to analysis or to a verdict.
+#: ``(sample identity prefix, function name)``.  The one owner of the
+#: definition: the eval wrapper's summary and the concrete-execution
+#: evaluation (Issue #323) both read it from here.
+NEQ_CORE_EXCLUDED: Tuple[Tuple[str, str], ...] = (("CLEVER/UnchLoop/Neq/", "foo"),)
+
+
+def neq_core_excluded(sample_identity: str, function_name: str) -> bool:
+    """Is this function left out of the Neq-Core view?"""
+    return any(
+        sample_identity.startswith(prefix) and function_name == name
+        for prefix, name in NEQ_CORE_EXCLUDED
+    )
+
+
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 PairKey = Tuple[str, str, str, str]

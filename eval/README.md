@@ -147,6 +147,36 @@ execution の receipt は「帰属不明」として別に出し、どの launch
 `yes`（実行中に、直前の有効な観測からの区間で `oom_kill` が増えた、または container が OOMKilled）／
 `no`（実行区間を観測が覆い、増分が 0）／`unobserved`（それ以外）で示す。SIGKILL だけからは OOM と書かない。
 
+## 具体実行の OFF / ON 比較評価（Issue #323）
+
+具体実行の効果は、**同じ freeze・同じ image・同じ profile** で `EQBENCH_CONCRETE_STAGES` だけが違う
+2 つの評価を比べて測る。ON の条件は `profile.env`、OFF の条件は `profile.concrete-off.env`（差は
+`EQBENCH_CONCRETE_STAGES` の 1 行だけで、unit test が固定する）。条件が違うので fingerprint と analysis
+config の identity（v6）が違い、別の `--tag` の別の評価になる（互いの pair status を再利用しない）。
+
+```bash
+eval/neq.sh start --freeze <commit> --tag concrete-on
+EVAL_PROFILE=eval/profile.concrete-off.env eval/neq.sh start --freeze <commit> --tag concrete-off
+```
+
+`status` / `stop` / `summary` にも同じ `--tag`（OFF は同じ `EVAL_PROFILE`）を付ける。slot の lock は 1 つ
+なので、2 つの評価は順に実行する。完了の判定は評価ごとの `summary`（exit 0）のまま。
+
+2 つが完了したら、container の中で比較の集計を作る（読み取りのみ）:
+
+```bash
+python3 -B -m scripts.function_tracer_pcode.reporting.concrete_evaluation \
+    --baseline logs/EqBench/eval_<sha12>_neq_concrete-off \
+    --treatment logs/EqBench/eval_<sha12>_neq_concrete-on \
+    --json <report.json> --pairs <pairs.tsv>
+```
+
+終了コード: 0 = 比較できて記録が整合、4 = 比較の条件が違う（違いを名前で出す。意図した違いは
+`--allow-difference <名前>` で明示する）、5 = pair の記録が manifest・pair status・結果 JSON と食い違う。
+集計は主判定・conditional 判定・診断上の差（具体実行で差を確定した事実）を別の欄に出し、conditional
+NOT_EQ を NOT_EQ として数えない。Neq-Core は `reporting.pair_outcomes.NEQ_CORE_EXCLUDED` の view
+（`summary` と同じ定義）。
+
 ## 所要時間の目安（全件規模）
 
 Eq の全件（49,320 pair、3 execution の合成 tree、本番の writer と署名）で、検証器 1 回が約 20 秒、
