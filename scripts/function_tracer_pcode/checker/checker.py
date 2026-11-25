@@ -90,6 +90,8 @@ from scripts.function_tracer_pcode.checker.preflight_gate import PreflightGateMi
 from scripts.function_tracer_pcode.checker.root_causes import RootCauseMixin
 from scripts.function_tracer_pcode.checker.recovery_proofs import RecoveryProofMixin
 from scripts.function_tracer_pcode.checker.recurrence_stage import RecurrenceStageMixin
+from scripts.function_tracer_pcode.checker import concrete_replay as _concrete_replay_svc
+from scripts.function_tracer_pcode.checker.concrete_replay import ConcreteReplayOptions
 
 
 #: `check()` が自分の名前で例外へ site を書くときの観測点（既存の文字列と同じ）。
@@ -184,6 +186,7 @@ class EquivalenceChecker(PreflightGateMixin, RootCauseMixin, RecoveryProofMixin,
         canonical_decision_cutover: bool = True,
         identical_fast_path: bool = True,
         analyzer_factory: Optional[Callable[..., Any]] = None,
+        concrete_replay: Optional[ConcreteReplayOptions] = None,
     ):
         """
         Args:
@@ -195,6 +198,9 @@ class EquivalenceChecker(PreflightGateMixin, RootCauseMixin, RecoveryProofMixin,
                 変更しておらず、設定は判定に影響しない。
             rewrite_direction: 非推奨・無効（同上）。
             strategy: 判定戦略 ("pairwise" or "monolithic")
+            concrete_replay: 無条件の判定が UNKNOWN の pair で、solver の witness を両 binary の
+                具体実行で再生し、差を conditional 列の証拠にする（Issue #18 C2。
+                ``checker.concrete_replay``）。``None``（既定）なら実行器を開かない。
             identical_fast_path: 同一バイナリ・同一関数を identity proof で
                 早期に EQUIVALENT 確定する（Issue #15）。False でも identity の
                 観測と結果 JSON への記録は続ける。
@@ -268,6 +274,9 @@ class EquivalenceChecker(PreflightGateMixin, RootCauseMixin, RecoveryProofMixin,
         if analyzer_factory is not None and not callable(analyzer_factory):
             raise TypeError("analyzer factory must be callable")
         self.analyzer_factory = analyzer_factory
+        if concrete_replay is not None and type(concrete_replay) is not ConcreteReplayOptions:
+            raise TypeError("concrete_replay must be ConcreteReplayOptions or None")
+        self.concrete_replay = concrete_replay
         if canonical_decision_cutover:
             from scripts.function_tracer_pcode.authority.decision.production_cutover import (
                 build_default_cutover_connector,
@@ -442,10 +451,13 @@ class EquivalenceChecker(PreflightGateMixin, RootCauseMixin, RecoveryProofMixin,
         UNKNOWN になる（authority の確定・receipt・結果の組み立ては続ける）。
         """
         previous_context = getattr(self, "_active_binary_content_identities", None)
+        previous_programs = getattr(self, "_active_programs", None)
         self._active_binary_content_identities = (
             binary1_content_identity,
             binary2_content_identity,
         )
+        # the concrete replay of this pair runs on these programs (checker.concrete_replay)
+        self._active_programs = (program1, program2)
         try:
             with deadline_scope(analysis_deadline) as deadline:
                 result = run_check_from_binaries(
@@ -467,7 +479,10 @@ class EquivalenceChecker(PreflightGateMixin, RootCauseMixin, RecoveryProofMixin,
             return result
         finally:
             self._active_binary_content_identities = previous_context
+            self._active_programs = previous_programs
     
+    concrete_replay_subjects = _concrete_replay_svc._impl_concrete_replay_subjects
+
     # ★ 新規: 遷移理由を判定
     def _get_transition_reason(
         self,
