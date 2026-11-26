@@ -19,7 +19,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple, Union
 
-from scripts.function_tracer_pcode.proof.concrete_counterexample import ConcreteSubject
+from scripts.function_tracer_pcode.core.fact_reliance import (
+    FactHandle,
+    FactKind,
+    FactProvenance,
+    FactSide,
+    FactSlot,
+    FactTarget,
+)
+from scripts.function_tracer_pcode.core.signature import is_pointer_data_type
+from scripts.function_tracer_pcode.proof.concrete_counterexample import (
+    ConcreteSideFacts,
+    ConcreteSubject,
+)
 
 #: The stages of concrete execution a run can enable (Issue #323, C4).  The
 #: runner's setting (``reporting.runner_concrete_policy``), the analysis config
@@ -97,6 +109,49 @@ def _entry(analysis: Any) -> Optional[int]:
     return offset if type(offset) is int else None
 
 
+#: The producer site of the side facts (the one module that reads an analysis for
+#: the concrete proof; Issue #325).
+SIDE_FACTS_PRODUCER_SITE = "checker.concrete_replay.concrete_side_facts"
+#: Why the side facts' provenance is unrecorded: the analysis may come from a
+#: type-hypothesis re-analysis phase, and which one is not recorded yet (E3).
+SIDE_FACTS_UNRECORDED_REASON = "analysis_phase_and_type_hypothesis_not_recorded"
+
+
+def concrete_side_facts(analysis: Any, side: FactSide) -> ConcreteSideFacts:
+    """The facts the concrete proof reads of one side's analysis, as fact handles.
+
+    This is the only place the concrete proof's inputs touch an analysis
+    object.  The values are what ``proof.concrete_counterexample`` used to read
+    directly (the parameter records, the return storage descriptor and the
+    return's pointer class).  Their provenance is **unrecorded**: the analysis
+    may be a type-hypothesis re-analysis whose phase is not recorded, so the
+    evidence relies on every fact until the phase is recorded (fail-closed).
+    """
+
+    provenance = FactProvenance.unrecorded(
+        producer_site=SIDE_FACTS_PRODUCER_SITE, reason=SIDE_FACTS_UNRECORDED_REASON,
+    )
+    facts = getattr(analysis, "return_abi_facts", None) or {}
+    descriptor = facts.get("return_storage_descriptor") or None
+    is_pointer = bool(is_pointer_data_type(
+        getattr(analysis, "return_type_obj", None), getattr(analysis, "return_type", None)
+    ))
+    return ConcreteSideFacts(
+        parameters=FactHandle(
+            FactKind.PARAMETER_STORAGE, FactTarget(side, FactSlot.PARAMETERS),
+            provenance=provenance, value=getattr(analysis, "parameters", None) or (),
+        ),
+        return_location=FactHandle(
+            FactKind.RETURN_LOCATION, FactTarget(side, FactSlot.RETURN),
+            provenance=provenance, value=descriptor,
+        ),
+        return_value_class=FactHandle(
+            FactKind.RETURN_VALUE_CLASS, FactTarget(side, FactSlot.RETURN),
+            provenance=provenance, value={"is_pointer": is_pointer},
+        ),
+    )
+
+
 def open_concrete_subjects(
     programs: Tuple[Any, Any],
     analyses: Tuple[Any, Any],
@@ -111,7 +166,7 @@ def open_concrete_subjects(
     )
 
     subjects = []
-    for program, analysis in zip(programs, analyses):
+    for program, analysis, side in zip(programs, analyses, (FactSide.LEFT, FactSide.RIGHT)):
         entry = _entry(analysis)
         executor = open_executor(program, time_limit_seconds=options.run_time_limit_seconds)
         if entry is None:
@@ -124,7 +179,10 @@ def open_concrete_subjects(
         if isinstance(abi, ExecutorRefusal):
             subjects.append(f"{abi.reason.value}:{abi.detail}"[:200])
             continue
-        subjects.append(ConcreteSubject(executor, abi, entry, executor.register_location, executor.program_facts))
+        subjects.append(ConcreteSubject(
+            executor, abi, entry, executor.register_location, executor.program_facts,
+            concrete_side_facts(analysis, side),
+        ))
     return subjects[0], subjects[1]
 
 

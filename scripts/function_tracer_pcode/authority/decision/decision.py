@@ -11,6 +11,13 @@ from scripts.function_tracer_pcode.authority.contracts import (
     VerifiedLifecycleProjection,
     authority_digest,
 )
+from scripts.function_tracer_pcode.authority.decision.obligation_scope import (
+    DecisionSide,
+    Lane,
+    ObligationScopeRecord,
+    evaluate_obligation_scope,
+    scoped_evidence,
+)
 
 
 class DecisiveProofKind(str, Enum):
@@ -243,7 +250,29 @@ class DecisionReceipt:
         return receipt
 
 
+@dataclass(frozen=True)
+class DecisionFinalization:
+    """One unconditional decision and the obligation-scope record it was derived with."""
+
+    receipt: "DecisionReceipt"
+    obligation_scope: ObligationScopeRecord
+
+
 def finalize_decision(authority: FinalizationAuthority) -> DecisionReceipt:
+    """The five-value decision (the receipt alone; see `finalize_decision_with_scope`)."""
+
+    return finalize_decision_with_scope(authority).receipt
+
+
+def finalize_decision_with_scope(authority: FinalizationAuthority) -> DecisionFinalization:
+    """Derive the decision and the row-by-row obligation scope it used (Issue #325).
+
+    Whether an active row blocks a side is answered by
+    ``obligation_scope.evaluate_obligation_scope`` (the one blocking rule shared
+    with the conditional finalizer).  Everything else -- receipt validation,
+    the EQ/NOT_EQ conflict, TIMEOUT and ERROR -- is this finalizer's own rule.
+    """
+
     projection = authority.lifecycle_projection
     malformed = authority.malformed_authority
     try:
@@ -289,41 +318,75 @@ def finalize_decision(authority: FinalizationAuthority) -> DecisionReceipt:
     conflict = (has_eq and has_not_eq) or (
         (has_eq or has_not_eq) and bool(authority.terminal_timeout_receipts)
     )
-    blocks_eq = any(
-        row.decision_effect in {"blocks_equivalence", "blocks_decision"} for row in active
-    )
-    blocks_not_eq = any(
-        row.decision_effect in {"blocks_disequivalence", "blocks_decision"}
-        for row in active
-    )
+    # The SMT receipts are the only decisive evidence of this lane; they rely on
+    # every fact, so every row whose decision_effect applies to a side blocks it.
+    try:
+        evidence = tuple(
+            scoped_evidence(receipt.proof_kind.value, receipt.receipt_digest)
+            for receipt in authority.decisive_proof_receipts
+            if receipt.proof_kind in (
+                DecisiveProofKind.EQ_CLOSURE, DecisiveProofKind.SAFE_COUNTEREXAMPLE,
+            )
+        )
+    except (TypeError, ValueError):
+        # A receipt that cannot even name itself already failed validate(); the
+        # decision is ERROR and the record lists no evidence.
+        malformed = True
+        evidence = ()
+
+    def _scope(items):
+        return evaluate_obligation_scope(
+            lane=Lane.UNCONDITIONAL,
+            result_occurrence_id=authority.result_occurrence_id,
+            lifecycle_projection_digest=projection.lifecycle_projection_digest,
+            rows=active,
+            evidence=items,
+        )
+
+    try:
+        scope = _scope(evidence)
+    except ValueError:
+        # two rows of one cause judged differently: the projection is not a
+        # projection of one lifecycle (ERROR); record the rows without evidence
+        malformed = True
+        scope = _scope(())
     if malformed or authority.error_receipts or conflict:
         outcome = Outcome.ERROR
     elif has_eq:
-        outcome = Outcome.EQUIVALENT if not blocks_eq else Outcome.UNKNOWN
+        outcome = (
+            Outcome.EQUIVALENT if scope.side_decisive(DecisionSide.EQUIVALENCE)
+            else Outcome.UNKNOWN
+        )
     elif has_not_eq:
-        outcome = Outcome.NOT_EQ if not blocks_not_eq else Outcome.UNKNOWN
+        outcome = (
+            Outcome.NOT_EQ if scope.side_decisive(DecisionSide.DISEQUIVALENCE)
+            else Outcome.UNKNOWN
+        )
     elif authority.terminal_timeout_receipts:
         outcome = Outcome.TIMEOUT if active and projection.q_open_base else Outcome.ERROR
     elif active:
         outcome = Outcome.UNKNOWN
     else:
         outcome = Outcome.ERROR
-    input_digest = authority_digest(
-        {
-            "result_occurrence_id": authority.result_occurrence_id,
-            "lifecycle_projection_digest": projection.lifecycle_projection_digest,
-            "decisive_receipt_digests": tuple(
-                receipt.receipt_digest for receipt in authority.decisive_proof_receipts
-            ),
-            "terminal_timeout_receipt_digests": tuple(
-                receipt.receipt_digest for receipt in authority.terminal_timeout_receipts
-            ),
-            "error_receipt_digests": tuple(
-                receipt.receipt_digest for receipt in authority.error_receipts
-            ),
-            "malformed_authority": malformed,
-        }
-    )
+    authority_input = {
+        "result_occurrence_id": authority.result_occurrence_id,
+        "lifecycle_projection_digest": projection.lifecycle_projection_digest,
+        "decisive_receipt_digests": tuple(
+            receipt.receipt_digest for receipt in authority.decisive_proof_receipts
+        ),
+        "terminal_timeout_receipt_digests": tuple(
+            receipt.receipt_digest for receipt in authority.terminal_timeout_receipts
+        ),
+        "error_receipt_digests": tuple(
+            receipt.receipt_digest for receipt in authority.error_receipts
+        ),
+        "malformed_authority": malformed,
+    }
+    if scope.bound_to_receipt:
+        # Only a narrowed reliance can make the scope differ from the plain
+        # decision_effect rule; the receipt then commits to the evaluation.
+        authority_input["obligation_scope_digest"] = scope.record_digest
+    input_digest = authority_digest(authority_input)
     receipt_digest = authority_digest(
         {
             "result_occurrence_id": authority.result_occurrence_id,
@@ -341,4 +404,4 @@ def finalize_decision(authority: FinalizationAuthority) -> DecisionReceipt:
         _factory_token=_DECISION_RECEIPT_FACTORY_TOKEN,
     )
     receipt.validate()
-    return receipt
+    return DecisionFinalization(receipt, scope)

@@ -61,14 +61,50 @@ def decision_receipt_payload(receipt: DecisionReceipt) -> dict[str, str]:
     }
 
 
-def attach_conditional_decision(result: Any, receipt: Any) -> Any:
+def obligation_scope_payload(record: Any, *, receipt: Any) -> dict:
+    """The serialized obligation-scope record of ``receipt`` (Issue #325).
+
+    The record must join the receipt it explains (same pair, same lifecycle
+    projection); one that does not is refused rather than printed next to a
+    decision it did not produce.
+    """
+
+    from scripts.function_tracer_pcode.authority.decision.obligation_scope import (
+        ObligationScopeRecord,
+    )
+
+    if type(record) is not ObligationScopeRecord:
+        raise TypeError("an obligation scope is an exact ObligationScopeRecord")
+    if (
+        record.result_occurrence_id != receipt.result_occurrence_id
+        or record.lifecycle_projection_digest != receipt.lifecycle_projection_digest
+    ):
+        raise ValueError("obligation scope does not join its receipt")
+    return dict(record.to_json())
+
+
+def attach_obligation_scope(result: Any, record: Any) -> Any:
+    """Install the unconditional decision's obligation-scope record (Issue #325)."""
+
+    receipt = getattr(result, "decision_receipt", None)
+    if type(receipt) is not DecisionReceipt:
+        raise ValueError("obligation scope without its DecisionReceipt")
+    obligation_scope_payload(record, receipt=receipt)
+    result.obligation_scope = record
+    return result
+
+
+def attach_conditional_decision(result: Any, receipt: Any, obligation_scope: Any = None) -> Any:
     """Install the conditional column without touching the unconditional one.
 
     ``is_equivalent``, ``final_outcome`` and ``decision_receipt`` keep the
     values the unconditional lane gave them; a conditional proof can only ever
-    add a separate column.
+    add a separate column.  ``obligation_scope`` is the record the conditional
+    receipt was derived with (Issue #325), joined to that receipt.
     """
     payload = conditional_decision_receipt_payload(receipt)
+    if obligation_scope is not None:
+        obligation_scope_payload(obligation_scope, receipt=receipt)
     unconditional = outcome_from_result(result)
     if unconditional is not Outcome.UNKNOWN:
         raise ValueError("the conditional lane runs only after an unconditional UNKNOWN")
@@ -80,6 +116,8 @@ def attach_conditional_decision(result: Any, receipt: Any) -> Any:
     )
     result.conditional_decision_receipt = receipt
     result.conditional_outcome = payload["conditional_outcome"]
+    if obligation_scope is not None:
+        result.conditional_obligation_scope = obligation_scope
     return result
 
 

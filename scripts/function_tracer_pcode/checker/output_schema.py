@@ -147,6 +147,45 @@ def conditional_receipt_max_bytes(policy: JsonEncodingPolicy) -> int:
     return policy.object_bytes(members)
 
 
+def obligation_scope_max_bytes(policy: JsonEncodingPolicy) -> int:
+    """obligation scope の記録 1 つの byte の上限（Issue #325。`ObligationScopeRecord.to_json`）。
+
+    証拠は proof kind ごとに高々 1 つ（`MAX_SCOPE_EVIDENCE`）。cause の entry は relation の行数の
+    上限まで（cause は行より多くない）、entry ごとの basis は証拠の数だけ。id は `ID_MAX_CHARS`、
+    記録の語彙は owner の最長の値（`SCOPE_VOCABULARY_MAX_CHARS`）。
+    """
+
+    from scripts.function_tracer_pcode.authority.decision.obligation_scope import (
+        MAX_SCOPE_EVIDENCE,
+        SCOPE_VOCABULARY_MAX_CHARS,
+    )
+
+    ident = policy.max_string_bytes(ID_MAX_CHARS)
+    vocab = policy.max_string_bytes(SCOPE_VOCABULARY_MAX_CHARS)
+    evidence_row = _object_bytes(policy, {
+        "evidence_id": ident, "proof_kind": vocab, "family": vocab, "side": vocab,
+        "relies_on_basis": vocab, "relies_on_digest": ident, "unblocked": 5,
+    })
+    cause = _object_bytes(policy, {
+        "cause_id": ident,
+        "guards_declared": 5,
+        "bases": _array_bytes(policy, MAX_SCOPE_EVIDENCE, vocab),
+    })
+    return _object_bytes(policy, {
+        "schema": vocab,
+        "lane": vocab,
+        "result_occurrence_id": ident,
+        "lifecycle_projection_digest": ident,
+        "guard_registry_digest": ident,
+        "bound_to_receipt": 5,
+        "evidence": _array_bytes(policy, MAX_SCOPE_EVIDENCE, evidence_row),
+        "row_count": INT_MAX_BYTES,
+        "rows_digest": ident,
+        "causes": _array_bytes(policy, MAX_RELATION_ROWS, cause),
+        "record_digest": ident,
+    })
+
+
 #: `superseded_decision_receipt_record` の、receipt を写せなかったときの形の語彙の上限
 SUPERSEDED_UNAVAILABLE_MAX_CHARS = 64
 
@@ -290,6 +329,10 @@ def authority_field_bounds(policy: JsonEncodingPolicy = RESULT_JSON_POLICY) -> D
         FieldBound("conditional_decision_receipt", conditional_receipt,
                    f"fixed row + ≤ {max_assumption_premises()} premises × "
                    f"{assumption_premise_max_bytes()} B", exclusive_group=RECEIPT_VARIANT),
+        FieldBound("obligation_scope", obligation_scope_max_bytes(policy),
+                   f"fixed members + ≤ {MAX_RELATION_ROWS} cause scopes (Issue #325)"),
+        FieldBound("conditional_obligation_scope", obligation_scope_max_bytes(policy),
+                   f"fixed members + ≤ {MAX_RELATION_ROWS} cause scopes (Issue #325)"),
         FieldBound("c_active_base", _array_bytes(
             policy, MAX_RELATION_ROWS, row_max_bytes(C_ACTIVE_BASE_ROW, policy),
         ), f"≤ {MAX_RELATION_ROWS} relation rows",

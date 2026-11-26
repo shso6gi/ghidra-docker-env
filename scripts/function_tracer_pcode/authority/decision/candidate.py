@@ -14,8 +14,9 @@ from scripts.function_tracer_pcode.authority.decision.decision import (
     ErrorReceipt,
     FinalizationAuthority,
     TerminalTimeoutReceipt,
-    finalize_decision,
+    finalize_decision_with_scope,
 )
+from scripts.function_tracer_pcode.authority.decision.obligation_scope import ObligationScopeRecord
 from scripts.function_tracer_pcode.authority.lifecycle.reducer import ShadowReductionResult
 
 
@@ -36,6 +37,11 @@ class CandidateDecisionProjection:
     retry_fallback_projection: Any
     cli_batch_projection: Any
     projection_digest: str
+    #: The obligation-scope record the decision was derived with (Issue #325).
+    #: Not part of ``projection_digest``: the record joins the receipt by its own
+    #: pair / projection digest, and the receipt commits to it whenever it can
+    #: differ from the plain decision_effect rule (``bound_to_receipt``).
+    obligation_scope: Any = None
 
     def __init__(
         self,
@@ -52,6 +58,7 @@ class CandidateDecisionProjection:
         cli_batch_projection,
         projection_digest,
         *,
+        obligation_scope=None,
         _factory_token=None,
     ):
         if _factory_token is not _CANDIDATE_PROJECTION_FACTORY_TOKEN:
@@ -68,6 +75,7 @@ class CandidateDecisionProjection:
         object.__setattr__(self, "retry_fallback_projection", canonical_value(retry_fallback_projection))
         object.__setattr__(self, "cli_batch_projection", canonical_value(cli_batch_projection))
         object.__setattr__(self, "projection_digest", projection_digest)
+        object.__setattr__(self, "obligation_scope", obligation_scope)
 
     def validate(self) -> None:
         self.decision_receipt.validate()
@@ -114,6 +122,14 @@ class CandidateDecisionProjection:
         })
         if expected != self.projection_digest:
             raise ValueError("candidate decision projection digest mismatch")
+        scope = self.obligation_scope
+        if scope is not None and (
+            type(scope) is not ObligationScopeRecord
+            or scope.result_occurrence_id != self.decision_receipt.result_occurrence_id
+            or scope.lifecycle_projection_digest
+            != self.decision_receipt.lifecycle_projection_digest
+        ):
+            raise ValueError("candidate obligation scope does not join its DecisionReceipt")
 
 
 def build_candidate_projection(
@@ -162,7 +178,7 @@ def build_candidate_projection(
         reduction.snapshot.error_event_bindings
     ):
         malformed = True
-    decision = finalize_decision(FinalizationAuthority(
+    finalization = finalize_decision_with_scope(FinalizationAuthority(
         reduction.snapshot.result_occurrence_id,
         reduction.projection,
         decisive_proof_receipts=decisive,
@@ -170,6 +186,7 @@ def build_candidate_projection(
         error_receipts=errors,
         malformed_authority=malformed,
     ))
+    decision = finalization.receipt
     occurrence_by_id = {
         item.occurrence.occurrence_id: item
         for item in reduction.snapshot.occurrence_authorities
@@ -225,6 +242,7 @@ def build_candidate_projection(
         fallback,
         cli,
         authority_digest(values),
+        obligation_scope=finalization.obligation_scope,
         _factory_token=_CANDIDATE_PROJECTION_FACTORY_TOKEN,
     )
     candidate.validate()

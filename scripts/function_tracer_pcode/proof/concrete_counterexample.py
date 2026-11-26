@@ -32,6 +32,14 @@ Sources.  Witnesses are the canonical SAT witnesses on the pair's solver rows
 suffix of its side (``proof.formula.params``) and is found in a witness by that
 name, its storage by the analysis' parameter record.  Nothing else of the
 formula is read.
+
+Facts, not analyses (Issue #325).  This module never receives an analysis
+object.  What it reads of each side's analysis -- the parameter records, the
+return storage descriptor and whether the return is a pointer -- arrives as
+typed fact handles (``ConcreteSideFacts``, ``core.fact_reliance.FactHandle``)
+built by one adapter (``checker.concrete_replay.concrete_side_facts``), so the
+facts the evidence relies on are exactly the handles' closure
+(`subject_reliance`).
 """
 
 from __future__ import annotations
@@ -54,8 +62,12 @@ from scripts.function_tracer_pcode.concrete.replay import (
 )
 from scripts.function_tracer_pcode.concrete.storage import StorageLocation
 from scripts.function_tracer_pcode.concrete.witness import FormulaInput
+from scripts.function_tracer_pcode.core.fact_reliance import (
+    FactHandle,
+    FactKind,
+    ReliesOn,
+)
 from scripts.function_tracer_pcode.core.parameter_domain import parameter_descriptor_bits
-from scripts.function_tracer_pcode.core.signature import is_pointer_data_type
 from scripts.function_tracer_pcode.smt.interface import SolverStatus
 from scripts.function_tracer_pcode.proof.assumptions import (
     AssumptionKind,
@@ -107,8 +119,37 @@ def solver_witnesses(result: Any) -> Tuple[Mapping[str, object], ...]:
     return tuple(witnesses)
 
 
+@dataclass(frozen=True)
+class ConcreteSideFacts:
+    """What the concrete proof reads of one side's analysis, as fact handles (Issue #325).
+
+    * ``parameters``: ``PARAMETER_STORAGE`` -- the parameter records (name,
+      storage, size, ...) in the analysis' order;
+    * ``return_location``: ``RETURN_LOCATION`` -- the return storage descriptor
+      (``None`` when the analysis has none);
+    * ``return_value_class``: ``RETURN_VALUE_CLASS`` -- ``{"is_pointer": bool}``.
+    """
+
+    parameters: FactHandle
+    return_location: FactHandle
+    return_value_class: FactHandle
+
+    def __post_init__(self) -> None:
+        for name, kind in (
+            ("parameters", FactKind.PARAMETER_STORAGE),
+            ("return_location", FactKind.RETURN_LOCATION),
+            ("return_value_class", FactKind.RETURN_VALUE_CLASS),
+        ):
+            handle = getattr(self, name)
+            if type(handle) is not FactHandle or handle.ref.kind is not kind:
+                raise TypeError(f"concrete side facts carry a {kind.value} FactHandle as {name}")
+
+    def handles(self) -> Tuple[FactHandle, ...]:
+        return (self.parameters, self.return_location, self.return_value_class)
+
+
 def formula_inputs(
-    analysis: Any,
+    parameters: FactHandle,
     suffix: str,
     locate: Callable[[str, int, int], Optional[StorageLocation]],
 ) -> Tuple[FormulaInput, ...]:
@@ -119,8 +160,10 @@ def formula_inputs(
     position of a named register that contains it; the width the recovered
     type gives the value is kept as the location's size (a reading).
     """
+    if type(parameters) is not FactHandle or parameters.ref.kind is not FactKind.PARAMETER_STORAGE:
+        raise TypeError("formula inputs are read from a PARAMETER_STORAGE FactHandle")
     inputs = []
-    for parameter in getattr(analysis, "parameters", None) or ():
+    for parameter in parameters.value or ():
         name = parameter.get("name")
         storage = parameter.get("storage")
         size = int(parameter.get("size") or 0)
@@ -145,15 +188,23 @@ def formula_inputs(
 
 
 def return_storage(
-    analysis: Any, locate: Callable[[str, int, int], Optional[StorageLocation]]
+    return_location: FactHandle,
+    return_value_class: FactHandle,
+    locate: Callable[[str, int, int], Optional[StorageLocation]],
 ) -> Optional[ReturnStorage]:
     """The recovered return location of one side, or ``None`` when it is not known.
 
     ``locate(space, offset, size)`` names the register piece of a storage
     member (the executor's language does).
     """
-    facts = getattr(analysis, "return_abi_facts", None) or {}
-    descriptor = facts.get("return_storage_descriptor") or {}
+    if type(return_location) is not FactHandle or return_location.ref.kind is not FactKind.RETURN_LOCATION:
+        raise TypeError("the return storage is read from a RETURN_LOCATION FactHandle")
+    if (
+        type(return_value_class) is not FactHandle
+        or return_value_class.ref.kind is not FactKind.RETURN_VALUE_CLASS
+    ):
+        raise TypeError("the return class is read from a RETURN_VALUE_CLASS FactHandle")
+    descriptor = return_location.value or {}
     if descriptor.get("status") != "PRESENT" or not descriptor.get("value"):
         return None
     _schema, members = descriptor["value"]
@@ -164,10 +215,22 @@ def return_storage(
         if location is None:
             location = StorageLocation(False, None, None, 0, 0, int(size))
         locations.append(location)
-    is_pointer = bool(is_pointer_data_type(
-        getattr(analysis, "return_type_obj", None), getattr(analysis, "return_type", None)
-    ))
+    is_pointer = bool((return_value_class.value or {}).get("is_pointer"))
     return ReturnStorage(False, tuple(locations), is_pointer)
+
+
+def subject_reliance(subjects: Optional[Sequence[Any]]) -> ReliesOn:
+    """The facts a concrete artifact of ``subjects`` relied on (the handles' closure).
+
+    A side that was refused (or no subjects at all) supplies no handle, so the
+    reliance is every fact.
+    """
+    handles: List[FactHandle] = []
+    for subject in subjects or ():
+        if not isinstance(subject, ConcreteSubject):
+            return ReliesOn.unknown_provenance(reason="a concrete side supplied no fact handles")
+        handles.extend(subject.side_facts.handles())
+    return ReliesOn.closure_of(handles)
 
 
 # ---------------------------------------------------------------- premises
@@ -346,11 +409,15 @@ class ConcreteSubject:
     entry_address: int
     locate: Callable[[str, int, int], Optional[StorageLocation]]
     facts: Mapping[str, Any]
+    #: what the proof reads of this side's analysis, as fact handles (Issue #325)
+    side_facts: ConcreteSideFacts
+
+    def __post_init__(self) -> None:
+        if type(self.side_facts) is not ConcreteSideFacts:
+            raise TypeError("a concrete subject carries its ConcreteSideFacts")
 
 
 def run_concrete_counterexample_proof(
-    analysis1: Any,
-    analysis2: Any,
     witnesses: Iterable[Mapping[str, object]],
     subjects: Optional[Tuple[Any, Any]],
     *,
@@ -381,12 +448,14 @@ def run_concrete_counterexample_proof(
         )
     programs = tuple(dict(subject.facts) for subject in subjects)
     sides = []
-    for subject, analysis, suffix in zip(subjects, (analysis1, analysis2), SIDE_SUFFIXES):
-        storage = return_storage(analysis, subject.locate)
+    for subject, suffix in zip(subjects, SIDE_SUFFIXES):
+        facts = subject.side_facts
+        storage = return_storage(facts.return_location, facts.return_value_class, subject.locate)
         if storage is None:
             storage = ReturnStorage(False, ())
         sides.append(ReplaySide(
-            subject.abi, subject.entry_address, formula_inputs(analysis, suffix, subject.locate), storage
+            subject.abi, subject.entry_address,
+            formula_inputs(facts.parameters, suffix, subject.locate), storage,
         ))
     plan = plan_replay(sides[0], sides[1], step_limit)
     if isinstance(plan, PlanRefusal):

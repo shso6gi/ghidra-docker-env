@@ -520,6 +520,10 @@ def _read_by_function(name: str, result: Any, options: OutputOptions) -> Any:
         return _decision_receipt(result, options)
     if name == "conditional_decision_receipt":
         return _conditional_decision_receipt(result, options)
+    if name == "obligation_scope":
+        return _obligation_scope(result, options)
+    if name == "conditional_obligation_scope":
+        return _conditional_obligation_scope(result, options)
     if name == "unknown_recovery_backlog":
         return _unknown_recovery_backlog(result, options)
     if name == "diagnostics":
@@ -591,6 +595,53 @@ def _conditional_decision_receipt(r: Any, _o: OutputOptions) -> Any:
     if live_values.attribute(r, "conditional_outcome") is not None:
         raise ValueError("conditional outcome without its ConditionalDecisionReceipt")
     return None
+
+
+def _obligation_scope(r: Any, _o: OutputOptions) -> Any:
+    """Issue #325: the unconditional decision's obligation-scope record (absent when the
+    decision was not derived through the lifecycle, e.g. an infrastructure ERROR)."""
+
+    from scripts.function_tracer_pcode.authority.decision.decision import DecisionReceipt
+    from scripts.function_tracer_pcode.authority.decision.obligation_scope import (
+        ObligationScopeRecord,
+    )
+
+    record = live_values.attribute(r, "obligation_scope")
+    if record is None:
+        return ABSENT
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+        obligation_scope_payload,
+    )
+
+    if not package_instance(record, ObligationScopeRecord):
+        raise TypeError("the obligation scope column requires an exact ObligationScopeRecord")
+    receipt = live_values.attribute(r, "decision_receipt")
+    if not package_instance(receipt, DecisionReceipt):
+        raise ValueError("an obligation scope without its DecisionReceipt")
+    return obligation_scope_payload(record, receipt=receipt)
+
+
+def _conditional_obligation_scope(r: Any, _o: OutputOptions) -> Any:
+    """Issue #325: the conditional column's obligation-scope record."""
+
+    from scripts.function_tracer_pcode.authority.decision.conditional import ConditionalDecisionReceipt
+    from scripts.function_tracer_pcode.authority.decision.obligation_scope import (
+        ObligationScopeRecord,
+    )
+
+    record = live_values.attribute(r, "conditional_obligation_scope")
+    if record is None:
+        return ABSENT
+    from scripts.function_tracer_pcode.authority.decision.production_cutover import (
+        obligation_scope_payload,
+    )
+
+    if not package_instance(record, ObligationScopeRecord):
+        raise TypeError("the obligation scope column requires an exact ObligationScopeRecord")
+    receipt = live_values.attribute(r, "conditional_decision_receipt")
+    if not package_instance(receipt, ConditionalDecisionReceipt):
+        raise ValueError("a conditional obligation scope without its ConditionalDecisionReceipt")
+    return obligation_scope_payload(record, receipt=receipt)
 
 
 def _unknown_recovery_backlog(r: Any, _o: OutputOptions) -> Any:
@@ -689,6 +740,11 @@ RESULT_FIELDS: Tuple[OutputField, ...] = (
     OutputField("decision_receipt", _B, _function("decision_receipt"), _INV),
     OutputField("conditional_outcome", _B, _attribute("conditional_outcome"), _INV),
     OutputField("conditional_decision_receipt", _B, _function("conditional_decision_receipt"), _INV),
+    # Issue #325: which active row blocked which decisive evidence, and why
+    OutputField("obligation_scope", _B, _function("obligation_scope"), _INV),
+    OutputField(
+        "conditional_obligation_scope", _B, _function("conditional_obligation_scope"), _INV,
+    ),
     OutputField("c_active_base", _B, _attribute("canonical_c_active_base"), _INV),
     OutputField("q_open_base", _B, _attribute("canonical_q_open_base"), _INV),
     OutputField("constrained_fragments", _A, _attribute("constrained_fragments"), _LIMIT),
