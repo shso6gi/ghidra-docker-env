@@ -468,9 +468,8 @@ def _text_or_error_result(args, *, result, payload, **context):
 def _analysis_deadline_policy(args, pair_diagnostics):
     """`--analysis-timeout` の期限（無ければ ``None``）。打ち切りの stack は pair の dump 先へ書く。"""
 
-    seconds = getattr(args, "analysis_timeout", None)
-    # 数でない値（未設定・test の Mock）は期限なし。CLI の値は argparse が正の秒数に限っている
-    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+    seconds = _analysis_deadline_seconds(args)
+    if seconds is None:
         return None
     from scripts.function_tracer_pcode.core.deadline import DeadlinePolicy
 
@@ -605,6 +604,37 @@ def _concrete_replay_options(args):
     if getattr(args, "no_concrete_replay", False) or budget is None or float(budget) <= 0:
         return None
     return ConcreteReplayOptions(budget_seconds=float(budget))
+
+
+def _analysis_deadline_seconds(args) -> Optional[float]:
+    """`--analysis-timeout` の秒（無ければ ``None``）。期限と具体実行の記録が共有する読み方。"""
+
+    seconds = getattr(args, "analysis_timeout", None)
+    # 数でない値（未設定・test の Mock）は期限なし。CLI の値は argparse が正の秒数に限っている
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        return None
+    return float(seconds)
+
+
+def _attach_concrete_execution_setting(result, args) -> None:
+    """この pair の具体実行の設定を診断に残す（Issue #323 C4。判定には使わない）。
+
+    評価が run manifest の設定と各 pair の実際の設定を照合するための記録。
+    ``diagnostics`` が mapping でない結果（起こらない想定）には何もしない。
+    """
+
+    from scripts.function_tracer_pcode.checker.concrete_replay import (
+        concrete_execution_setting,
+    )
+
+    current = getattr(result, "diagnostics", None)
+    if current is not None and not isinstance(current, dict):
+        return
+    diagnostics = dict(current or {})
+    diagnostics["concrete_execution_setting"] = concrete_execution_setting(
+        _concrete_replay_options(args), _analysis_deadline_seconds(args),
+    )
+    result.diagnostics = diagnostics
 
 
 def run_equivalence_check(args):
@@ -888,6 +918,7 @@ def run_equivalence_check(args):
         )
 
     attach_stage_timing(result, stage_clock)
+    _attach_concrete_execution_setting(result, args)
     # Issue #125 / #128: 添付順は attach_stage_timing -> attach_failure_diagnostics
     # -> attach_cause_aggregate -> to_string -> to_dict -> bundle。診断は
     # preimage を組む前に確定させる（確定後に payload を書き換えない）。

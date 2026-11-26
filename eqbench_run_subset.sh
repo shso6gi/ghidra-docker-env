@@ -123,6 +123,13 @@ export EQBENCH_IDENTICAL_FAST_PATH="${EQBENCH_IDENTICAL_FAST_PATH:-1}"
 validation_resolve_analysis_timeout_policy "$PYTHON_BIN" "$MANIFEST" "$SCRIPT_DIR" || exit 1
 export ANALYSIS_TIMEOUT="$ANALYSIS_TIMEOUT_SECONDS"
 export ANALYSIS_TIMEOUT_MARGIN="$ANALYSIS_TIMEOUT_MARGIN_SECONDS"
+# Issue #323 (C4): the concrete-execution stages and budget are checked here with the
+# runners' own rule before either half starts, then passed to both halves exactly as
+# given (unset stays unset): each half resolves them against the same exported
+# deadline, so both run and record the same setting.
+validation_resolve_concrete_policy "$PYTHON_BIN" "$SCRIPT_DIR" || exit 1
+if [[ -v EQBENCH_CONCRETE_STAGES ]]; then export EQBENCH_CONCRETE_STAGES; fi
+if [[ -v EQBENCH_CONCRETE_BUDGET ]]; then export EQBENCH_CONCRETE_BUDGET; fi
 
 mkdir -p "$OUTPUT_BASE_DIR"
 OUTPUT_BASE_DIR="$(realpath -m "$OUTPUT_BASE_DIR")"
@@ -248,6 +255,10 @@ ELAPSED=$(( $(date +%s) - START_EPOCH ))
         echo "$key=$(half_setting "$key")"
     done <<< "$ANALYSIS_TIMEOUT_MANIFEST_LINES"
     echo "identical_fast_path=$(half_setting identical_fast_path)"
+    # Issue #323 (C4): the concrete setting the halves recorded (never re-derived here)
+    while IFS='=' read -r key _; do
+        echo "$key=$(half_setting "$key")"
+    done <<< "$CONCRETE_MANIFEST_LINES"
     echo "analysis_config_schema=$(half_setting analysis_config_schema)"
     echo "$RUN_GIT_STATE_LINES"
     echo "start_time_utc=$START_TIME_UTC"

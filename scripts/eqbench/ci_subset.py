@@ -97,7 +97,7 @@ BENCHMARK_GATE_PASS = "PASS"
 BINARY_MANIFEST_HEADER = "# eqbench-binary-manifest-v1"
 PAIR_STATUS_SUFFIX = ".pair-status.json"
 
-DEFAULT_ANALYSIS_CONFIG_SCHEMA = "eqbench-analysis-config-v5"
+DEFAULT_ANALYSIS_CONFIG_SCHEMA = "eqbench-analysis-config-v6"
 
 #: ``subset_manifest.txt``'s ``pr`` field when ``SUBSET_PR`` was never set.
 #: The CI workflow leaves it that way on purpose: that field says which pull

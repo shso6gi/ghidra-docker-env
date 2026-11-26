@@ -76,6 +76,53 @@ validation_resolve_analysis_timeout_policy() {
     if [[ "$enabled" == "1" ]]; then
         ANALYSIS_TIMEOUT_CLI_ARGS=(--analysis-timeout "$timeout")
     fi
+    ANALYSIS_TIMEOUT_ENABLED="$enabled"
+}
+
+# Issue #323（C4）: 具体実行の段（EQBENCH_CONCRETE_STAGES）と予算（EQBENCH_CONCRETE_BUDGET）。
+#
+# 規則（段の名前・既定・書式・解析の期限との整合）は `reporting/runner_concrete_policy.py` に
+# だけあり、ここは呼んで結果を変数へ移すだけ。具体実行は解析の期限の中でだけ走るので、
+# validation_resolve_analysis_timeout_policy の **後** に呼ぶ。期限が無いのに段を明示的に要求
+# していれば 1 を返す（呼び出し側は pair を始めずに exit 1）。既定のままなら有効な段なしとして
+# 記録される（警告は module が stderr に出す）。
+#
+# 成功すると次を設定する:
+#   CONCRETE_MANIFEST_LINES    run manifest に書く key=value 行（要求値と実効値）
+#   CONCRETE_CLI_ARGS          pair の CLI へ足す引数（有効な段が無ければ無効の flag）
+#   CONCRETE_STAGES_EFFECTIVE  実効の段（無ければ none）
+#   CONCRETE_BUDGET_EFFECTIVE  実効の予算（有効な段が無ければ 0）
+validation_resolve_concrete_policy() {
+    local python_bin="$1"
+    local repo_root="${2:-${SCRIPT_DIR:-.}}"
+    if [[ ! "${ANALYSIS_TIMEOUT_ENABLED-}" =~ ^[01]$ ]]; then
+        echo "Error: resolve the analysis timeout policy before the concrete policy" >&2
+        return 1
+    fi
+    local output
+    output="$(
+        cd "$repo_root" &&
+        "$python_bin" -B -m scripts.function_tracer_pcode.reporting.runner_concrete_policy \
+            resolve \
+            --stages "${EQBENCH_CONCRETE_STAGES-}" \
+            --budget "${EQBENCH_CONCRETE_BUDGET-}" \
+            --analysis-timeout-enabled "$ANALYSIS_TIMEOUT_ENABLED"
+    )" || return 1
+    CONCRETE_MANIFEST_LINES="$(printf '%s\n' "$output" | grep -v '^cli_arg=')"
+    CONCRETE_CLI_ARGS=()
+    local line
+    while IFS= read -r line; do
+        if [[ "$line" == cli_arg=* ]]; then
+            CONCRETE_CLI_ARGS+=("${line#cli_arg=}")
+        fi
+    done <<< "$output"
+    CONCRETE_STAGES_EFFECTIVE="$(printf '%s\n' "$CONCRETE_MANIFEST_LINES" | awk -F= '$1 == "concrete_stages" {print $2}')"
+    CONCRETE_BUDGET_EFFECTIVE="$(printf '%s\n' "$CONCRETE_MANIFEST_LINES" | awk -F= '$1 == "concrete_budget" {print $2}')"
+    if [[ -z "$CONCRETE_STAGES_EFFECTIVE" || ! "$CONCRETE_BUDGET_EFFECTIVE" =~ ^[0-9]+([.][0-9]+)?$ \
+        || ${#CONCRETE_CLI_ARGS[@]} -eq 0 ]]; then
+        echo "Error: the concrete policy printed no effective values" >&2
+        return 1
+    fi
 }
 
 _VALIDATION_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

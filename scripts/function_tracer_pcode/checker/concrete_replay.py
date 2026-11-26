@@ -17,9 +17,24 @@ programs are recordings -- never opens an executor.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 from scripts.function_tracer_pcode.proof.concrete_counterexample import ConcreteSubject
+
+#: The stages of concrete execution a run can enable (Issue #323, C4).  The
+#: runner's setting (``reporting.runner_concrete_policy``), the analysis config
+#: identity and the per-pair record all name stages from this table, in this
+#: order.  C4 has one stage: replaying the solver's witnesses (#18 C2).  A new
+#: stage (C5: fixed-input search) is one more entry here plus its CLI flags.
+STAGE_WITNESS_REPLAY = "witness_replay"
+CONCRETE_STAGES: Tuple[str, ...] = (STAGE_WITNESS_REPLAY,)
+
+#: Schema of the per-pair record of the concrete-execution setting
+#: (``diagnostics.concrete_execution_setting``).
+CONCRETE_SETTING_SCHEMA = "concrete-execution-setting-v1"
+#: Why the requested stages cannot run in this pair (``inactive_reason``).
+INACTIVE_NOT_REQUESTED = "not_requested"
+INACTIVE_NO_ANALYSIS_DEADLINE = "no_analysis_deadline"
 
 
 @dataclass(frozen=True)
@@ -34,6 +49,46 @@ class ConcreteReplayOptions:
     budget_seconds: float = 60.0
     run_time_limit_seconds: float = 20.0
     step_limit: int = 300_000
+
+
+def concrete_execution_setting(
+    options: Optional[ConcreteReplayOptions],
+    analysis_deadline_seconds: Optional[float],
+) -> Dict[str, Any]:
+    """The concrete-execution setting one pair ran under (Issue #323, C4).
+
+    A diagnostic, never a verdict input: it lets an evaluation check, pair by
+    pair, that the setting its run manifest declares is the one each pair
+    actually had.  ``stages`` are the requested ones; ``effective_stages`` are
+    those that can run, which needs an analysis deadline (the replay runs only
+    inside it: ``authority.decision.conditional_lane._concrete_lane_budget``).
+    Whether a stage then did run for this pair (only an unconditional UNKNOWN
+    pair with witnesses reaches it) is recorded by the stage itself.
+    """
+
+    stages = [STAGE_WITNESS_REPLAY] if options is not None else []
+    deadline = (
+        float(analysis_deadline_seconds)
+        if isinstance(analysis_deadline_seconds, (int, float))
+        and not isinstance(analysis_deadline_seconds, bool)
+        else None
+    )
+    if not stages:
+        inactive = INACTIVE_NOT_REQUESTED
+    elif deadline is None:
+        inactive = INACTIVE_NO_ANALYSIS_DEADLINE
+    else:
+        inactive = None
+    return {
+        "schema": CONCRETE_SETTING_SCHEMA,
+        "stages": stages,
+        "effective_stages": [] if inactive is not None else list(stages),
+        "inactive_reason": inactive,
+        "budget_seconds": None if options is None else float(options.budget_seconds),
+        "run_time_limit_seconds": None if options is None else float(options.run_time_limit_seconds),
+        "step_limit": None if options is None else int(options.step_limit),
+        "analysis_deadline_seconds": deadline,
+    }
 
 
 def _entry(analysis: Any) -> Optional[int]:

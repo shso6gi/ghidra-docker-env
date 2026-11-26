@@ -100,12 +100,14 @@ ANALYSIS_CONFIG_SCHEMA_KEY = "analysis_config_schema"
 IDENTICAL_FAST_PATH_KEY = "identical_fast_path"
 ANALYSIS_CONFIG_V3_SCHEMA = "eqbench-analysis-config-v3"
 #: Issue #106 PR-106-B: v4 adds the runner's analysis deadline and keeps the v3
-#: fast-path flag; v5 (eval plan v2 PR-B) adds the FT_* knobs.  Every schema
+#: fast-path flag; v5 (eval plan v2 PR-B) adds the FT_* knobs; v6 (Issue #323)
+#: adds the effective concrete-execution setting.  Every schema
 #: here carries ``identical_fast_path``; the set
 #: is pinned to ``execution_receipt.ANALYSIS_CONFIG_SCHEMAS_WITH_FAST_PATH`` by a
 #: unit test (this gate stays standard-library only and does not import it).
 ANALYSIS_CONFIG_SCHEMAS_WITH_FAST_PATH = frozenset({
     ANALYSIS_CONFIG_V3_SCHEMA, "eqbench-analysis-config-v4", "eqbench-analysis-config-v5",
+    "eqbench-analysis-config-v6",
 })
 
 MODE_ON = "on"

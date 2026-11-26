@@ -840,6 +840,12 @@ class _ResultDiagnosticsView:
         analysis_deadline = _base_value(base, "analysis_deadline", None, falsy=True)
         if analysis_deadline is not None:
             yield "analysis_deadline", analysis_deadline
+        # Issue #323 C4: この pair の具体実行の設定（CLI が付けた記録。run manifest との照合に
+        # 評価が読む）。記録の無い結果（CLI を経ない直接の呼び出し）は key を出さない。判定には
+        # 効かない観測。
+        concrete_setting = _base_value(base, "concrete_execution_setting", None, falsy=True)
+        if concrete_setting is not None:
+            yield "concrete_execution_setting", concrete_setting
         yield "pairs", _or_default(live_values.attribute(result, "pairwise_stats"), caches_empty)
         yield "solver_invocations", self._timing("solver_invocations")
         yield "stage_path", _or_default(live_values.attribute(result, "stage_path", ()), ())

@@ -20,6 +20,14 @@ from scripts.function_tracer_pcode.reporting.execution_identity import (
     sha256_file,
     source_tree_digest,
 )
+from scripts.function_tracer_pcode.reporting.runner_concrete_policy import (
+    KEY_BUDGET as KEY_CONCRETE_BUDGET,
+    KEY_STAGES as KEY_CONCRETE_STAGES,
+    NO_BUDGET as NO_CONCRETE_BUDGET,
+    ConcretePolicyError,
+    parse_stages as parse_concrete_stages,
+    stages_text as concrete_stages_text,
+)
 from scripts.function_tracer_pcode.reporting.runner_timeout_policy import (
     KEY_ANALYSIS_TIMEOUT,
     KEY_ANALYSIS_TIMEOUT_MARGIN,
@@ -112,8 +120,26 @@ ANALYSIS_CONFIG_V5_FIELDS = ANALYSIS_CONFIG_V4_FIELDS | {
     "expander_dedup_case_limit", "callee_unbound_reuse", "callee_unbound_reuse_shadow",
 }
 ANALYSIS_CONFIG_V5_SCHEMA = "eqbench-analysis-config-v5"
+# Issue #323 (C4).  Concrete execution (#18 C2) changes the conditional column a
+# pair reports, so the *effective* concrete stages and budget join the identity:
+# an ON run and an OFF run get different ``analysis_config_digest`` values and
+# never reuse each other's pair statuses.  The values are the effective ones
+# (``reporting.runner_concrete_policy``): a run whose default stages could not
+# run for want of an analysis deadline records ``none`` / ``0``, which is what
+# it computed.  v6 is never projected onto v5 -- a v5 run did not record the
+# concrete setting (it ran with the checker's default), so nothing shows it ran
+# with the same one.
+ANALYSIS_CONFIG_V6_FIELDS = ANALYSIS_CONFIG_V5_FIELDS | {
+    "concrete_stages", "concrete_budget_seconds",
+}
+ANALYSIS_CONFIG_V6_SCHEMA = "eqbench-analysis-config-v6"
+#: The fields only v6 carries (the concrete-execution setting).
+ANALYSIS_CONFIG_CONCRETE_FIELDS = ANALYSIS_CONFIG_V6_FIELDS - ANALYSIS_CONFIG_V5_FIELDS
 ANALYSIS_CONFIG_SCHEMAS_WITH_DEADLINE = frozenset({
-    ANALYSIS_CONFIG_V4_SCHEMA, ANALYSIS_CONFIG_V5_SCHEMA,
+    ANALYSIS_CONFIG_V4_SCHEMA, ANALYSIS_CONFIG_V5_SCHEMA, ANALYSIS_CONFIG_V6_SCHEMA,
+})
+ANALYSIS_CONFIG_SCHEMAS_WITH_FT_KNOBS = frozenset({
+    ANALYSIS_CONFIG_V5_SCHEMA, ANALYSIS_CONFIG_V6_SCHEMA,
 })
 ANALYSIS_CONFIG_SCHEMAS_WITH_FAST_PATH = frozenset({
     ANALYSIS_CONFIG_V3_SCHEMA, *ANALYSIS_CONFIG_SCHEMAS_WITH_DEADLINE,
@@ -169,10 +195,13 @@ def analysis_config_from_run(run: Mapping[str, str]) -> Mapping[str, Any]:
         if schema in ANALYSIS_CONFIG_SCHEMAS_WITH_DEADLINE:
             config["analysis_timeout_seconds"] = run[KEY_ANALYSIS_TIMEOUT]
             config["analysis_timeout_margin_seconds"] = run[KEY_ANALYSIS_TIMEOUT_MARGIN]
-        if schema == ANALYSIS_CONFIG_V5_SCHEMA:
+        if schema in ANALYSIS_CONFIG_SCHEMAS_WITH_FT_KNOBS:
             config["expander_dedup_case_limit"] = run["expander_dedup_case_limit_effective"]
             config["callee_unbound_reuse"] = run["callee_unbound_reuse"]
             config["callee_unbound_reuse_shadow"] = run["callee_unbound_reuse_shadow"]
+        if schema == ANALYSIS_CONFIG_V6_SCHEMA:
+            config["concrete_stages"] = run[KEY_CONCRETE_STAGES]
+            config["concrete_budget_seconds"] = run[KEY_CONCRETE_BUDGET]
     except (KeyError, ValueError) as exc:
         raise ValueError("matrix run manifest lacks typed analysis config") from exc
     validate_analysis_config(config)
@@ -200,6 +229,7 @@ def validate_analysis_config(config: Mapping[str, Any]) -> None:
         ANALYSIS_CONFIG_V3_SCHEMA: ANALYSIS_CONFIG_V3_FIELDS,
         ANALYSIS_CONFIG_V4_SCHEMA: ANALYSIS_CONFIG_V4_FIELDS,
         ANALYSIS_CONFIG_V5_SCHEMA: ANALYSIS_CONFIG_V5_FIELDS,
+        ANALYSIS_CONFIG_V6_SCHEMA: ANALYSIS_CONFIG_V6_FIELDS,
     }.get(config.get("schema"))
     bool_fields = {"debug", "dry_run"}
     if config.get("schema") == "eqbench-analysis-config-v1":
@@ -208,11 +238,13 @@ def validate_analysis_config(config: Mapping[str, Any]) -> None:
         bool_fields.add("identical_fast_path")
     if config.get("schema") in ANALYSIS_CONFIG_SCHEMAS_WITH_DEADLINE:
         timeout_fields += ["analysis_timeout_seconds", "analysis_timeout_margin_seconds"]
-    if config.get("schema") == ANALYSIS_CONFIG_V5_SCHEMA and any(
+    if config.get("schema") in ANALYSIS_CONFIG_SCHEMAS_WITH_FT_KNOBS and any(
         type(config.get(field)) is not str or not config[field]
         for field in ANALYSIS_CONFIG_V5_FIELDS - ANALYSIS_CONFIG_V4_FIELDS
     ):
         raise ValueError("EqBench typed analysis config is invalid")
+    if config.get("schema") == ANALYSIS_CONFIG_V6_SCHEMA:
+        _validate_concrete_setting(config)
     if (
         expected_fields is None or set(config) != expected_fields
         or config["authority_kind"] != "EqBenchAnalysisConfig"
@@ -229,6 +261,26 @@ def validate_analysis_config(config: Mapping[str, Any]) -> None:
         or any(not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", config[field])
                for field in timeout_fields)
     ):
+        raise ValueError("EqBench typed analysis config is invalid")
+
+
+def _validate_concrete_setting(config: Mapping[str, Any]) -> None:
+    """v6 の具体実行の設定: 登録表の段（``none`` = 無し）と、それに合う秒の予算。
+
+    段の綴りと予算の書式の owner は ``runner_concrete_policy``（runner が書いた値をここで
+    読み直す）。有効な段が無いのに予算が 0 でない・段があるのに予算が 0、は不整合。
+    """
+    stages_raw = config.get("concrete_stages")
+    budget_raw = config.get("concrete_budget_seconds")
+    if type(stages_raw) is not str or type(budget_raw) is not str:
+        raise ValueError("EqBench typed analysis config is invalid")
+    try:
+        stages = parse_concrete_stages(stages_raw)
+    except ConcretePolicyError as exc:
+        raise ValueError("EqBench typed analysis config is invalid") from exc
+    if concrete_stages_text(stages) != stages_raw or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", budget_raw):
+        raise ValueError("EqBench typed analysis config is invalid")
+    if (budget_raw == NO_CONCRETE_BUDGET) == bool(stages):
         raise ValueError("EqBench typed analysis config is invalid")
 
 
@@ -254,7 +306,7 @@ def normalize_semantic_analysis_config(config: Mapping[str, Any]) -> Mapping[str
         return projected
     if config["schema"] in (
         "eqbench-analysis-config-v2", ANALYSIS_CONFIG_V3_SCHEMA, ANALYSIS_CONFIG_V4_SCHEMA,
-        ANALYSIS_CONFIG_V5_SCHEMA,
+        ANALYSIS_CONFIG_V5_SCHEMA, ANALYSIS_CONFIG_V6_SCHEMA,
     ):
         # A v3 config is *not* projected onto v2: dropping the fast-path field
         # would make an ON run and an OFF run compare equal, which is exactly

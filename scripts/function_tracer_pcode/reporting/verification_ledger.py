@@ -74,6 +74,9 @@ from scripts.function_tracer_pcode.reporting.pair_outcomes import (
     OUTCOME_ORDER,
     load_pair_outcomes,
 )
+from scripts.function_tracer_pcode.reporting.runner_concrete_policy import (
+    MANIFEST_KEYS as CONCRETE_MANIFEST_KEYS,
+)
 from scripts.function_tracer_pcode.reporting.runner_timeout_policy import (
     MANIFEST_KEYS as ANALYSIS_TIMEOUT_MANIFEST_KEYS,
 )
@@ -197,6 +200,9 @@ SETTING_KEYS = (
     # Issue #106 PR-106-B: a run with the analysis deadline and one without it
     # (ANALYSIS_TIMEOUT=0) are different measurements of the same pairs.
     *ANALYSIS_TIMEOUT_MANIFEST_KEYS,
+    # Issue #323 (C4): a concrete-execution OFF run and an ON run of the same
+    # pairs are the two sides of one comparison.
+    *CONCRETE_MANIFEST_KEYS,
 )
 
 

@@ -57,8 +57,9 @@ LAUNCH_EVIDENCE_SCHEMA = protocol.EVIDENCE_SCHEMA
 REQUESTED_SCOPE_BY_MATRIX = {"neq": "full_neq", "eq": "full_eq"}
 
 # Neq-Core の集計の定義（EvalPrep 計画 v2 §7.4「Neq-Core は集計時に UnchLoop の foo を除いて
-# 作る」）。解析にも判定にも使わない、表示の view だけの定義。(sample identity の接頭辞, 関数名)。
-NEQ_CORE_EXCLUDED = (("CLEVER/UnchLoop/Neq/", "foo"),)
+# 作る」）は ``reporting.pair_outcomes.NEQ_CORE_EXCLUDED`` が唯一の owner（具体実行の評価 #323 と
+# 共有する）。解析にも判定にも使わない、表示の view だけの定義。ここの他の reader と同じく
+# container の中で遅延 import する。
 
 INCOMPLETE_STATUS = "INCOMPLETE"
 RUNNING_STATE = "RUNNING"
@@ -201,9 +202,16 @@ def _isa_of(binary_path: Any) -> str:
     return parts[-3] if len(parts) >= 4 else "unknown"
 
 
+def neq_core_definition() -> Tuple[Tuple[str, str], ...]:
+    from scripts.function_tracer_pcode.reporting.pair_outcomes import NEQ_CORE_EXCLUDED
+
+    return NEQ_CORE_EXCLUDED
+
+
 def _neq_core_excluded(sample: str, function: str) -> bool:
-    return any(sample.startswith(prefix) and function == name
-               for prefix, name in NEQ_CORE_EXCLUDED)
+    from scripts.function_tracer_pcode.reporting.pair_outcomes import neq_core_excluded
+
+    return neq_core_excluded(sample, function)
 
 
 def observed_statuses(out: Path) -> Dict[str, int]:
@@ -297,7 +305,7 @@ def raw_aggregate(out: Path, matrix: str, soundness: Any) -> Dict[str, Any]:
     }
     if matrix == "neq":
         view["neq_core"] = {
-            "excluded": [f"{prefix}* {name}" for prefix, name in NEQ_CORE_EXCLUDED],
+            "excluded": [f"{prefix}* {name}" for prefix, name in neq_core_definition()],
             "pairs": sum(core.values()), "functions": len(core_functions),
             "outcomes": dict(sorted(core.items())),
         }

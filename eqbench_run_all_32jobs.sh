@@ -139,6 +139,12 @@ fi
 # inconsistent combination stops the run with exit 1.  PAIR_PROCESS_TIMEOUT is
 # never raised to make room.
 validation_resolve_analysis_timeout_policy "$PYTHON_BIN" "" "$SCRIPT_DIR" || exit 1
+# Issue #323 (C4): the concrete-execution stages and budget handed to every pair
+# (EQBENCH_CONCRETE_STAGES / EQBENCH_CONCRETE_BUDGET), resolved after the analysis
+# deadline because concrete execution runs only inside it.  The effective values
+# join the analysis config identity (v6), so runs with different concrete
+# settings never reuse each other's pair statuses.
+validation_resolve_concrete_policy "$PYTHON_BIN" "$SCRIPT_DIR" || exit 1
 if [[ ! "$PARALLEL_JOBS_REQUESTED" =~ ^[1-9][0-9]*$ \
     || ! "$EQBENCH_CPU_TOKENS" =~ ^[1-9][0-9]*$ \
     || ! "$EQBENCH_PAIR_CPU_TOKENS" =~ ^[1-9][0-9]*$ \
@@ -559,6 +565,9 @@ run_pair() {
     )
     # Issue #106 PR-106-B: empty when ANALYSIS_TIMEOUT=0 (the pre-deadline argv).
     equiv_cmd+=( ${ANALYSIS_TIMEOUT_CLI_ARGS[@]+"${ANALYSIS_TIMEOUT_CLI_ARGS[@]}"} )
+    # Issue #323 (C4): the resolver always sets it (the off flag when no stage is
+    # effective; a run whose resolver failed has already stopped with exit 1).
+    equiv_cmd+=( ${CONCRETE_CLI_ARGS[@]+"${CONCRETE_CLI_ARGS[@]}"} )
     if [[ "$EQBENCH_IDENTICAL_FAST_PATH" == "0" ]]; then
         equiv_cmd+=( --no-identical-fast-path )
     fi
@@ -878,6 +887,7 @@ pair_stack_dump_lead=$PAIR_STACK_DUMP_LEAD
 pair_process_timeout_seconds=$PAIR_PROCESS_TIMEOUT_SECONDS
 pair_process_kill_after_seconds=$PAIR_PROCESS_KILL_AFTER_SECONDS
 $ANALYSIS_TIMEOUT_MANIFEST_LINES
+$CONCRETE_MANIFEST_LINES
 equiv_timeout=$EQUIV_TIMEOUT
 decompile_timeout=$DECOMPILE_TIMEOUT
 pairwise_timeout=$PAIRWISE_TIMEOUT
@@ -889,7 +899,7 @@ callee_unbound_reuse_shadow=$FT_CALLEE_UNBOUND_REUSE_SHADOW
 skip_completed_results=$SKIP_COMPLETED_RESULTS
 error_only_rerun=$ERROR_ONLY_RERUN
 debug=$EQBENCH_DEBUG
-analysis_config_schema=eqbench-analysis-config-v5
+analysis_config_schema=eqbench-analysis-config-v6
 matrix_publication_schema=eqbench-matrix-publication-manifest-v4
 identical_fast_path=$EQBENCH_IDENTICAL_FAST_PATH
 eqbench_tmpdir=$EQBENCH_TMPDIR
@@ -1056,6 +1066,7 @@ echo "Resource admission: enabled=$EQBENCH_RESOURCE_ADMISSION cpu_tokens=$EQBENC
 echo "Progress receipts: interval=${EQBENCH_PROGRESS_INTERVAL_SECONDS}s (wall/RSS per pair)"
 echo "Pair process timeout: $PAIR_PROCESS_TIMEOUT (kill after $PAIR_PROCESS_KILL_AFTER)"
 echo "Analysis timeout: ${ANALYSIS_TIMEOUT_SECONDS}s (0 = off; margin ${ANALYSIS_TIMEOUT_MARGIN_SECONDS}s)"
+echo "Concrete execution: stages=${CONCRETE_STAGES_EFFECTIVE} budget=${CONCRETE_BUDGET_EFFECTIVE}s"
 echo "Equiv timeout: $EQUIV_TIMEOUT"
 echo "Decompile timeout: $DECOMPILE_TIMEOUT"
 echo "Pairwise timeout: $PAIRWISE_TIMEOUT (hard $PAIRWISE_TIMEOUT_HARD)"
@@ -1504,6 +1515,8 @@ fi
     "PAIR_PROCESS_KILL_AFTER=$PAIR_PROCESS_KILL_AFTER" \
     "ANALYSIS_TIMEOUT=${ANALYSIS_TIMEOUT-}" \
     "ANALYSIS_TIMEOUT_MARGIN=${ANALYSIS_TIMEOUT_MARGIN-}" \
+    "EQBENCH_CONCRETE_STAGES=${EQBENCH_CONCRETE_STAGES-}" \
+    "EQBENCH_CONCRETE_BUDGET=${EQBENCH_CONCRETE_BUDGET-}" \
     "./eqbench_run_all_32jobs.sh"
 # 評価計画 v2 PR-B: 正常に終えた execution の最終の記録を、その execution の記録に複製する。
 validation_execution_chain "$PYTHON_BIN" seal --root "$OUTPUT_BASE_DIR" \
