@@ -165,26 +165,42 @@ SMT_PARITY_UNRECORDED_REASON = "return_width_proof_analysis_phase_not_recorded"
 def smt_parity_of_side(observation_inputs: Optional[Mapping[str, Any]], side: FactSide, analysis: Any) -> Optional[Dict[str, Any]]:
     """The SMT_PARITY level of one side (Issue #327), from the lane's inputs.
 
-    ``complete`` holds when the pair's final projection has no active cause of
-    the return-width / ABI-width domain and at least one unary return-width
-    proof completed for this side; ``payload_bits`` is the smallest completed
-    payload width.  ``None`` when the lane gave no inputs.  This is an evidence
-    level of an *assumed* element, never verification.
+    ``complete`` holds only when the pair's final projection has no active cause
+    of the return-width / ABI-width domain **and every return member** of this
+    side's final analysis (each index of ``analysis.returns``) is covered by an
+    applicable completed unary return-width proof of this side's function (same
+    side, same entry).  A member never proved, a proof of another phase's
+    analysis, a function whose returns are unknown: not complete.
+    ``payload_bits`` is the smallest payload width among the covering proofs.
+    ``None`` when the lane gave no inputs.  This is an evidence level of an
+    *assumed* element, never verification.
     """
     if not isinstance(observation_inputs, Mapping):
         return None
     side_key = "function1" if side is FactSide.LEFT else "function2"
-    binary_id = getattr(analysis, "binary_id", None)
+    entry = _entry(analysis)
+    returns = getattr(analysis, "returns", None)
+    member_count = len(returns) if isinstance(returns, (list, tuple)) else 0
+    covered = set()
     widths = []
     for record in observation_inputs.get("completed") or ():
-        if not isinstance(record, Mapping):
+        if (not isinstance(record, Mapping) or record.get("side") != side_key or record.get("applicable") is not True
+                or entry is None or record.get("entry") != entry):
             continue
-        named = record.get("side")
-        if named == side_key or (named is None and binary_id is not None and record.get("binary_id") == binary_id):
-            widths.append(record.get("payload_bits"))
-    complete = bool(widths) and observation_inputs.get("return_width_domain_active") is False
+        covered.update(i for i in record.get("members") or () if type(i) is int)
+        widths.append(record.get("payload_bits"))
+    complete = (
+        observation_inputs.get("return_width_domain_active") is False
+        and member_count > 0
+        and covered >= set(range(member_count))
+    )
     known = [w for w in widths if type(w) is int and w > 0]
-    return {"complete": complete, "payload_bits": min(known) if complete and known else None}
+    return {
+        "complete": complete,
+        "payload_bits": min(known) if complete and known else None,
+        "members": member_count,
+        "covered": len(covered & set(range(member_count))),
+    }
 
 
 def return_observation_facts(
@@ -235,10 +251,21 @@ def return_observation_facts(
     facts = program_facts if isinstance(program_facts, Mapping) else {}
     sha = str(facts.get("sha256") or getattr(program_facts, "sha256", "") or "")
     abi_id = getattr(getattr(abi, "abi_id", None), "value", None) or str(getattr(abi, "abi_id", ""))
+    ghidra = str(facts.get("ghidra") or "")
     image = FactHandle(
         FactKind.PROGRAM_IMAGE, FactTarget(side, FactSlot.PROGRAM),
         provenance=FactProvenance.leaf(producer_site=OBSERVATION_FACTS_PRODUCER_SITE, origin=f"program_sha256:{sha or 'unknown'}"),
         value=sha,
+    )
+    # E-b reads the instructions, function boundaries, call references and symbols Ghidra's
+    # auto-analysis built from the image: an analysis stage of its own (named by the Ghidra version)
+    code_model = FactHandle(
+        FactKind.PROGRAM_CODE_MODEL, FactTarget(side, FactSlot.PROGRAM),
+        provenance=FactProvenance.leaf(
+            producer_site=OBSERVATION_FACTS_PRODUCER_SITE,
+            origin=f"ghidra_auto_analysis:{ghidra or 'unknown'}:program_sha256:{sha or 'unknown'}",
+        ),
+        value={"ghidra": ghidra, "program_sha256": sha},
     )
     model = FactHandle(
         FactKind.ABI_MODEL, FactTarget(side, FactSlot.FUNCTION),
@@ -248,7 +275,8 @@ def return_observation_facts(
     demand = FactHandle(
         FactKind.RETURN_CALLER_DEMAND, target,
         provenance=FactProvenance.derived(
-            producer_site=OBSERVATION_FACTS_PRODUCER_SITE, rule=RETURN_USE_EVIDENCE_VERSION, upstream=(image, model),
+            producer_site=OBSERVATION_FACTS_PRODUCER_SITE, rule=RETURN_USE_EVIDENCE_VERSION,
+            upstream=(image, code_model, model),
         ),
         value=evidence.to_json(),
     )

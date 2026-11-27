@@ -59,6 +59,9 @@ class FactKind(str, Enum):
     ABI_MODEL = "ABI_MODEL"
     #: program の image（byte・section・読み取り専用領域）
     PROGRAM_IMAGE = "PROGRAM_IMAGE"
+    #: program の code model（disassembler / auto-analysis が作った命令・関数の境界・call の参照・symbol）
+    #: （Issue #327 E-b が読む。image そのものではなく、それを解析した段）
+    PROGRAM_CODE_MODEL = "PROGRAM_CODE_MODEL"
     #: SMT の model が実在の挙動であること（SAT-safety が守る事実）
     SMT_MODEL_REALIZABILITY = "SMT_MODEL_REALIZABILITY"
     #: ループ要約（recurrence）の妥当性

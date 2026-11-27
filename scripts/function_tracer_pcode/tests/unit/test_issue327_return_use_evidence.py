@@ -13,6 +13,7 @@ from scripts.function_tracer_pcode.ghidra.return_use_evidence import (
     ReturnUseEvidence,
     Vn,
     demanded_bits,
+    entry_flow_ops,
     fold_constants,
     own_write,
     prefix_bits,
@@ -159,11 +160,60 @@ def test_the_return_path_limit_follows_extensions_and_masks_in_the_block():
     assert producer_limit(block, 2, X0) == 1
 
 
+def _graph(instructions):
+    """``step`` over a synthetic instruction map ``address -> (ops, targets, fallthrough)``."""
+    return lambda address: instructions.get(address)
+
+
+def test_the_callee_write_is_read_along_its_own_flow_from_the_entry():
+    write = Op("COPY", W0, (c(3),))
+    ret = Op("RETURN", None, (c(0, 8),))
+    graph = {
+        0x10: ([Op("CBRANCH", None, (c(0x20, 8), FLAG))], (0x20,), 0x14),
+        0x14: ([write], (), 0x18),
+        0x18: ([ret], (), None),
+        0x20: ([ret], (), None),
+    }
+    ops, truncated = entry_flow_ops(0x10, _graph(graph))
+    assert own_write(ops, X0) and not truncated     # a write on one path is a write the callee executes
+
+
+def test_code_after_a_call_or_an_indirect_jump_is_not_the_callees_own_flow():
+    # Ghidra's body may run past a call it believes returns (into the next function), or follow a
+    # mis-resolved jump table: such code is not read
+    after_call = {
+        0x10: ([Op("COPY", X1, (c(1, 8),)), Op("CALL", None, (c(0x900, 8),))], (0x900,), 0x14),
+        0x14: ([Op("COPY", W0, (c(3),))], (), None),
+    }
+    assert not own_write(entry_flow_ops(0x10, _graph(after_call))[0], X0)
+    after_jump = {
+        0x10: ([Op("BRANCHIND", None, (X1,))], (0x30,), None),
+        0x30: ([Op("COPY", W0, (c(3),))], (), None),
+    }
+    assert not own_write(entry_flow_ops(0x10, _graph(after_jump))[0], X0)
+
+
+def test_a_delay_slot_before_the_call_is_the_callees_own_instruction():
+    # MIPS: ``jal g`` executes its delay slot (here a write of v0) before the call
+    delay = {0x10: ([Op("COPY", W0, (c(0),)), Op("CALL", None, (c(0x900, 8),))], (0x900,), 0x18)}
+    assert own_write(entry_flow_ops(0x10, _graph(delay))[0], X0)
+
+
+def test_a_direct_branch_is_followed_and_a_walk_at_its_limit_says_so():
+    branch = {0x10: ([Op("BRANCH", None, (c(0x40, 8),))], (0x40,), None), 0x40: ([Op("COPY", W0, (c(3),))], (), None)}
+    assert own_write(entry_flow_ops(0x10, _graph(branch))[0], X0)
+    loop = {a: ([Op("COPY", X1, (c(1, 8),))], (), a + 4) for a in range(0, 400, 4)}
+    ops, truncated = entry_flow_ops(0, _graph(loop), limit=10)
+    assert truncated and len(ops) == 10
+
+
 def test_the_record_is_plain_ordered_data():
     record = ReturnUseEvidence(
         "SCANNED", (("FP", "z0"), ("INT", "x0")), "", (("FP", False), ("INT", True)),
         (CallsiteDemand(0x200, 0x100, "CBRANCH", (("FP", 0), ("INT", 0xFFFFFFFF))),), False,
-        (("FP", (None,)), ("INT", (32,))),
+        (("FP", (None,)), ("INT", (32,))), entry_symbols=("f",), entry_symbol_count=1,
     ).to_json()
     assert record["status"] == "SCANNED" and record["own_writes"] == {"FP": False, "INT": True}
     assert record["callsites"][0]["demand"]["INT"] == 0xFFFFFFFF
+    assert record["entry_symbols"] == ["f"] and record["entry_symbol_count"] == 1
+    assert record["entry_flow_truncated"] is False and record["version"] == "return-use-evidence-v2"

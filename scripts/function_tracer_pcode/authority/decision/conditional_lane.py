@@ -620,12 +620,21 @@ def return_width_parity_inputs(projection: Any, result: Any) -> Mapping[str, Any
 
     * ``return_width_domain_active``: whether the final projection has an active
       cause of the return-width / ABI-width domain (its sealed reason registry);
-    * ``completed``: the completed unary return-width proofs on the result, with
-      the side (or binary id) they belong to and their payload width.
+    * ``completed``: per completed unary return-width proof on the result, the
+      side (``function1`` / ``function2``; a record naming no side is dropped),
+      the entry offset of the function it proved, the return members it covers
+      (the source indices of its return-member target), its payload width, and
+      whether it is **applicable** to the final analysis (the result's
+      completion-applicability contexts validated it against the live snapshot:
+      a proof made on an earlier phase's analysis is not applicable).
 
-    The checker's adapter turns them into a per-side evidence level.  They are
-    an evidence level of an assumed observation element, never verification.
+    The checker's adapter turns them into a per-side evidence level: complete only
+    when every return member of the final analysis is covered by an applicable
+    proof (``checker.concrete_replay.smt_parity_of_side``).  They are an evidence
+    level of an assumed observation element, never verification.
     """
+
+    import json
 
     from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
         ABI_WIDTH_READONLY_REASON_REGISTRY,
@@ -634,11 +643,20 @@ def return_width_parity_inputs(projection: Any, result: Any) -> Mapping[str, Any
         UNARY_RETURN_WIDTH_PROOF_KIND,
     )
 
+    def key(requirement: Any) -> str:
+        return json.dumps(requirement, sort_keys=True, separators=(",", ":"), default=repr)
+
     width_reasons = {definition.reason_id for definition in ABI_WIDTH_READONLY_REASON_REGISTRY.snapshot()}
     active = any(row.reason_id in width_reasons for row in getattr(projection, "c_active_base", ()) or ())
+    applicable = {
+        key(context.get("proof_requirement_id"))
+        for context in getattr(result, "reason_completion_applicability_contexts", ()) or ()
+        if isinstance(context, Mapping) and context.get("artifact_is_valid") is True
+        and isinstance(context.get("proof_requirement_id"), Mapping)
+    }
     completed = []
     for item in getattr(result, "completed_recovery_proof_evidence", ()) or ():
-        if not isinstance(item, Mapping):
+        if not isinstance(item, Mapping) or item.get("side") not in ("function1", "function2"):
             continue
         evidence = item.get("evidence")
         if not isinstance(evidence, Mapping):
@@ -646,14 +664,37 @@ def return_width_parity_inputs(projection: Any, result: Any) -> Mapping[str, Any
         requirement = evidence.get("proof_requirement_id")
         if not isinstance(requirement, Mapping) or requirement.get("proof_kind") != UNARY_RETURN_WIDTH_PROOF_KIND:
             continue
+        entry, members = _return_width_target(requirement.get("proof_target_key"))
         facts = evidence.get("width_facts")
         payload = facts.get("semantic_payload_width") if isinstance(facts, Mapping) else None
         completed.append({
-            "side": item.get("side") if isinstance(item.get("side"), str) else None,
-            "binary_id": item.get("binary_id") if isinstance(item.get("binary_id"), str) else None,
+            "side": item["side"],
+            "entry": entry,
+            "members": members,
             "payload_bits": payload if type(payload) is int else None,
+            "applicable": key(requirement) in applicable,
         })
     return {"return_width_domain_active": active, "completed": tuple(completed)}
+
+
+def _return_width_target(target: Any) -> Tuple[Optional[int], Tuple[int, ...]]:
+    """``(entry offset, return-member source indices)`` of a unary return-width
+    proof target (``proof.return_width.surface.build_function_return_width_target``
+    as serialized); ``(None, ())`` when its shape is not the known one."""
+    try:
+        if target[0] != "function_return_width_target":
+            return None, ()
+        function = target[2]
+        entry = function[2][2] if function[0] == "function_identity_v1" else None
+        member = target[3]
+        indices = ()
+        if member[0] == "return_member_v1":
+            for part in member[1:]:
+                if isinstance(part, (list, tuple)) and len(part) == 2 and part[0] == "source_indices":
+                    indices = tuple(i for i in part[1] if type(i) is int)
+        return (entry if type(entry) is int else None), indices
+    except (IndexError, KeyError, TypeError):
+        return None, ()
 
 
 def _run_concrete_proof(

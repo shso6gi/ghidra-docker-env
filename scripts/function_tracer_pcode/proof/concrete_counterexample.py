@@ -53,9 +53,11 @@ from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence, T
 from scripts.function_tracer_pcode.concrete.observation import ReturnStorage, compared_extent
 from scripts.function_tracer_pcode.concrete.observation_claim import (
     EvidenceStatus,
+    Method,
     ObservationClassification,
     classify_pair,
     classify_side,
+    relied_methods,
 )
 from scripts.function_tracer_pcode.concrete.replay import (
     PlanRefusal,
@@ -195,6 +197,13 @@ class ReturnObservationFacts:
             out.append(self.smt_parity)
         return tuple(out)
 
+    def method_handle(self, method: Method) -> Optional[FactHandle]:
+        """The consulted handle of a verifying method's evidence (``SMT_PARITY``
+        is an evidence level, never a method, so it has none)."""
+        if method is Method.CALLER_DEMAND and self.caller_demand_status is EvidenceStatus.CONSULTED:
+            return self.caller_demand
+        return None
+
 
 class LazyObservationFacts:
     """Reads one side's return-observation evidence once, and only when asked.
@@ -211,6 +220,7 @@ class LazyObservationFacts:
         self._facts: Optional[ReturnObservationFacts] = None
         self._failure: Optional[str] = None
         self._asked = False
+        self._relied: Tuple[FactHandle, ...] = ()
 
     def get(self) -> Optional[ReturnObservationFacts]:
         if not self._asked:
@@ -231,8 +241,18 @@ class LazyObservationFacts:
     def failure(self) -> Optional[str]:
         return self._failure
 
-    def consulted_handles(self) -> Tuple[FactHandle, ...]:
-        return () if self._facts is None else self._facts.handles()
+    def rely_on(self, methods: Iterable[Method]) -> None:
+        """Record the evidence the classification decided an element with
+        (``observation_claim.relied_methods``): only those handles enter the
+        evidence's ``relies_on``.  Evidence read only to annotate an assumed
+        element (its level, a diagnostic) is in the record's digest, not relied on."""
+        if self._facts is None:
+            return
+        handles = [self._facts.method_handle(method) for method in sorted(set(methods), key=lambda m: m.value)]
+        self._relied = tuple(handle for handle in handles if handle is not None)
+
+    def relied_handles(self) -> Tuple[FactHandle, ...]:
+        return self._relied
 
 
 def formula_inputs(
@@ -317,9 +337,9 @@ def subject_reliance(subjects: Optional[Sequence[Any]]) -> ReliesOn:
         if not isinstance(subject, ConcreteSubject):
             return ReliesOn.unknown_provenance(reason="a concrete side supplied no fact handles")
         handles.extend(subject.side_facts.handles())
-        # Issue #327: the observation evidence the classification actually read
+        # Issue #327: the observation evidence an element's state was decided with
         if subject.observation_facts is not None:
-            handles.extend(subject.observation_facts.consulted_handles())
+            handles.extend(subject.observation_facts.relied_handles())
     return ReliesOn.closure_of(handles)
 
 
@@ -664,7 +684,7 @@ def classify_observation(
             "smt_parity": _plain(parity) if parity_status is EvidenceStatus.CONSULTED else None,
             "failure": None if lazy is None else lazy.failure,
         }
-        sides.append(classify_side(
+        side = classify_side(
             index,
             value_class=location.arg_class.value,
             register=location.register,
@@ -673,7 +693,11 @@ def classify_observation(
             smt_parity=parity, parity_status=parity_status,
             executed_format=(value.value_format.value if value is not None and value.value_format is not None
                              and location.arg_class.value == "FP" else None),
-        ))
+            single_class_return=getattr(getattr(subject, "abi", None), "single_class_return", False) is True,
+        )
+        if lazy is not None:
+            lazy.rely_on(relied_methods(side))
+        sides.append(side)
     return classify_pair(sides[0], sides[1], compared_bits=extent.compared_bits,
                          first_difference_bit=extent.first_difference_bit, evidence=evidence), evidence
 

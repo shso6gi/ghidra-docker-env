@@ -9,12 +9,17 @@ Pins what the classification may and may not change:
   with or without it (the conditional set can only shrink);
 * a producer that fails, or a deadline that has passed, leaves every element
   assumed and the difference adopted as before;
-* only a positive contradiction (``CONFLICT``) refuses the difference;
+* only a positive contradiction (``CONFLICT``, on a single-class-return ABI)
+  refuses the difference;
 * the premises and the serialized record carry the classification, within the
-  receipt's premise bounds; the reliance closure gains exactly the consulted
-  handles and stays ``UNKNOWN_PROVENANCE``.
+  receipt's premise bounds; the reliance closure gains only the evidence that
+  decided an element (never SMT_PARITY, never a diagnostic) and stays
+  ``UNKNOWN_PROVENANCE``;
+* SMT_PARITY needs every return member of the final analysis covered by an
+  applicable completed proof.
 """
 
+import dataclasses
 import json
 from types import SimpleNamespace
 
@@ -67,14 +72,19 @@ from scripts.function_tracer_pcode.checker.concrete_replay import concrete_side_
 WITNESSES = ({"param_1_1": 3, "param_1_2": 3},)
 
 
-def _demand_facts(side, *, int_mask=0, fp_mask=0, own_int=True, own_fp=False, status="SCANNED"):
+def _demand_facts(side, *, int_mask=0, fp_mask=0, own_int=True, own_fp=False, status="SCANNED", symbols=1,
+                  parity=None):
     target = FactTarget(side, FactSlot.RETURN)
-    record = {"status": status, "own_writes": {"INT": own_int, "FP": own_fp},
+    record = {"status": status, "own_writes": {"INT": own_int, "FP": own_fp}, "entry_symbol_count": symbols,
               "callsites": [{"call": 0x500, "caller": 0x400, "end": "CBRANCH",
                              "demand": {"INT": int_mask, "FP": fp_mask}}]}
     handle = FactHandle(FactKind.RETURN_CALLER_DEMAND, target,
                         provenance=FactProvenance.leaf(producer_site="test", origin="synthetic"), value=record)
-    return ReturnObservationFacts(handle, EvidenceStatus.CONSULTED, None, EvidenceStatus.NOT_CONSULTED)
+    if parity is None:
+        return ReturnObservationFacts(handle, EvidenceStatus.CONSULTED, None, EvidenceStatus.NOT_CONSULTED)
+    parity_handle = FactHandle(FactKind.RETURN_PAYLOAD_WIDTH, target,
+                               provenance=FactProvenance.leaf(producer_site="test", origin="synthetic"), value=parity)
+    return ReturnObservationFacts(handle, EvidenceStatus.CONSULTED, parity_handle, EvidenceStatus.CONSULTED)
 
 
 class Counting:
@@ -87,10 +97,11 @@ class Counting:
         return self._build()
 
 
-def _with_observation(left, right, builders):
+def _with_observation(left, right, builders, abi=None):
     base = _subjects(left, right)
     return tuple(
-        ConcreteSubject(s.executor, s.abi, s.entry_address, s.locate, s.facts, s.side_facts, LazyObservationFacts(b))
+        ConcreteSubject(s.executor, abi or s.abi, s.entry_address, s.locate, s.facts, s.side_facts,
+                        LazyObservationFacts(b))
         for s, b in zip(base, builders)
     )
 
@@ -118,9 +129,10 @@ def test_the_replays_and_the_confirmed_witness_do_not_depend_on_the_evidence():
     assert plain.decisive and observed.decisive
     assert plain.replays == observed.replays and plain.confirmed == observed.confirmed
     assert plain.observation["compared_bits"] == observed.observation["compared_bits"] == 32
-    # E-b verified O1/O2 on both sides, but O3 stays assumed: R_V is empty
+    # the E-b fact verifies O1 only; O2 / O3 stay assumed (C-b5 / H3): R_V is empty
     sides = observed.observation["sides"]
-    assert [e["state"] for e in sides[0]["elements"]][:3] == ["VERIFIED", "VERIFIED", "ASSUMED"]
+    assert [e["state"] for e in sides[0]["elements"]][:3] == ["VERIFIED", "ASSUMED", "ASSUMED"]
+    assert sides[0]["elements"][1]["unconfirmed"] == ["C-b5_standard_calling_convention"]
     assert observed.observation["verified_bits"] == 0
 
 
@@ -140,14 +152,27 @@ def test_a_failing_or_late_producer_leaves_every_element_assumed_and_the_differe
 
 
 def test_a_positive_contradiction_refuses_the_difference():
-    artifact = _run(_with_observation(
-        Fixed(_clean(13)), Fixed(_clean(14)),
-        (lambda: _demand_facts(FactSide.LEFT, fp_mask=0xFF, own_int=True, own_fp=True),
-         lambda: _demand_facts(FactSide.RIGHT, int_mask=0xFF)),
-    ))
+    builders = (lambda: _demand_facts(FactSide.LEFT, fp_mask=0xFF, own_int=True, own_fp=True),
+                lambda: _demand_facts(FactSide.RIGHT, int_mask=0xFF))
+    assert ARM.single_class_return is True
+    artifact = _run(_with_observation(Fixed(_clean(13)), Fixed(_clean(14)), builders))
     assert not artifact.decisive and artifact.non_decisive_reasons == (CONCRETE_OBSERVATION_CONFLICT,)
     assert artifact.confirmed is None and artifact.observation["conflict"] is True
     assert artifact.replays[0]["status"] == "CONFIRMED"   # the run is kept as a record
+    # on an ABI not known to return each value in one class the same evidence is no contradiction
+    mixed = dataclasses.replace(ARM, single_class_return=False)
+    adopted = _run(_with_observation(Fixed(_clean(13)), Fixed(_clean(14)), builders, abi=mixed))
+    assert adopted.decisive and adopted.observation["conflict"] is False
+
+
+def test_a_lack_of_evidence_never_refuses_the_difference():
+    for left in (lambda: _demand_facts(FactSide.LEFT),                                  # callers read nothing
+                 lambda: _demand_facts(FactSide.LEFT, fp_mask=0xFF, own_fp=False),      # no callee write
+                 lambda: _demand_facts(FactSide.LEFT, fp_mask=0xFF, own_fp=True, symbols=2),  # shared entry
+                 lambda: _demand_facts(FactSide.LEFT, fp_mask=0xFF, own_fp=True, status="STOPPED")):
+        artifact = _run(_with_observation(Fixed(_clean(13)), Fixed(_clean(14)),
+                                          (left, lambda: _demand_facts(FactSide.RIGHT))))
+        assert artifact.decisive and artifact.observation["conflict"] is False
 
 
 def test_the_premises_and_record_carry_the_classification_within_the_receipt_bounds():
@@ -170,18 +195,33 @@ def test_the_premises_and_record_carry_the_classification_within_the_receipt_bou
     assert record["artifact_payload"]["observation"]["difference_range"] == "ASSUMED_RANGE_ONLY"
 
 
-def test_the_reliance_closure_gains_only_the_consulted_handles_and_stays_unknown():
+def test_the_reliance_closure_gains_only_the_evidence_that_decided_an_element():
+    parity = {"complete": True, "payload_bits": 32}
     subjects = _with_observation(
         Fixed(_clean(13)), Fixed(_clean(14)),
-        (lambda: _demand_facts(FactSide.LEFT, int_mask=0xFF), lambda: _demand_facts(FactSide.RIGHT, int_mask=0xFF)),
+        (lambda: _demand_facts(FactSide.LEFT, int_mask=0xFF, parity=parity),            # O1 verified by E-b
+         lambda: _demand_facts(FactSide.RIGHT, int_mask=0xFF, own_int=False, parity=parity)),  # diagnostic only
     )
     before = subject_reliance(subjects)
     assert FactKind.RETURN_CALLER_DEMAND not in {r.kind for r in before.refs}
     _run(subjects)
     after = subject_reliance(subjects)
     assert after.basis is before.basis is RelianceBasis.UNKNOWN_PROVENANCE
-    # the synthetic handle is a leaf; the adapter's handle also brings PROGRAM_IMAGE / ABI_MODEL upstream
-    assert {r.kind for r in after.refs} - {r.kind for r in before.refs} == {FactKind.RETURN_CALLER_DEMAND}
+    added = {r for r in after.refs} - {r for r in before.refs}
+    # the left side's E-b decided O1; the right side's E-b and both SMT_PARITY levels only annotate assumptions
+    assert added == {r for r in added if r.kind is FactKind.RETURN_CALLER_DEMAND and r.target.side is FactSide.LEFT}
+    assert len(added) == 1
+
+
+def test_the_adapters_caller_demand_handle_names_the_code_model_it_was_read_from(monkeypatch):
+    import scripts.function_tracer_pcode.ghidra.return_use_evidence as producer
+    monkeypatch.setattr(producer, "scan_return_use_or_failure",
+                        lambda *a, **k: producer.ReturnUseEvidence("SCANNED", (("FP", "z0"), ("INT", "x0"))))
+    facts = adapter.return_observation_facts(None, 0x1000, ARM, {"sha256": "ab", "ghidra": "11.4"}, FactSide.LEFT, None)
+    upstream = {h.ref.kind: h for h in facts.caller_demand.provenance.upstream}
+    assert set(upstream) == {FactKind.PROGRAM_IMAGE, FactKind.PROGRAM_CODE_MODEL, FactKind.ABI_MODEL}
+    assert upstream[FactKind.PROGRAM_CODE_MODEL].provenance.detail == "ghidra_auto_analysis:11.4:program_sha256:ab"
+    assert facts.smt_parity is None and facts.smt_parity_status is EvidenceStatus.NOT_CONSULTED
 
 
 def test_the_compared_range_is_the_comparisons_own_value():
@@ -198,25 +238,52 @@ def test_the_compared_range_is_the_comparisons_own_value():
             assert extent is None
 
 
-def test_the_lane_gives_the_smt_parity_inputs_and_the_adapter_reads_them_per_side():
-    evidence = [
-        {"side": "function1", "evidence": {"proof_requirement_id": {"proof_kind": "unary_return_width_relation"},
-                                            "width_facts": {"semantic_payload_width": 32}}},
-        {"binary_id": "B2", "evidence": {"proof_requirement_id": {"proof_kind": "unary_return_width_relation"},
-                                          "width_facts": {"semantic_payload_width": 64}}},
-        {"side": "function1", "evidence": {"proof_requirement_id": {"proof_kind": "other"}}},
-    ]
-    result = SimpleNamespace(completed_recovery_proof_evidence=evidence)
+def _width_target(entry, indices):
+    function = ["function_identity_v1", "B", ["function", 7, entry], hex(entry)[2:]]
+    member = ["return_member_v1", ["pcode_op_ref", []], ["summary_candidate_id", None], ["address", "0"],
+              ["source_indices", list(indices)], ["return_kind", "exact"]]
+    return ["function_return_width_target", 1, function, member, ["guard_region_target", 1, member, [], [], []]]
+
+
+def _width_record(side, entry, indices, payload=32):
+    requirement = {"proof_kind": "unary_return_width_relation", "proof_target_key": _width_target(entry, indices)}
+    return {"side": side, "evidence": {"proof_requirement_id": requirement,
+                                       "width_facts": {"semantic_payload_width": payload}}}
+
+
+def test_smt_parity_needs_every_return_member_covered_by_an_applicable_proof():
+    left = SimpleNamespace(function_ref=SimpleNamespace(entry_offset=0x1000), returns=[1, 2])
+    records = [_width_record("function1", 0x1000, [0]), _width_record("function1", 0x1000, [1], payload=8),
+               _width_record("function2", 0x2000, [0]), {"binary_id": "B", "evidence": {}},
+               {"side": "function1", "evidence": {"proof_requirement_id": {"proof_kind": "other"}}}]
+    applicable = [{"proof_requirement_id": r["evidence"]["proof_requirement_id"], "artifact_is_valid": True}
+                  for r in records[:3]]
     quiet = SimpleNamespace(c_active_base=(SimpleNamespace(reason_id="counterexample_analysis_safety_unproven"),))
-    inputs = return_width_parity_inputs(quiet, result)
-    assert inputs["return_width_domain_active"] is False and len(inputs["completed"]) == 2
-    left = adapter.smt_parity_of_side(inputs, FactSide.LEFT, SimpleNamespace(binary_id="B1"))
-    right = adapter.smt_parity_of_side(inputs, FactSide.RIGHT, SimpleNamespace(binary_id="B2"))
-    assert left == {"complete": True, "payload_bits": 32} and right == {"complete": True, "payload_bits": 64}
+
+    def parity(evidence, contexts, projection=quiet, analysis=left, side=FactSide.LEFT):
+        result = SimpleNamespace(completed_recovery_proof_evidence=evidence,
+                                 reason_completion_applicability_contexts=contexts)
+        return adapter.smt_parity_of_side(return_width_parity_inputs(projection, result), side, analysis)
+
+    inputs = return_width_parity_inputs(quiet, SimpleNamespace(completed_recovery_proof_evidence=records,
+                                                               reason_completion_applicability_contexts=applicable))
+    assert len(inputs["completed"]) == 3     # no side, or not a width proof: dropped
+    assert parity(records, applicable) == {"complete": True, "payload_bits": 8, "members": 2, "covered": 2}
+    # one member never proved: not complete (one completed member is not enough)
+    assert parity(records[:1], applicable)["complete"] is False
+    # a proof not applicable to the final analysis (another phase's snapshot) does not count
+    assert parity(records, applicable[1:])["complete"] is False
+    # a proof of another function (entry) or another side does not count
+    assert parity(records, applicable, analysis=SimpleNamespace(function_ref=SimpleNamespace(entry_offset=0x3000),
+                                                                returns=[1]))["complete"] is False
+    assert parity(records, applicable, side=FactSide.RIGHT, analysis=SimpleNamespace(
+        function_ref=SimpleNamespace(entry_offset=0x2000), returns=[1]))["complete"] is True
+    # unknown returns, or an active return-width cause: not complete
+    assert parity(records, applicable, analysis=SimpleNamespace(function_ref=left.function_ref, returns=None))[
+        "complete"] is False
     active = SimpleNamespace(c_active_base=(SimpleNamespace(reason_id="return_width_provenance_unavailable"),))
-    blocked = return_width_parity_inputs(active, result)
-    assert adapter.smt_parity_of_side(blocked, FactSide.LEFT, SimpleNamespace(binary_id="B1"))["complete"] is False
-    assert adapter.smt_parity_of_side(None, FactSide.LEFT, SimpleNamespace(binary_id="B1")) is None
+    assert parity(records, applicable, projection=active)["complete"] is False
+    assert adapter.smt_parity_of_side(None, FactSide.LEFT, left) is None
 
 
 def test_only_the_adapter_builds_return_observation_facts():

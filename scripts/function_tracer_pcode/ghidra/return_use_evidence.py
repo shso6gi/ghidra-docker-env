@@ -21,11 +21,23 @@ caller depends on along that path:
 * an op whose meaning is not modelled demands nothing; so does a value that
   leaves the region (returned by the caller, passed to another call).
 
-The record also says whether the callee's **own instructions** write each
-return register (a call inside the callee does not count: with interprocedural
-register allocation the caller knows which registers that call preserves), and,
-per RETURN of the callee, the value width its return register is limited to by
-the producer in the same block (an extension, a mask, a comparison result).
+The record also says:
+
+* whether the callee's **own instructions** write each return register (C-b2).
+  Only instructions reached from the entry along the callee's own flow are
+  read -- fallthrough and direct branches (a tail jump into another function
+  included: that code runs as part of the call), stopping at a call, an
+  indirect jump or a return -- so a write is one the call itself executes.  Neither
+  a call inside the callee (with interprocedural register allocation the
+  caller knows which registers that call preserves) nor code that Ghidra's
+  function body merely contains (a body that runs past a call it wrongly
+  believes returns, a mis-resolved jump table) counts;
+* the symbols at the entry (C-b7): identical code folding can place several
+  functions at one entry, and then the callers of one say nothing about the
+  other;
+* per RETURN of the callee, the value width its return register is limited to
+  by the producer in the same block (an extension, a mask, a comparison
+  result) -- recorded only (C-b4).
 
 What this evidence does and does not show is decided by the consumer
 (``concrete.observation_claim``); this module only reads the program.
@@ -36,7 +48,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-RETURN_USE_EVIDENCE_VERSION = "return-use-evidence-v1"
+RETURN_USE_EVIDENCE_VERSION = "return-use-evidence-v2"
 
 #: registers whose value plus a constant is a stack slot (AArch64 / MIPS)
 STACK_BASE_REGISTERS = frozenset({"sp", "x29", "s8", "fp"})
@@ -44,6 +56,11 @@ STACK_BASE_REGISTERS = frozenset({"sp", "x29", "s8", "fp"})
 #: truncated scan as evidence only of what it saw)
 MAX_CALLSITES = 32
 MAX_REGION_INSTRUCTIONS = 96
+#: instructions read along the callee's own flow from its entry (C-b2); a walk
+#: that hits it has seen only part of the callee (a write it found still counts)
+MAX_ENTRY_FLOW_INSTRUCTIONS = 4096
+#: entry symbol names kept in the record (the count is always exact)
+MAX_ENTRY_SYMBOLS = 8
 
 CONST = "const"
 
@@ -304,6 +321,51 @@ def own_write(ops: Iterable[Op], register: Vn) -> bool:
                for op in ops)
 
 
+_FLOW_END = frozenset({"RETURN", "BRANCHIND"})
+_CALLS = frozenset({"CALL", "CALLIND"})
+
+
+def entry_flow_ops(
+    entry: Any,
+    step: Callable[[Any], Optional[Tuple[Sequence[Op], Sequence[Any], Optional[Any]]]],
+    limit: int = MAX_ENTRY_FLOW_INSTRUCTIONS,
+) -> Tuple[List[Op], bool]:
+    """The P-code the callee executes from ``entry`` along its own flow (C-b2).
+
+    ``step(address)`` gives an instruction's ``(ops, branch targets,
+    fallthrough)``, or ``None`` when no instruction is there.  The walk follows
+    fallthrough and direct branches; an instruction with a call contributes only
+    its ops before the first call (a delay slot) and ends the path, and a return
+    or an indirect jump ends the path.  Returns the ops and whether ``limit``
+    stopped the walk."""
+    seen = set()
+    pending = [entry]
+    ops: List[Op] = []
+    while pending:
+        address = pending.pop()
+        if address in seen:
+            continue
+        if len(seen) >= limit:
+            return ops, True
+        seen.add(address)
+        item = step(address)
+        if item is None:
+            continue
+        instruction_ops, targets, fallthrough = item
+        names = [op.mnemonic for op in instruction_ops]
+        call = next((i for i, name in enumerate(names) if name in _CALLS), None)
+        if call is not None:
+            ops.extend(instruction_ops[:call])
+            continue
+        ops.extend(instruction_ops)
+        if _FLOW_END.intersection(names):
+            continue
+        pending.extend(targets)
+        if fallthrough is not None:
+            pending.append(fallthrough)
+    return ops, False
+
+
 def producer_limit(block_ops: Sequence[Op], index: int, vn: Vn, depth: int = 0) -> Optional[int]:
     """Value-width limit (bits) of ``vn`` as defined before ``block_ops[index]``
     inside the block: an extension, a mask ``2^n-1``, a comparison result, a
@@ -363,6 +425,9 @@ class CallsiteDemand:
 class ReturnUseEvidence:
     """What the callers of one function do with its return registers.
 
+    ``own_writes`` is C-b2 (the callee's own flow from its entry, see the
+    module docstring).
+
     ``status``: ``SCANNED`` (the function was found and every call reference
     was read, up to ``MAX_CALLSITES``), ``NO_FUNCTION``, ``STOPPED`` (the
     caller's stop condition fired: the scan is incomplete), ``FAILED`` (reading
@@ -376,6 +441,12 @@ class ReturnUseEvidence:
     callsites: Tuple[CallsiteDemand, ...] = ()
     callsites_truncated: bool = False
     return_path_limits: Tuple[Tuple[str, Tuple[Optional[int], ...]], ...] = ()
+    #: the walk along the callee's own flow stopped at ``MAX_ENTRY_FLOW_INSTRUCTIONS``
+    entry_flow_truncated: bool = False
+    #: distinct names of the (non-default) function / label symbols at the entry, sorted, at most
+    #: ``MAX_ENTRY_SYMBOLS``; ``entry_symbol_count`` is exact
+    entry_symbols: Tuple[str, ...] = ()
+    entry_symbol_count: int = 0
     version: str = RETURN_USE_EVIDENCE_VERSION
 
     def to_json(self) -> Mapping[str, Any]:
@@ -388,6 +459,9 @@ class ReturnUseEvidence:
             "callsites": [c.to_json() for c in self.callsites],
             "callsites_truncated": self.callsites_truncated,
             "return_path_limits": {k: list(v) for k, v in self.return_path_limits},
+            "entry_flow_truncated": self.entry_flow_truncated,
+            "entry_symbols": list(self.entry_symbols),
+            "entry_symbol_count": self.entry_symbol_count,
         }
 
 
@@ -450,6 +524,7 @@ def scan_return_use(
     """Read the callers of the function at ``entry_offset`` (``register_names``
     maps a value class, ``INT`` / ``FP``, to the ABI return register's name)."""
     from ghidra.program.model.block import SimpleBlockModel  # noqa: PLC0415
+    from ghidra.program.model.symbol import SourceType, SymbolType  # noqa: PLC0415
     from ghidra.util.task import TaskMonitor  # noqa: PLC0415
 
     language = program.getLanguage()
@@ -467,14 +542,12 @@ def scan_return_use(
         reg_vn[value_class] = Vn(str(reg.getAddress().getAddressSpace().getName()), int(reg.getAddress().getOffset()),
                                  int(reg.getMinimumByteSize()), name)
 
-    body: List[Op] = []
     limits: Dict[str, List[Optional[int]]] = {k: [] for k in reg_vn}
     blocks = SimpleBlockModel(program)
     for instruction in listing.getInstructions(function.getBody(), True):
         if should_stop():
             return ReturnUseEvidence("STOPPED", registers)
         pcode = _ops(instruction.getPcode(), language)
-        body.extend(pcode)
         if any(op.mnemonic == "RETURN" for op in pcode):
             block = blocks.getFirstCodeBlockContaining(instruction.getAddress(), TaskMonitor.DUMMY)
             block_ops: List[Op] = []
@@ -485,7 +558,27 @@ def scan_return_use(
             index = next(i for i, op in enumerate(block_ops) if op.mnemonic == "RETURN")
             for value_class, vn in reg_vn.items():
                 limits[value_class].append(producer_limit(block_ops, index, vn))
-    own = tuple((k, own_write(body, vn)) for k, vn in sorted(reg_vn.items()))
+    space = entry.getAddressSpace()
+
+    def step(offset):
+        # addresses are walked as plain offsets in the entry's space (a flow to another space is not followed)
+        instruction = listing.getInstructionAt(space.getAddress(offset))
+        if instruction is None:
+            return None
+        flows = tuple(int(a.getOffset()) for a in (instruction.getFlows() or ()) if a.getAddressSpace() == space)
+        following = instruction.getFallThrough()
+        return (_ops(instruction.getPcode(), language), flows,
+                None if following is None or following.getAddressSpace() != space else int(following.getOffset()))
+
+    if should_stop():
+        return ReturnUseEvidence("STOPPED", registers)
+    flow_ops, flow_truncated = entry_flow_ops(int(entry.getOffset()), step)
+    own = tuple((k, own_write(flow_ops, vn)) for k, vn in sorted(reg_vn.items()))
+    names = sorted({
+        str(symbol.getName()) for symbol in (program.getSymbolTable().getSymbols(entry) or ())
+        if not symbol.isDynamic() and symbol.getSource() != SourceType.DEFAULT
+        and symbol.getSymbolType() in (SymbolType.FUNCTION, SymbolType.LABEL)
+    })
 
     callsites: List[CallsiteDemand] = []
     truncated = False
@@ -520,6 +613,8 @@ def scan_return_use(
     return ReturnUseEvidence(
         "SCANNED", registers=registers, own_writes=own, callsites=tuple(callsites), callsites_truncated=truncated,
         return_path_limits=tuple((k, tuple(v)) for k, v in sorted(limits.items())),
+        entry_flow_truncated=flow_truncated, entry_symbols=tuple(names[:MAX_ENTRY_SYMBOLS]),
+        entry_symbol_count=len(names),
     )
 
 
@@ -542,7 +637,8 @@ def scan_return_use_or_failure(
 
 
 __all__ = [
-    "CallsiteDemand", "MAX_CALLSITES", "MAX_REGION_INSTRUCTIONS", "Op", "RETURN_USE_EVIDENCE_VERSION",
-    "ReturnUseEvidence", "STACK_BASE_REGISTERS", "Vn", "demanded_bits", "fold_constants", "own_write",
+    "CallsiteDemand", "MAX_CALLSITES", "MAX_ENTRY_FLOW_INSTRUCTIONS", "MAX_ENTRY_SYMBOLS", "MAX_REGION_INSTRUCTIONS",
+    "Op", "RETURN_USE_EVIDENCE_VERSION", "ReturnUseEvidence", "STACK_BASE_REGISTERS", "Vn", "demanded_bits",
+    "entry_flow_ops", "fold_constants", "own_write",
     "prefix_bits", "producer_limit", "scan_return_use", "scan_return_use_or_failure",
 ]
