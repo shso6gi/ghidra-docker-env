@@ -41,9 +41,15 @@ class UnaryWidthProofResult:
         return self.status == "proved" and self.validated_artifact is not None
 
 
+#: proof kind of a completed unary return-width proof (the SMT path's static return provenance).
+#: Issue #327 reads completed proofs of this kind as the ``SMT_PARITY`` level of a concrete
+#: return observation.
+UNARY_RETURN_WIDTH_PROOF_KIND = "unary_return_width_relation"
+
+
 def return_width_requirement(seed: FunctionReturnWidthSeed) -> ProofRequirementId:
     return ProofRequirementId.create(
-        "unary_return_width_relation",
+        UNARY_RETURN_WIDTH_PROOF_KIND,
         seed.target_id.stable_key(),
         ProofRequirementContract(
             proposition="return storage equals the declared semantic payload relation",

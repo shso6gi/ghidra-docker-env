@@ -62,7 +62,7 @@ from scripts.function_tracer_pcode.reporting.pair_outcomes import (
     normalized_sha256,
 )
 
-REPORT_SCHEMA = "concrete-evaluation-report-v1"
+REPORT_SCHEMA = "concrete-evaluation-report-v2"
 RUN_MANIFEST_FILE = "run_manifest.txt"
 
 EXIT_OK = 0
@@ -709,6 +709,58 @@ def concrete_differences(tree: Tree) -> Dict[str, Any]:
     }
 
 
+def observation(tree: Tree) -> Dict[str, Any]:
+    """The return-observation classification of the confirmed differences (Issue #327).
+
+    Over every pair whose replay confirmed a difference (adopted, or refused by a
+    ``CONFLICT``): where the difference lies (the verified range R_V or only the
+    assumed range), each element's state with its evidence level and methods, how
+    each side's evidence was consulted, and R_V's widths.  A pair whose record
+    carries no classification is counted as ``unclassified`` (fail closed).
+    """
+
+    from scripts.function_tracer_pcode.proof.concrete_counterexample import CONCRETE_OBSERVATION_CONFLICT
+
+    classified = []
+    unclassified = []
+    for f in tree.facts.values():
+        payload = f.concrete_payload
+        confirmed = f.concrete_decisive or CONCRETE_OBSERVATION_CONFLICT in (payload.get("non_decisive_reasons") or ())
+        if not confirmed:
+            continue
+        record = payload.get("observation")
+        (classified if isinstance(record, Mapping) else unclassified).append((f, record))
+    ranges: Counter = Counter()
+    elements: Counter = Counter()
+    statuses: Counter = Counter()
+    verified: Counter = Counter()
+    conflicts = []
+    for f, record in classified:
+        ranges[str(record.get("difference_range"))] += 1
+        verified[str(record.get("verified_bits"))] += 1
+        if record.get("conflict"):
+            conflicts.append(f.key)
+        for side in record.get("sides") or ():
+            if not isinstance(side, Mapping):
+                continue
+            statuses[(str(side.get("value_class")), "caller_demand", str(side.get("caller_demand")))] += 1
+            statuses[(str(side.get("value_class")), "smt_parity", str(side.get("smt_parity")))] += 1
+            for element in side.get("elements") or ():
+                if isinstance(element, Mapping):
+                    elements[(str(side.get("value_class")), str(element.get("element")), str(element.get("state")),
+                              str(element.get("level")), "+".join(element.get("methods") or ()) or "-")] += 1
+    return {
+        "pairs": len(classified) + len(unclassified),
+        "unclassified_pairs": [list(f.key) for f, _ in unclassified][:50],
+        "unclassified_count": len(unclassified),
+        "difference_range": dict(sorted(ranges.items())),
+        "verified_bits": dict(sorted(verified.items())),
+        "conflict_pairs": [list(key) for key in conflicts],
+        "evidence_status": {"/".join(k): v for k, v in sorted(statuses.items())},
+        "elements": {"/".join(k): v for k, v in sorted(elements.items())},
+    }
+
+
 def blocked(tree: Tree) -> Dict[str, Any]:
     """Confirmed pairs whose conditional column stayed short of NOT_EQ, and why."""
     discharged = concrete_discharged_reason_ids()
@@ -903,6 +955,7 @@ def build_report_from_trees(baseline: Tree, treatment: Tree, allowed: Sequence[s
         "detection": {"baseline": detection(baseline), "treatment": detection(treatment)},
         "against_baseline": against_baseline(baseline, treatment),
         "concrete_differences": concrete_differences(treatment),
+        "observation": observation(treatment),
         "blocked": blocked(treatment),
         "funnel": funnel(treatment),
         "cost": cost(baseline, treatment),
@@ -980,6 +1033,12 @@ def format_report(report: Mapping[str, Any]) -> str:
     cd = report["concrete_differences"]
     lines.append(f"concrete differences: {cd['pairs']} pairs / {cd['function_pairs']} function pairs / "
                  f"{cd['confirmed_witness_replays']} witnesses; conditional {cd['conditional_of_confirmed']}")
+    ob = report["observation"]
+    lines.append(f"observation (#327): {ob['pairs']} confirmed pairs; range {ob['difference_range']}; "
+                 f"verified bits {ob['verified_bits']}; conflicts {len(ob['conflict_pairs'])}; "
+                 f"unclassified {ob['unclassified_count']}")
+    for key, value in ob["elements"].items():
+        lines.append(f"  {key}: {value}")
     bl = report["blocked"]
     lines.append(f"confirmed but held: {bl['pairs']} pairs / {bl['function_pairs']} function pairs; "
                  f"reconstruction {bl['reconstruction']}")

@@ -262,16 +262,58 @@ def _fp_value(
     return fmt, _low(observed.value, format_bytes)
 
 
+def _int_compare_bytes(plan: ReturnObservationPlan, observed: Tuple[ObservedRegister, ObservedRegister]) -> int:
+    """The low bytes an integer comparison reads: the smaller recovered width and
+    defined part of the two sides (the one rule ``compare_return_values`` uses)."""
+    return min(
+        min(location.width_bytes, value.defined_low_bytes)
+        for location, value in zip(plan.locations, observed)
+    )
+
+
+@dataclass(frozen=True)
+class ComparedExtent:
+    """What a comparison that found a difference read (Issue #327, recorded only).
+
+    ``compared_bits`` is the range the comparison used (the conditional
+    comparison range R_C: the same value ``compare_return_values`` computed);
+    ``first_difference_bit`` the lowest differing bit inside it, ``None`` when
+    the difference was established between two sets of possible values (a
+    rounding-sensitive floating-point value); ``fp_format`` the format the
+    floating-point comparison used.
+    """
+
+    compared_bits: int
+    first_difference_bit: Optional[int]
+    fp_format: Optional[FpFormat] = None
+
+
+def compared_extent(
+    plan: ReturnObservationPlan, left: ObservedRegister, right: ObservedRegister
+) -> Optional[ComparedExtent]:
+    """The extent of a comparison that found a difference, or ``None`` when
+    ``compare_return_values`` did not find one."""
+    if compare_return_values(plan, left, right) is not ObservationRelation.DIFFERENT:
+        return None
+    if plan.arg_class is ArgClass.INT:
+        size = _int_compare_bytes(plan, (left, right))
+        x = _low(left.value ^ right.value, size)
+        return ComparedExtent(8 * size, (x & -x).bit_length() - 1 if x else None)
+    fmt = left.value_format
+    size = _FORMAT_BYTES[fmt]
+    if left.reliable_for(size) and right.reliable_for(size):
+        x = _low(left.value ^ right.value, size)
+        return ComparedExtent(8 * size, (x & -x).bit_length() - 1 if x else None, fmt)
+    return ComparedExtent(8 * size, None, fmt)
+
+
 def compare_return_values(
     plan: ReturnObservationPlan, left: ObservedRegister, right: ObservedRegister
 ) -> Union[ObservationRelation, ObservationRefusal]:
     """Compare the two return registers under ``plan``."""
     observed = (left, right)
     if plan.arg_class is ArgClass.INT:
-        compare_bytes = min(
-            min(location.width_bytes, value.defined_low_bytes)
-            for location, value in zip(plan.locations, observed)
-        )
+        compare_bytes = _int_compare_bytes(plan, observed)
         if compare_bytes <= 0:
             return ObservationRefusal.RETURN_VALUE_NOT_DEFINED
         if not all(value.reliable_for(compare_bytes) for value in observed):

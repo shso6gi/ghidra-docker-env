@@ -615,7 +615,50 @@ def _concrete_lane_budget(budget_seconds: float) -> Optional[float]:
     return min(float(budget_seconds), deadline.remaining_seconds())
 
 
-def _run_concrete_proof(result: Any, analyses: Tuple[Any, Any], concrete_subjects: Any, options: Any) -> Any:
+def return_width_parity_inputs(projection: Any, result: Any) -> Mapping[str, Any]:
+    """The SMT_PARITY inputs of the concrete observation (Issue #327), plain data.
+
+    * ``return_width_domain_active``: whether the final projection has an active
+      cause of the return-width / ABI-width domain (its sealed reason registry);
+    * ``completed``: the completed unary return-width proofs on the result, with
+      the side (or binary id) they belong to and their payload width.
+
+    The checker's adapter turns them into a per-side evidence level.  They are
+    an evidence level of an assumed observation element, never verification.
+    """
+
+    from scripts.function_tracer_pcode.authority.domains.abi_width_readonly import (
+        ABI_WIDTH_READONLY_REASON_REGISTRY,
+    )
+    from scripts.function_tracer_pcode.proof.obligations.return_width import (
+        UNARY_RETURN_WIDTH_PROOF_KIND,
+    )
+
+    width_reasons = {definition.reason_id for definition in ABI_WIDTH_READONLY_REASON_REGISTRY.snapshot()}
+    active = any(row.reason_id in width_reasons for row in getattr(projection, "c_active_base", ()) or ())
+    completed = []
+    for item in getattr(result, "completed_recovery_proof_evidence", ()) or ():
+        if not isinstance(item, Mapping):
+            continue
+        evidence = item.get("evidence")
+        if not isinstance(evidence, Mapping):
+            continue
+        requirement = evidence.get("proof_requirement_id")
+        if not isinstance(requirement, Mapping) or requirement.get("proof_kind") != UNARY_RETURN_WIDTH_PROOF_KIND:
+            continue
+        facts = evidence.get("width_facts")
+        payload = facts.get("semantic_payload_width") if isinstance(facts, Mapping) else None
+        completed.append({
+            "side": item.get("side") if isinstance(item.get("side"), str) else None,
+            "binary_id": item.get("binary_id") if isinstance(item.get("binary_id"), str) else None,
+            "payload_bits": payload if type(payload) is int else None,
+        })
+    return {"return_width_domain_active": active, "completed": tuple(completed)}
+
+
+def _run_concrete_proof(
+    result: Any, analyses: Tuple[Any, Any], concrete_subjects: Any, options: Any, projection: Any = None,
+) -> Any:
     """solver の witness を両 binary で再生した proof artifact（Issue #18 C2）と、その artifact が
     依存した事実の閉包（Issue #325。subject の fact handle の閉包）の組。"""
 
@@ -638,7 +681,10 @@ def _run_concrete_proof(result: Any, analyses: Tuple[Any, Any], concrete_subject
         return ConcreteCounterexampleArtifact._create(
             witness_count=len(witnesses), non_decisive_reasons=(CONCRETE_BUDGET_EXHAUSTED,)
         ), subject_reliance(None)
-    subjects = concrete_subjects(*analyses) if witnesses else None
+    subjects = (
+        concrete_subjects(*analyses, observation_inputs=return_width_parity_inputs(projection, result))
+        if witnesses else None
+    )
     # Issue #325: the proof reads the analyses only through the subjects' fact
     # handles; what it relied on is their closure.
     return run_concrete_counterexample_proof(
@@ -708,7 +754,7 @@ def run_production_conditional_lane(
                 debug=debug,
             )
             concrete, concrete_reliance = (
-                _run_concrete_proof(result, (analysis1, analysis2), concrete_subjects, concrete_options)
+                _run_concrete_proof(result, (analysis1, analysis2), concrete_subjects, concrete_options, projection)
                 if concrete_enabled else (None, None)
             )
             stopped = lane_ledger.pending_failure()

@@ -50,7 +50,13 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from scripts.function_tracer_pcode.concrete.observation import ReturnStorage
+from scripts.function_tracer_pcode.concrete.observation import ReturnStorage, compared_extent
+from scripts.function_tracer_pcode.concrete.observation_claim import (
+    EvidenceStatus,
+    ObservationClassification,
+    classify_pair,
+    classify_side,
+)
 from scripts.function_tracer_pcode.concrete.replay import (
     PlanRefusal,
     ReplayPlan,
@@ -75,7 +81,7 @@ from scripts.function_tracer_pcode.proof.assumptions import (
     normalize_assumption_premises,
 )
 
-CONCRETE_PROOF_ADAPTER_VERSION = "concrete-counterexample-proof-v1"
+CONCRETE_PROOF_ADAPTER_VERSION = "concrete-counterexample-proof-v2"
 
 #: authority 側 ``ConditionalDecisiveProofKind`` と同じ名前（import はしない）。
 CONDITIONAL_CONCRETE_COUNTEREXAMPLE = "CONDITIONAL_CONCRETE_COUNTEREXAMPLE"
@@ -92,6 +98,9 @@ CONCRETE_NOT_CONFIRMED = "concrete_replay_not_confirmed"
 CONCRETE_BUDGET_EXHAUSTED = "concrete_replay_budget_exhausted"
 #: the pair has no analysis deadline: the replay runs only inside one
 CONCRETE_NO_DEADLINE = "concrete_replay_no_analysis_deadline"
+#: Issue #327: binary evidence positively contradicts the compared return observation
+#: (an element in CONFLICT): the difference is not a difference of the return values
+CONCRETE_OBSERVATION_CONFLICT = "concrete_replay_observation_conflict"
 
 #: Distinct witnesses replayed per pair at most.
 MAX_WITNESSES = 16
@@ -146,6 +155,84 @@ class ConcreteSideFacts:
 
     def handles(self) -> Tuple[FactHandle, ...]:
         return (self.parameters, self.return_location, self.return_value_class)
+
+
+@dataclass(frozen=True)
+class ReturnObservationFacts:
+    """The evidence about one side's return observation, as fact handles (Issue #327).
+
+    * ``caller_demand``: ``RETURN_CALLER_DEMAND`` -- how the callers in the same
+      binary use the return registers (``ghidra.return_use_evidence``), or
+      ``None`` when it was not read;
+    * ``smt_parity``: ``RETURN_PAYLOAD_WIDTH`` -- whether the symbolic path's
+      static return-width proof completed for this side (``{"complete": bool,
+      "payload_bits": int|None}``), or ``None``;
+    * ``*_status``: whether each was consulted (``EvidenceStatus``).
+
+    Built by the checker's adapter only (``checker.concrete_replay``).
+    """
+
+    caller_demand: Optional[FactHandle]
+    caller_demand_status: EvidenceStatus
+    smt_parity: Optional[FactHandle]
+    smt_parity_status: EvidenceStatus
+
+    def __post_init__(self) -> None:
+        for name, kind in (("caller_demand", FactKind.RETURN_CALLER_DEMAND), ("smt_parity", FactKind.RETURN_PAYLOAD_WIDTH)):
+            handle = getattr(self, name)
+            if handle is not None and (type(handle) is not FactHandle or handle.ref.kind is not kind):
+                raise TypeError(f"return observation facts carry a {kind.value} FactHandle as {name}")
+        for name in ("caller_demand_status", "smt_parity_status"):
+            if type(getattr(self, name)) is not EvidenceStatus:
+                raise TypeError(f"{name} is an EvidenceStatus")
+
+    def handles(self) -> Tuple[FactHandle, ...]:
+        """The handles the classification reads (only consulted ones)."""
+        out = []
+        if self.caller_demand is not None and self.caller_demand_status is EvidenceStatus.CONSULTED:
+            out.append(self.caller_demand)
+        if self.smt_parity is not None and self.smt_parity_status is EvidenceStatus.CONSULTED:
+            out.append(self.smt_parity)
+        return tuple(out)
+
+
+class LazyObservationFacts:
+    """Reads one side's return-observation evidence once, and only when asked.
+
+    The proof asks only after a witness confirmed a difference, so reading the
+    callers never runs before or during the replay and never changes which
+    witness is replayed or confirmed.  A builder that raises, or returns
+    something other than ``ReturnObservationFacts``, leaves the side with no
+    consulted evidence (fail closed: every element stays assumed).
+    """
+
+    def __init__(self, build: Callable[[], "ReturnObservationFacts"]):
+        self._build = build
+        self._facts: Optional[ReturnObservationFacts] = None
+        self._failure: Optional[str] = None
+        self._asked = False
+
+    def get(self) -> Optional[ReturnObservationFacts]:
+        if not self._asked:
+            self._asked = True
+            try:
+                facts = self._build()
+            except (ArithmeticError, AttributeError, LookupError, RuntimeError, TypeError, ValueError) as exc:
+                # fail closed: the evidence is just not used (every element stays assumed)
+                self._failure = f"{type(exc).__name__}: {exc}"[:200]
+                facts = None
+            if facts is not None and type(facts) is not ReturnObservationFacts:
+                self._failure = f"unexpected evidence type {type(facts).__name__}"
+                facts = None
+            self._facts = facts
+        return self._facts
+
+    @property
+    def failure(self) -> Optional[str]:
+        return self._failure
+
+    def consulted_handles(self) -> Tuple[FactHandle, ...]:
+        return () if self._facts is None else self._facts.handles()
 
 
 def formula_inputs(
@@ -230,12 +317,23 @@ def subject_reliance(subjects: Optional[Sequence[Any]]) -> ReliesOn:
         if not isinstance(subject, ConcreteSubject):
             return ReliesOn.unknown_provenance(reason="a concrete side supplied no fact handles")
         handles.extend(subject.side_facts.handles())
+        # Issue #327: the observation evidence the classification actually read
+        if subject.observation_facts is not None:
+            handles.extend(subject.observation_facts.consulted_handles())
     return ReliesOn.closure_of(handles)
 
 
 # ---------------------------------------------------------------- premises
 
-def concrete_premises(plan: ReplayPlan, programs: Sequence[Mapping[str, Any]]) -> Tuple[AssumptionPremise, ...]:
+def concrete_premises(
+    plan: ReplayPlan,
+    programs: Sequence[Mapping[str, Any]],
+    observation: Optional[ObservationClassification] = None,
+) -> Tuple[AssumptionPremise, ...]:
+    """The premises of a concrete difference: the calling convention of each
+    side, the processor semantics and (Issue #327) every return-observation
+    element no accepted evidence verified.  Without ``observation`` (no
+    classification was made) every observation element is assumed."""
     premises = []
     for side, (item, location, facts) in enumerate(zip(plan.sides, plan.observation.locations, programs)):
         premises.append(AssumptionPremise(
@@ -249,11 +347,26 @@ def concrete_premises(plan: ReplayPlan, programs: Sequence[Mapping[str, Any]]) -
                     item.abi.argument_register(argument.slots[side]) or ""
                     for argument in plan.correspondence.arguments
                 ],
-                "return_register": location.register,
-                "return_class": location.arg_class.value,
-                "return_width_bytes": location.width_bytes,
             },
         ))
+        side_claim = None if observation is None else observation.sides[side]
+        if side_claim is None or side_claim.assumed:
+            premises.append(AssumptionPremise(
+                kind=AssumptionKind.CONCRETE_RETURN_OBSERVATION,
+                subject=f"function{side + 1}",
+                payload={
+                    "register": location.register,
+                    "value_class": location.arg_class.value,
+                    "elements": (
+                        [claim.premise_record() for claim in side_claim.elements]
+                        if side_claim is not None else [(("assumed", location.width_bytes * 8), ("element", "ALL"),
+                                                         ("state", "ASSUMED"))]
+                    ),
+                    "verified_bits": 0 if observation is None else observation.verified_bits,
+                    "compared_bits": None if observation is None else observation.compared_bits,
+                    "evidence_digest": "" if observation is None else observation.evidence_digest,
+                },
+            ))
     premises.append(AssumptionPremise(
         kind=AssumptionKind.CONCRETE_PCODE_SEMANTICS,
         subject="executor",
@@ -293,6 +406,9 @@ class ConcreteCounterexampleArtifact:
     non_decisive_reasons: Tuple[str, ...]
     artifact_digest: str
     diagnostics: Mapping[str, Any] = field(default_factory=dict, compare=False, repr=False)
+    #: Issue #327: the classification of the confirmed difference's return observation
+    #: (``ObservationClassification.to_json``), ``None`` when no difference was classified
+    observation: Optional[Mapping[str, Any]] = None
 
     def __init__(self, *, _factory_token: object = None, diagnostics: Optional[Mapping[str, Any]] = None,
                  **fields: Any) -> None:
@@ -300,6 +416,7 @@ class ConcreteCounterexampleArtifact:
             raise ValueError("concrete proof artifacts are issued only by run_concrete_counterexample_proof")
         for name in ("proof_kind", "plan", "witness_count", "confirmed", "artifact_digest"):
             object.__setattr__(self, name, fields[name])
+        object.__setattr__(self, "observation", fields.get("observation"))
         object.__setattr__(self, "assumption_set", tuple(fields["assumption_set"]))
         object.__setattr__(self, "replays", tuple(fields["replays"]))
         object.__setattr__(self, "programs", tuple(fields["programs"]))
@@ -324,6 +441,7 @@ class ConcreteCounterexampleArtifact:
             "confirmed": self.confirmed,
             "programs": list(self.programs),
             "non_decisive_reasons": list(self.non_decisive_reasons),
+            "observation": self.observation,
         }
 
     def validate(self) -> None:
@@ -341,6 +459,8 @@ class ConcreteCounterexampleArtifact:
                 raise ValueError("a decisive concrete proof names its confirmed replay")
             if self.replays[self.confirmed].get("status") != WitnessStatus.CONFIRMED.value:
                 raise ValueError("the confirmed replay of a concrete proof is not a confirmation")
+            if not isinstance(self.observation, Mapping) or self.observation.get("conflict") is not False:
+                raise ValueError("a decisive concrete proof carries a conflict-free observation classification")
         elif self.confirmed is not None:
             raise ValueError("a non-decisive concrete proof names no confirmed replay")
 
@@ -374,6 +494,7 @@ class ConcreteCounterexampleArtifact:
         fields.setdefault("confirmed", None)
         fields.setdefault("programs", ())
         fields.setdefault("non_decisive_reasons", ())
+        fields.setdefault("observation", None)
         draft = cls(_factory_token=_CONCRETE_ARTIFACT_FACTORY_TOKEN, artifact_digest="", **fields)
         artifact = cls(
             _factory_token=_CONCRETE_ARTIFACT_FACTORY_TOKEN,
@@ -411,10 +532,14 @@ class ConcreteSubject:
     facts: Mapping[str, Any]
     #: what the proof reads of this side's analysis, as fact handles (Issue #325)
     side_facts: ConcreteSideFacts
+    #: the side's return-observation evidence, read only after a confirmation (Issue #327)
+    observation_facts: Optional[LazyObservationFacts] = None
 
     def __post_init__(self) -> None:
         if type(self.side_facts) is not ConcreteSideFacts:
             raise TypeError("a concrete subject carries its ConcreteSideFacts")
+        if self.observation_facts is not None and type(self.observation_facts) is not LazyObservationFacts:
+            raise TypeError("a concrete subject's observation evidence is a LazyObservationFacts")
 
 
 def run_concrete_counterexample_proof(
@@ -491,9 +616,72 @@ def run_concrete_counterexample_proof(
             plan="OK", witness_count=len(witnesses), replays=records, programs=programs,
             non_decisive_reasons=tuple(reasons), diagnostics=diagnostics,
         )
+    observation, evidence = classify_observation(plan, subjects, replays[confirmed])
+    record = observation.to_json()
+    diagnostics["observation_evidence"] = evidence
+    if observation.conflict:
+        # Issue #327: evidence contradicts the compared observation; refuse the difference
+        # (the replay records stay; a conflict is about the pair, so no later witness is tried)
+        return ConcreteCounterexampleArtifact._create(
+            plan="OK", witness_count=len(witnesses), replays=records, programs=programs,
+            non_decisive_reasons=(CONCRETE_OBSERVATION_CONFLICT,), diagnostics=diagnostics,
+            observation=record,
+        )
     return ConcreteCounterexampleArtifact._create(
         proof_kind=CONDITIONAL_CONCRETE_COUNTEREXAMPLE,
-        assumption_set=concrete_premises(plan, programs),
+        assumption_set=concrete_premises(plan, programs, observation),
         plan="OK", witness_count=len(witnesses), replays=records, confirmed=confirmed,
-        programs=programs, diagnostics=diagnostics,
+        programs=programs, diagnostics=diagnostics, observation=record,
     )
+
+
+def classify_observation(
+    plan: ReplayPlan, subjects: Sequence[Any], replay: WitnessReplay
+) -> Tuple[ObservationClassification, Mapping[str, Any]]:
+    """Classify the return observation of a confirmed difference (Issue #327).
+
+    Runs only after the replay confirmed ``replay``: it reads each side's
+    observation evidence (``LazyObservationFacts``) and never changes the
+    comparison range R_C, which is what the comparison read
+    (``concrete.observation.compared_extent``).
+    """
+    observed = tuple(result.observed(location.register) for result, location in zip(replay.results, plan.observation.locations))
+    extent = compared_extent(plan.observation, observed[0], observed[1])
+    if extent is None:  # pragma: no cover - a confirmed replay always has a difference
+        raise ValueError("a confirmed replay has no compared difference")
+    sides = []
+    evidence = {}
+    for index, (subject, location, value) in enumerate(zip(subjects, plan.observation.locations, observed)):
+        lazy = getattr(subject, "observation_facts", None)
+        facts = lazy.get() if lazy is not None else None
+        demand_status = facts.caller_demand_status if facts is not None else (
+            EvidenceStatus.FAILED if lazy is not None else EvidenceStatus.NOT_CONSULTED)
+        parity_status = facts.smt_parity_status if facts is not None else demand_status
+        demand = facts.caller_demand.value if facts is not None and facts.caller_demand is not None else None
+        parity = facts.smt_parity.value if facts is not None and facts.smt_parity is not None else None
+        evidence[f"side{index}"] = {
+            "caller_demand": _plain(demand) if demand_status is EvidenceStatus.CONSULTED else None,
+            "smt_parity": _plain(parity) if parity_status is EvidenceStatus.CONSULTED else None,
+            "failure": None if lazy is None else lazy.failure,
+        }
+        sides.append(classify_side(
+            index,
+            value_class=location.arg_class.value,
+            register=location.register,
+            prototype_width_bits=8 * location.width_bytes,
+            caller_demand=demand, caller_demand_status=demand_status,
+            smt_parity=parity, parity_status=parity_status,
+            executed_format=(value.value_format.value if value is not None and value.value_format is not None
+                             and location.arg_class.value == "FP" else None),
+        ))
+    return classify_pair(sides[0], sides[1], compared_bits=extent.compared_bits,
+                         first_difference_bit=extent.first_difference_bit, evidence=evidence), evidence
+
+
+def _plain(value: Any) -> Any:
+    """A read-only handle value as plain JSON data (MappingProxy / tuple -> dict / list)."""
+    if isinstance(value, Mapping):
+        return {str(k): _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
