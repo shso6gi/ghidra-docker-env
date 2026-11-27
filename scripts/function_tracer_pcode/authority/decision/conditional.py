@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Iterable, Mapping, Tuple
+from typing import Any, Iterable, Mapping, Optional, Tuple
 
 from scripts.function_tracer_pcode.authority.contracts import (
     Outcome,
@@ -28,6 +28,14 @@ from scripts.function_tracer_pcode.authority.contracts import (
     freeze_authority_value,
 )
 from scripts.function_tracer_pcode.authority.decision.decision import DecisionReceipt
+from scripts.function_tracer_pcode.authority.decision.obligation_scope import (
+    DecisionSide,
+    Lane,
+    ObligationScopeRecord,
+    evaluate_obligation_scope,
+    scoped_evidence,
+)
+from scripts.function_tracer_pcode.core.fact_reliance import ReliesOn
 from scripts.function_tracer_pcode.proof.assumptions import (
     AssumptionKind,
     AssumptionPremise,
@@ -158,8 +166,14 @@ class ConditionalFinalizationAuthority:
     assumption_set: Tuple[AssumptionPremise, ...]
     conditional_decisive_proof_receipts: Tuple[ConditionalDecisiveProofReceipt, ...] = ()
     malformed_authority: bool = False
+    #: What the concrete counterexample relied on (Issue #325).  ``None`` = the
+    #: producer recorded nothing, i.e. every fact.  The SMT kinds always rely on
+    #: every fact, whatever is passed here.
+    concrete_reliance: Optional[ReliesOn] = None
 
     def __post_init__(self) -> None:
+        if self.concrete_reliance is not None and type(self.concrete_reliance) is not ReliesOn:
+            raise TypeError("a concrete reliance is an exact ReliesOn")
         if type(self.unconditional_decision) is not DecisionReceipt:
             raise TypeError("the conditional lane requires the unconditional DecisionReceipt")
         if type(self.lifecycle_projection) is not VerifiedLifecycleProjection:
@@ -509,10 +523,31 @@ def validate_conditional_decision_join(
         raise ValueError("conditional receipt contradicts the unconditional outcome")
 
 
+@dataclass(frozen=True)
+class ConditionalDecisionFinalization:
+    """One conditional decision and the obligation-scope record it was derived with."""
+
+    receipt: "ConditionalDecisionReceipt"
+    obligation_scope: ObligationScopeRecord
+
+
 def finalize_conditional_decision(
     authority: ConditionalFinalizationAuthority,
 ) -> ConditionalDecisionReceipt:
+    """The conditional column (the receipt alone; see `finalize_conditional_decision_with_scope`)."""
+
+    return finalize_conditional_decision_with_scope(authority).receipt
+
+
+def finalize_conditional_decision_with_scope(
+    authority: ConditionalFinalizationAuthority,
+) -> ConditionalDecisionFinalization:
     """Derive the conditional column from one conditional lane bundle.
+
+    Whether an active row of the lane projection blocks a side is answered by
+    the shared ``obligation_scope`` rule (Issue #325); the lane's own adoption
+    rule -- unconditional UNKNOWN, the join, the whole assumption set -- stays
+    here.
 
     The lane runs only after an unconditional ``UNKNOWN``; every other
     unconditional outcome, a broken join, or a receipt that depends on less
@@ -564,33 +599,69 @@ def finalize_conditional_decision(
     has_eq = ConditionalDecisiveProofKind.CONDITIONAL_EQ_CLOSURE in kinds
     has_not_eq = any(kind in CONDITIONAL_NOT_EQ_PROOF_KINDS for kind in kinds)
     active = projection.c_active_base
-    blocks_eq = any(
-        row.decision_effect in {"blocks_equivalence", "blocks_decision"} for row in active
-    )
-    blocks_not_eq = any(
-        row.decision_effect in {"blocks_disequivalence", "blocks_decision"} for row in active
-    )
+    try:
+        evidence = tuple(
+            scoped_evidence(
+                receipt.proof_kind.value,
+                receipt.receipt_digest,
+                relies_on=(
+                    authority.concrete_reliance
+                    if receipt.proof_kind is ConditionalDecisiveProofKind.CONDITIONAL_CONCRETE_COUNTEREXAMPLE
+                    else None
+                ),
+            )
+            for receipt in authority.conditional_decisive_proof_receipts
+            if isinstance(receipt.proof_kind, ConditionalDecisiveProofKind)
+        )
+    except (TypeError, ValueError):
+        # A receipt that cannot name itself already failed validate() (ERROR).
+        malformed = True
+        evidence = ()
+
+    def _scope(items):
+        return evaluate_obligation_scope(
+            lane=Lane.CONDITIONAL,
+            result_occurrence_id=authority.result_occurrence_id,
+            lifecycle_projection_digest=projection.lifecycle_projection_digest,
+            rows=active,
+            evidence=items,
+        )
+
+    try:
+        scope = _scope(evidence)
+    except ValueError:
+        # two rows of one cause judged differently: the projection is not a
+        # projection of one lifecycle (ERROR); record the rows without evidence
+        malformed = True
+        scope = _scope(())
     if malformed or (has_eq and has_not_eq):
         conditional_outcome = Outcome.ERROR
     elif has_eq:
-        conditional_outcome = Outcome.EQUIVALENT if not blocks_eq else Outcome.UNKNOWN
+        conditional_outcome = (
+            Outcome.EQUIVALENT if scope.side_decisive(DecisionSide.EQUIVALENCE)
+            else Outcome.UNKNOWN
+        )
     elif has_not_eq:
-        conditional_outcome = Outcome.NOT_EQ if not blocks_not_eq else Outcome.UNKNOWN
+        conditional_outcome = (
+            Outcome.NOT_EQ if scope.side_decisive(DecisionSide.DISEQUIVALENCE)
+            else Outcome.UNKNOWN
+        )
     else:
         conditional_outcome = Outcome.UNKNOWN
-    input_digest = authority_digest(
-        {
-            "result_occurrence_id": authority.result_occurrence_id,
-            "lifecycle_projection_digest": projection.lifecycle_projection_digest,
-            "unconditional_receipt_digest": unconditional.receipt_digest,
-            "assumption_set_digest": set_digest,
-            "conditional_receipt_digests": tuple(
-                receipt.receipt_digest
-                for receipt in authority.conditional_decisive_proof_receipts
-            ),
-            "malformed_authority": malformed,
-        }
-    )
+    authority_input = {
+        "result_occurrence_id": authority.result_occurrence_id,
+        "lifecycle_projection_digest": projection.lifecycle_projection_digest,
+        "unconditional_receipt_digest": unconditional.receipt_digest,
+        "assumption_set_digest": set_digest,
+        "conditional_receipt_digests": tuple(
+            receipt.receipt_digest
+            for receipt in authority.conditional_decisive_proof_receipts
+        ),
+        "malformed_authority": malformed,
+    }
+    if scope.bound_to_receipt:
+        authority_input["obligation_scope_digest"] = scope.record_digest
+    input_digest = authority_digest(authority_input)
     receipt_digest = authority_digest(
         {
             "result_occurrence_id": authority.result_occurrence_id,
@@ -615,4 +686,4 @@ def finalize_conditional_decision(
         _factory_token=_CONDITIONAL_DECISION_FACTORY_TOKEN,
     )
     receipt.validate()
-    return receipt
+    return ConditionalDecisionFinalization(receipt, scope)

@@ -42,6 +42,8 @@ from scripts.function_tracer_pcode.proof.concrete_counterexample import (
     solver_witnesses,
     verify_concrete_record,
 )
+from scripts.function_tracer_pcode.checker.concrete_replay import concrete_side_facts
+from scripts.function_tracer_pcode.core.fact_reliance import FactSide
 from scripts.function_tracer_pcode.tests.unit._publication import raw_function_analysis
 from scripts.function_tracer_pcode.tests.unit.test_issue20_prb3_conditional_lane import (
     NO_OBSERVATION,
@@ -111,9 +113,22 @@ FACTS = {"sha256": "ab" * 32, "language_id": "AARCH64:LE:64:v8A", "compiler_spec
          "executor": "pcode-emulator-executor-v3", "ghidra": "12.0"}
 
 
-def _subjects(left, right):
-    return (ConcreteSubject(left, ARM, 0x1000, _locate, FACTS),
-            ConcreteSubject(right, ARM, 0x2000, _locate, dict(FACTS, sha256="cd" * 32)))
+def _subjects(left, right, analyses=None):
+    # Issue #325: the proof reads each side's analysis only through the adapter's fact handles
+    analysis1, analysis2 = analyses or (_analysis(), _analysis(0x2000))
+    return (ConcreteSubject(left, ARM, 0x1000, _locate, FACTS,
+                            concrete_side_facts(analysis1, FactSide.LEFT)),
+            ConcreteSubject(right, ARM, 0x2000, _locate, dict(FACTS, sha256="cd" * 32),
+                            concrete_side_facts(analysis2, FactSide.RIGHT)))
+
+
+def _params(analysis):
+    return concrete_side_facts(analysis, FactSide.LEFT).parameters
+
+
+def _return(analysis, locate=None):
+    facts = concrete_side_facts(analysis, FactSide.LEFT)
+    return return_storage(facts.return_location, facts.return_value_class, locate or _locate)
 
 
 WITNESS = {"param_1_1": 3, "param_1_2": 3, "rtunk_x_32": 9}
@@ -122,9 +137,7 @@ WITNESS = {"param_1_1": 3, "param_1_2": 3, "rtunk_x_32": 9}
 def _proof(left, right, witnesses=(WITNESS,), **kw):
     kw.setdefault("budget_seconds", 30.0)
     kw.setdefault("step_limit", 1000)
-    return run_concrete_counterexample_proof(
-        _analysis(), _analysis(0x2000), witnesses, _subjects(left, right), **kw
-    )
+    return run_concrete_counterexample_proof(witnesses, _subjects(left, right), **kw)
 
 
 # ------------------------------------------------------------------ the proof
@@ -139,13 +152,13 @@ def test_witnesses_come_from_the_sat_rows_distinct_and_in_order():
 
 def test_the_formula_inputs_and_the_return_location_are_read_from_the_analysis():
     analysis = _analysis()
-    (only,) = formula_inputs(analysis, "_2", _locate)
+    (only,) = formula_inputs(_params(analysis), "_2", _locate)
     assert only.variable == "param_1_2" and only.bit_width == 32 and only.location == W0
-    storage = return_storage(analysis, _locate)
+    storage = _return(analysis)
     assert storage.locations == (W0,) and not storage.is_pointer
     # pointer-ness is the recovered type object's (never the type's spelling)
-    assert return_storage(_analysis_pointer(), _locate).is_pointer
-    assert not return_storage(_analysis(return_type="int *"), _locate).is_pointer
+    assert _return(_analysis_pointer()).is_pointer
+    assert not _return(_analysis(return_type="int *")).is_pointer
 
 
 def test_a_witness_whose_runs_differ_is_a_decisive_conditional_proof():
@@ -188,12 +201,13 @@ def test_runs_that_establish_nothing_leave_the_proof_non_decisive(left_result, r
 def test_no_witness_no_side_a_refused_plan_and_a_spent_budget_are_non_decisive():
     assert _proof(Fixed(), Fixed(), witnesses=()).non_decisive_reasons == (CONCRETE_NO_WITNESS,)
     artifact = run_concrete_counterexample_proof(
-        _analysis(), _analysis(), (WITNESS,), ("PROGRAM_NOT_MODELLED:x", None), budget_seconds=1, step_limit=1
+        (WITNESS,), ("PROGRAM_NOT_MODELLED:x", None), budget_seconds=1, step_limit=1
     )
     assert artifact.non_decisive_reasons == (CONCRETE_SIDE_UNAVAILABLE,)
     assert artifact.plan == "SIDE_REFUSED:side0:PROGRAM_NOT_MODELLED:x;side1:UNAVAILABLE"
     pointer = run_concrete_counterexample_proof(
-        _analysis(), _analysis_pointer(), (WITNESS,), _subjects(Fixed(), Fixed()), budget_seconds=1, step_limit=1
+        (WITNESS,), _subjects(Fixed(), Fixed(), (_analysis(), _analysis_pointer())),
+        budget_seconds=1, step_limit=1,
     )
     assert pointer.non_decisive_reasons == (CONCRETE_PLAN_REFUSED,)
     assert pointer.plan == "RETURN_LOCATION:side1:RETURN_TYPE_POINTER"
@@ -236,7 +250,7 @@ def _concrete_lane(result, projection, left, right, analyses=None, *, deadline=6
         return run_production_conditional_lane(
             result, projection=projection, analyses=analyses, observation_policy=NO_OBSERVATION,
             solver_runner=_Solver(True),
-            concrete_subjects=lambda a1, a2: _subjects(left, right),
+            concrete_subjects=lambda a1, a2: _subjects(left, right, (a1, a2)),
             concrete_options=SimpleNamespace(budget_seconds=30.0, step_limit=1000),
         )
 @pytest.mark.wall_clock   # the lane reads the analysis deadline (Issue #239)
@@ -356,18 +370,18 @@ def test_a_parameter_is_located_by_its_varnode_and_read_at_its_type_width():
         seen.append((space, offset, size))
         return StorageLocation(True, "x0", "x0", 8, 0, size)
 
-    (only,) = formula_inputs(analysis, "_1", locate)
+    (only,) = formula_inputs(_params(analysis), "_1", locate)
     assert seen == [("register", 0x4000, 8)]
     # the same when the record keeps the type's width at the base register's
     # start (MIPS: 4 bytes at ``a0``'s offset would be its high half)
     analysis.parameters[0]["storage"] = dict(_storage(), size=4, register_name="x0")
     seen.clear()
-    (only,) = formula_inputs(analysis, "_1", locate)
+    (only,) = formula_inputs(_params(analysis), "_1", locate)
     assert seen == [("register", 0x4000, 8)] and only.location.names_whole_base_register()
     assert only.location.size_bytes == 4 and only.location.names_whole_base_register()
     # a stack or unlocatable parameter is not a register parameter
     analysis.parameters[0]["storage"] = {"is_register": False, "offset": 8, "size": 4, "space_name": "stack"}
-    assert not formula_inputs(analysis, "_1", locate)[0].location.is_register
+    assert not formula_inputs(_params(analysis), "_1", locate)[0].location.is_register
 
 
 def test_the_replay_never_outlasts_its_budget():

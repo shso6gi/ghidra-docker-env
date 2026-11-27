@@ -51,6 +51,7 @@ from scripts.function_tracer_pcode.authority.contracts import authority_digest
 from scripts.function_tracer_pcode.authority.decision.production_cutover import (
     attach_canonical_decision,
     attach_canonical_relations,
+    attach_obligation_scope,
     issue_infrastructure_error_decision,
 )
 # Issue #124 PR-124-B: finalize / conditional lane の区間を journal にも残す。
@@ -672,6 +673,12 @@ def run_check_from_binaries_with_v2_pilot(
                 attach_canonical_relations(
                     result, evidence.pilot_result.reduction.projection
                 )
+                # Issue #325: the row-by-row obligation scope the decision used.
+                scope_record = getattr(
+                    evidence.pilot_result.candidate, "obligation_scope", None
+                )
+                if scope_record is not None:
+                    attach_obligation_scope(result, scope_record)
                 # Issue #20 PR-20-B3: 無条件 DecisionReceipt が確定したあと、
                 # UNKNOWN のときだけ conditional lane を回す。conditional 列は
                 # 別列で、is_equivalent / final_outcome / exit code は動かない。

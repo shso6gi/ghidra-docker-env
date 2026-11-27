@@ -50,7 +50,8 @@ P-code の意味）は receipt の assumption set に載る。
 並び順・reason 名の一致は対応根拠にしない。ここで落とせなかった理由（outcome
 partition、ABI 幅、recurrence、argument extraction など）は残り、
 ``finalize_conditional_decision`` の ``blocks_equivalence`` / ``blocks_decision``
-判定でそのまま効く。
+判定でそのまま効く（その判定は主判定と共通の ``obligation_scope`` の規則。Issue #325 E1 では
+どの証拠も全事実に依存するので、``decision_effect`` だけで阻む従来の規則と同じ結果になる）。
 """
 
 from __future__ import annotations
@@ -68,7 +69,7 @@ from scripts.function_tracer_pcode.authority.decision.conditional import (
     ConditionalDecisiveProofKind,
     ConditionalDecisiveProofReceipt,
     ConditionalFinalizationAuthority,
-    finalize_conditional_decision,
+    finalize_conditional_decision_with_scope,
 )
 from scripts.function_tracer_pcode.authority.decision.decision import DecisionReceipt
 
@@ -438,8 +439,34 @@ def issue_conditional_decision(
     artifact: Any,
     result: Any = None,
     concrete_artifact: Any = None,
+    concrete_reliance: Any = None,
+) -> Any:
+    """`issue_conditional_decision_with_scope` の receipt だけ（従来の呼び出し口）。"""
+
+    return issue_conditional_decision_with_scope(
+        unconditional_decision=unconditional_decision,
+        projection=projection,
+        artifact=artifact,
+        result=result,
+        concrete_artifact=concrete_artifact,
+        concrete_reliance=concrete_reliance,
+    ).receipt
+
+
+def issue_conditional_decision_with_scope(
+    *,
+    unconditional_decision: DecisionReceipt,
+    projection: VerifiedLifecycleProjection,
+    artifact: Any,
+    result: Any = None,
+    concrete_artifact: Any = None,
+    concrete_reliance: Any = None,
 ) -> Any:
     """proof artifact を conditional 列の ``ConditionalDecisionReceipt`` にする。
+
+    返り値は receipt と、その導出に使った obligation scope の記録（Issue #325）の組
+    （``ConditionalDecisionFinalization``）。``concrete_reliance`` は具体実行の反例が依存した
+    事実の閉包（``core.fact_reliance.ReliesOn``。``None`` は全事実）。
 
     decisive でない artifact でも receipt は出す（conditional_outcome は
     ``UNKNOWN``）。無条件 receipt / projection / 結果には触れない。
@@ -517,8 +544,9 @@ def issue_conditional_decision(
         lane_projection,
         assumption_set,
         conditional_decisive_proof_receipts=receipts,
+        concrete_reliance=concrete_reliance,
     )
-    return finalize_conditional_decision(authority)
+    return finalize_conditional_decision_with_scope(authority)
 
 
 class _PostDecisionConsumer:
@@ -588,7 +616,8 @@ def _concrete_lane_budget(budget_seconds: float) -> Optional[float]:
 
 
 def _run_concrete_proof(result: Any, analyses: Tuple[Any, Any], concrete_subjects: Any, options: Any) -> Any:
-    """solver の witness を両 binary で再生した proof artifact（Issue #18 C2）。"""
+    """solver の witness を両 binary で再生した proof artifact（Issue #18 C2）と、その artifact が
+    依存した事実の閉包（Issue #325。subject の fact handle の閉包）の組。"""
 
     from scripts.function_tracer_pcode.proof.concrete_counterexample import (
         CONCRETE_BUDGET_EXHAUSTED,
@@ -596,6 +625,7 @@ def _run_concrete_proof(result: Any, analyses: Tuple[Any, Any], concrete_subject
         ConcreteCounterexampleArtifact,
         run_concrete_counterexample_proof,
         solver_witnesses,
+        subject_reliance,
     )
 
     witnesses = solver_witnesses(result)
@@ -603,16 +633,18 @@ def _run_concrete_proof(result: Any, analyses: Tuple[Any, Any], concrete_subject
     if witnesses and budget is None:
         return ConcreteCounterexampleArtifact._create(
             witness_count=len(witnesses), non_decisive_reasons=(CONCRETE_NO_DEADLINE,)
-        )
+        ), subject_reliance(None)
     if witnesses and budget <= 0:
         return ConcreteCounterexampleArtifact._create(
             witness_count=len(witnesses), non_decisive_reasons=(CONCRETE_BUDGET_EXHAUSTED,)
-        )
+        ), subject_reliance(None)
     subjects = concrete_subjects(*analyses) if witnesses else None
+    # Issue #325: the proof reads the analyses only through the subjects' fact
+    # handles; what it relied on is their closure.
     return run_concrete_counterexample_proof(
-        analyses[0], analyses[1], witnesses, subjects,
+        witnesses, subjects,
         budget_seconds=budget, step_limit=int(getattr(options, "step_limit", 0)),
-    )
+    ), subject_reliance(subjects)
 
 
 def _concrete_diagnostic(artifact: Any) -> Mapping[str, Any]:
@@ -675,9 +707,9 @@ def run_production_conditional_lane(
                 timeout=timeout,
                 debug=debug,
             )
-            concrete = (
+            concrete, concrete_reliance = (
                 _run_concrete_proof(result, (analysis1, analysis2), concrete_subjects, concrete_options)
-                if concrete_enabled else None
+                if concrete_enabled else (None, None)
             )
             stopped = lane_ledger.pending_failure()
         if stopped is not None:
@@ -725,14 +757,16 @@ def run_production_conditional_lane(
                 **extra,
             }
         external = artifact if external_decisive and over_bound is None else None
-        receipt = issue_conditional_decision(
+        finalization = issue_conditional_decision_with_scope(
             unconditional_decision=decision,
             projection=projection,
             artifact=external,
             result=result,
             concrete_artifact=concrete if concrete_decisive else None,
+            concrete_reliance=concrete_reliance if concrete_decisive else None,
         )
-        attach_conditional_decision(result, receipt)
+        receipt = finalization.receipt
+        attach_conditional_decision(result, receipt, finalization.obligation_scope)
     except AnalysisLimitation as exc:
         # Issue #22 PR-22-D: lane は authority 確定の **後** に走る非 authoritative
         # な consumer。そこで上がった限界（式サイズ予算など）は lane 自身の台帳に
