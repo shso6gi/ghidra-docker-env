@@ -122,6 +122,14 @@ class AbiModel:
     # so an operation narrower than ``int`` may stand for ``int`` arithmetic
     # on either extension of its operands.
     c_int_bytes: int = 0
+    # Whether the standard convention returns every value in registers of one
+    # class only (integer or floating point, never both for one value).  AAPCS64:
+    # yes (an HFA / HVA in v-registers, any other composite in x0/x1 or memory).
+    # The MIPS n64 rules for small aggregates with floating-point fields are not
+    # modelled here, so it stays False there (no contradiction is derived).
+    # Read only to tell a contradiction from compatible evidence (Issue #327);
+    # False is the safe default (a refusal is then never derived from it).
+    single_class_return: bool = False
 
     def argument_register(self, slot: ArgumentSlot) -> Optional[str]:
         table = (
@@ -213,6 +221,7 @@ _AARCH64 = AbiModel(
     ),
     control_register_defaults=(("fpcr", 0),),
     c_int_bytes=4,       # LP64 (AAPCS64 data model)
+    single_class_return=True,
 )
 
 _MIPS_N64 = AbiModel(

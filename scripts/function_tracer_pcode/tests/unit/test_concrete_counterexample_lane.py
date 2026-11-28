@@ -170,12 +170,21 @@ def test_a_witness_whose_runs_differ_is_a_decisive_conditional_proof():
     assert dict(left.requests[0].entry_state.registers)["x0"] == 3
     assert dict(right.requests[0].entry_state.registers)["x0"] == 3
     kinds = sorted((p.kind, p.subject) for p in artifact.assumption_set)
+    # Issue #327: the return observation is its own premise per side (no evidence here: all assumed)
     assert kinds == [
         (AssumptionKind.CONCRETE_CALLING_CONVENTION, "function1"),
         (AssumptionKind.CONCRETE_CALLING_CONVENTION, "function2"),
         (AssumptionKind.CONCRETE_PCODE_SEMANTICS, "executor"),
+        (AssumptionKind.CONCRETE_RETURN_OBSERVATION, "function1"),
+        (AssumptionKind.CONCRETE_RETURN_OBSERVATION, "function2"),
     ]
-    convention = [p for p in artifact.assumption_set if p.subject == "function2"][0]
+    convention = [p for p in artifact.assumption_set
+                  if p.subject == "function2" and p.kind is AssumptionKind.CONCRETE_CALLING_CONVENTION][0]
+    assert convention.payload_value("return_width_bytes") is None   # moved to the observation premise
+    observation = [p for p in artifact.assumption_set
+                   if p.subject == "function2" and p.kind is AssumptionKind.CONCRETE_RETURN_OBSERVATION][0]
+    assert observation.payload_value("verified_bits") == 0
+    assert artifact.observation["difference_range"] == "ASSUMED_RANGE_ONLY"
     assert convention.payload_value("program_sha256") == "cd" * 32
     assert convention.payload_value("argument_registers") == ("x0",)
     record = json.loads(json.dumps(artifact.to_json()))
@@ -250,7 +259,7 @@ def _concrete_lane(result, projection, left, right, analyses=None, *, deadline=6
         return run_production_conditional_lane(
             result, projection=projection, analyses=analyses, observation_policy=NO_OBSERVATION,
             solver_runner=_Solver(True),
-            concrete_subjects=lambda a1, a2: _subjects(left, right, (a1, a2)),
+            concrete_subjects=lambda a1, a2, observation_inputs=None: _subjects(left, right, (a1, a2)),
             concrete_options=SimpleNamespace(budget_seconds=30.0, step_limit=1000),
         )
 @pytest.mark.wall_clock   # the lane reads the analysis deadline (Issue #239)
@@ -269,6 +278,7 @@ def test_a_confirmed_replay_discharges_only_the_sat_safety_causes_and_gives_cond
     assert receipt.unconditional_outcome is Outcome.UNKNOWN
     assert {p.kind for p in receipt.assumption_set} == {
         AssumptionKind.CONCRETE_CALLING_CONVENTION, AssumptionKind.CONCRETE_PCODE_SEMANTICS,
+        AssumptionKind.CONCRETE_RETURN_OBSERVATION,   # Issue #327: the assumed observation elements
     }
 
 

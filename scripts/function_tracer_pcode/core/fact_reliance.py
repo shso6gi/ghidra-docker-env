@@ -50,12 +50,18 @@ class FactKind(str, Enum):
     RETURN_LOCATION = "RETURN_LOCATION"
     #: 戻り値の class（整数 / pointer / 浮動小数点）
     RETURN_VALUE_CLASS = "RETURN_VALUE_CLASS"
+    #: 同じ binary の呼び出し側が、call の後に戻り register のどの bit を実際に要求するか
+    #: （Issue #327 E-b。callee の解析・decompiler から独立に、命令の raw P-code から作る）
+    RETURN_CALLER_DEMAND = "RETURN_CALLER_DEMAND"
     #: 引数の storage（どの register / stack の piece が何番目の引数か）
     PARAMETER_STORAGE = "PARAMETER_STORAGE"
     #: ABI model（呼出規約・cspec）
     ABI_MODEL = "ABI_MODEL"
     #: program の image（byte・section・読み取り専用領域）
     PROGRAM_IMAGE = "PROGRAM_IMAGE"
+    #: program の code model（disassembler / auto-analysis が作った命令・関数の境界・call の参照・symbol）
+    #: （Issue #327 E-b が読む。image そのものではなく、それを解析した段）
+    PROGRAM_CODE_MODEL = "PROGRAM_CODE_MODEL"
     #: SMT の model が実在の挙動であること（SAT-safety が守る事実）
     SMT_MODEL_REALIZABILITY = "SMT_MODEL_REALIZABILITY"
     #: ループ要約（recurrence）の妥当性

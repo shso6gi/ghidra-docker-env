@@ -17,7 +17,7 @@ programs are recordings -- never opens an executor.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
 from scripts.function_tracer_pcode.core.fact_reliance import (
     FactHandle,
@@ -27,10 +27,13 @@ from scripts.function_tracer_pcode.core.fact_reliance import (
     FactSlot,
     FactTarget,
 )
+from scripts.function_tracer_pcode.concrete.observation_claim import EvidenceStatus
 from scripts.function_tracer_pcode.core.signature import is_pointer_data_type
 from scripts.function_tracer_pcode.proof.concrete_counterexample import (
     ConcreteSideFacts,
     ConcreteSubject,
+    LazyObservationFacts,
+    ReturnObservationFacts,
 )
 
 #: The stages of concrete execution a run can enable (Issue #323, C4).  The
@@ -152,10 +155,139 @@ def concrete_side_facts(analysis: Any, side: FactSide) -> ConcreteSideFacts:
     )
 
 
+#: The producer site of the return-observation facts (Issue #327).
+OBSERVATION_FACTS_PRODUCER_SITE = "checker.concrete_replay.return_observation_facts"
+#: Why the SMT_PARITY fact's provenance is unrecorded: the return-width proof ran on an analysis
+#: that may come from a type-hypothesis phase (recorded in E3).
+SMT_PARITY_UNRECORDED_REASON = "return_width_proof_analysis_phase_not_recorded"
+
+
+def smt_parity_of_side(observation_inputs: Optional[Mapping[str, Any]], side: FactSide, analysis: Any) -> Optional[Dict[str, Any]]:
+    """The SMT_PARITY level of one side (Issue #327), from the lane's inputs.
+
+    ``complete`` holds only when the pair's final projection has no active cause
+    of the return-width / ABI-width domain **and every return member** of this
+    side's final analysis (each index of ``analysis.returns``) is covered by an
+    applicable completed unary return-width proof of this side's function (same
+    side, same entry).  A member never proved, a proof of another phase's
+    analysis, a function whose returns are unknown: not complete.
+    ``payload_bits`` is the smallest payload width among the covering proofs.
+    ``None`` when the lane gave no inputs.  This is an evidence level of an
+    *assumed* element, never verification.
+    """
+    if not isinstance(observation_inputs, Mapping):
+        return None
+    side_key = "function1" if side is FactSide.LEFT else "function2"
+    entry = _entry(analysis)
+    returns = getattr(analysis, "returns", None)
+    member_count = len(returns) if isinstance(returns, (list, tuple)) else 0
+    covered = set()
+    widths = []
+    for record in observation_inputs.get("completed") or ():
+        if (not isinstance(record, Mapping) or record.get("side") != side_key or record.get("applicable") is not True
+                or entry is None or record.get("entry") != entry):
+            continue
+        covered.update(i for i in record.get("members") or () if type(i) is int)
+        widths.append(record.get("payload_bits"))
+    complete = (
+        observation_inputs.get("return_width_domain_active") is False
+        and member_count > 0
+        and covered >= set(range(member_count))
+    )
+    known = [w for w in widths if type(w) is int and w > 0]
+    return {
+        "complete": complete,
+        "payload_bits": min(known) if complete and known else None,
+        "members": member_count,
+        "covered": len(covered & set(range(member_count))),
+    }
+
+
+def return_observation_facts(
+    program: Any,
+    entry: int,
+    abi: Any,
+    program_facts: Any,
+    side: FactSide,
+    smt_parity: Optional[Mapping[str, Any]],
+) -> ReturnObservationFacts:
+    """The evidence about one side's return observation (Issue #327), as fact handles.
+
+    Called lazily by the proof, only after a witness confirmed a difference.  It
+    reads nothing once the pair's analysis deadline has passed, and stops the
+    callers' scan when it passes (the scan is then not evidence).
+    """
+    from scripts.function_tracer_pcode.core.deadline import active_deadline
+    from scripts.function_tracer_pcode.ghidra.return_use_evidence import (
+        RETURN_USE_EVIDENCE_VERSION,
+        scan_return_use_or_failure,
+    )
+
+    deadline = active_deadline()
+
+    def expired() -> bool:
+        return deadline is not None and deadline.remaining_seconds() <= 0
+
+    if expired():
+        return ReturnObservationFacts(None, EvidenceStatus.DEADLINE, None, EvidenceStatus.DEADLINE)
+    target = FactTarget(side, FactSlot.RETURN)
+    if smt_parity is None:
+        parity_handle, parity_status = None, EvidenceStatus.NOT_CONSULTED
+    else:
+        parity_handle = FactHandle(
+            FactKind.RETURN_PAYLOAD_WIDTH, target,
+            provenance=FactProvenance.unrecorded(
+                producer_site=OBSERVATION_FACTS_PRODUCER_SITE, reason=SMT_PARITY_UNRECORDED_REASON,
+            ),
+            value=dict(smt_parity),
+        )
+        parity_status = EvidenceStatus.CONSULTED
+    evidence = scan_return_use_or_failure(
+        program, entry, {"INT": abi.int_return_register, "FP": abi.fp_return_register}, should_stop=expired,
+    )
+    status = {
+        "SCANNED": EvidenceStatus.CONSULTED, "STOPPED": EvidenceStatus.DEADLINE,
+    }.get(evidence.status, EvidenceStatus.FAILED)
+    facts = program_facts if isinstance(program_facts, Mapping) else {}
+    sha = str(facts.get("sha256") or getattr(program_facts, "sha256", "") or "")
+    abi_id = getattr(getattr(abi, "abi_id", None), "value", None) or str(getattr(abi, "abi_id", ""))
+    ghidra = str(facts.get("ghidra") or "")
+    image = FactHandle(
+        FactKind.PROGRAM_IMAGE, FactTarget(side, FactSlot.PROGRAM),
+        provenance=FactProvenance.leaf(producer_site=OBSERVATION_FACTS_PRODUCER_SITE, origin=f"program_sha256:{sha or 'unknown'}"),
+        value=sha,
+    )
+    # E-b reads the instructions, function boundaries, call references and symbols Ghidra's
+    # auto-analysis built from the image: an analysis stage of its own (named by the Ghidra version)
+    code_model = FactHandle(
+        FactKind.PROGRAM_CODE_MODEL, FactTarget(side, FactSlot.PROGRAM),
+        provenance=FactProvenance.leaf(
+            producer_site=OBSERVATION_FACTS_PRODUCER_SITE,
+            origin=f"ghidra_auto_analysis:{ghidra or 'unknown'}:program_sha256:{sha or 'unknown'}",
+        ),
+        value={"ghidra": ghidra, "program_sha256": sha},
+    )
+    model = FactHandle(
+        FactKind.ABI_MODEL, FactTarget(side, FactSlot.FUNCTION),
+        provenance=FactProvenance.leaf(producer_site=OBSERVATION_FACTS_PRODUCER_SITE, origin=f"abi_model:{abi_id or 'unknown'}"),
+        value=abi_id,
+    )
+    demand = FactHandle(
+        FactKind.RETURN_CALLER_DEMAND, target,
+        provenance=FactProvenance.derived(
+            producer_site=OBSERVATION_FACTS_PRODUCER_SITE, rule=RETURN_USE_EVIDENCE_VERSION,
+            upstream=(image, code_model, model),
+        ),
+        value=evidence.to_json(),
+    )
+    return ReturnObservationFacts(demand, status, parity_handle, parity_status)
+
+
 def open_concrete_subjects(
     programs: Tuple[Any, Any],
     analyses: Tuple[Any, Any],
     options: ConcreteReplayOptions,
+    observation_inputs: Optional[Mapping[str, Any]] = None,
 ) -> Tuple[Union[ConcreteSubject, str], Union[ConcreteSubject, str]]:
     """One ``ConcreteSubject`` per side, or the reason the concrete layer
     refuses that side (an unmodelled program, a calling convention other than
@@ -179,18 +311,24 @@ def open_concrete_subjects(
         if isinstance(abi, ExecutorRefusal):
             subjects.append(f"{abi.reason.value}:{abi.detail}"[:200])
             continue
+        parity = smt_parity_of_side(observation_inputs, side, analysis)
         subjects.append(ConcreteSubject(
             executor, abi, entry, executor.register_location, executor.program_facts,
             concrete_side_facts(analysis, side),
+            LazyObservationFacts(
+                lambda program=program, entry=entry, abi=abi, facts=executor.program_facts, side=side, parity=parity:
+                return_observation_facts(program, entry, abi, facts, side, parity)
+            ),
         ))
     return subjects[0], subjects[1]
 
 
-def _impl_concrete_replay_subjects(self, analysis1: Any, analysis2: Any):
+def _impl_concrete_replay_subjects(self, analysis1: Any, analysis2: Any, observation_inputs: Optional[Mapping[str, Any]] = None):
     """The checker's concrete subjects for the pair it is checking, or ``None``
-    when the replay is off or the checker holds no programs."""
+    when the replay is off or the checker holds no programs.  ``observation_inputs``
+    are the lane's SMT_PARITY inputs (Issue #327)."""
     options = getattr(self, "concrete_replay", None)
     programs = getattr(self, "_active_programs", None)
     if options is None or programs is None:
         return None
-    return open_concrete_subjects(programs, (analysis1, analysis2), options)
+    return open_concrete_subjects(programs, (analysis1, analysis2), options, observation_inputs)
