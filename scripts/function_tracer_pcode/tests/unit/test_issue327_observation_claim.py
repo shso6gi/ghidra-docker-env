@@ -5,9 +5,11 @@ Pins the decisions of #327 (2026-11-27, revised before merge):
 
 * E-a (SMT_PARITY) is an evidence level of an ASSUMED element and never verifies;
 * the E-b fact (callers demand the register, the callee's own flow writes it,
-  one symbol names the entry) verifies O1 only: O2 needs C-b5 (a memory-returned
-  aggregate's address or an internally narrowed value may sit in the result
-  register) and O3 needs C-b5 and H3, which production cannot confirm;
+  one symbol names the entry) verifies nothing by itself: O1 needs C-b8 (the
+  callers may read an indeterminate value the compiler took from the free
+  result register), O2 also C-b5 (a memory-returned aggregate's address or an
+  internally narrowed value may sit in the result register) and O3 also H3,
+  none of which production can confirm, so production verifies no element;
 * E-b and E-d alone verify nothing; a lack of evidence is never a CONFLICT;
 * CONFLICT is a positive contradiction on a single-class-return ABI only;
 * R_V is empty unless every element of both sides is verified, never wider than R_C;
@@ -30,6 +32,7 @@ from scripts.function_tracer_pcode.concrete.observation_claim import (
 )
 
 OK = EvidenceStatus.CONSULTED
+C_B8 = Condition.CALLER_READS_RESULT
 C_B5 = Condition.STANDARD_CALLING_CONVENTION
 H3 = Condition.NO_INTERPROCEDURAL_RELIANCE
 
@@ -54,16 +57,19 @@ def states(s):
     return [c.state for c in s.elements]
 
 
-def test_the_caller_demand_fact_verifies_existence_only():
+def test_the_caller_demand_fact_alone_verifies_nothing():
     s = side(caller=demand(int_mask=0xFFFFFFFF))
-    assert s.element(E.O1_EXISTS).state is ElementState.VERIFIED
-    assert s.element(E.O1_EXISTS).methods == (Method.CALLER_DEMAND,)
+    assert ElementState.VERIFIED not in states(s) and not s.conflict
+    # what the callers read may be an indeterminate value taken from the free result register (C-b8)
+    o1 = s.element(E.O1_EXISTS)
+    assert o1.state is ElementState.ASSUMED and o1.methods == (Method.CALLER_DEMAND,)
+    assert o1.diagnostic_classes == ("INT",) and o1.unconfirmed == (C_B8,)
     # the register the callers read as the result need not hold the value itself without C-b5
     o2 = s.element(E.O2_CLASS)
-    assert o2.state is ElementState.ASSUMED and o2.diagnostic_classes == ("INT",) and o2.unconfirmed == (C_B5,)
+    assert o2.state is ElementState.ASSUMED and o2.diagnostic_classes == ("INT",) and o2.unconfirmed == (C_B8, C_B5)
     o3 = s.element(E.O3_VALID_BITS)
     assert o3.state is ElementState.ASSUMED and o3.diagnostic_bits == 32 and o3.assumed == 32
-    assert set(o3.unconfirmed) == {C_B5, H3}
+    assert set(o3.unconfirmed) == {C_B8, C_B5, H3}
     assert s.element(E.O4_FP_FORMAT).state is ElementState.NOT_APPLICABLE
 
 
@@ -116,7 +122,7 @@ def test_callers_reading_only_the_other_class_on_a_single_class_abi_is_a_conflic
     s = side("INT", caller=demand(int_mask=0, fp_mask=0xFFFFFFFFFFFFFFFF, own_int=True, own_fp=True))
     o2 = s.element(E.O2_CLASS)
     assert o2.state is ElementState.CONFLICT and s.conflict
-    assert o2.diagnostic_classes == ("FP",) and o2.unconfirmed == (C_B5,)   # the contradiction's own premise
+    assert o2.diagnostic_classes == ("FP",) and o2.unconfirmed == (C_B8, C_B5)   # the contradiction's premises
     pair = classify_pair(s, side(index=1), compared_bits=32, first_difference_bit=0, evidence={})
     assert pair.conflict and pair.verified_bits == 0
     assert relied_methods(s) == {Method.CALLER_DEMAND}
@@ -125,7 +131,8 @@ def test_callers_reading_only_the_other_class_on_a_single_class_abi_is_a_conflic
 def test_the_same_evidence_on_an_abi_not_known_to_be_single_class_is_not_a_contradiction():
     s = side("INT", caller=demand(int_mask=0, fp_mask=0xFF, own_int=True, own_fp=True), single=False)
     assert not s.conflict
-    assert s.element(E.O1_EXISTS).state is ElementState.VERIFIED      # it returns a value
+    assert s.element(E.O1_EXISTS).state is ElementState.ASSUMED      # a diagnostic, not a verification
+    assert s.element(E.O1_EXISTS).diagnostic_classes == ("FP",)
     o2 = s.element(E.O2_CLASS)
     assert o2.state is ElementState.ASSUMED and o2.diagnostic_classes == ("FP",)
 
@@ -147,12 +154,12 @@ def test_both_classes_on_a_single_class_abi_is_inconsistent_evidence_and_not_use
     o1 = s.element(E.O1_EXISTS)
     assert o1.unconfirmed == (Condition.CONSISTENT_CLASS_EVIDENCE,) and o1.diagnostic_classes == ("FP", "INT")
     mixed = side("INT", caller=demand(int_mask=0xFF, fp_mask=0xFF, own_int=True, own_fp=True), single=False)
-    assert mixed.element(E.O1_EXISTS).state is ElementState.VERIFIED and not mixed.conflict
+    assert mixed.element(E.O1_EXISTS).unconfirmed == (C_B8,) and not mixed.conflict
 
 
 def test_the_executed_format_without_a_verified_class_stays_assumed():
     s = side("FP", caller=demand(fp_mask=0xFFFFFFFFFFFFFFFF, own_int=False, own_fp=True), fmt="BINARY64", width=128)
-    assert s.element(E.O1_EXISTS).state is ElementState.VERIFIED
+    assert s.element(E.O1_EXISTS).state is ElementState.ASSUMED
     assert s.element(E.O2_CLASS).state is ElementState.ASSUMED
     assert s.element(E.O4_FP_FORMAT).state is ElementState.ASSUMED
     assert Condition.VERIFIED_LOCATION in s.element(E.O4_FP_FORMAT).unconfirmed
@@ -160,9 +167,9 @@ def test_the_executed_format_without_a_verified_class_stays_assumed():
 
 
 def test_a_producer_that_confirms_the_conditions_is_the_only_way_to_verify_class_and_bits():
-    # the extension point (#327 Preferred design); nothing in production confirms C-b5 / H3 today
+    # the extension point (#327 Preferred design); nothing in production confirms C-b8 / C-b5 / H3 today
     fp = dict(caller=demand(fp_mask=0xFFFFFFFFFFFFFFFF, own_int=False, own_fp=True), fmt="BINARY64", width=128,
-              confirmed=frozenset({C_B5}))
+              confirmed=frozenset({C_B8, C_B5}))
     left, right = side("FP", **fp), side("FP", index=1, **fp)
     assert left.element(E.O2_CLASS).state is ElementState.VERIFIED
     assert left.element(E.O4_FP_FORMAT).state is ElementState.VERIFIED
@@ -174,10 +181,15 @@ def test_a_producer_that_confirms_the_conditions_is_the_only_way_to_verify_class
     assumed = side("FP", fmt="BINARY64", index=1)
     assert classify_pair(left, assumed, compared_bits=64, first_difference_bit=3, evidence={}).verified_bits == 0
 
+    only_cb8 = side(caller=demand(int_mask=0xFF), confirmed=frozenset({C_B8}))
+    assert only_cb8.element(E.O1_EXISTS).state is ElementState.VERIFIED
+    assert only_cb8.element(E.O2_CLASS).unconfirmed == (C_B5,)
     only_cb5 = side(caller=demand(int_mask=0xFF), confirmed=frozenset({C_B5}))
-    assert only_cb5.element(E.O3_VALID_BITS).state is ElementState.ASSUMED
-    assert only_cb5.element(E.O3_VALID_BITS).unconfirmed == (H3,)
-    both = side(caller=demand(int_mask=0xFF), confirmed=frozenset({C_B5, H3}))
+    assert ElementState.VERIFIED not in states(only_cb5)               # C-b5 without C-b8 verifies nothing
+    no_h3 = side(caller=demand(int_mask=0xFF), confirmed=frozenset({C_B8, C_B5}))
+    assert no_h3.element(E.O3_VALID_BITS).state is ElementState.ASSUMED
+    assert no_h3.element(E.O3_VALID_BITS).unconfirmed == (H3,)
+    both = side(caller=demand(int_mask=0xFF), confirmed=frozenset({C_B8, C_B5, H3}))
     assert both.element(E.O3_VALID_BITS).state is ElementState.VERIFIED and both.element(E.O3_VALID_BITS).bound_bits == 8
 
 
@@ -190,8 +202,12 @@ def test_no_default_width_an_integer_value_is_never_verified():
 
 
 def test_only_evidence_that_decided_an_element_is_relied_on():
-    assert relied_methods(side(caller=demand(int_mask=0xFF))) == {Method.CALLER_DEMAND}     # O1 verified
+    assert relied_methods(side(caller=demand(int_mask=0xFF))) == frozenset()                  # diagnostic only
     assert relied_methods(side(caller=demand(int_mask=0xFF, own_int=False))) == frozenset()  # diagnostic only
+    conflict = side(caller=demand(int_mask=0, fp_mask=0xFF, own_int=True, own_fp=True))
+    assert relied_methods(conflict) == {Method.CALLER_DEMAND}                                 # decided CONFLICT
+    verified = side(caller=demand(int_mask=0xFF), confirmed=frozenset({C_B8}))
+    assert relied_methods(verified) == {Method.CALLER_DEMAND}                                 # decided O1
     assert relied_methods(side("FP", fmt="BINARY32")) == frozenset()                          # format annotates
 
 

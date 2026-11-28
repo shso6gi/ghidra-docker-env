@@ -129,10 +129,12 @@ def test_the_replays_and_the_confirmed_witness_do_not_depend_on_the_evidence():
     assert plain.decisive and observed.decisive
     assert plain.replays == observed.replays and plain.confirmed == observed.confirmed
     assert plain.observation["compared_bits"] == observed.observation["compared_bits"] == 32
-    # the E-b fact verifies O1 only; O2 / O3 stay assumed (C-b5 / H3): R_V is empty
+    # the E-b fact verifies nothing without C-b8 / C-b5 / H3: every element is assumed, R_V is empty
     sides = observed.observation["sides"]
-    assert [e["state"] for e in sides[0]["elements"]][:3] == ["VERIFIED", "ASSUMED", "ASSUMED"]
-    assert sides[0]["elements"][1]["unconfirmed"] == ["C-b5_standard_calling_convention"]
+    assert [e["state"] for e in sides[0]["elements"]][:3] == ["ASSUMED", "ASSUMED", "ASSUMED"]
+    assert sides[0]["elements"][0]["unconfirmed"] == ["C-b8_caller_reads_the_result"]
+    assert sides[0]["elements"][1]["unconfirmed"] == ["C-b8_caller_reads_the_result",
+                                                      "C-b5_standard_calling_convention"]
     assert observed.observation["verified_bits"] == 0
 
 
@@ -189,7 +191,8 @@ def test_the_premises_and_record_carry_the_classification_within_the_receipt_bou
     elements = dict(observation[0].payload)["elements"]
     o3 = dict(elements[2])
     assert o3["state"] == "ASSUMED" and o3["assumed"] == 32
-    assert set(o3["unconfirmed"]) == {"C-b5_standard_calling_convention", "H3_no_interprocedural_reliance"}
+    assert set(o3["unconfirmed"]) == {"C-b8_caller_reads_the_result", "C-b5_standard_calling_convention",
+                                      "H3_no_interprocedural_reliance"}
     record = json.loads(json.dumps(artifact.to_json()))
     assert verify_concrete_record(record)
     assert record["artifact_payload"]["observation"]["difference_range"] == "ASSUMED_RANGE_ONLY"
@@ -199,8 +202,10 @@ def test_the_reliance_closure_gains_only_the_evidence_that_decided_an_element():
     parity = {"complete": True, "payload_bits": 32}
     subjects = _with_observation(
         Fixed(_clean(13)), Fixed(_clean(14)),
-        (lambda: _demand_facts(FactSide.LEFT, int_mask=0xFF, parity=parity),            # O1 verified by E-b
-         lambda: _demand_facts(FactSide.RIGHT, int_mask=0xFF, own_int=False, parity=parity)),  # diagnostic only
+        # the left side's callers read only the other class on a single-class ABI: E-b decides a CONFLICT
+        (lambda: _demand_facts(FactSide.LEFT, fp_mask=0xFF, own_int=True, own_fp=True, parity=parity),
+         # the right side's E-b fact holds but verifies nothing without C-b8: a diagnostic only
+         lambda: _demand_facts(FactSide.RIGHT, int_mask=0xFF, parity=parity)),
     )
     before = subject_reliance(subjects)
     assert FactKind.RETURN_CALLER_DEMAND not in {r.kind for r in before.refs}
@@ -208,7 +213,7 @@ def test_the_reliance_closure_gains_only_the_evidence_that_decided_an_element():
     after = subject_reliance(subjects)
     assert after.basis is before.basis is RelianceBasis.UNKNOWN_PROVENANCE
     added = {r for r in after.refs} - {r for r in before.refs}
-    # the left side's E-b decided O1; the right side's E-b and both SMT_PARITY levels only annotate assumptions
+    # the left side's E-b decided O2 (CONFLICT); the right side's E-b and both SMT_PARITY levels only annotate
     assert added == {r for r in added if r.kind is FactKind.RETURN_CALLER_DEMAND and r.target.side is FactSide.LEFT}
     assert len(added) == 1
 
@@ -329,5 +334,6 @@ def test_the_evaluation_report_counts_the_classification_and_flags_unclassified_
     section = ce.observation(SimpleNamespace(facts=facts))
     assert section["pairs"] == 2 and section["unclassified_count"] == 1
     assert section["difference_range"] == {"ASSUMED_RANGE_ONLY": 1}
-    assert section["elements"]["INT/O1_EXISTS/VERIFIED/None/E-b"] == 2
+    assert section["elements"]["INT/O1_EXISTS/ASSUMED/PROTOTYPE/E-b"] == 2
+    assert not any("/VERIFIED/" in key for key in section["elements"])
     assert section["elements"]["INT/O3_VALID_BITS/ASSUMED/PROTOTYPE/E-b"] == 2

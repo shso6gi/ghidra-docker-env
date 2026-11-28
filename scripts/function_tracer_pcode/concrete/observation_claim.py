@@ -56,15 +56,19 @@ and no analysis):
 
   What the fact shows: a caller reads the register after the call, and the
   callee clobbers it on its own path, so under interprocedural register
-  allocation the caller cannot be relying on the register being preserved;
-  a compiled call reads a register the callee clobbers only as the call's
-  result.  Hence **O1 is verified**: the function returns a value.  This holds
-  whatever convention the compiler chose for the call -- no translation turns
-  a function without a result into one with a result -- and it rests only on
-  the method's premise that the caller's code is a compiled, well-defined
-  call of this function (the premise of E-b itself, v2 §6).
+  allocation the caller cannot be relying on the register being preserved.
 
-  **O2 is not verified by E-b** without C-b5 (the call follows the standard
+  **O1 is not verified by E-b** without C-b8 (what the callers read after the
+  call is the call's result).  A well-defined program may copy an
+  indeterminate value (an uninitialised member of a structure it copies, an
+  object whose address is taken); a compiler materialises such a value from
+  whatever register it allocates, with no definition, and after a call the
+  clobbered result register is free.  A caller of a void function can then
+  read the register the callee wrote, and the binary does not tell this
+  read from a use of the result.  The classes the callers read are recorded
+  as diagnostic evidence of an ``ASSUMED`` O1.
+
+  **O2 is not verified by E-b** without C-b8 and C-b5 (the call follows the standard
   calling convention, which Ghidra's convention name does not reveal): the
   register the caller reads as the result need not hold the value itself.
   A memory-returned aggregate returns its address in the result register on
@@ -72,12 +76,13 @@ and no analysis):
   value (a dead-member elimination keeps the function's name).  The classes
   the callers read are recorded as diagnostic evidence of an ``ASSUMED`` O2.
 
-  **O3 is not verified by E-b** without C-b5 and H3 (the caller relies on no
+  **O3 is not verified by E-b** without C-b8, C-b5 and H3 (the caller relies on no
   interprocedural knowledge of the callee beyond the ABI: a value range or an
   extension); its demanded width is diagnostic evidence of an ``ASSUMED`` O3.
 
-  A later producer that confirms C-b5 (and H3) passes them in
-  ``confirmed``; nothing in production confirms them today.
+  A later producer that confirms C-b8, C-b5 (and H3) passes them in
+  ``confirmed``; nothing in production confirms them today, so production
+  verifies no element and R_V is always empty.
 * **E-e, the executed format**: the run reports the format of the scalar
   floating-point instruction that produced the compared bits.  With O2
   verified it verifies O4, and O3 of a floating-point value follows from O4.
@@ -93,8 +98,11 @@ and no analysis):
 produced for O2 only when the E-b fact holds for the *other* class and not
 for the compared one, on an ABI whose return values occupy registers of one
 class only (``single_class_return``: AAPCS64).  The contradiction itself rests
-on the standard convention (C-b5, named on the element); a refusal only gives
-up the difference, so it may rest on it, while verification may not.  On an
+on the unconfirmed C-b8 and C-b5 (named on the element): it is a ground to
+refuse, not a verified fact.  A refusal only gives up the difference (the
+conditional verdict can only shrink, never gain a NOT_EQ), so it may rest on
+them, while verification may not; a wrongly recovered prototype class is the
+case it catches (the comparison read the other class's register).  On an
 ABI not known to return each value in one class (MIPS n64: its small-aggregate
 rules are not modelled) the same evidence is not a contradiction and is
 recorded as diagnostic.  The E-b fact holding
@@ -111,7 +119,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, FrozenSet, Mapping, Optional, Tuple
 
-OBSERVATION_CLAIM_VERSION = "return-observation-claim-v2"
+OBSERVATION_CLAIM_VERSION = "return-observation-claim-v3"
 
 VALUE_CLASSES = ("INT", "FP")
 
@@ -145,6 +153,9 @@ class Method(str, Enum):
 class Condition(str, Enum):
     """Conditions of a method that could not be confirmed (named on the element)."""
 
+    #: what the callers read after the call is the call's result, not an indeterminate value the compiler
+    #: materialised from a free register (not confirmable from the binary today)
+    CALLER_READS_RESULT = "C-b8_caller_reads_the_result"
     #: the call follows the standard calling convention (not confirmable from the binary today): the
     #: result register holds the value itself (not a memory-returned aggregate's address, not a value an
     #: internal convention narrowed), at the ABI's bit positions
@@ -345,9 +356,14 @@ def classify_side(
     if inconsistent:
         holds = set()
 
-    # O1: some class's E-b fact holds
-    if holds:
-        o1 = ElementClaim(ObservationElement.O1_EXISTS, ElementState.VERIFIED, methods=(Method.CALLER_DEMAND,))
+    # O1: some class's E-b fact holds and what the callers read is the result (C-b8)
+    if holds and Condition.CALLER_READS_RESULT in confirmed:
+        o1 = ElementClaim(ObservationElement.O1_EXISTS, ElementState.VERIFIED, methods=(Method.CALLER_DEMAND,),
+                          diagnostic_classes=diag_classes)
+    elif holds:
+        o1 = ElementClaim(ObservationElement.O1_EXISTS, ElementState.ASSUMED, level, assumed=True,
+                          methods=(Method.CALLER_DEMAND,), diagnostic_classes=diag_classes,
+                          unconfirmed=(Condition.CALLER_READS_RESULT,))
     else:
         failed = []
         if demanded - written:
@@ -359,25 +375,25 @@ def classify_side(
         o1 = ElementClaim(ObservationElement.O1_EXISTS, ElementState.ASSUMED, level, assumed=True,
                           unconfirmed=tuple(failed), diagnostic_classes=diag_classes if inconsistent else ())
 
-    # O2: verified only with C-b5 confirmed; a contradiction only on a single-class ABI
-    standard = Condition.STANDARD_CALLING_CONVENTION in confirmed
-    if holds == {value_class} and standard:
+    # O2: verified only with C-b8 and C-b5 confirmed; a contradiction only on a single-class ABI
+    class_missing = tuple(c for c in (Condition.CALLER_READS_RESULT, Condition.STANDARD_CALLING_CONVENTION)
+                          if c not in confirmed)
+    if holds == {value_class} and not class_missing:
         o2 = ElementClaim(ObservationElement.O2_CLASS, ElementState.VERIFIED, methods=(Method.CALLER_DEMAND,),
                           diagnostic_classes=diag_classes)
     elif holds == {other} and single_class_return:
         o2 = ElementClaim(ObservationElement.O2_CLASS, ElementState.CONFLICT, methods=(Method.CALLER_DEMAND,),
-                          assumed=value_class, diagnostic_classes=diag_classes,
-                          unconfirmed=() if standard else (Condition.STANDARD_CALLING_CONVENTION,))
+                          assumed=value_class, diagnostic_classes=diag_classes, unconfirmed=class_missing)
     else:
         o2 = ElementClaim(ObservationElement.O2_CLASS, ElementState.ASSUMED, level, assumed=value_class,
                           methods=(Method.CALLER_DEMAND,) if holds else (), diagnostic_classes=diag_classes,
-                          unconfirmed=(Condition.STANDARD_CALLING_CONVENTION,) if holds and not standard else ())
+                          unconfirmed=class_missing if holds else ())
 
     if value_class == "INT":
         o4 = ElementClaim(ObservationElement.O4_FP_FORMAT, ElementState.NOT_APPLICABLE)
         diag = _prefix(classes["INT"]["demanded"]) if "INT" in holds else None
-        missing = tuple(c for c in (Condition.STANDARD_CALLING_CONVENTION, Condition.NO_INTERPROCEDURAL_RELIANCE)
-                        if c not in confirmed)
+        missing = tuple(c for c in (Condition.CALLER_READS_RESULT, Condition.STANDARD_CALLING_CONVENTION,
+                                    Condition.NO_INTERPROCEDURAL_RELIANCE) if c not in confirmed)
         if diag and o2.state is ElementState.VERIFIED and not missing:
             o3 = ElementClaim(ObservationElement.O3_VALID_BITS, ElementState.VERIFIED,
                               methods=(Method.CALLER_DEMAND,), bound_bits=diag)
